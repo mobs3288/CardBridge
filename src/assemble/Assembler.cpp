@@ -570,6 +570,9 @@ void settleHeels(Scene& scene) {
         }
         const Vec3 ankle = scene.bones[static_cast<size_t>(foot)].pos;
         const Vec3 ball = scene.bones[static_cast<size_t>(toes)].pos;
+        // Weights of a vertex on the foot and toes. The original skin weights switch from leg to foot over a few
+        // millimetres, which would fold the ankle; instead the foot's share also fades in smoothly with height above the ankle
+        // for everything in the foot's column (skin, shoe, strap, sock), so the ankle bends like a joint.
         auto weights = [&](const SceneVertex& v, float& wFoot, float& wToes) {
             wFoot = wToes = 0;
             for (int k = 0; k < 4; ++k) {
@@ -577,6 +580,11 @@ void settleHeels(Scene& scene) {
                 char c = set[static_cast<size_t>(v.bone[k])];
                 if (c == 1) wFoot += v.weight[k];
                 else if (c == 2) wToes += v.weight[k];
+            }
+            if (std::fabs(v.pos.x - ankle.x) < 0.07f && v.pos.z > ankle.z - 0.12f && v.pos.z < ankle.z + 0.30f) {
+                float t = std::min(1.0f, std::max(0.0f, (v.pos.y - (ankle.y + 0.01f)) / 0.11f));
+                float g = 1.0f - t * t * (3.0f - 2.0f * t);
+                wFoot = std::min(1.0f - wToes, std::max(wFoot, g));
             }
         };
         auto rot = [](Vec3 p, Vec3 c, float ang) {   // about the X axis through c; positive points +Z (the toes) down
