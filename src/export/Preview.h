@@ -10,6 +10,7 @@ struct PreviewOptions {
     int viewHeight = 640;
     float yawDegrees[3] = {0.0f, 90.0f, 180.0f};   // front, side, back (about Y)
     int views = 3;
+    float yTop = 1.0f, yBottom = 0.0f;   // vertical window as fractions of the model height (1 = top); a close-up when narrower
 };
 
 // A small headless software renderer: orthographic, z-buffered, nearest-texel

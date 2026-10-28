@@ -98,11 +98,17 @@ std::vector<int64_t> UnityFile::findXformsByName(const std::string& goName) cons
     return out;
 }
 
-Mat4 UnityFile::worldMatrix(int64_t xformId) const {
+Mat4 UnityFile::worldMatrix(int64_t xformId, const std::map<int64_t, Mat4>* localOverride) const {
     std::vector<const Xform*> chain;
     for (const Xform* x = xform(xformId); x && chain.size() < 4096; x = xform(x->parent)) chain.push_back(x);
     Mat4 m;
-    for (size_t i = chain.size(); i-- > 0;) m = m * Mat4::TRS(chain[i]->pos, chain[i]->rot, chain[i]->scl);
+    for (size_t i = chain.size(); i-- > 0;) {
+        if (localOverride) {
+            auto it = localOverride->find(chain[i]->id);
+            if (it != localOverride->end()) { m = m * it->second; continue; }
+        }
+        m = m * Mat4::TRS(chain[i]->pos, chain[i]->rot, chain[i]->scl);
+    }
     return m;
 }
 

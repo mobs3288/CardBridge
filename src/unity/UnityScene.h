@@ -100,7 +100,8 @@ public:
     const std::map<int64_t, Xform>& xforms() const { return xforms_; }
     // Transform ids of every GameObject with this name (a prefab root is usually unique).
     std::vector<int64_t> findXformsByName(const std::string& goName) const;
-    Mat4 worldMatrix(int64_t xformId) const;
+    // `localOverride` replaces the local matrix of the listed transforms (accessory move nodes, shape bones).
+    Mat4 worldMatrix(int64_t xformId, const std::map<int64_t, Mat4>* localOverride = nullptr) const;
     // This transform and all its descendants, parent before child.
     std::vector<int64_t> subtree(int64_t rootXformId) const;
     // Path of names from the root, e.g. "cf_j_root/cf_n_height" (for diagnostics).

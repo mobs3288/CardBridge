@@ -73,8 +73,9 @@ add_library(cardbridge_core STATIC
     src/export/Preview.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp
+    third_party/bc7decomp/bc7decomp.cpp
 )
-target_include_directories(cardbridge_core PUBLIC src)
+target_include_directories(cardbridge_core PUBLIC src PRIVATE third_party/bc7decomp)
 target_link_libraries(cardbridge_core PUBLIC nlohmann_json::nlohmann_json PRIVATE stb_image cardbridge_stb_write)
 if(MSVC)
     target_compile_options(cardbridge_core PRIVATE /W4)
