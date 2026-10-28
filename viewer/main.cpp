@@ -66,6 +66,15 @@ std::string ModCachePath() {
     return std::string(base ? Slashes(base) : ".") + "/CardBridge/modindex.json";
 }
 
+// The folder the mod index was last built for (the cache stores it), so the viewer finds the mods without asking.
+std::string CachedModsRoot() {
+    try {
+        Bytes b = fileio::ReadFile(ModCachePath());
+        auto j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+        return Slashes(j.value("root", ""));
+    } catch (...) { return {}; }
+}
+
 struct Settings {
     std::string library, mods;
 };
@@ -155,6 +164,7 @@ struct App {
     std::vector<char> hidden;
     std::atomic<bool> busy{false};
     std::string status = "drop a Koikatsu card on this window";
+    std::string modsInfo;   // what the mod index found, shown in the panel
     std::mutex mu;
 
     exporter::ViewCamera cam;
@@ -177,8 +187,19 @@ bool EnsureResolver(std::string& err) {
     if (g.resolver && key == g.resolverKey) return true;
     if (g.settings.library.empty()) { err = "no asset library: start with --library <dir>"; return false; }
     std::vector<std::string> issues;
+    g.modsInfo.clear();
     if (!g.settings.mods.empty()) {
         g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, nullptr);
+        // A game folder instead of its mods folder: look one level down.
+        if (g.mods.guidCount() == 0 && Exists(g.settings.mods + "/mods")) {
+            g.settings.mods += "/mods";
+            g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, nullptr);
+            SaveSettings(g.settings);
+        }
+        g.modsInfo = std::to_string(g.mods.guidCount()) + " mods found";
+        if (g.mods.guidCount() == 0) g.modsInfo = "NO mods found in that folder - press M and pick the folder that holds the .zipmod files";
+    } else {
+        g.modsInfo = "no mods folder set - mod items will be missing (press M)";
     }
     auto chk = library::CheckLibrary(g.settings.library, false);
     if (!chk.ok) { err = "asset library problem: " + (chk.issues.empty() ? std::string("unusable") : chk.issues[0]); return false; }
@@ -280,6 +301,7 @@ void Paint(HWND hwnd) {
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         line(std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I] list", warn + err ? RGB(240, 190, 90) : RGB(120, 200, 120));
         line("O open  Left/Right outfit  T tex  R reset", RGB(120, 130, 150));
+        if (!g.modsInfo.empty()) line("mods: " + g.modsInfo, g.modsInfo.rfind("NO ", 0) == 0 || g.modsInfo.rfind("no ", 0) == 0 ? RGB(240, 110, 110) : RGB(120, 200, 120));
         y += 6;
         if (g.showIssues) {
             for (const auto& i : L->scene.issues) {
@@ -437,7 +459,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     CoInitialize(nullptr);
     if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
     if (g.settings.library.empty()) g.settings.library = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (made by 'cardbridge library import')");
-    if (g.settings.mods.empty() || !Exists(g.settings.mods)) {
+    if (g.settings.mods.empty() || !Exists(g.settings.mods)) g.settings.mods = Exists(CachedModsRoot()) ? CachedModsRoot() : std::string();
+    if (g.settings.mods.empty()) {
         // Optional: without mods only base-game items resolve.
         std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder (Cancel to use base-game items only)");
         if (!d.empty()) g.settings.mods = d;
