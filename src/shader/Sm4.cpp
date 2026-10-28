@@ -1,6 +1,7 @@
 #include "shader/Sm4.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace cardbridge::shader {
@@ -293,6 +294,10 @@ struct Machine {
             default:
                 if (why) *why = "unsupported SM4 opcode " + std::to_string(in.op);
                 return false;
+            }
+            if (io.trace && !ops.empty() && ops[0].type == 0 && in.op != OP_IF && in.op != OP_DISCARD) {
+                const uint32_t* r = &temps[static_cast<size_t>(ops[0].index0) * 4];
+                std::fprintf(stderr, "    [%zu] op%u -> r%d = %.4f %.4f %.4f %.4f\n", pc, in.op, ops[0].index0, Flt(r[0]), Flt(r[1]), Flt(r[2]), Flt(r[3]));
             }
             ++pc;
         }

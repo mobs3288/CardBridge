@@ -324,7 +324,7 @@ struct MatTextures : shader::ISm4Textures {
                 return;
             }
         // A texture the material does not have: Unity's defaults (white; a flat normal map).
-        if (name->find("Normal") != std::string::npos || name->find("Bump") != std::string::npos) { out[0] = 0.5f; out[1] = 0.5f; out[2] = 1.0f; }
+        if (name->find("Normal") != std::string::npos || name->find("Bump") != std::string::npos) { out[0] = 0.5f; out[1] = 0.5f; out[2] = 1.0f; out[3] = 0.5f; }   // flat normal in Unity's packed form (x in alpha)
     }
 };
 
@@ -522,7 +522,9 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                     mt.trace = traceMat && !traced && mat.name == traceMat && (!tpx || (x == wx && y == wy));
                                 }
                                 if (mt.trace) std::fprintf(stderr, "trace %s (shader %s) at %d,%d\n", mat.name.c_str(), mat.shader.c_str(), x, y);
+                                if (mt.trace) for (uint32_t vi2 : {i0, i1, i2}) std::fprintf(stderr, "  vertex pos %.3f %.3f %.3f normal %.3f %.3f %.3f uv %.3f %.3f\n", mesh.vertices[vi2].pos.x, mesh.vertices[vi2].pos.y, mesh.vertices[vi2].pos.z, mesh.vertices[vi2].normal.x, mesh.vertices[vi2].normal.y, mesh.vertices[vi2].normal.z, mesh.vertices[vi2].uv.x, mesh.vertices[vi2].uv.y);
                                 if (mt.trace) for (const auto& in : sr->programs[sr->pi].code.inputs) if (in.reg < 32) std::fprintf(stderr, "  in %s%u r%u = %.3f %.3f %.3f %.3f\n", in.semantic.c_str(), in.index, in.reg, io.input[in.reg][0], io.input[in.reg][1], io.input[in.reg][2], io.input[in.reg][3]);
+                                io.trace = mt.trace && std::getenv("CARDBRIDGE_TRACE_INSTR");
                                 bool okRun = shader::RunSm4(sr->ps, io, &why);
                                 if (mt.trace) { std::fprintf(stderr, "  result %s %.3f %.3f %.3f %.3f %s\n", okRun ? "ok" : why.c_str(), io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3], io.discarded ? "DISCARDED" : ""); traced = true; mt.trace = false; }
                                 if (!okRun || io.discarded) continue;

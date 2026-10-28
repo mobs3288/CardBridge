@@ -56,6 +56,7 @@ struct Sm4Io {
     ISm4Textures* textures = nullptr;
     bool frontFace = true;      // SV_IsFrontFace input is read as an integer (0xFFFFFFFF front) through input[reg].x
     bool discarded = false;
+    bool trace = false;         // print every instruction's destination (debugging)
 };
 
 // Runs a decoded program once. Returns false (with `why`) on an operation the interpreter does not know.
