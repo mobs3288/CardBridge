@@ -47,6 +47,8 @@ struct MaterialData {
     std::vector<std::pair<std::string, PPtr>> textures;     // property -> texture
     std::vector<std::pair<std::string, Vec4>> colors;
     std::vector<std::pair<std::string, float>> floats;
+    std::vector<std::pair<std::string, Vec4>> texST;        // texture property -> (scale.xy, offset.xy)
+    int64_t shaderPathId = 0;                               // the Shader object in the same bundle, 0 if external
     const PPtr* texture(const std::string& prop) const {
         for (auto& t : textures) if (t.first == prop) return &t.second;
         return nullptr;
@@ -123,6 +125,10 @@ public:
     std::optional<MeshData> readMesh(const PPtr& p, std::string* why = nullptr) const;
     std::optional<MaterialData> readMaterial(const PPtr& p, std::string* why = nullptr) const;
     std::optional<TextureData> readTexture(const PPtr& p, std::string* why = nullptr) const;
+    // The external file name a PPtr with fileId > 0 points into (empty when local).
+    std::string externalNameOf(const PPtr& p) const { return p.fileId > 0 ? externalName(p) : std::string(); }
+    // The decompressed Direct3D 11 program blob of a Shader object (what tools/extract_shaders.py writes).
+    std::optional<Bytes> readShaderBlob(int64_t shaderPathId, std::string* why = nullptr) const;
 
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;

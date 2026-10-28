@@ -173,6 +173,11 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
                 pm.diffuse = mat.diffuse;
+                if (mat.shader.find("glasses") != std::string::npos) {   // lenses: the shader's _Color alpha (see-through), not a solid
+                    float a = 0.35f;
+                    for (const auto& pr : mat.props) if (pr.first == "_Color") a = pr.second.w < 0.99f ? pr.second.w : 0.35f;
+                    pm.diffuse.w = a;
+                }
                 // MMD shades as diffuse * light + ambient: the game's shadow colour goes to ambient so the dark side keeps
                 // the tint the card's shader gives it.
                 pm.ambient = {mat.diffuse.x * mat.shadow.x, mat.diffuse.y * mat.shadow.y, mat.diffuse.z * mat.shadow.z};
@@ -235,6 +240,21 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         Bytes png;
         stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); }, &png, 640, 800, 4, rgba.data(), 640 * 4);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_view.png"), png.data(), png.size());
+    }
+    {   // the same view through the game's own shaders (materials whose shader is in the bundle), for comparing with the card picture
+        ViewCamera cam;
+        cam.yawDeg = 0;
+        cam.pitchDeg = 4;
+        ViewOptions vo;
+        vo.shaded = true;
+        auto vs = NewViewState();
+        std::vector<uint32_t> px;
+        RenderView(scene, cam, 640, 800, vo, *vs, px);
+        std::vector<uint8_t> rgba(px.size() * 4);
+        for (size_t i = 0; i < px.size(); ++i) { rgba[i * 4] = (px[i] >> 16) & 255; rgba[i * 4 + 1] = (px[i] >> 8) & 255; rgba[i * 4 + 2] = px[i] & 255; rgba[i * 4 + 3] = 255; }
+        Bytes png;
+        stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); }, &png, 640, 800, 4, rgba.data(), 640 * 4);
+        fileio::WriteFile(fileio::Join(opt.outDir, stem + "_shaded.png"), png.data(), png.size());
     }
     {   // the feet from the front, side and back
         PreviewOptions feet;

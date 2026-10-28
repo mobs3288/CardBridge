@@ -40,6 +40,7 @@ struct ViewOptions {
     bool textured = true;
     const std::vector<char>* hiddenParts = nullptr;   // per scene part: 1 = do not draw (on top of visibleInPreview)
     int step = 1;                                      // 2 = every other pixel in each direction (fast, while dragging)
+    bool shaded = false;                               // run the game's own compiled shaders per pixel (materials without one keep the plain look)
 };
 
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).

@@ -30,15 +30,9 @@ struct Rig {
 bool contains(const std::string& s, const char* sub) { return s.find(sub) != std::string::npos; }
 
 
-// The game shows card colours more saturated than their stored values (measured against the cards' own pictures: a
-// vest colour of saturation 0.25 renders at 0.49, hair 0.20 at 0.47 - about twice the saturation at unchanged value (a square-root fit turned near-white colours mint); skin is
-// not converted). Hue and value are kept.
-Vec4 kkColor(Vec4 c) {
-    float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z});
-    if (mx <= 1e-4f || mx - mn <= 1e-5f) return c;
-    float s = (mx - mn) / mx, k = std::min(2.0f, 1.0f / s);   // saturation doubled, capped at 1
-    return {mx - (mx - c.x) * k, mx - (mx - c.y) * k, mx - (mx - c.z) * k, c.w};
-}
+// Card colours are used as stored. An earlier "colour conversion" (a saturation boost fitted to two samples) tinted
+// near-white clothes green and skin-like colours brown; the game's own shader does whatever conversion there is.
+Vec4 kkColor(Vec4 c) { return c; }
 
 // A local transform the card's shape sliders replace on a named bone.
 struct LocalOverride {
@@ -318,6 +312,9 @@ struct Builder {
     std::map<std::string, int> accessoryBones; // "<part>#<xformId>" -> scene bone (accessory-owned skeletons)
 
     // MaterialEditor texture replacements stored in the card, for the item being added (-1 type = none).
+    // Colours the game's ChaControl writes into the item's materials at run time (ChangeAccessoryColor, ChangeSettingHairColor ...),
+    // by Unity property; the shader reads them. Set per renderer before it is added.
+    std::vector<std::pair<std::string, Vec4>> runtime;
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
@@ -355,6 +352,70 @@ struct Builder {
             result = static_cast<int>(scene.textures.size()) - 1;
         }
         textureCache[key] = result;
+        return result;
+    }
+
+    std::map<std::string, int> shaderCache;    // "<bundle>#<pathId>" -> scene shader (-1 = unreadable)
+    std::map<std::string, int> shaderTexCache; // "<bundle>#<pathId>" -> scene texture, at most 1024 px on a side
+
+    int shaderFor(UnityFile& uf, int64_t pathId, const std::string& name) {
+        std::string key = uf.name() + "#" + std::to_string(pathId);
+        auto it = shaderCache.find(key);
+        if (it != shaderCache.end()) return it->second;
+        int result = -1;
+        for (size_t i = 0; i < scene.shaders.size(); ++i)
+            if (scene.shaders[i].name == name) { result = static_cast<int>(i); break; }   // the same shader from another bundle
+        if (result < 0) {
+            std::string why;
+            if (auto blob = uf.readShaderBlob(pathId, &why)) {
+                SceneShader sh;
+                sh.name = name;
+                sh.blob = std::move(*blob);
+                scene.shaders.push_back(std::move(sh));
+                result = static_cast<int>(scene.shaders.size()) - 1;
+            }
+        }
+        shaderCache[key] = result;
+        return result;
+    }
+
+    // A material texture for the shader: decoded once and shrunk to 1024 px (box filter) so a card's dozen maps stay small.
+    std::function<std::shared_ptr<UnityFile>(const std::string&)> openCab;   // library bundle for an external file name
+
+    int shaderTexture(UnityFile& uf, const PPtr& p, const std::string& partId) {
+        if (p.isNull()) return -1;
+        UnityFile* src = &uf;
+        std::shared_ptr<UnityFile> hold;
+        PPtr lp = p;
+        if (!p.isLocal()) {   // a shared texture (ramp, gloss, normal map) lives in another bundle of the library
+            if (!openCab) return -1;
+            hold = openCab(uf.externalNameOf(p));
+            if (!hold) { if (std::getenv("CARDBRIDGE_DEBUG_MAT")) std::fprintf(stderr, "ext texture %s in %s: no library bundle\n", uf.externalNameOf(p).c_str(), uf.name().c_str()); return -1; }
+            src = hold.get();
+            lp.fileId = 0;
+        }
+        std::string key = src->name() + "#" + std::to_string(lp.pathId);
+        auto it = shaderTexCache.find(key);
+        if (it != shaderTexCache.end()) return it->second;
+        int result = -1;
+        auto t = decode(*src, lp, partId);
+        if (t && t->width > 0 && t->height > 0) {
+            int sx = 1, sy = 1;
+            while (t->width / sx > 1024) sx *= 2;
+            while (t->height / sy > 1024) sy *= 2;
+            int w = t->width / sx, h = t->height / sy;
+            std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                    for (int c = 0; c < 4; ++c) {
+                        int sum = 0;
+                        for (int dy = 0; dy < sy; ++dy)
+                            for (int dx = 0; dx < sx; ++dx) sum += t->rgba[(static_cast<size_t>(y * sy + dy) * t->width + (x * sx + dx)) * 4 + c];
+                        px[(static_cast<size_t>(y) * w + x) * 4 + c] = static_cast<uint8_t>(sum / (sx * sy));
+                    }
+            result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
+        }
+        shaderTexCache[key] = result;
         return result;
     }
 
@@ -418,6 +479,21 @@ struct Builder {
         } else {
             sm.name = m->name;
             sm.shader = m->shaderName;
+            if (m->shaderPathId) sm.shaderIndex = shaderFor(uf, m->shaderPathId, m->shaderName);
+            for (const auto& c : m->colors) sm.props.emplace_back(c.first, c.second);
+            for (const auto& rp : runtime) {
+                bool found = false;
+                for (auto& pr : sm.props) if (pr.first == rp.first) { pr.second = rp.second; found = true; }
+                if (!found) sm.props.push_back(rp);
+            }
+            for (const auto& f : m->floats) sm.props.emplace_back(f.first, Vec4{f.second, 0, 0, 0});
+            for (const auto& tb : m->textures) {
+                SceneTexBinding b;
+                b.name = tb.first;
+                for (const auto& st : m->texST) if (st.first == tb.first) b.st = st.second;
+                b.texture = shaderTexture(uf, tb.second, partId);
+                sm.texProps.push_back(std::move(b));
+            }
             if (const Vec4* c = m->color("_ShadowColor")) sm.shadow = {c->x, c->y, c->z};
             if (const Vec4* c = m->color("_LineColor")) sm.outlineColor = {c->x, c->y, c->z};
             float specPow = 0.0f;
@@ -453,6 +529,11 @@ struct Builder {
             }
             if (sm.texture < 0 && look && look->materialTint) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
             else if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
+        }
+        if (sm.texture >= 0) {   // the texture this exporter assigns (baked, tinted or replaced) is what the shader gets as _MainTex
+            bool found = false;
+            for (auto& b : sm.texProps) if (b.name == "_MainTex") { b.texture = sm.texture; found = true; }
+            if (!found) { SceneTexBinding b; b.name = "_MainTex"; b.texture = sm.texture; sm.texProps.push_back(std::move(b)); }
         }
         if (edits && meType >= 0) {
             int id = edits->mainTexFor(meCoordinate, meType, meSlot, sm.name);
@@ -651,6 +732,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     scene.name = card.displayName();
     Rig rig;
     Builder b{nullptr, scene, rig, {}};
+    b.openCab = [&resolver](const std::string& n) { std::string w; return resolver.openByCab(n, &w); };
 
     int outfit = opt.outfit;
     if (outfit < 0) outfit = static_cast<int>(card.status.at("coordinateType").asInt());
@@ -1097,6 +1179,25 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             b.meSlot = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
         } else if (ref.group == "Head") { b.meType = card::MaterialEdits::Character; }
 
+        // Which renderers get which run-time colours (ChaAccessoryComponent: rendNormal/rendAlpha/rendHair; ChaCustomHairComponent: rendHair).
+        std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem;
+        bool useC[3] = {true, true, true};
+        for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+            auto ids = [&](const char* field, std::set<int64_t>& into) {
+                const Value& fv = mb.fields.at(field);
+                if (fv.isMap()) { if (fv.at("m_FileID").asInt() == 0 && fv.at("m_PathID").asInt() != 0) into.insert(fv.at("m_PathID").asInt()); return; }
+                for (const auto& pp : fv.asArray()) if (pp.at("m_FileID").asInt() == 0 && pp.at("m_PathID").asInt() != 0) into.insert(pp.at("m_PathID").asInt());
+            };
+            if (std::getenv("CARDBRIDGE_DEBUG_MB")) std::fprintf(stderr, "mb %s on %s\n", mb.className.c_str(), ref.partId.c_str());
+            if (mb.className == "ChaAccessoryComponent") {
+                ids("rendNormal", rtNormal); ids("rendAlpha", rtAlpha); ids("rendHair", rtHair);
+                useC[0] = mb.fields.at("useColor01").asInt() != 0;
+                useC[1] = mb.fields.at("useColor02").asInt() != 0;
+                useC[2] = mb.fields.at("useColor03").asInt() != 0;
+            } else if (mb.className == "ChaCustomHairComponent") {
+                ids("rendHair", rtHairItem);
+            }
+        }
         Vec4 hairColor{1, 1, 1, 1};
         std::vector<std::string> skipped;
         size_t before = scene.meshes.size();
@@ -1141,6 +1242,28 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     faceLook.use1.insert(r.componentId);
                     lookPtr = &faceLook;
                 }
+            }
+            b.runtime.clear();
+            auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
+            if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
+                const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
+                if (rtNormal.count(r.componentId)) {
+                    if (useC[0]) b.runtime.emplace_back("_Color", vec4Of(col.at(size_t(0))));
+                    if (useC[1]) b.runtime.emplace_back("_Color2", vec4Of(col.at(size_t(1))));
+                    if (useC[2]) b.runtime.emplace_back("_Color3", vec4Of(col.at(size_t(2))));
+                }
+                if (rtAlpha.count(r.componentId)) b.runtime.emplace_back("_Color4", vec4Of(col.at(size_t(3))));
+                if (rtHair.count(r.componentId)) {
+                    Vec4 sc = rawColor(card.hair.at("parts").at(size_t(0)).at("startColor"));
+                    b.runtime.emplace_back("_Color", sc); b.runtime.emplace_back("_Color2", sc); b.runtime.emplace_back("_Color3", sc);
+                }
+            } else if (ref.group == "Hair" && rtHairItem.count(r.componentId)) {
+                size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+                const Value& hp = card.hair.at("parts").at(kind);
+                b.runtime.emplace_back("_Color", rawColor(hp.at("baseColor")));
+                b.runtime.emplace_back("_Color2", rawColor(hp.at("startColor")));
+                b.runtime.emplace_back("_Color3", rawColor(hp.at("endColor")));
+                b.runtime.emplace_back("_LineColor", vec4Of(hp.at("outlineColor")));
             }
             int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
             if (mi >= 0) part.meshes.push_back(mi);
@@ -1204,6 +1327,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
+    if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
+        for (const auto& m : scene.materials) {
+            std::fprintf(stderr, "mat %s shader=%s idx=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex);
+            for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d", t.name.c_str(), t.texture);
+            std::fprintf(stderr, " | props:");
+            for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
+            std::fprintf(stderr, "\n");
+        }
     return scene;
 }
 

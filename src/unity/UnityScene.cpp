@@ -1,6 +1,7 @@
 #include "unity/UnityScene.h"
 
 #include "unity/TextureDecode.h"
+#include "core/Lz4.h"
 
 #include <algorithm>
 #include <cstring>
@@ -384,6 +385,7 @@ std::optional<MaterialData> UnityFile::readMaterial(const PPtr& p, std::string* 
     m.name = v.at("m_Name").asStr();
     PPtr sp = toPPtr(v.at("m_Shader"));
     if (sp.isLocal() && !sp.isNull()) {
+        m.shaderPathId = sp.pathId;
         if (const ObjectInfo* so = sf_->find(sp.pathId)) {
             Value sv = sf_->read(*so);
             m.shaderName = sv.at("m_ParsedForm").at("m_Name").asStr();
@@ -394,7 +396,13 @@ std::optional<MaterialData> UnityFile::readMaterial(const PPtr& p, std::string* 
     }
     const Value& props = v.at("m_SavedProperties");
     for (const auto& e : props.at("m_TexEnvs").asArray())
+    {
         m.textures.emplace_back(e.at("first").asStr(), toPPtr(e.at("second").at("m_Texture")));
+        const Value& sc = e.at("second").at("m_Scale");
+        const Value& of = e.at("second").at("m_Offset");
+        m.texST.emplace_back(e.at("first").asStr(), Vec4{static_cast<float>(sc.at("x").asFloat(1.0)), static_cast<float>(sc.at("y").asFloat(1.0)),
+                                                        static_cast<float>(of.at("x").asFloat(0.0)), static_cast<float>(of.at("y").asFloat(0.0))});
+    }
     for (const auto& e : props.at("m_Colors").asArray()) {
         const Value& c = e.at("second");
         m.colors.emplace_back(e.at("first").asStr(),
@@ -404,6 +412,28 @@ std::optional<MaterialData> UnityFile::readMaterial(const PPtr& p, std::string* 
     for (const auto& e : props.at("m_Floats").asArray())
         m.floats.emplace_back(e.at("first").asStr(), static_cast<float>(e.at("second").asFloat()));
     return m;
+}
+
+std::optional<Bytes> UnityFile::readShaderBlob(int64_t shaderPathId, std::string* why) const {
+    auto fail = [&](const std::string& m) -> std::optional<Bytes> { if (why) *why = m; return std::nullopt; };
+    const ObjectInfo* o = sf_->find(shaderPathId);
+    if (!o) return fail("shader object not found");
+    Value v = sf_->read(*o);
+    const Value& platforms = v.at("platforms");
+    size_t pick = platforms.size();
+    for (size_t i = 0; i < platforms.size(); ++i) if (platforms.at(i).asInt() == 4) pick = i;   // 4 = Direct3D 11
+    if (pick == platforms.size()) return fail("the shader has no Direct3D 11 program");
+    // Programs of every platform are stored back to back in one blob; this platform's part starts at offsets[pick].
+    uint64_t off = static_cast<uint64_t>(v.at("offsets").at(pick).asInt());
+    uint64_t clen = static_cast<uint64_t>(v.at("compressedLengths").at(pick).asInt());
+    uint64_t dlen = static_cast<uint64_t>(v.at("decompressedLengths").at(pick).asInt());
+    const Bytes& blob = v.at("compressedBlob").asBin();
+    if (off + clen > blob.size()) return fail("shader blob is truncated");
+    try {
+        return Lz4DecompressBlock(blob.data() + off, static_cast<size_t>(clen), static_cast<size_t>(dlen));
+    } catch (const std::exception& e) {
+        return fail(std::string("shader blob does not decompress: ") + e.what());
+    }
 }
 
 std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* why) const {
