@@ -416,6 +416,7 @@ struct Builder {
                         px[(static_cast<size_t>(y) * w + x) * 4 + c] = static_cast<uint8_t>(sum / (sx * sy));
                     }
             result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
+            scene.textures[static_cast<size_t>(result)].clamp = t->wrapMode == 1;
         }
         shaderTexCache[key] = result;
         return result;
@@ -749,6 +750,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     scene.globalProps.emplace_back("_ambientshadowG", Vec4{0.019f, 0.027f, 0.039f, 0.26f});
     scene.globalProps.emplace_back("_LineColorG", Vec4{0.5f, 0.5f, 0.5f, 0.0f});
     scene.globalProps.emplace_back("_linewidthG", Vec4{0.307f, 0, 0, 0});
+    scene.globalProps.emplace_back("_FaceShadowG", Vec4{std::getenv("FS") ? static_cast<float>(std::atof(std::getenv("FS"))) : 0.0f, 0, 0, 0});
+    scene.globalProps.emplace_back("_FaceNormalG", Vec4{std::getenv("FN") ? static_cast<float>(std::atof(std::getenv("FN"))) : 0.0f, 0, 0, 0});
     auto loadListTexture = [&](int category, int64_t id) -> int {
         const resolve::ListItem* row = resolver.baseRow(category, id);
         if (!row) return -1;
@@ -763,7 +766,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         auto t = b.decode(*bu, tp, "globals");
         if (!t) return -1;
         std::vector<uint8_t> px = t->rgba;
-        return b.addSceneTexture(t->name, bu->name(), t->width, t->height, std::move(px));
+        int idx = b.addSceneTexture(t->name, bu->name(), t->width, t->height, std::move(px));
+        scene.textures[static_cast<size_t>(idx)].clamp = t->wrapMode == 1;
+        return idx;
     };
     {
         SceneTexBinding ramp;

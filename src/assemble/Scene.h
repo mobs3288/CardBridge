@@ -31,6 +31,7 @@ struct SceneTexture {
     std::string source;       // bundle it came from (provenance)
     int width = 0, height = 0;
     std::vector<uint8_t> rgba;   // top row first
+    bool clamp = false;          // the texture's wrap mode is clamp (ramps), not repeat
     uint64_t pixelHash = 0;      // FNV-1a 64 of rgba
 };
 
