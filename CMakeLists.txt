@@ -92,6 +92,16 @@ if(WIN32 AND NOT MSVC)
     target_link_options(cardbridge PRIVATE -static)
 endif()
 
+
+# The viewer: a Win32 window over the same core (plain GDI blit of the software renderer; no GPU dependency).
+if(WIN32)
+    add_executable(cardbridge_viewer WIN32 viewer/main.cpp)
+    target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)
+    if(NOT MSVC)
+        target_link_options(cardbridge_viewer PRIVATE -municode -static)
+    endif()
+endif()
+
 add_executable(cardbridge_tests tests/cardbridge_tests.cpp)
 target_link_libraries(cardbridge_tests PRIVATE cardbridge_core stb_image)
 if(WIN32 AND NOT MSVC)

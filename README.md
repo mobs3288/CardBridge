@@ -142,6 +142,10 @@ cardbridge inspect "<card.png>" --library "<library folder>" --mods "<mods folde
 
 # convert (writes <out>\<name>.pmx, <out>\textures\*.png, <out>\<name>.cardbridge.json)
 cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folder>" --out "<out folder>"
+
+# look at a card in a window, without exporting (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel,
+# Left/Right switch outfit, T toggles textures, I lists the problems, click a part to hide it; drop a card on the window to open it
+cardbridge_viewer "<card.png>" --library "<library folder>" --mods "<mods folder>"      # the folders are remembered
 ```
 
 Exit codes: 0 success, 1 usage, 2 not a supported card (with the reason: not a PNG, no card data, truncated, an outfit file, unknown or unsupported family), 3 conversion failed. Items that cannot be loaded are listed with a status and reason on screen and in the manifest's `issues`; the first run over a mods folder builds an index (about 15 minutes for 4,000 mods, then cached).
