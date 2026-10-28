@@ -315,6 +315,8 @@ struct Builder {
     // Colours the game's ChaControl writes into the item's materials at run time (ChangeAccessoryColor, ChangeSettingHairColor ...),
     // by Unity property; the shader reads them. Set per renderer before it is added.
     std::vector<std::pair<std::string, Vec4>> runtime;
+    bool glossForThisRenderer = false;
+    int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
@@ -493,6 +495,11 @@ struct Builder {
                 for (const auto& st : m->texST) if (st.first == tb.first) b.st = st.second;
                 b.texture = shaderTexture(uf, tb.second, partId);
                 sm.texProps.push_back(std::move(b));
+            }
+            if (hairGlossTexture >= 0 && glossForThisRenderer) {
+                bool set = false;
+                for (auto& tb : sm.texProps) if (tb.name == "_HairGloss") { tb.texture = hairGlossTexture; set = true; }
+                if (!set) { SceneTexBinding g; g.name = "_HairGloss"; g.texture = hairGlossTexture; sm.texProps.push_back(g); }
             }
             if (const Vec4* c = m->color("_ShadowColor")) sm.shadow = {c->x, c->y, c->z};
             if (const Vec4* c = m->color("_LineColor")) sm.outlineColor = {c->x, c->y, c->z};
@@ -737,6 +744,35 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     int outfit = opt.outfit;
     if (outfit < 0) outfit = static_cast<int>(card.status.at("coordinateType").asInt());
     if (outfit < 0 || static_cast<size_t>(outfit) >= card.outfits.size()) outfit = 0;
+    // Shader globals as Character.UpdateGlobalShader / ChaShader set them at their defaults (Config.EtcData: rampId 1,
+    // shadowDepth 0.26, lineDepth 1, lineWidth 0.307).
+    scene.globalProps.emplace_back("_ambientshadowG", Vec4{0.019f, 0.027f, 0.039f, 0.26f});
+    scene.globalProps.emplace_back("_LineColorG", Vec4{0.5f, 0.5f, 0.5f, 0.0f});
+    scene.globalProps.emplace_back("_linewidthG", Vec4{0.307f, 0, 0, 0});
+    auto loadListTexture = [&](int category, int64_t id) -> int {
+        const resolve::ListItem* row = resolver.baseRow(category, id);
+        if (!row) return -1;
+        std::string ab = row->get("MainTexAB"), name = row->get("MainTex");
+        if (ab.empty() || ab == "0" || name.empty() || name == "0") return -1;
+        std::string w;
+        auto bu = resolver.openBaseBundle(ab, &w);
+        if (!bu) return -1;
+        PPtr tp = bu->findAsset(name);
+        if (tp.isNull()) tp = bu->findTexture(name);
+        if (tp.isNull()) return -1;
+        auto t = b.decode(*bu, tp, "globals");
+        if (!t) return -1;
+        std::vector<uint8_t> px = t->rgba;
+        return b.addSceneTexture(t->name, bu->name(), t->width, t->height, std::move(px));
+    };
+    {
+        SceneTexBinding ramp;
+        ramp.name = "_RampG";
+        ramp.texture = loadListTexture(432, 1);
+        scene.globalTextures.push_back(ramp);
+        int64_t gloss = card.hair.at("parts").at(size_t(0)).at("glossId").asInt();
+        b.hairGlossTexture = loadListTexture(433, gloss);
+    }
     card::MaterialEdits materialEdits = card::LoadMaterialEdits(card.extended, outfit);
     if (!materialEdits.empty()) b.edits = &materialEdits;
 
@@ -1244,6 +1280,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
             b.runtime.clear();
+            b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0;
             auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
             if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
                 const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");

@@ -69,6 +69,8 @@ public:
     std::shared_ptr<unity::UnityFile> openBaseBundle(const std::string& rel, std::string* why);
     // The library bundle that holds an object a material points at in "another file" (a PPtr's external name, e.g.
     // "archive:/CAB-xxxx/CAB-xxxx"): the first call indexes which bundle holds which CAB (cached in library/cab_index.json).
+    // A row of the base-game lists (the library's abdata/list), or null.
+    const ListItem* baseRow(int category, int64_t id) const { return lists_.findBase(category, id); }
     std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
 
 private:

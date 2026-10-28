@@ -105,6 +105,10 @@ struct Scene {
     std::vector<SceneTexture> textures;
     std::vector<SceneMaterial> materials;
     std::vector<SceneShader> shaders;
+    // Shader globals the game sets for every material (Shader.SetGlobalTexture / SetGlobalColor / SetGlobalFloat):
+    // the shadow ramp, the ambient shadow colour, the outline colour and width.
+    std::vector<SceneTexBinding> globalTextures;
+    std::vector<std::pair<std::string, Vec4>> globalProps;
     std::vector<SceneMesh> meshes;
     std::vector<ScenePart> parts;
     std::vector<SceneIssue> issues;

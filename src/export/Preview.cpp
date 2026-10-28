@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <cstring>
 #include <map>
@@ -246,7 +248,8 @@ struct CbSet {
     std::vector<std::vector<float>> data;   // by slot
     std::vector<const float*> ptr;
 };
-void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3], CbSet& out) {
+void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3], CbSet& out,
+                   const std::vector<std::pair<std::string, Vec4>>* globals = nullptr) {
     out.data.assign(8, {});
     for (const auto& cb : prog.cbuffers) {
         if (cb.slot < 0 || cb.slot >= 8) continue;
@@ -263,7 +266,11 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
             if (pm.name == "_WorldSpaceCameraPos") { f[0] = camPos[0]; f[1] = camPos[1]; f[2] = camPos[2]; continue; }
             bool found = false;
             for (const auto& pr : mat.props) if (pr.first == pm.name) { f[0] = pr.second.x; f[1] = pr.second.y; f[2] = pr.second.z; f[3] = pr.second.w; found = true; }
+            if (!found && globals)
+                for (const auto& pr : *globals) if (pr.first == pm.name) { f[0] = pr.second.x; f[1] = pr.second.y; f[2] = pr.second.z; f[3] = pr.second.w; found = true; }
             if (found) continue;
+            if (std::getenv("CARDBRIDGE_DEBUG_CB") && !(pm.name.size() > 3 && pm.name.compare(pm.name.size() - 3, 3, "_ST") == 0))
+                std::fprintf(stderr, "cb-missing %s: %s\n", mat.name.c_str(), pm.name.c_str());
             if (pm.name.size() > 3 && pm.name.compare(pm.name.size() - 3, 3, "_ST") == 0) {
                 std::string tex = pm.name.substr(0, pm.name.size() - 3);
                 f[0] = 1; f[1] = 1;
@@ -295,6 +302,14 @@ struct MatTextures : shader::ISm4Textures {
                 int l = std::min(static_cast<int>(m.w.size()) - 1, std::max(0, static_cast<int>(lodIn >= 0 ? lodIn : lod)));
                 float u = coord[0] - std::floor(coord[0]), v = coord[1] - std::floor(coord[1]);
                 SampleBilinear(m, l, u, v, out);
+                return;
+            }
+        for (const auto& tb : scene->globalTextures)
+            if (tb.name == *name && tb.texture >= 0) {
+                size_t ti = static_cast<size_t>(tb.texture);
+                if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
+                if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                SampleBilinear(st->mips[ti], 0, coord[0] - std::floor(coord[0]), coord[1] - std::floor(coord[1]), out);
                 return;
             }
         // A texture the material does not have: Unity's defaults (white; a flat normal map).
@@ -339,10 +354,11 @@ std::vector<Vec3> ComputeTangents(const assemble::SceneMesh& m) {
 
 // Runs the vertex program for every vertex of a mesh and keeps what the pixel program receives.
 bool RunVertexStage(const ShaderRuntime& sr, const assemble::SceneMaterial& mat, const assemble::SceneMesh& mesh, const std::vector<Vec3>& tangents,
+                    const std::vector<std::pair<std::string, Vec4>>& globalProps,
                     const float lightDir[3], const float camPos[3], std::vector<PsIn>& out) {
     const auto& vp = sr.programs[sr.vi];
     CbSet cbs;
-    FillConstants(vp, mat, lightDir, camPos, cbs);
+    FillConstants(vp, mat, lightDir, camPos, cbs, &globalProps);
     out.assign(mesh.vertices.size(), PsIn{});
     shader::Sm4Io io;
     io.constantBuffers = cbs.ptr;
@@ -428,9 +444,9 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 MatTextures mt;
                 if (sr) {
                     if (tangents.empty()) tangents = ComputeTangents(mesh);
-                    if (!RunVertexStage(*sr, mat, mesh, tangents, L, camPos, vsOut)) sr = nullptr;
+                    if (!RunVertexStage(*sr, mat, mesh, tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                     else {
-                        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb);
+                        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
                         mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat;
                     }
                 }
