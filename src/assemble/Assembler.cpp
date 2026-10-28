@@ -552,6 +552,7 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 // toe tip and the heel at the same height, skinning-weighted so the leg-to-foot blend stays smooth. Nothing happens
 // without shoes or when the sole is already level.
 void settleHeels(Scene& scene) {
+    bool tilted = false;
     for (const char* side : {"L", "R"}) {
         int foot = scene.boneIndex(std::string("cf_j_foot_") + side);
         if (foot < 0) continue;
@@ -618,6 +619,18 @@ void settleHeels(Scene& scene) {
         char buf[160];
         std::snprintf(buf, sizeof buf, "foot %s tilted %.1f degrees about the ankle so the heeled shoe stands on heel and toe", side, best * 180.0f / 3.14159265f);
         scene.warn("", buf);
+        tilted = true;
+    }
+    if (!tilted) return;
+    // The ankle stays where it was and the toes dropped below the floor: lift the whole character so the shoes stand on
+    // y = 0, as the heel raises the ankle in the game.
+    float lowest = 1e30f;
+    for (const auto& mesh : scene.meshes)
+        for (const auto& v : mesh.vertices) lowest = std::min(lowest, v.pos.y);
+    if (lowest < 1e29f && std::fabs(lowest) > 1e-4f) {
+        for (auto& mesh : scene.meshes)
+            for (auto& v : mesh.vertices) v.pos.y -= lowest;
+        for (auto& b : scene.bones) b.pos.y -= lowest;
     }
 }
 } // namespace
