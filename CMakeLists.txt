@@ -74,6 +74,7 @@ add_library(cardbridge_core STATIC
     src/export/Preview.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp
+    src/shader/Dxbc.cpp
     third_party/bc7decomp/bc7decomp.cpp
 )
 target_include_directories(cardbridge_core PUBLIC src PRIVATE third_party/bc7decomp)

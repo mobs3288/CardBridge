@@ -8,6 +8,7 @@
 // Only `library import` ever reads a game install. Every other command works
 // from the card, the CardBridge library folder and the user's mods folder.
 
+#include "shader/Dxbc.h"
 #include "assemble/Assembler.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
@@ -247,6 +248,29 @@ int cmdInspect(const Args& a) {
     return 0;
 }
 
+int cmdShader(const Args& a) {
+    // cardbridge shader <file.dxbc|blob>: lists the constant buffers, resources and signatures of each DXBC program.
+    if (a.positional.size() < 2) { std::fprintf(stderr, "usage: cardbridge shader <file>\n"); return 1; }
+    Bytes data = fileio::ReadFile(a.positional[1]);
+    std::vector<Bytes> progs = shader::CarveDxbc(data);
+    if (progs.empty()) { std::fprintf(stderr, "no DXBC program found in %s\n", a.positional[1].c_str()); return 2; }
+    int n = 0;
+    for (const Bytes& b : progs) {
+        shader::Dxbc d;
+        std::string why;
+        if (!shader::ParseDxbc(b.data(), b.size(), d, &why)) { std::printf("program %d: %s\n", n++, why.c_str()); continue; }
+        std::printf("program %d: %s_%u_%u, %zu tokens\n", n++, d.programType == 0 ? "ps" : d.programType == 1 ? "vs" : "xs", d.major, d.minor, d.tokens.size());
+        for (const auto& cb : d.cbuffers) {
+            std::printf("  cbuffer %s (%u bytes)\n", cb.name.c_str(), cb.size);
+            for (const auto& v : cb.vars) std::printf("    +%-4u %-4u %s\n", v.offset, v.size, v.name.c_str());
+        }
+        for (const auto& r : d.resources) std::printf("  resource %s type %u slot %u\n", r.name.c_str(), r.type, r.bindPoint);
+        for (const auto& e : d.inputs) std::printf("  in  %s%u r%u mask %x\n", e.semantic.c_str(), e.index, e.reg, e.mask);
+        for (const auto& e : d.outputs) std::printf("  out %s%u r%u mask %x\n", e.semantic.c_str(), e.index, e.reg, e.mask);
+    }
+    return 0;
+}
+
 int cmdConvert(const Args& a) {
     if (a.positional.size() < 2) { usage(); return 1; }
     std::string out = normalizeSlashes(a.get("out"));
@@ -317,6 +341,7 @@ int main(int argc, char** argv) {
         if (cmd == "convert") return cmdConvert(a);
         if (cmd == "inspect") return cmdInspect(a);
         if (cmd == "library") return cmdLibrary(a);
+        if (cmd == "shader") return cmdShader(a);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 3;
