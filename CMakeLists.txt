@@ -99,6 +99,7 @@ if(WIN32)
     target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)
     if(NOT MSVC)
         target_link_options(cardbridge_viewer PRIVATE -municode -static)
+        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32)
     endif()
 endif()
 

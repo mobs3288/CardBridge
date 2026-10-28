@@ -22,6 +22,8 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <atomic>
@@ -84,6 +86,50 @@ void SaveSettings(const Settings& s) {
         j["mods"] = s.mods;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
+}
+
+// ---- dialogs and first-run defaults ------------------------------------------------------------------------------------
+std::string PickFolder(HWND owner, const wchar_t* title) {
+    BROWSEINFOW bi{};
+    bi.hwndOwner = owner;
+    bi.lpszTitle = title;
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return {};
+    wchar_t path[MAX_PATH];
+    std::string r;
+    if (SHGetPathFromIDListW(pidl, path)) r = Slashes(WideToUtf8(path));
+    CoTaskMemFree(pidl);
+    return r;
+}
+
+std::string PickCard(HWND owner) {
+    wchar_t file[1024] = L"";
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof of;
+    of.hwndOwner = owner;
+    of.lpstrFilter = L"Koikatsu cards (*.png)\0*.png\0All files\0*.*\0";
+    of.lpstrFile = file;
+    of.nMaxFile = 1024;
+    of.lpstrTitle = L"Open a Koikatsu character card";
+    of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&of) ? Slashes(WideToUtf8(file)) : std::string();
+}
+
+bool Exists(const std::string& p) { return GetFileAttributesW(Utf8ToWide(p).c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+// The asset library normally sits in the CardBridge folder (library_full, else library): look from the exe upwards.
+std::string FindLibrary() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::string dir = Slashes(WideToUtf8(exe));
+    for (int up = 0; up < 5; ++up) {
+        dir = dir.substr(0, dir.find_last_of('/'));
+        for (const char* sub : {"/cardbridge/library_full", "/library_full", "/cardbridge/library", "/library"})
+            if (Exists(dir + sub + "/abdata") || Exists(dir + sub + "/library.json")) return dir + sub;
+        if (dir.find('/') == std::string::npos) break;
+    }
+    return {};
 }
 
 // ---- the loaded character ------------------------------------------------------------------------------------------
@@ -233,7 +279,7 @@ void Paint(HWND hwnd) {
         size_t warn = 0, err = 0;
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         line(std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I] list", warn + err ? RGB(240, 190, 90) : RGB(120, 200, 120));
-        line("Left/Right outfit  T textures  R reset", RGB(120, 130, 150));
+        line("O open  Left/Right outfit  T tex  R reset", RGB(120, 130, 150));
         y += 6;
         if (g.showIssues) {
             for (const auto& i : L->scene.issues) {
@@ -253,6 +299,14 @@ void Paint(HWND hwnd) {
         }
     } else {
         line(g.status, RGB(220, 220, 220));
+        line("", RGB(0, 0, 0));
+        line("drag a card .png onto this window,", RGB(160, 170, 190));
+        line("or press O to open one", RGB(160, 170, 190));
+        line("M  set the mods folder", RGB(120, 130, 150));
+        line("L  set the asset library folder", RGB(120, 130, 150));
+        line("", RGB(0, 0, 0));
+        line("library: " + (g.settings.library.empty() ? std::string("(not set)") : g.settings.library), RGB(120, 130, 150));
+        line("mods: " + (g.settings.mods.empty() ? std::string("(not set)") : g.settings.mods), RGB(120, 130, 150));
         if (L) for (const auto& n : L->notes) for (size_t p = 0; p < n.size(); p += 40) line(n.substr(p, 40), RGB(240, 110, 110));
     }
     if (g.busy) line("working ...", RGB(120, 200, 255));
@@ -339,6 +393,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'S') ResetView(90);
         else if (wp == 'B') ResetView(180);
         else if (wp == 'I') g.showIssues = !g.showIssues;
+        else if (wp == 'O') { std::string c = PickCard(hwnd); if (!c.empty()) { g.cam = {}; StartLoad(c, -1); } }
+        else if (wp == 'M') { std::string d = PickFolder(hwnd, L"Choose your Koikatsu mods folder"); if (!d.empty()) { g.settings.mods = d; SaveSettings(g.settings); if (!g.cardPath.empty()) StartLoad(g.cardPath, -1); } }
+        else if (wp == 'L') { std::string d = PickFolder(hwnd, L"Choose the CardBridge asset library folder"); if (!d.empty()) { g.settings.library = d; SaveSettings(g.settings); if (!g.cardPath.empty()) StartLoad(g.cardPath, -1); } }
         else if ((wp == VK_LEFT || wp == VK_RIGHT) && L && L->outfits > 1 && !g.cardPath.empty()) {
             int n = L->outfits, o = (L->outfit + (wp == VK_RIGHT ? 1 : n - 1)) % n;
             StartLoad(g.cardPath, o);
@@ -377,6 +434,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
                              CW_USEDEFAULT, 1280, 800, nullptr, nullptr, inst, nullptr);
     ShowWindow(g.hwnd, show);
+    CoInitialize(nullptr);
+    if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
+    if (g.settings.library.empty()) g.settings.library = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (made by 'cardbridge library import')");
+    if (g.settings.mods.empty() || !Exists(g.settings.mods)) {
+        // Optional: without mods only base-game items resolve.
+        std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder (Cancel to use base-game items only)");
+        if (!d.empty()) g.settings.mods = d;
+    }
+    SaveSettings(g.settings);
     if (!card.empty()) StartLoad(card, g.wantOutfit);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
