@@ -89,7 +89,7 @@ void usage() {
         "cardbridge " "0.1.0-m1" " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
-        "             [--outfit N] [--scale F] [--heel-pose] [--overwrite] [--mod-cache <file>]\n"
+        "             [--outfit N] [--scale F] [--overwrite] [--mod-cache <file>]\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -263,7 +263,6 @@ int cmdConvert(const Args& a) {
 
     assemble::AssembleOptions ao;
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
-    ao.heelPose = a.has("heel-pose");
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
@@ -310,7 +309,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "heel-pose", "minimal", "hashes", "json", "help", "version"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

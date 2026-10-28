@@ -547,124 +547,6 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 }
 
 
-// Opt-in (--heel-pose). Shoes with a heel are modelled for a flat foot: level sole, heel stack hanging below it. Worn, the
-// foot points down at the ankle and the toes bend back flat at the ball. This poses the foot that way with linear-blend
-// skinning (`cf_j_foot` about the ankle, `cf_j_toes` turned back by the same angle). The angle is the forward lean of the
-// shoe's own heel stack: a shoe is modelled for the pose it is worn in, so pointing the foot by the lean stands the stack
-// upright. The character is then lifted onto y = 0. Flat shoes and upright stacks are left alone.
-void settleHeels(Scene& scene) {
-    bool posed = false;
-    for (const char* side : {"L", "R"}) {
-        int foot = scene.boneIndex(std::string("cf_j_foot_") + side);
-        int toes = scene.boneIndex(std::string("cf_j_toes_") + side);
-        if (foot < 0 || toes < 0) continue;
-        std::vector<char> set(scene.bones.size(), 0);   // 1 = under the foot, 2 = under the toes
-        set[static_cast<size_t>(foot)] = 1;
-        set[static_cast<size_t>(toes)] = 2;
-        for (bool changed = true; changed;) {
-            changed = false;
-            for (size_t i = 0; i < scene.bones.size(); ++i) {
-                int par = scene.bones[i].parent;
-                if (!set[i] && par >= 0 && set[static_cast<size_t>(par)]) { set[i] = set[static_cast<size_t>(par)]; changed = true; }
-            }
-        }
-        const Vec3 ankle = scene.bones[static_cast<size_t>(foot)].pos;
-        const Vec3 ball = scene.bones[static_cast<size_t>(toes)].pos;
-        auto weights = [&](const SceneVertex& v, float& wFoot, float& wToes) {
-            wFoot = wToes = 0;
-            for (int k = 0; k < 4; ++k) {
-                if (v.weight[k] <= 0 || v.bone[k] < 0) continue;
-                char c = set[static_cast<size_t>(v.bone[k])];
-                if (c == 1) wFoot += v.weight[k];
-                else if (c == 2) wToes += v.weight[k];
-            }
-        };
-        auto rot = [](Vec3 p, Vec3 c, float ang) {   // about the X axis through c; positive points +Z (the toes) down
-            float cs = std::cos(ang), sn = std::sin(ang), dy = p.y - c.y, dz = p.z - c.z;
-            return Vec3{p.x, c.y + dy * cs - dz * sn, c.z + dz * cs + dy * sn};
-        };
-        auto footM = [&](Vec3 p, float th) { return rot(p, ankle, th); };
-        auto toesM = [&](Vec3 p, float th) { return footM(rot(p, ball, -th), th); };
-        auto blend = [&](const SceneVertex& v, Vec3 p, float th) {
-            float wf, wt;
-            weights(v, wf, wt);
-            Vec3 f = footM(p, th), t = toesM(p, th);
-            float wr = 1.0f - wf - wt;
-            return Vec3{p.x * wr + f.x * wf + t.x * wt, p.y * wr + f.y * wf + t.y * wt, p.z * wr + f.z * wf + t.z * wt};
-        };
-
-        // The shoe's foot-bound vertices on this side.
-        std::vector<const SceneVertex*> shoe;
-        float maxZ = -1e30f;
-        for (const auto& part : scene.parts) {
-            if (!part.includeInExport || part.group != "Outfit" || part.id.find(".shoes") == std::string::npos) continue;
-            for (int mi : part.meshes)
-                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
-                    float wf, wt;
-                    weights(v, wf, wt);
-                    if (wf + wt > 0.5f && v.pos.x * ankle.x > 0) { shoe.push_back(&v); maxZ = std::max(maxZ, v.pos.z - ankle.z); }
-                }
-        }
-        if (shoe.size() < 50 || maxZ <= 0) continue;
-        float toeLow0 = 1e30f, heelLow0 = 1e30f;
-        for (const SceneVertex* v : shoe) {
-            float z = v->pos.z - ankle.z;
-            if (z > 0.6f * maxZ) toeLow0 = std::min(toeLow0, v->pos.y);
-            else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
-        }
-        if (toeLow0 - heelLow0 < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
-        const float soleY = toeLow0;
-        // The angle: the shoe is modelled for the pose it is worn in, so its heel stack leans forward by the foot's
-        // pointing angle. Pointing the foot by that much stands the stack upright, which is what a worn heel does.
-        float topZ = 0, topY = 0, botZ = 0, botY = 0;
-        int topN = 0, botN = 0;
-        for (const SceneVertex* v : shoe) {
-            if (v->pos.z - ankle.z > 0.4f * maxZ || v->pos.y > soleY - 0.003f) continue;   // the stack: below the sole, behind the arch
-            if (v->pos.y > soleY - 0.015f) { topZ += v->pos.z; topY += v->pos.y; ++topN; }
-            else if (v->pos.y < heelLow0 + 0.01f) { botZ += v->pos.z; botY += v->pos.y; ++botN; }
-        }
-        float best = 0;
-        if (topN > 3 && botN > 3) {
-            float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
-            if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
-        }
-        if (best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
-        for (auto& mesh : scene.meshes)
-            for (auto& v : mesh.vertices) {
-                float wf, wt;
-                weights(v, wf, wt);
-                if (wf + wt <= 0) continue;
-                Vec3 np = blend(v, v.pos, best);
-                SceneVertex nv = v;
-                nv.pos = {v.pos.x + v.normal.x, v.pos.y + v.normal.y, v.pos.z + v.normal.z};
-                Vec3 tip = blend(nv, nv.pos, best);
-                Vec3 base = blend(v, v.pos, best);
-                Vec3 n{tip.x - base.x, tip.y - base.y, tip.z - base.z};
-                float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-                if (len > 1e-6f) v.normal = {n.x / len, n.y / len, n.z / len};
-                v.pos = np;
-            }
-        for (size_t i = 0; i < scene.bones.size(); ++i) {
-            if (set[i] == 1 && static_cast<int>(i) != foot) scene.bones[i].pos = footM(scene.bones[i].pos, best);
-            else if (set[i] == 2) scene.bones[i].pos = toesM(scene.bones[i].pos, best);
-        }
-        char buf[200];
-        std::snprintf(buf, sizeof buf, "foot %s posed for a %.1f cm heel (--heel-pose): ankle pointed %.1f degrees, toes bent back flat", side,
-                      (toeLow0 - heelLow0) * 100.0f, best * 180.0f / 3.14159265f);
-        scene.warn("", buf);
-        posed = true;
-    }
-    if (!posed) return;
-    float lowest = 1e30f;
-    for (const auto& mesh : scene.meshes)
-        for (const auto& v : mesh.vertices) lowest = std::min(lowest, v.pos.y);
-    if (lowest < 1e29f && std::fabs(lowest) > 1e-5f) {
-        for (auto& mesh : scene.meshes)
-            for (auto& v : mesh.vertices) v.pos.y -= lowest;
-        for (auto& b : scene.bones) b.pos.y -= lowest;
-    }
-}
-
 } // namespace
 
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
@@ -1198,7 +1080,6 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
-    if (opt.heelPose) settleHeels(scene);
     return scene;
 }
 
