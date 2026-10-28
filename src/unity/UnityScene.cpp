@@ -448,6 +448,7 @@ std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* wh
     t.width = static_cast<int>(v.at("m_Width").asInt());
     t.height = static_cast<int>(v.at("m_Height").asInt());
     t.unityFormat = static_cast<int>(v.at("m_TextureFormat").asInt());
+    t.wrapMode = static_cast<int>(v.at("m_TextureSettings").at("m_WrapMode").asInt());
     const uint8_t* src = nullptr;
     size_t size = 0;
     const Bytes& inl = v.at("image data").asBin();

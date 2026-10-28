@@ -48,12 +48,12 @@ Mips BuildMips(const assemble::SceneTexture& t) {
 }
 
 // Bilinear, wrapping.
-void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4]) {
+void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4], bool clamp = false) {
     int w = m.w[lvl], h = m.h[lvl];
     float fx = u * w - 0.5f, fy = (1.0f - v) * h - 0.5f;
     int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
     float tx = fx - x0, ty = fy - y0;
-    auto at = [&](int x, int y, int c) { x = ((x % w) + w) % w; y = ((y % h) + h) % h; return m.rgba[lvl][(static_cast<size_t>(y) * w + x) * 4 + c] / 255.0f; };
+    auto at = [&](int x, int y, int c) { if (clamp) { x = std::min(w - 1, std::max(0, x)); y = std::min(h - 1, std::max(0, y)); } else { x = ((x % w) + w) % w; y = ((y % h) + h) % h; } return m.rgba[lvl][(static_cast<size_t>(y) * w + x) * 4 + c] / 255.0f; };
     for (int c = 0; c < 4; ++c)
         out[c] = (at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx) * (1 - ty) + (at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx) * ty;
 }
@@ -288,7 +288,16 @@ struct MatTextures : shader::ISm4Textures {
     const shader::UnityProgram* prog = nullptr;
     const assemble::SceneMaterial* mat = nullptr;
     float lod = 0;
+    bool trace = false;
     void Sample(int t, int, const float coord[4], float lodIn, float out[4]) override {
+        SampleImpl(t, coord, lodIn, out);
+        if (trace) {
+            const std::string* nm = nullptr;
+            for (const auto& b : prog->textures) if (static_cast<int>(b.reg) == t) nm = &b.name;
+            std::fprintf(stderr, "  sample t%d %s uv(%.3f %.3f) -> %.3f %.3f %.3f %.3f\n", t, nm ? nm->c_str() : "?", coord[0], coord[1], out[0], out[1], out[2], out[3]);
+        }
+    }
+    void SampleImpl(int t, const float coord[4], float lodIn, float out[4]) {
         out[0] = out[1] = out[2] = out[3] = 1.0f;
         const std::string* name = nullptr;
         for (const auto& b : prog->textures) if (static_cast<int>(b.reg) == t) name = &b.name;
@@ -300,8 +309,9 @@ struct MatTextures : shader::ISm4Textures {
                 if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
                 const Mips& m = st->mips[ti];
                 int l = std::min(static_cast<int>(m.w.size()) - 1, std::max(0, static_cast<int>(lodIn >= 0 ? lodIn : lod)));
-                float u = coord[0] - std::floor(coord[0]), v = coord[1] - std::floor(coord[1]);
-                SampleBilinear(m, l, u, v, out);
+                bool cl = scene->textures[ti].clamp;
+                float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
+                SampleBilinear(m, l, u, v, out, cl);
                 return;
             }
         for (const auto& tb : scene->globalTextures)
@@ -309,7 +319,8 @@ struct MatTextures : shader::ISm4Textures {
                 size_t ti = static_cast<size_t>(tb.texture);
                 if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
                 if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
-                SampleBilinear(st->mips[ti], 0, coord[0] - std::floor(coord[0]), coord[1] - std::floor(coord[1]), out);
+                bool cl = scene->textures[ti].clamp;
+                SampleBilinear(st->mips[ti], 0, cl ? coord[0] : coord[0] - std::floor(coord[0]), cl ? coord[1] : coord[1] - std::floor(coord[1]), out, cl);
                 return;
             }
         // A texture the material does not have: Unity's defaults (white; a flat normal map).
@@ -377,7 +388,7 @@ bool RunVertexStage(const ShaderRuntime& sr, const assemble::SceneMaterial& mat,
         std::string why;
         if (!shader::RunSm4(sr.vs, io, &why)) return false;
         for (const auto& l : sr.links)
-            if (l.vsReg < 32 && l.psReg < 8) for (int c = 0; c < 4; ++c) out[i].r[l.psReg][c] = io.output[l.vsReg][c];
+            if (l.vsReg < 32 && l.psReg < 8) for (int c = 0; c < 4; ++c) if (l.mask & (1u << c)) out[i].r[l.psReg][c] = io.output[l.vsReg][c];   // registers are packed: TEXCOORD0 is xy, TEXCOORD1 zw
     }
     return true;
 }
@@ -502,7 +513,19 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                     }
                                 }
                                 std::string why;
-                                if (!shader::RunSm4(sr->ps, io, &why) || io.discarded) continue;
+                                static const char* traceMat = std::getenv("CARDBRIDGE_TRACE_MAT");
+                                static bool traced = false;
+                                {
+                                    static const char* tpx = std::getenv("CARDBRIDGE_TRACE_PX");
+                                    int wx = -1, wy = -1;
+                                    if (tpx) std::sscanf(tpx, "%d,%d", &wx, &wy);
+                                    mt.trace = traceMat && !traced && mat.name == traceMat && (!tpx || (x == wx && y == wy));
+                                }
+                                if (mt.trace) std::fprintf(stderr, "trace %s (shader %s) at %d,%d\n", mat.name.c_str(), mat.shader.c_str(), x, y);
+                                if (mt.trace) for (const auto& in : sr->programs[sr->pi].code.inputs) if (in.reg < 32) std::fprintf(stderr, "  in %s%u r%u = %.3f %.3f %.3f %.3f\n", in.semantic.c_str(), in.index, in.reg, io.input[in.reg][0], io.input[in.reg][1], io.input[in.reg][2], io.input[in.reg][3]);
+                                bool okRun = shader::RunSm4(sr->ps, io, &why);
+                                if (mt.trace) { std::fprintf(stderr, "  result %s %.3f %.3f %.3f %.3f %s\n", okRun ? "ok" : why.c_str(), io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3], io.discarded ? "DISCARDED" : ""); traced = true; mt.trace = false; }
+                                if (!okRun || io.discarded) continue;
                                 r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
                                 if (al < 0.5f) continue;
                                 zbuf[zi] = z;

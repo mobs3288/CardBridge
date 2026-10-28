@@ -35,6 +35,7 @@ struct MeshData {
 };
 
 struct TextureData {
+    int wrapMode = 0;            // Unity m_WrapMode: 0 repeat, 1 clamp, 2 mirror, 3 mirror once
     std::string name;
     int width = 0, height = 0;
     int unityFormat = 0;
