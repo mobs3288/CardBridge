@@ -9,6 +9,9 @@
 // from the card, the CardBridge library folder and the user's mods folder.
 
 #include "shader/Dxbc.h"
+#include "shader/UnityShader.h"
+#include "shader/Sm4.h"
+#include <cstring>
 #include "assemble/Assembler.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
@@ -249,25 +252,75 @@ int cmdInspect(const Args& a) {
 }
 
 int cmdShader(const Args& a) {
-    // cardbridge shader <file.dxbc|blob>: lists the constant buffers, resources and signatures of each DXBC program.
-    if (a.positional.size() < 2) { std::fprintf(stderr, "usage: cardbridge shader <file>\n"); return 1; }
+    // cardbridge shader <blob>: the programs of a decompressed Unity shader blob with their bindings, and the forward pass.
+    if (a.positional.size() < 2) { std::fprintf(stderr, "usage: cardbridge shader <blob>\n"); return 1; }
     Bytes data = fileio::ReadFile(a.positional[1]);
-    std::vector<Bytes> progs = shader::CarveDxbc(data);
-    if (progs.empty()) { std::fprintf(stderr, "no DXBC program found in %s\n", a.positional[1].c_str()); return 2; }
-    int n = 0;
-    for (const Bytes& b : progs) {
-        shader::Dxbc d;
-        std::string why;
-        if (!shader::ParseDxbc(b.data(), b.size(), d, &why)) { std::printf("program %d: %s\n", n++, why.c_str()); continue; }
-        std::printf("program %d: %s_%u_%u, %zu tokens\n", n++, d.programType == 0 ? "ps" : d.programType == 1 ? "vs" : "xs", d.major, d.minor, d.tokens.size());
+    std::vector<std::string> why;
+    auto progs = shader::ParseUnityShaderBlob(data, &why);
+    for (const auto& w : why) std::fprintf(stderr, "  skipped: %s\n", w.c_str());
+    if (progs.empty()) { std::fprintf(stderr, "no programs found in %s\n", a.positional[1].c_str()); return 2; }
+    size_t pi = 0, vi = 0;
+    bool fwd = shader::PickForwardPass(progs, pi, vi);
+    for (size_t n = 0; n < progs.size(); ++n) {
+        const auto& d = progs[n];
+        std::printf("program %zu: %s_%u_%u, %zu tokens%s\n", n, d.isPixel() ? "ps" : d.isVertex() ? "vs" : "xs", d.code.major, d.code.minor, d.code.tokens.size(),
+                    fwd && (n == pi || n == vi) ? "   <== forward pass" : "");
+        if (!d.keywords.empty()) { std::printf("  keywords:"); for (const auto& k : d.keywords) std::printf(" %s", k.c_str()); std::printf("\n"); }
         for (const auto& cb : d.cbuffers) {
-            std::printf("  cbuffer %s (%u bytes)\n", cb.name.c_str(), cb.size);
-            for (const auto& v : cb.vars) std::printf("    +%-4u %-4u %s\n", v.offset, v.size, v.name.c_str());
+            std::printf("  cb%d %s (%u bytes)\n", cb.slot, cb.name.c_str(), cb.size);
+            for (const auto& v : cb.params) std::printf("    +%-4u %ux%u%s %s\n", v.offset, v.rows, v.cols, v.isMatrix ? " matrix" : "", v.name.c_str());
         }
-        for (const auto& r : d.resources) std::printf("  resource %s type %u slot %u\n", r.name.c_str(), r.type, r.bindPoint);
-        for (const auto& e : d.inputs) std::printf("  in  %s%u r%u mask %x\n", e.semantic.c_str(), e.index, e.reg, e.mask);
-        for (const auto& e : d.outputs) std::printf("  out %s%u r%u mask %x\n", e.semantic.c_str(), e.index, e.reg, e.mask);
+        for (const auto& t : d.textures) std::printf("  t%u s%u dim%u %s\n", t.reg, t.sampler, t.dimension, t.name.c_str());
     }
+    return 0;
+}
+
+int cmdShaderRun(const Args& a) {
+    // cardbridge shader-run <blob>: runs the forward pixel program once with synthetic inputs (white textures, unit
+    // vectors) to prove the interpreter handles every instruction of the shader; prints the result colour.
+    if (a.positional.size() < 2) { std::fprintf(stderr, "usage: cardbridge shader-run <blob>\n"); return 1; }
+    Bytes data = fileio::ReadFile(a.positional[1]);
+    auto progs = shader::ParseUnityShaderBlob(data, nullptr);
+    size_t pi = 0, vi = 0;
+    if (!shader::PickForwardPass(progs, pi, vi)) { std::fprintf(stderr, "no forward pass\n"); return 2; }
+    const auto& ps = progs[pi];
+    shader::Sm4Program sm;
+    std::string why;
+    if (!shader::DecodeSm4(ps.code.tokens, sm, &why)) { std::fprintf(stderr, "decode: %s\n", why.c_str()); return 2; }
+    std::printf("decoded %zu instructions, %u temps\n", sm.code.size(), sm.tempCount);
+    struct Tex : shader::ISm4Textures {
+        const shader::UnityProgram* p;
+        void Sample(int t, int, const float*, float, float out[4]) override {
+            bool normal = false;
+            for (const auto& b : p->textures) if (static_cast<int>(b.reg) == t && b.name.find("Normal") != std::string::npos) normal = true;
+            out[0] = normal ? 0.5f : 1.0f; out[1] = normal ? 0.5f : 1.0f; out[2] = 1.0f; out[3] = 1.0f;
+        }
+    } tex;
+    tex.p = &ps;
+    std::vector<std::vector<float>> cbs(8);
+    shader::Sm4Io io;
+    for (const auto& cb : ps.cbuffers) {
+        if (cb.slot < 0 || cb.slot >= 8) continue;
+        cbs[static_cast<size_t>(cb.slot)].assign(cb.size / 4 + 4, 0.0f);
+        for (const auto& pm : cb.params) {
+            float* f = &cbs[static_cast<size_t>(cb.slot)][pm.offset / 4];
+            if (pm.name.size() > 3 && pm.name.compare(pm.name.size() - 3, 3, "_ST") == 0) { f[0] = 1; f[1] = 1; }
+            else if (pm.name == "_LightColor0" || pm.name == "_ShadowColor") { f[0] = f[1] = f[2] = 0.9f; f[3] = 1; }
+            else if (pm.name == "_alpha_a" || pm.name == "_alpha_b") f[0] = 1;
+            else if (pm.name == "_WorldSpaceLightPos0") { f[1] = 1; }
+        }
+    }
+    io.constantBuffers.resize(8, nullptr);
+    for (size_t i = 0; i < 8; ++i) if (!cbs[i].empty()) io.constantBuffers[i] = cbs[i].data();
+    io.textures = &tex;
+    for (const auto& in : ps.code.inputs) {
+        if (in.reg >= 32) continue;
+        float* v = io.input[in.reg];
+        if (in.semantic == "SV_IsFrontFace") { uint32_t m = 0xFFFFFFFFu; std::memcpy(v, &m, 4); }
+        else { v[0] = 0.3f; v[1] = 0.5f; v[2] = 0.8f; v[3] = 1.0f; }
+    }
+    if (!shader::RunSm4(sm, io, &why)) { std::fprintf(stderr, "run: %s\n", why.c_str()); return 2; }
+    std::printf("%s -> %.4f %.4f %.4f %.4f\n", io.discarded ? "discarded" : "colour", io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3]);
     return 0;
 }
 
@@ -342,6 +395,7 @@ int main(int argc, char** argv) {
         if (cmd == "inspect") return cmdInspect(a);
         if (cmd == "library") return cmdLibrary(a);
         if (cmd == "shader") return cmdShader(a);
+        if (cmd == "shader-run") return cmdShaderRun(a);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 3;
