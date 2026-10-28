@@ -177,6 +177,86 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     return out;
 }
 
+Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver, const resolve::ResolvedItem& headItem,
+                             UnityFile& headBundle, UnityFile& rigFile, const std::string& rigPrefab, const Mat4& headParentWorld,
+                             Scene& scene) {
+    Overrides out;
+    std::string why;
+    shape::AnimKeys anm;
+    const std::string anmName = headItem.listItem.get("ShapeAnime");
+    bool haveAnm = false;
+    if (!anmName.empty() && anmName != "0")
+        for (const auto& [name, bytes] : headBundle.readTextAssets())
+            if (name == anmName) { anm = shape::AnimKeys::Parse(bytes); haveAnm = true; }
+    auto custom = resolver.openBaseBundle("list/customshape.unity3d", &why);
+    std::string catText;
+    if (custom)
+        for (const auto& [name, bytes] : custom->readTextAssets())
+            if (name == "cf_customhead") catText.assign(bytes.begin(), bytes.end());
+    if (!haveAnm || catText.empty()) {
+        scene.warn("head", "face shape tables not found (ShapeAnime '" + anmName + "' / cf_customhead); the default face shape is used");
+        return out;
+    }
+    std::map<std::string, int> srcIds;
+    const auto& srcNames = shape::HeadSrcNames();
+    for (size_t i = 0; i < srcNames.size(); ++i) srcIds[srcNames[i]] = static_cast<int>(i);
+    shape::CategoryTable cats = shape::ParseCategories(catText, srcIds);
+
+    std::map<std::string, shape::ShapeBone> bones;
+    std::map<std::string, std::string> parentOf;
+    std::map<const shape::ShapeBone*, std::string> nameOf;
+    auto roots = rigFile.findXformsByName(rigPrefab);
+    if (roots.empty()) return out;
+    for (int64_t id : rigFile.subtree(roots[0])) {
+        const unity::Xform* x = rigFile.xform(id);
+        if (bones.count(x->name)) continue;
+        shape::ShapeBone sb;
+        sb.pos = x->pos;
+        sb.scl = x->scl;
+        bones[x->name] = sb;
+        if (id != roots[0]) if (const unity::Xform* par = rigFile.xform(x->parent)) parentOf[x->name] = par->name;
+    }
+    for (auto& [n, b] : bones) nameOf[&b] = n;
+
+    // World scale of the node the head rig hangs from (cf_s_head: the body shape scales it).
+    auto colLen = [&](int c) { return std::sqrt(headParentWorld.m[0 * 4 + c] * headParentWorld.m[0 * 4 + c] + headParentWorld.m[1 * 4 + c] * headParentWorld.m[1 * 4 + c] + headParentWorld.m[2 * 4 + c] * headParentWorld.m[2 * 4 + c]); };
+    const Vec3 attachScale{colLen(0), colLen(1), colLen(2)};
+
+    shape::ShapeState S;
+    S.typeBone = static_cast<int>(card.body.at("typeBone").asInt());
+    const auto& dstNames = shape::HeadDstNames();
+    S.dstFn = [&](int i) -> shape::ShapeBone* {
+        if (i < 0 || static_cast<size_t>(i) >= dstNames.size()) return nullptr;
+        auto it = bones.find(dstNames[static_cast<size_t>(i)]);
+        return it == bones.end() ? nullptr : &it->second;
+    };
+    S.parentScaleFn = [&](shape::ShapeBone* b) -> Vec3 {
+        Vec3 r = attachScale;
+        auto nm = nameOf.find(b);
+        std::string cur = nm == nameOf.end() ? std::string() : nm->second;
+        for (auto pi = parentOf.find(cur); pi != parentOf.end(); pi = parentOf.find(cur)) {
+            const shape::ShapeBone& pb = bones[pi->second];
+            r = {r.x * pb.scl.x, r.y * pb.scl.y, r.z * pb.scl.z};
+            cur = pi->second;
+        }
+        return r;
+    };
+    const Value& vals = card.face.at("shapeValueFace");
+    for (size_t i = 0; i < vals.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), static_cast<float>(vals.at(i).asFloat()));
+    shape::RunHeadUpdate(S);
+    shape::RunHeadUpdateAlways(S);
+
+    for (const auto& [name, sb] : bones) {
+        LocalOverride o;
+        o.pos = sb.pos;
+        o.scl = sb.scl;
+        o.hasRot = sb.rotSet;
+        if (sb.rotSet) o.rot = shape::EulerToQuat(sb.rot);
+        out[name] = o;
+    }
+    return out;
+}
+
 // How an item's materials are coloured. The game builds clothing textures at run time from the list row's
 // MainTex and ColorMaskTex plus the card's colours and assigns them to the first material of the renderers its
 // ChaClothesComponent lists; accessories keep the prefab texture and are tinted through their colour mask.
@@ -238,6 +318,7 @@ struct Builder {
     std::map<std::string, int> accessoryBones; // "<part>#<xformId>" -> scene bone (accessory-owned skeletons)
 
     // MaterialEditor texture replacements stored in the card, for the item being added (-1 type = none).
+    const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
     std::map<int, int> meTextures;   // embedded TexID -> scene texture (-1 when unreadable)
@@ -443,12 +524,16 @@ struct Builder {
                     // A bone only this item has (a mod's necklace joint ...): keep its offset from the nearest ancestor the
                     // shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
                     bw = rootInv * W(uf, r.boneXforms[i]);
+                    bool anchored = false;
                     for (const unity::Xform* a = bx ? uf.xform(bx->parent) : nullptr; a; a = uf.xform(a->parent)) {
                         auto ar = rig.world.find(a->name);
                         if (ar == rig.world.end()) continue;
                         bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * W(uf, r.boneXforms[i])));
+                        anchored = true;
                         break;
                     }
+                    // A hair item's prefab hangs under the head's hair parent (cf_J_FaceUp_ty) in the game.
+                    if (!anchored && hairParent) bw = *hairParent * (rootInv * W(uf, r.boneXforms[i]));
                     if (bx && bi < 0) {
                         // A bone only this item has (a mod's necklace joint ...): add it, parented to the
                         // nearest ancestor the scene already knows.
@@ -582,7 +667,21 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     } else {
         scene.warn("", "bone '" + opt.headAttachBone + "' not found; the head rig is placed at the origin");
     }
-    if (!addRigPrefab(scene, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig"))
+    Overrides headOv;
+    if (opt.applyShape) {
+        resolve::ItemRef hr;
+        for (const auto& it : resolve::ItemsFromCard(card, outfit))
+            if (it.group == "Head") hr = it;
+        if (hr.group == "Head") {
+            resolve::ResolvedItem hi = resolver.resolve(card, hr);
+            if (hi.ok()) {
+                std::string hwhy;
+                auto hb = resolver.openBundle(hi, &hwhy);
+                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene);
+            }
+        }
+    }
+    if (!addRigPrefab(scene, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv))
         scene.warn("", "prefab '" + opt.headRigPrefab + "' not found in oo_base.unity3d");
 
     auto vec4Of = [](const Value& v) {
@@ -970,6 +1069,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
 
+        b.hairParent = nullptr;
+        if (ref.group == "Hair") {
+            auto hp = rig.world.find("cf_J_FaceUp_ty");
+            if (hp != rig.world.end()) b.hairParent = &hp->second;
+            else scene.warn(ref.partId, "hair parent node cf_J_FaceUp_ty not found; the hair is placed at the model origin");
+        }
         b.meCoordinate = outfit;
         b.meType = -1;
         b.meSlot = 0;
@@ -980,6 +1085,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             b.meSlot = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
         } else if (ref.group == "Head") { b.meType = card::MaterialEdits::Character; }
 
+        Vec4 hairColor{1, 1, 1, 1};
         std::vector<std::string> skipped;
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(roots[0])) {
@@ -997,6 +1103,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (list.find("," + r.name + ",") != std::string::npos) { skipped.push_back(r.name + " (CARDBRIDGE_SKIP)"); continue; }
             }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
+            if (ref.group == "Hair") {   // hair items: the card's hair colour (shading and root-to-tip gradient are not modelled)
+                size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+                const Value& hp = card.hair.at("parts").at(kind);
+                if (hp.at("baseColor").size() >= 3) { hairColor = kkColor(vec4Of(hp.at("baseColor"))); fb = &hairColor; }
+            }
             ItemLook faceLook;
             const ItemLook* lookPtr = haveLook ? &look : nullptr;
             if (ref.group == "Head") {
@@ -1033,6 +1144,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         b.localOv = nullptr;
+        b.hairParent = nullptr;
         b.meType = -1;
         scene.parts.push_back(std::move(part));
     }
