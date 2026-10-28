@@ -11,6 +11,7 @@ struct AssembleOptions {
     std::string bodyPrefab = "p_cf_body_00";
     std::string bodyRigPrefab = "p_cf_body_bone";
     std::string headRigPrefab = "p_cf_head_bone";
+    bool heelPose = false;                 // pose the feet for heeled shoes (opt-in; the game leaves that to plugins)
     bool applyShape = true;                // apply the card's body sliders to the skeleton
     std::string headAttachBone = "cf_s_head";   // where the head rig hangs (ChaReference HeadParent)
 };
