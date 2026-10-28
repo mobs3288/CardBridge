@@ -1,0 +1,185 @@
+{
+ "marker": "【KoiKatuChara】",
+ "format_version": "0.0.0",
+ "blocks": [
+  "KKEx",
+  "Custom",
+  "Coordinate",
+  "Parameter",
+  "Status"
+ ],
+ "outfits": 7,
+ "resolver_rows": 24,
+ "mods": [
+  "Modified headmod",
+  "Praven.MoreHair",
+  "Tansen.TonyTakaEyes",
+  "[OoOoO]srTohsakaRin",
+  "com.Blanketman.AdditionalSkinMod",
+  "com.DeathWeasel.NoIris",
+  "com.alex7997.lips",
+  "mlekoduszenip",
+  "moderchan.CharamakerSupportMOD",
+  "yamadamod.nohairB"
+ ],
+ "outfit0_clothes_ids": [
+  64428,
+  740129,
+  3429,
+  99999999,
+  334449,
+  352652,
+  620115,
+  0,
+  12459
+ ],
+ "outfit0_accessory_ids": [
+  [
+   121,
+   520358
+  ],
+  [
+   121,
+   520359
+  ],
+  [
+   121,
+   520360
+  ]
+ ],
+ "top_resolution": {
+  "mod_file": "srRin.zipmod",
+  "main_ab": "chara/[OoOoO]srTohsakaRin_top.unity3d",
+  "main_data": "[OoOoO]srTohsakaRin_top"
+ },
+ "top_prefab": {
+  "renderers": [
+   {
+    "renderer": "acc",
+    "enabled": true,
+    "mesh": "sh_acc",
+    "vertices": 1942,
+    "triangles": 1746,
+    "bones": 8,
+    "materials": [
+     "Lor",
+     "Lor3"
+    ]
+   },
+   {
+    "renderer": "n_top_a",
+    "enabled": true,
+    "mesh": "base",
+    "vertices": 2268,
+    "triangles": 2644,
+    "bones": 16,
+    "materials": [
+     "Lor",
+     "Lor2"
+    ]
+   },
+   {
+    "renderer": "n_top_b",
+    "enabled": true,
+    "mesh": "base",
+    "vertices": 2268,
+    "triangles": 2644,
+    "bones": 16,
+    "materials": [
+     "Lor_Copy",
+     "Lor2"
+    ]
+   },
+   {
+    "renderer": "topbase",
+    "enabled": true,
+    "mesh": "topbase",
+    "vertices": 950,
+    "triangles": 1193,
+    "bones": 9,
+    "materials": [
+     "Lor",
+     "Lor2"
+    ]
+   }
+  ],
+  "bone_names": [
+   "NecklaceL_JNT",
+   "NecklaceM_JNT",
+   "NecklaceR_JNT",
+   "cf_s_arm01_L",
+   "cf_s_arm01_R",
+   "cf_s_bust01_L",
+   "cf_s_bust01_R",
+   "cf_s_bust02_L",
+   "cf_s_bust02_R",
+   "cf_s_bust03_L",
+   "cf_s_bust03_R",
+   "cf_s_head",
+   "cf_s_neck",
+   "cf_s_shoulder02_L",
+   "cf_s_shoulder02_R",
+   "cf_s_spine01",
+   "cf_s_spine02",
+   "cf_s_spine03",
+   "cf_s_waist01"
+  ],
+  "textures": {
+   "Ramp_StateLine60": {
+    "width": 128,
+    "height": 8,
+    "format": 10,
+    "rgba_fnv1a64": "12749568679148206727"
+   },
+   "liquid01_t": {
+    "width": 512,
+    "height": 512,
+    "format": 10,
+    "rgba_fnv1a64": "14559597456039511608"
+   },
+   "liquid01_n": {
+    "width": 512,
+    "height": 512,
+    "format": 12,
+    "rgba_fnv1a64": "9799423183649011966"
+   },
+   "Lor": {
+    "width": 4096,
+    "height": 2048,
+    "format": 12,
+    "rgba_fnv1a64": "6265743655645073781"
+   },
+   "Lor2": {
+    "width": 2048,
+    "height": 2048,
+    "format": 12,
+    "rgba_fnv1a64": "4661504448702382399"
+   },
+   "Lor3": {
+    "width": 50,
+    "height": 50,
+    "format": 12,
+    "rgba_fnv1a64": "4234194540367690619"
+   },
+   "Lor4": {
+    "width": 50,
+    "height": 50,
+    "format": 12,
+    "rgba_fnv1a64": "7885873659183820515"
+   }
+  }
+ },
+ "body": [
+  {
+   "renderer": "o_body_a",
+   "enabled": true,
+   "mesh": "o_body_a",
+   "vertices": 8302,
+   "triangles": 14028,
+   "bones": 100,
+   "materials": [
+    "(external)"
+   ]
+  }
+ ]
+}
