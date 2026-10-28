@@ -2,6 +2,7 @@
 
 #include "core/FileIo.h"
 #include "core/ZipArchive.h"
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -148,6 +149,45 @@ std::shared_ptr<unity::UnityFile> Resolver::openBaseBundle(const std::string& re
         if (why) *why = std::string(e.what());
         return nullptr;
     }
+}
+
+std::shared_ptr<unity::UnityFile> Resolver::openByCab(const std::string& externalName, std::string* why) {
+    std::string cab = externalName;
+    for (char& c : cab) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto slash = cab.find_last_of('/');
+    if (slash != std::string::npos) cab = cab.substr(slash + 1);
+    if (!cabIndexBuilt_) {
+        cabIndexBuilt_ = true;
+        const std::string cachePath = fileio::Join(abdata_, "../cab_index.json");
+        try {
+            auto b = fileio::ReadFile(cachePath);
+            auto j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+            for (auto it = j.begin(); it != j.end(); ++it) cabIndex_[it.key()] = it.value().get<std::string>();
+        } catch (...) {}
+        if (cabIndex_.empty()) {
+            std::string root = fileio::Join(abdata_, "chara");
+            for (const auto& f : fileio::ListFiles(root, {".unity3d"})) {
+                try {
+                    for (const auto& n : unity::UnityBundle::NodeNames(fileio::ReadFile(f))) {
+                        if (n.rfind("CAB-", 0) != 0 || n.find('.') != std::string::npos) continue;
+                        std::string key = n;
+                        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        std::string rel = f.substr(abdata_.size());
+                        while (!rel.empty() && (rel[0] == '/' || rel[0] == '\\')) rel.erase(0, 1);
+                        cabIndex_[key] = rel;
+                    }
+                } catch (...) {}
+            }
+            try {
+                nlohmann::json j = nlohmann::json::object();
+                for (const auto& kv : cabIndex_) j[kv.first] = kv.second;
+                fileio::WriteTextFile(cachePath, j.dump());
+            } catch (...) {}
+        }
+    }
+    auto it = cabIndex_.find(cab);
+    if (it == cabIndex_.end()) { if (why) *why = "no library bundle holds " + externalName; return nullptr; }
+    return openBaseBundle(it->second, why);
 }
 
 std::shared_ptr<unity::UnityFile> Resolver::openBundle(const ResolvedItem& item, std::string* why) {

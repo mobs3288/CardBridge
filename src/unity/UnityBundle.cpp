@@ -77,6 +77,35 @@ std::shared_ptr<UnityBundle> UnityBundle::Open(Bytes file, const std::string& de
     return b;
 }
 
+std::vector<std::string> UnityBundle::NodeNames(const Bytes& file) {
+    ByteReader r(file, true);
+    if (r.cstr() != "UnityFS") throw FormatError("not a UnityFS bundle");
+    uint32_t version = r.u32();
+    r.cstr();
+    r.cstr();
+    r.u64();
+    uint32_t cbiSize = r.u32();
+    uint32_t ubiSize = r.u32();
+    uint32_t flags = r.u32();
+    if (version >= 7) r.align(16);
+    Bytes cbi;
+    if (flags & 0x80) {
+        if (cbiSize > file.size()) throw FormatError("bad block info size");
+        cbi.assign(file.end() - cbiSize, file.end());
+    } else {
+        cbi = r.bytes(cbiSize);
+    }
+    Bytes info = decompressBlock(cbi.data(), cbi.size(), ubiSize, flags, "block info");
+    ByteReader ir(info, true);
+    ir.skip(16);
+    int32_t blocks = ir.i32();
+    for (int32_t i = 0; i < blocks; ++i) { ir.u32(); ir.u32(); ir.u16(); }
+    std::vector<std::string> names;
+    int32_t nodeCount = ir.i32();
+    for (int32_t i = 0; i < nodeCount; ++i) { ir.u64(); ir.u64(); ir.u32(); names.push_back(ir.cstr()); }
+    return names;
+}
+
 const UnityBundle::Node* UnityBundle::findNode(const std::string& pathOrBasename) const {
     std::string base = pathOrBasename;
     auto slash = base.find_last_of('/');

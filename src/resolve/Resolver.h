@@ -67,6 +67,9 @@ public:
     std::shared_ptr<unity::UnityFile> openItemBundle(const ResolvedItem& item, const std::string& rel, std::string* why);
     // A base-game bundle by its abdata-relative path, e.g. "chara/oo_base.unity3d".
     std::shared_ptr<unity::UnityFile> openBaseBundle(const std::string& rel, std::string* why);
+    // The library bundle that holds an object a material points at in "another file" (a PPtr's external name, e.g.
+    // "archive:/CAB-xxxx/CAB-xxxx"): the first call indexes which bundle holds which CAB (cached in library/cab_index.json).
+    std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
 
 private:
     const ModIndex& mods_;
@@ -74,6 +77,8 @@ private:
     std::string abdata_;
     std::map<std::string, bool> modListsLoaded_;
     std::map<std::string, std::shared_ptr<unity::UnityFile>> cache_;
+    std::map<std::string, std::string> cabIndex_;   // lower-case CAB name -> library-relative bundle path
+    bool cabIndexBuilt_ = false;
 };
 
 } // namespace cardbridge::resolve

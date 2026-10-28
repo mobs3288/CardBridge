@@ -129,7 +129,7 @@ namespace {
 struct Machine {
     const Sm4Program& prog;
     Sm4Io& io;
-    std::vector<uint32_t> temps;   // 4 words per temp register
+    std::vector<uint32_t>& temps;   // 4 words per temp register (a reusable buffer: the interpreter runs once per pixel)
     std::string* why;
 
     uint32_t* Reg(const Sm4Operand& o) {
@@ -303,7 +303,8 @@ struct Machine {
 } // namespace
 
 bool RunSm4(const Sm4Program& prog, Sm4Io& io, std::string* why) {
-    Machine m{prog, io, {}, why};
+    static thread_local std::vector<uint32_t> buffer;
+    Machine m{prog, io, buffer, why};
     return m.Run();
 }
 

@@ -34,6 +34,12 @@ struct SceneTexture {
     uint64_t pixelHash = 0;      // FNV-1a 64 of rgba
 };
 
+struct SceneTexBinding {
+    std::string name;            // Unity property, e.g. "_MainTex"
+    int texture = -1;            // index into Scene::textures
+    Vec4 st{1, 1, 0, 0};         // scale.xy, offset.xy
+};
+
 struct SceneMaterial {
     std::string name;
     std::string shader;
@@ -47,6 +53,16 @@ struct SceneMaterial {
     float specularPower = 5.0f;
     Vec3 outlineColor{0, 0, 0};              // _LineColor
     float outlineWidth = 0.0f;               // _LineWidthS (0 = no outline)
+    // Everything the game's shader reads: the material's colours and floats (floats in .x) and all its textures, plus
+    // the compiled shader (index into Scene::shaders, -1 when the shader is not in the bundle).
+    std::vector<std::pair<std::string, Vec4>> props;
+    std::vector<SceneTexBinding> texProps;
+    int shaderIndex = -1;
+};
+
+struct SceneShader {
+    std::string name;            // e.g. "Shader Forge/main_opaque"
+    std::vector<uint8_t> blob;   // decompressed Direct3D 11 program blob
 };
 
 struct SceneSubmesh {
@@ -88,6 +104,7 @@ struct Scene {
     std::vector<SceneBone> bones;
     std::vector<SceneTexture> textures;
     std::vector<SceneMaterial> materials;
+    std::vector<SceneShader> shaders;
     std::vector<SceneMesh> meshes;
     std::vector<ScenePart> parts;
     std::vector<SceneIssue> issues;

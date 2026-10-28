@@ -23,6 +23,8 @@ public:
     };
 
     static std::shared_ptr<UnityBundle> Open(Bytes fileBytes, const std::string& debugName);   // throws FormatError
+    // The node names (CAB-xxxx ...) of a bundle file without decompressing its data: enough to index which bundle holds which CAB.
+    static std::vector<std::string> NodeNames(const Bytes& fileBytes);   // throws FormatError
 
     const std::string& name() const { return name_; }
     const std::string& engineVersion() const { return engineVersion_; }
