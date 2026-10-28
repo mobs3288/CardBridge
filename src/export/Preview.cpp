@@ -171,7 +171,12 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                                 }
                                 if (al < 0.5f) continue;
                                 float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                                float shade = 0.55f + 0.45f * std::min(1.0f, nz);
+                                // Two-tone toon: lit side full colour, shade side tinted by the material's shadow colour.
+                                float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                                float shade = 1.0f;
+                                r *= (mat.shadow.x + (1.0f - mat.shadow.x) * lit);
+                                g *= (mat.shadow.y + (1.0f - mat.shadow.y) * lit);
+                                bl *= (mat.shadow.z + (1.0f - mat.shadow.z) * lit);
                                 zbuf[zi] = z;
                                 uint8_t* o = &img[(static_cast<size_t>(y) * W + ox + x) * 4];
                                 o[0] = static_cast<uint8_t>(std::min(255.0f, r * shade * 255.0f));

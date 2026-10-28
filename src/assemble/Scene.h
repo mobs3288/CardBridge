@@ -41,6 +41,12 @@ struct SceneMaterial {
     Vec4 diffuse{1, 1, 1, 1};
     bool doubleSided = false;
     bool alpha = false;
+    // The game's toon look, from the Shader Forge material: the colour a surface turns in shade, its highlight and its outline.
+    Vec3 shadow{0.5f, 0.5f, 0.5f};           // _ShadowColor (per-channel multiplier of the lit colour)
+    Vec3 specular{0, 0, 0};                  // _SpecularColor scaled by its power
+    float specularPower = 5.0f;
+    Vec3 outlineColor{0, 0, 0};              // _LineColor
+    float outlineWidth = 0.0f;               // _LineWidthS (0 = no outline)
 };
 
 struct SceneSubmesh {
