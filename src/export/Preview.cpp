@@ -194,4 +194,123 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
     return out;
 }
 
+
+struct ViewState {
+    std::vector<Mips> mips;
+    std::vector<bool> built;
+};
+void ViewStateDeleter::operator()(ViewState* v) const { delete v; }
+ViewStatePtr NewViewState() { return ViewStatePtr(new ViewState()); }
+
+void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int H, const ViewOptions& opt, ViewState& st,
+                std::vector<uint32_t>& bgra) {
+    bgra.assign(static_cast<size_t>(W) * H, 0xFFE2E4E8u);
+    if (st.mips.size() != scene.textures.size()) { st.mips.assign(scene.textures.size(), Mips{}); st.built.assign(scene.textures.size(), false); }
+    // Bounds of everything drawable, once per frame (cheap next to the raster).
+    Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+    auto visible = [&](size_t pi) {
+        const auto& part = scene.parts[pi];
+        if (!part.includeInExport || !part.visibleInPreview) return false;
+        return !(opt.hiddenParts && pi < opt.hiddenParts->size() && (*opt.hiddenParts)[pi]);
+    };
+    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        if (!visible(pi)) continue;
+        for (int mi : scene.parts[pi].meshes)
+            for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
+                mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
+            }
+    }
+    if (mn.x > mx.x) return;
+    const float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f, cz = (mn.z + mx.z) * 0.5f;
+    const float extent = std::max({mx.x - mn.x, mx.y - mn.y, mx.z - mn.z});
+    const float scale = H * 0.9f / extent * cam.zoom;
+    const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
+    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
+    std::vector<float> zbuf(static_cast<size_t>(W) * H, -1e30f);
+
+    auto project = [&](const assemble::SceneVertex& v, Pt& p, float& nz) {
+        float x = v.pos.x - cx, y = v.pos.y - cy, z = v.pos.z - cz;
+        float rx = x * cs + z * sn, rz = -x * sn + z * cs;
+        float ry = y * cp - rz * sp, rz2 = y * sp + rz * cp;
+        p = {W * 0.5f - rx * scale + cam.panX * H, H * 0.5f - ry * scale + cam.panY * H, rz2};
+        float nzz = -v.normal.x * sn + v.normal.z * cs;
+        nz = v.normal.y * sp + nzz * cp;
+    };
+
+    const int step = std::max(1, opt.step);
+    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        if (!visible(pi)) continue;
+        for (int mi : scene.parts[pi].meshes) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            std::vector<Pt> P(mesh.vertices.size());
+            std::vector<float> NZ(mesh.vertices.size());
+            for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], P[i], NZ[i]);
+            for (const auto& sub : mesh.submeshes) {
+                const auto& mat = scene.materials[static_cast<size_t>(sub.material)];
+                const assemble::SceneTexture* tex = (opt.textured && mat.texture >= 0) ? &scene.textures[static_cast<size_t>(mat.texture)] : nullptr;
+                for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
+                    uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
+                    const Pt &a = P[i0], &b = P[i1], &c = P[i2];
+                    float minx = std::min({a.x, b.x, c.x}), maxx = std::max({a.x, b.x, c.x});
+                    float miny = std::min({a.y, b.y, c.y}), maxy = std::max({a.y, b.y, c.y});
+                    if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
+                    int x0 = std::max(0, static_cast<int>(std::floor(minx))), x1 = std::min(W - 1, static_cast<int>(std::ceil(maxx)));
+                    int y0 = std::max(0, static_cast<int>(std::floor(miny))), y1 = std::min(H - 1, static_cast<int>(std::ceil(maxy)));
+                    float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+                    if (std::fabs(den) < 1e-8f) continue;
+                    int lod = 0;
+                    const Mips* mp = nullptr;
+                    if (tex) {
+                        size_t ti = static_cast<size_t>(mat.texture);
+                        if (!st.built[ti]) { st.mips[ti] = BuildMips(*tex); st.built[ti] = true; }
+                        mp = &st.mips[ti];
+                        const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
+                        float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
+                        float scrArea = std::fabs(den) * 0.5f;
+                        if (scrArea > 1e-6f && uvArea > scrArea)
+                            lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                    }
+                    for (int y = y0 - (y0 % step); y <= y1; y += step)
+                        for (int x = x0 - (x0 % step); x <= x1; x += step) {
+                            if (x < 0 || y < 0) continue;
+                            float px = x + 0.5f, py = y + 0.5f;
+                            float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
+                            float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
+                            float l2 = 1.0f - l0 - l1;
+                            if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                            float z = l0 * a.z + l1 * b.z + l2 * c.z;
+                            size_t zi = static_cast<size_t>(y) * W + x;
+                            if (z <= zbuf[zi]) continue;
+                            float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
+                            if (mp) {
+                                const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                                float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                                u -= std::floor(u); v -= std::floor(v);
+                                float tc[4];
+                                SampleBilinear(*mp, lod, u, v, tc);
+                                r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
+                            }
+                            if (al < 0.5f) continue;
+                            float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                            float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                            r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
+                            g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
+                            bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            zbuf[zi] = z;
+                            auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
+                            uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
+                            for (int dy = 0; dy < step && y + dy < H; ++dy)
+                                for (int dx = 0; dx < step && x + dx < W; ++dx) {
+                                    size_t zj = static_cast<size_t>(y + dy) * W + (x + dx);
+                                    bgra[zj] = px32;
+                                    zbuf[zj] = z;
+                                }
+                        }
+                }
+            }
+        }
+    }
+}
+
 } // namespace cardbridge::exporter

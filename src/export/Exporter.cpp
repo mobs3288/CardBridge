@@ -222,6 +222,20 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         Bytes hp = RenderPreviewPng(scene, head);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
     }
+    {   // a three-quarter view through the same camera the viewer uses (keeps the viewer's renderer under test)
+        ViewCamera cam;
+        cam.yawDeg = 30;
+        cam.pitchDeg = 8;
+        ViewOptions vo;
+        auto vs = NewViewState();
+        std::vector<uint32_t> px;
+        RenderView(scene, cam, 640, 800, vo, *vs, px);
+        std::vector<uint8_t> rgba(px.size() * 4);
+        for (size_t i = 0; i < px.size(); ++i) { rgba[i * 4] = (px[i] >> 16) & 255; rgba[i * 4 + 1] = (px[i] >> 8) & 255; rgba[i * 4 + 2] = px[i] & 255; rgba[i * 4 + 3] = 255; }
+        Bytes png;
+        stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); }, &png, 640, 800, 4, rgba.data(), 640 * 4);
+        fileio::WriteFile(fileio::Join(opt.outDir, stem + "_view.png"), png.data(), png.size());
+    }
     {   // the feet from the front, side and back
         PreviewOptions feet;
         feet.viewWidth = 560;
