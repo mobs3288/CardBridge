@@ -85,7 +85,7 @@ These are facts established against real cards and the decompiled game assembly;
 - **Materials and colours.** The game's Shader Forge shaders have no PMX equivalent, so output is a diffuse-texture approximation. Done: clothing textures are baked from the list row's main texture and colour mask with the card's colours (including jacket-type tops, whose real garments are sub-parts), accessories are tinted by their colours, and eyes, eyebrows, eyelines and the nose line get their textures from the card's face ids. Not done: skin texture (body and face are the card's flat skin colour), lips, blush and makeup layers, eye highlights, pattern textures, hair colour (hair-type accessories are recoloured to the character's hair by a plugin whose data is not decoded), shading and rim light, BC7 textures (a few face parts) and textures stored in other bundles. Items a mod ships with mismatched texture names (as in the Rin sample) keep their prefab look.
 - **Physics.** DynamicBone settings are not mapped to PMX rigid bodies and joints.
 - **Independent outfit toggles in PMX.** PMX has no per-object visibility switch. Whether material opacity, display frames or group morphs give reliable toggles in a given viewer is untested; the manifest keeps the real toggles so the engine does not depend on viewer behaviour.
-- **Plugin data.** MaterialEditor, ABMX and similar plugin payloads change the look and need their own decoders.
+- **Plugin data.** Done: MaterialEditor main-texture replacements and KoiSkinOverlayX body, face and eye overlays, whose images are embedded in the card (they decide the look of many mod cards: the Rin sample is a blue outfit without them and the red-and-black one the card shows with them). Not done: MaterialEditor colour, float and shader overrides, ABMX, DynamicBoneEditor, HairAccessoryCustomizer and similar payloads, which need their own decoders.
 - **Mods.** Only mods present on disk resolve. Duplicate GUIDs and mods shipped as unextracted `.rar`/`.7z` are not handled yet.
 
 ## Prior art and licensing
@@ -228,7 +228,7 @@ If a mod breaks the converter, ideally we'll know exactly why.
 
 It bridges the gap between a character card and an editable 3D model.
 
-Also, `CardToPMXButHopefullyItActuallyWorks` was too long.
+Also, `CardToPMXButHopefullyItActuallyWorksAndEasyToUseWithoutAnyManualModification` was too long.
 
 </details>
 

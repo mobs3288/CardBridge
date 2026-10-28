@@ -53,6 +53,7 @@ bool AnimKeys::get(const std::string& name, float rate, Vec3 v[3], const bool fl
     auto it = d_.find(name);
     if (it == d_.end() || it->second.empty()) return false;
     const auto& keys = it->second;
+    rate = std::min(1.0f, std::max(0.0f, rate));   // cards can store slightly out-of-range sliders; the game clamps
     auto sample = [&](int group, Vec3 Key::*field) {
         if (rate == 0.0f) { v[group] = keys.front().*field; return; }
         if (rate == 1.0f) { v[group] = keys.back().*field; return; }
