@@ -1196,7 +1196,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
-    settleHeels(scene);
+    if (!std::getenv("CARDBRIDGE_NO_HEELS")) settleHeels(scene);   // debug aid: compare against the unposed feet
     return scene;
 }
 
