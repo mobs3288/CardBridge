@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <set>
@@ -378,7 +379,15 @@ struct Builder {
                 if (rw != rig.world.end()) {
                     bw = rw->second;
                 } else {
+                    // A bone only this item has (a mod's necklace joint ...): keep its offset from the nearest ancestor the
+                    // shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
                     bw = rootInv * W(uf, r.boneXforms[i]);
+                    for (const unity::Xform* a = bx ? uf.xform(bx->parent) : nullptr; a; a = uf.xform(a->parent)) {
+                        auto ar = rig.world.find(a->name);
+                        if (ar == rig.world.end()) continue;
+                        bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * W(uf, r.boneXforms[i])));
+                        break;
+                    }
                     if (bx && bi < 0) {
                         // A bone only this item has (a mod's necklace joint ...): add it, parented to the
                         // nearest ancestor the scene already knows.
@@ -853,6 +862,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             bool hiddenByDefault = path.find("/n_top_b/") != std::string::npos || path.find("/n_bot_b/") != std::string::npos ||
                                    (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye") || contains(r.name, "o_tang")));
             if (hiddenByDefault) { skipped.push_back(r.name); continue; }
+            // Debug aid: CARDBRIDGE_SKIP=name1,name2 leaves those renderers out (to find which mesh draws an artefact).
+            if (const char* sk = std::getenv("CARDBRIDGE_SKIP")) {
+                std::string list = std::string(",") + sk + ",";
+                if (list.find("," + r.name + ",") != std::string::npos) { skipped.push_back(r.name + " (CARDBRIDGE_SKIP)"); continue; }
+            }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
             ItemLook faceLook;
             const ItemLook* lookPtr = haveLook ? &look : nullptr;
@@ -863,6 +877,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     ft = faceSkin;
                 } else {
                     ft = faceTextureFor(r.name);
+                    // These parts are drawn only through their texture; with none (a "none" item, or a mod texture that
+                    // could not be loaded) the game shows nothing, but an unlit white mesh would be a white smear.
+                    static const char* textureOnly[] = {"cf_O_mayuge", "cf_O_eyeline", "cf_O_eyeline_low", "cf_O_noseline"};
+                    for (const char* n : textureOnly)
+                        if (ft < 0 && r.name == n) { skipped.push_back(r.name + " (no texture)"); ft = -3; }
+                    if (ft == -3) continue;
                 }
                 if (ft >= 0) {
                     faceLook.tex1 = ft;
