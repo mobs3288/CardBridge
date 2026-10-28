@@ -46,8 +46,12 @@ std::vector<ItemRef> ItemsFromCard(const card::Card& card, int outfit) {
         static const int cat[9] = {105, 106, 107, 108, 109, 110, 111, 112, 112};
         const auto& cp = oc.clothes.at("parts").asArray();
         for (size_t i = 0; i < cp.size() && i < 9; ++i)
-            add("outfit" + std::to_string(outfit) + "." + slot[i], slot[i], "Outfit",
-                "outfit" + std::to_string(outfit) + ".ChaFileClothes." + prop[i], cat[i], cp[i].at("id").asInt());
+            {
+                add("outfit" + std::to_string(outfit) + "." + slot[i], slot[i], "Outfit",
+                    "outfit" + std::to_string(outfit) + ".ChaFileClothes." + prop[i], cat[i], cp[i].at("id").asInt());
+                out.back().slot = static_cast<int>(i);
+                out.back().outfit = outfit;
+            }
         const auto& ap = oc.accessory.at("parts").asArray();
         for (size_t i = 0; i < ap.size(); ++i) {
             int type = static_cast<int>(ap[i].at("type").asInt());
@@ -58,6 +62,8 @@ std::vector<ItemRef> ItemsFromCard(const card::Card& card, int outfit) {
             add("outfit" + std::to_string(outfit) + ".acc" + num, std::string("Accessory ") + num, "Accessories",
                 "outfit" + std::to_string(outfit) + ".accessory" + std::to_string(i) + ".ChaFileAccessory.PartsInfo.id",
                 type, id, ap[i].at("parentKey").asStr());
+            out.back().accIndex = static_cast<int>(i);
+            out.back().outfit = outfit;
         }
     }
     return out;
@@ -70,7 +76,9 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     ResolvedItem r;
     r.ref = ref;
     // id 0 means "none" for hair, clothing and accessories - but for the head it is the first real head.
-    if (ref.id == 0 && ref.category != 100) { r.status = ItemStatus::Empty; return r; }
+    // Jacket/sailor sub-parts (categories 200-212) are the same: id 0 there is a real shirt or a listed "none".
+    bool zeroIsItem = ref.category == 100 || (ref.category >= 200 && ref.category <= 212);
+    if (ref.id == 0 && !zeroIsItem) { r.status = ItemStatus::Empty; return r; }
 
     // The card's resolver row for this item: by property path first, then by
     // (category, slot) - the pair identifies a mod item even if a property

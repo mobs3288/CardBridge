@@ -22,6 +22,7 @@ int64_t LastWriteTicks(const std::string& path);
 void WriteFile(const std::string& path, const uint8_t* data, size_t size);
 void WriteTextFile(const std::string& path, const std::string& text);
 void CreateDirectories(const std::string& path);
+bool RemoveFile(const std::string& path);   // false if it did not exist
 
 // Recursively lists regular files whose lower-cased extension is in `exts`
 // (each with its leading dot). Unreadable folders are skipped and reported in

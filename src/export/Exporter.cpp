@@ -1,6 +1,7 @@
 #include "export/Exporter.h"
 
 #include "core/FileIo.h"
+#include "export/Preview.h"
 #include "pmx/PmxWriter.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -127,6 +128,9 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             throw FormatError("output folder already has files: " + opt.outDir + " (use a new folder or --overwrite)");
     }
     fileio::CreateDirectories(fileio::Join(opt.outDir, "textures"));
+    // A re-export replaces the previous one: stale textures from an earlier run must not linger beside it.
+    if (opt.overwrite)
+        for (const std::string& f : fileio::ListFiles(fileio::Join(opt.outDir, "textures"), {".png"})) fileio::RemoveFile(f);
 
     // --- textures: only those a written material uses ---------------------
     std::vector<int> texMap(scene.textures.size(), -1);   // scene texture -> pmx texture
@@ -197,6 +201,11 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::string pmxFile = stem + ".pmx";
     res.pmxPath = fileio::Join(opt.outDir, pmxFile);
     fileio::WriteFile(res.pmxPath, pmxBytes.data(), pmxBytes.size());
+
+    // A picture of what was written (front, side, back): a conversion can be judged without a PMX viewer.
+    res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
+    Bytes prev = RenderPreviewPng(scene);
+    fileio::WriteFile(res.previewPath, prev.data(), prev.size());
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range);
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");

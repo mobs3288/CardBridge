@@ -291,7 +291,7 @@ int cmdConvert(const Args& a) {
         auto r = exporter::ExportScene(scene, c, eo);
         double secs = std::chrono::duration<double>(t1 - t0).count();
         std::printf("wrote %s\n  %zu vertices, %zu triangles, %zu materials, %zu bones, %zu textures; %zu of %zu card items loaded (assembled in %.1fs)\n  manifest: %s\n",
-                    r.pmxPath.c_str(), r.vertices, r.triangles, r.materials, r.bones, r.textures, parts - failed - 0, parts, secs, r.manifestPath.c_str());
+                    r.pmxPath.c_str(), r.vertices, r.triangles, r.materials, r.bones, r.textures, parts - failed - 0, parts, secs, r.manifestPath.c_str(), r.previewPath.c_str());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "export failed: %s\n", e.what());
         return 3;

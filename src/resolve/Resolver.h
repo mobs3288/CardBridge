@@ -22,6 +22,10 @@ struct ItemRef {
     int category = 0;         // ChaListDefine.CategoryNo
     int64_t id = 0;
     std::string attachNode;   // accessories: the body node they hang on (e.g. a_n_headside)
+    int slot = -1;            // clothing slot index (0 top ... 8 outer shoes), or -1
+    int accIndex = -1;        // accessory slot index, or -1
+    int subKind = -1;         // top sub-part A/B/C (0..2) of a jacket/sailor top, or -1
+    int outfit = -1;
 };
 
 enum class ItemStatus {
