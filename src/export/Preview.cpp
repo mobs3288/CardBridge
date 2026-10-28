@@ -5,12 +5,50 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace cardbridge::exporter {
 
 namespace {
 
 struct Pt { float x, y, z; };
+
+// Box-filtered mip levels, so a 4096 atlas drawn a few hundred pixels tall does not alias into speckle.
+struct Mips {
+    std::vector<std::vector<uint8_t>> rgba;
+    std::vector<int> w, h;
+};
+
+Mips BuildMips(const assemble::SceneTexture& t) {
+    Mips m;
+    m.rgba.push_back(t.rgba); m.w.push_back(t.width); m.h.push_back(t.height);
+    while (m.w.back() > 1 && m.h.back() > 1) {
+        const auto& src = m.rgba.back();
+        int sw = m.w.back(), sh = m.h.back(), dw = sw / 2, dh = sh / 2;
+        std::vector<uint8_t> dst(static_cast<size_t>(dw) * dh * 4);
+        for (int y = 0; y < dh; ++y)
+            for (int x = 0; x < dw; ++x)
+                for (int c = 0; c < 4; ++c) {
+                    int sum = 0;
+                    for (int dy = 0; dy < 2; ++dy)
+                        for (int dx = 0; dx < 2; ++dx) sum += src[(static_cast<size_t>(2 * y + dy) * sw + 2 * x + dx) * 4 + c];
+                    dst[(static_cast<size_t>(y) * dw + x) * 4 + c] = static_cast<uint8_t>((sum + 2) / 4);
+                }
+        m.rgba.push_back(std::move(dst)); m.w.push_back(dw); m.h.push_back(dh);
+    }
+    return m;
+}
+
+// Bilinear, wrapping.
+void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4]) {
+    int w = m.w[lvl], h = m.h[lvl];
+    float fx = u * w - 0.5f, fy = (1.0f - v) * h - 0.5f;
+    int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
+    float tx = fx - x0, ty = fy - y0;
+    auto at = [&](int x, int y, int c) { x = ((x % w) + w) % w; y = ((y % h) + h) % h; return m.rgba[lvl][(static_cast<size_t>(y) * w + x) * 4 + c] / 255.0f; };
+    for (int c = 0; c < 4; ++c)
+        out[c] = (at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx) * (1 - ty) + (at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx) * ty;
+}
 
 } // namespace
 
@@ -40,9 +78,24 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
     float spanY = mx.y - mn.y;
     float y0 = mn.y + opt.yBottom * spanY, y1 = mn.y + opt.yTop * spanY;
     bool closeUp = (opt.yTop - opt.yBottom) < 0.9f;
+    if (closeUp) {   // centre a close-up on the geometry inside its window, not on the whole model
+        Pt wn{1e30f, 1e30f, 1e30f}, wx{-1e30f, -1e30f, -1e30f};
+        for (const auto& part : scene.parts) {
+            if (!part.includeInExport) continue;
+            for (int mi : part.meshes)
+                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                    if (v.pos.y < y0 || v.pos.y > y1) continue;
+                    wn = {std::min(wn.x, v.pos.x), 0, std::min(wn.z, v.pos.z)};
+                    wx = {std::max(wx.x, v.pos.x), 0, std::max(wx.z, v.pos.z)};
+                }
+        }
+        if (wn.x <= wx.x) { cx = (wn.x + wx.x) * 0.5f; cz = (wn.z + wx.z) * 0.5f; }
+    }
     float scale = closeUp ? static_cast<float>(opt.viewHeight) / (y1 - y0)
                           : std::min(static_cast<float>(opt.viewHeight) * 0.96f / spanY, static_cast<float>(opt.viewWidth) * 0.96f / (2.0f * radius));
 
+    std::vector<Mips> mips(scene.textures.size());
+    std::vector<bool> mipsBuilt(scene.textures.size(), false);
     for (int view = 0; view < opt.views; ++view) {
         float yaw = opt.yawDegrees[view] * 3.14159265f / 180.0f;
         float cs = std::cos(yaw), sn = std::sin(yaw);
@@ -85,6 +138,18 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         int y0 = std::max(0, static_cast<int>(miny)), y1 = std::min(opt.viewHeight - 1, static_cast<int>(maxy));
                         float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
                         if (std::fabs(den) < 1e-8f) continue;
+                        int lod = 0;
+                        const Mips* mp = nullptr;
+                        if (tex) {
+                            size_t ti = static_cast<size_t>(mat.texture);
+                            if (!mipsBuilt[ti]) { mips[ti] = BuildMips(*tex); mipsBuilt[ti] = true; }
+                            mp = &mips[ti];
+                            const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
+                            float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
+                            float scrArea = std::fabs(den) * 0.5f;
+                            if (scrArea > 1e-6f && uvArea > scrArea)
+                                lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                        }
                         for (int y = y0; y <= y1; ++y)
                             for (int x = x0; x <= x1; ++x) {
                                 float px = x + 0.5f, py = y + 0.5f;
@@ -100,10 +165,9 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                                     const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
                                     float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
                                     u -= std::floor(u); v -= std::floor(v);
-                                    int tx = std::min(tex->width - 1, static_cast<int>(u * tex->width));
-                                    int ty = std::min(tex->height - 1, static_cast<int>((1.0f - v) * tex->height));
-                                    const uint8_t* p = &tex->rgba[(static_cast<size_t>(ty) * tex->width + tx) * 4];
-                                    r *= p[0] / 255.0f; g *= p[1] / 255.0f; bl *= p[2] / 255.0f; al = p[3] / 255.0f;
+                                    float tc[4];
+                                    SampleBilinear(*mp, lod, u, v, tc);
+                                    r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
                                 }
                                 if (al < 0.5f) continue;
                                 float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);

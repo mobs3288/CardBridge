@@ -60,6 +60,7 @@ add_library(cardbridge_core STATIC
     src/core/MsgPack.cpp
     src/core/ZipArchive.cpp
     src/card/CardFile.cpp
+    src/card/MaterialEdits.cpp
     src/unity/UnityBundle.cpp
     src/unity/UnitySerialized.cpp
     src/unity/UnityScene.cpp

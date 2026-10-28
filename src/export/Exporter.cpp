@@ -216,6 +216,15 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         Bytes hp = RenderPreviewPng(scene, head);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
     }
+    {   // the feet from the front, side and back
+        PreviewOptions feet;
+        feet.viewWidth = 560;
+        feet.viewHeight = 560;
+        feet.yTop = 0.16f;
+        feet.yBottom = 0.0f;
+        Bytes fp = RenderPreviewPng(scene, feet);
+        fileio::WriteFile(fileio::Join(opt.outDir, stem + "_feet.png"), fp.data(), fp.size());
+    }
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range);
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");

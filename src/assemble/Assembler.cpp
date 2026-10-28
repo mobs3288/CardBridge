@@ -2,10 +2,12 @@
 
 #include "core/Bytes.h"
 #include "shape/Shape.h"
+#include "card/MaterialEdits.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -26,6 +28,17 @@ struct Rig {
 };
 
 bool contains(const std::string& s, const char* sub) { return s.find(sub) != std::string::npos; }
+
+
+// The game shows card colours more saturated than their stored values (measured against the cards' own pictures: a
+// vest colour of saturation 0.25 renders at 0.49, hair 0.20 at 0.47 - about sqrt(s) at unchanged value; skin is
+// not converted). Hue and value are kept.
+Vec4 kkColor(Vec4 c) {
+    float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z});
+    if (mx <= 1e-4f || mx - mn <= 1e-5f) return c;
+    float s = (mx - mn) / mx, k = std::sqrt(s) / s;
+    return {mx - (mx - c.x) * k, mx - (mx - c.y) * k, mx - (mx - c.z) * k, c.w};
+}
 
 // A local transform the card's shape sliders replace on a named bone.
 struct LocalOverride {
@@ -145,6 +158,9 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
     }
     for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
+    if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
+        for (int id : {1, 26, 27})
+            std::fprintf(stderr, "src %d %s scl %g %g %g\n", id, srcNames[static_cast<size_t>(id)].c_str(), S.src(id).scl.x, S.src(id).scl.y, S.src(id).scl.z);
     shape::RunBodyUpdate(S, 7);
     shape::RunBodyUpdateAlways(S);
 
@@ -154,6 +170,8 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
         o.scl = sb.scl;
         o.hasRot = sb.rotSet;
         if (sb.rotSet) o.rot = shape::EulerToQuat(sb.rot);
+        if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
+            std::fprintf(stderr, "shape %s pos %g %g %g scl %g %g %g\n", name.c_str(), o.pos.x, o.pos.y, o.pos.z, o.scl.x, o.scl.y, o.scl.z);
         out[name] = o;
     }
     return out;
@@ -196,6 +214,21 @@ std::vector<uint8_t> tintTexture(const unity::TextureData& main, const unity::Te
     return out;
 }
 
+// Source-over of an embedded image onto `dst` (nearest resampling when the sizes differ).
+void alphaOver(std::vector<uint8_t>& dst, int dw, int dh, const card::MaterialEdits::Image& ov) {
+    for (int y = 0; y < dh; ++y)
+        for (int x = 0; x < dw; ++x) {
+            int ox = std::min(ov.width - 1, x * ov.width / dw), oy = std::min(ov.height - 1, y * ov.height / dh);
+            const uint8_t* o = &ov.rgba[(static_cast<size_t>(oy) * ov.width + ox) * 4];
+            float a = o[3] / 255.0f;
+            if (a <= 0.0f) continue;
+            uint8_t* d = &dst[(static_cast<size_t>(y) * dw + x) * 4];
+            float da = d[3] / 255.0f, oa = a + da * (1.0f - a);
+            for (int c = 0; c < 3; ++c) d[c] = static_cast<uint8_t>((o[c] * a + d[c] * da * (1.0f - a)) / std::max(oa, 1e-6f));
+            d[3] = static_cast<uint8_t>(oa * 255.0f);
+        }
+}
+
 struct Builder {
     const std::map<int64_t, Mat4>* localOv = nullptr;   // local-matrix overrides for the prefab being added (accessory N_move nodes)
     Mat4 W(UnityFile& uf, int64_t id) const { return uf.worldMatrix(id, localOv); }
@@ -203,6 +236,22 @@ struct Builder {
     Rig& rig;
     std::map<std::string, int> textureCache;   // "<bundle>#<pathId>" -> scene texture
     std::map<std::string, int> accessoryBones; // "<part>#<xformId>" -> scene bone (accessory-owned skeletons)
+
+    // MaterialEditor texture replacements stored in the card, for the item being added (-1 type = none).
+    const card::MaterialEdits* edits = nullptr;
+    int meCoordinate = 0, meType = -1, meSlot = 0;
+    std::map<int, int> meTextures;   // embedded TexID -> scene texture (-1 when unreadable)
+
+    int embeddedTexture(int texId, const std::string& partId) {
+        auto it = meTextures.find(texId);
+        if (it != meTextures.end()) return it->second;
+        card::MaterialEdits::Image img;
+        int result = -1;
+        if (edits && edits->decode(texId, img)) result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
+        else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
+        meTextures[texId] = result;
+        return result;
+    }
 
     int textureFor(UnityFile& uf, const PPtr& p, const std::string& partId) {
         std::string key = uf.name() + "#" + std::to_string(p.pathId);
@@ -277,9 +326,14 @@ struct Builder {
         std::string why;
         auto m = uf.readMaterial(p, &why);
         if (!m) {
-            scene.warn(partId, "material not loaded (" + why + "); using a plain material");
             sm.name = "material";
-            if (fallbackColor) sm.diffuse = *fallbackColor;
+            if (look && matIndex == 0) {   // a renderer whose material lives elsewhere still gets the texture the game assigns it
+                if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
+                else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
+            }
+            if (sm.texture < 0) scene.warn(partId, "material not loaded (" + why + "); using a plain material");
+            if (sm.texture >= 0) sm.alpha = true;
+            if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
         } else {
             sm.name = m->name;
             sm.shader = m->shaderName;
@@ -306,6 +360,13 @@ struct Builder {
             }
             if (sm.texture < 0 && look && look->materialTint) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
             else if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
+        }
+        if (edits && meType >= 0) {
+            int id = edits->mainTexFor(meCoordinate, meType, meSlot, sm.name);
+            if (id >= 0) {
+                int t = embeddedTexture(id, partId);
+                if (t >= 0) { sm.texture = t; sm.diffuse = {1, 1, 1, 1}; }
+            }
         }
         scene.materials.push_back(std::move(sm));
         return static_cast<int>(scene.materials.size()) - 1;
@@ -485,6 +546,80 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
     return true;
 }
 
+
+// Shoes with a heel are modelled for a foot that points down (the game poses the foot that way); on the flat T-pose
+// foot they stand on the heel with the toes in the air. Rotate the foot about the ankle by the angle that puts the
+// toe tip and the heel at the same height, skinning-weighted so the leg-to-foot blend stays smooth. Nothing happens
+// without shoes or when the sole is already level.
+void settleHeels(Scene& scene) {
+    for (const char* side : {"L", "R"}) {
+        int foot = scene.boneIndex(std::string("cf_j_foot_") + side);
+        if (foot < 0) continue;
+        std::vector<char> inSet(scene.bones.size(), 0);
+        inSet[static_cast<size_t>(foot)] = 1;
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t i = 0; i < scene.bones.size(); ++i)
+                if (!inSet[i] && scene.bones[i].parent >= 0 && inSet[static_cast<size_t>(scene.bones[i].parent)]) { inSet[i] = 1; changed = true; }
+        }
+        const Vec3 pivot = scene.bones[static_cast<size_t>(foot)].pos;
+        auto footWeight = [&](const SceneVertex& v) {
+            float w = 0;
+            for (int k = 0; k < 4; ++k)
+                if (v.weight[k] > 0 && v.bone[k] >= 0 && inSet[static_cast<size_t>(v.bone[k])]) w += v.weight[k];
+            return w;
+        };
+        // The sole of the shoe: its foot-bound vertices on this side (x on the side's half of the body).
+        std::vector<Vec3> sole;
+        for (const auto& part : scene.parts) {
+            if (!part.includeInExport || part.group != "Outfit") continue;
+            bool shoe = part.id.size() > 6 && (part.id.compare(part.id.size() - 6, 6, ".shoes") == 0 ||
+                        part.id.find(".shoes_") != std::string::npos);
+            if (!shoe) continue;
+            for (int mi : part.meshes)
+                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices)
+                    if (footWeight(v) > 0.5f && (v.pos.x - 0.0f) * (pivot.x) > 0) sole.push_back({v.pos.x - pivot.x, v.pos.y - pivot.y, v.pos.z - pivot.z});
+        }
+        if (sole.size() < 50) continue;
+        float maxZ = -1e30f;
+        for (const Vec3& q : sole) maxZ = std::max(maxZ, q.z);
+        if (maxZ <= 0) continue;
+        auto drop = [&](float theta, float& toe, float& heel) {   // lowest y' of the toe end and of the heel end after rotating
+            float c = std::cos(theta), sn = std::sin(theta);
+            toe = heel = 1e30f;
+            for (const Vec3& q : sole) {
+                float y = q.y * c - q.z * sn;
+                if (q.z > 0.6f * maxZ) toe = std::min(toe, y);
+                else if (q.z < 0.15f * maxZ) heel = std::min(heel, y);
+            }
+        };
+        float best = 0, bestErr = 1e30f;
+        for (int d = 0; d <= 60; ++d) {
+            float theta = static_cast<float>(d) * 0.75f * 3.14159265f / 180.0f, toe, heel;
+            drop(theta, toe, heel);
+            float err = std::fabs(toe - heel);
+            if (err < bestErr) { bestErr = err; best = theta; }
+        }
+        if (best < 2.0f * 3.14159265f / 180.0f) continue;   // level already
+        float c = std::cos(best), sn = std::sin(best);
+        auto rotP = [&](Vec3 pnt) { float dy = pnt.y - pivot.y, dz = pnt.z - pivot.z; return Vec3{pnt.x, pivot.y + dy * c - dz * sn, pivot.z + dz * c + dy * sn}; };
+        auto rotD = [&](Vec3 d) { return Vec3{d.x, d.y * c - d.z * sn, d.z * c + d.y * sn}; };
+        for (auto& mesh : scene.meshes)
+            for (auto& v : mesh.vertices) {
+                float w = footWeight(v);
+                if (w <= 0) continue;
+                Vec3 r = rotP(v.pos);
+                v.pos = {v.pos.x, v.pos.y + (r.y - v.pos.y) * w, v.pos.z + (r.z - v.pos.z) * w};
+                Vec3 n = rotD(v.normal);
+                v.normal = {v.normal.x, v.normal.y + (n.y - v.normal.y) * w, v.normal.z + (n.z - v.normal.z) * w};
+            }
+        for (size_t i = 0; i < scene.bones.size(); ++i)
+            if (inSet[i] && static_cast<int>(i) != foot) scene.bones[i].pos = rotP(scene.bones[i].pos);
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "foot %s tilted %.1f degrees about the ankle so the heeled shoe stands on heel and toe", side, best * 180.0f / 3.14159265f);
+        scene.warn("", buf);
+    }
+}
 } // namespace
 
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
@@ -496,6 +631,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     int outfit = opt.outfit;
     if (outfit < 0) outfit = static_cast<int>(card.status.at("coordinateType").asInt());
     if (outfit < 0 || static_cast<size_t>(outfit) >= card.outfits.size()) outfit = 0;
+    card::MaterialEdits materialEdits = card::LoadMaterialEdits(card.extended, outfit);
+    if (!materialEdits.empty()) b.edits = &materialEdits;
 
     // --- shared skeleton and body ---------------------------------------
     std::string why;
@@ -559,6 +696,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                         bodyLook.tex1 = b.bake(b.decode(*base, bt, "body"), "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
                         bodyLook.use1.insert(r.componentId);
                         bodyLookPtr = &bodyLook;
+                        card::MaterialEdits::Image ov;
+                        if (bodyLook.tex1 >= 0 && b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayBody, ov)) {
+                            auto& st = scene.textures[static_cast<size_t>(bodyLook.tex1)];
+                            alphaOver(st.rgba, st.width, st.height, ov);
+                            st.pixelHash = Fnv1a64(st.rgba.data(), st.rgba.size());
+                        }
                     }
                 }
                 int mi = b.addRenderer(*base, r, roots[0], partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
@@ -577,10 +720,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (sk2.size() >= 3) skinColor = vec4Of(sk2);
 
     bool topCoversBra = false;
+    std::vector<std::shared_ptr<unity::TextureData>> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
         const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
         if (item.status == resolve::ItemStatus::Empty) continue;
+        if (const char* sp = std::getenv("CARDBRIDGE_SKIP_PART")) {   // debug aid: leave whole parts out
+            if ((std::string(",") + sp + ",").find("," + ref.partId + ",") != std::string::npos) continue;
+        }
 
         // A jacket-type (2) or sailor-type (1) top is mostly empty itself: the garments are its sub-parts A/B/C,
         // categories 210+k / 200+k, with ids from the coordinate's subPartsId (ChaControl.ChangeClothesSubParts).
@@ -670,8 +817,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             // Sub-parts use the top's colours; part C's first colour is the fourth slot (ChaControl.ChangeCustomClothes).
             size_t colorSlot = ref.subKind >= 0 ? 0 : static_cast<size_t>(std::max(0, ref.slot));
             const Value& ci = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(colorSlot).at("colorInfo");
-            Vec4 c[3] = {vec4Of(ci.at(size_t(0)).at("baseColor")), vec4Of(ci.at(size_t(1)).at("baseColor")), vec4Of(ci.at(size_t(2)).at("baseColor"))};
-            if (ref.subKind == 2) c[0] = vec4Of(ci.at(size_t(3)).at("baseColor"));
+            Vec4 c[3] = {kkColor(vec4Of(ci.at(size_t(0)).at("baseColor"))), kkColor(vec4Of(ci.at(size_t(1)).at("baseColor"))), kkColor(vec4Of(ci.at(size_t(2)).at("baseColor")))};
+            if (ref.subKind == 2) c[0] = kkColor(vec4Of(ci.at(size_t(3)).at("baseColor")));
 
             // The list row's textures; a list bundle of "0" means the item's own bundle.
             auto listTex = [&](const char* abKey, const char* nameKey, std::string& keyOut) -> std::shared_ptr<unity::TextureData> {
@@ -701,19 +848,25 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
                     if (mb.className != "ChaClothesComponent") continue;
                     auto collect = [&](const char* field, std::set<int64_t>& into) {
-                        for (const auto& pp : mb.fields.at(field).asArray())
+                        const Value& fv = mb.fields.at(field);
+                        if (fv.isMap()) {   // a single renderer reference (rendAccessory)
+                            if (fv.at("m_FileID").asInt() == 0 && fv.at("m_PathID").asInt() != 0) into.insert(fv.at("m_PathID").asInt());
+                            return;
+                        }
+                        for (const auto& pp : fv.asArray())
                             if (pp.at("m_FileID").asInt() == 0 && pp.at("m_PathID").asInt() != 0) into.insert(pp.at("m_PathID").asInt());
                     };
                     collect("rendNormal01", look.use1);
                     collect("rendAlpha01", look.use1);
                     collect("rendNormal02", look.use2);
                     collect("rendAlpha02", look.use2);
+                    collect("rendAccessory", look.use1);
                 }
             }
         } else if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
             const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
             if (col.size() >= 3) {
-                for (int k = 0; k < 3; ++k) look.colors[k] = vec4Of(col.at(static_cast<size_t>(k)));
+                for (int k = 0; k < 3; ++k) look.colors[k] = kkColor(vec4Of(col.at(static_cast<size_t>(k))));
                 look.materialTint = true;
                 haveLook = true;
             }
@@ -754,7 +907,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         // tinted with the card's colours (ChaControl.ChangeSettingEyebrow / Eyeline / Eye ...).
         auto faceTextureFor = [&](const std::string& rendererName) -> int {
             struct Spec { const char* renderer; int category; int64_t id; const char* property; const char* texKey; Vec4 color; };
-            auto colorOf = [&](const char* field) { return vec4Of(faceV.at(field)); };
+            auto colorOf = [&](const char* field) { return kkColor(vec4Of(faceV.at(field))); };
             std::vector<Spec> specs;
             specs.push_back({"cf_O_mayuge", 406, faceV.at("eyebrowId").asInt(), "ChaFileFace.eyebrowId", "EyebrowTex", colorOf("eyebrowColor")});
             specs.push_back({"cf_O_eyeline", 412, faceV.at("eyelineUpId").asInt(), "ChaFileFace.eyelineUpId", "EyelineUpTex", colorOf("eyelineColor")});
@@ -763,14 +916,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             specs.push_back({"cf_Ohitomi_L", 407, faceV.at("whiteId").asInt(), "ChaFileFace.whiteId", "EyeWhiteTex", colorOf("whiteBaseColor")});
             specs.push_back({"cf_Ohitomi_R", 407, faceV.at("whiteId").asInt(), "ChaFileFace.whiteId", "EyeWhiteTex", colorOf("whiteBaseColor")});
             const Value& pupils = faceV.at("pupil");
-            specs.push_back({"cf_Ohitomi_L02", 408, pupils.at(size_t(0)).at("id").asInt(), "ChaFileFace.Pupil1", "EyeTex", vec4Of(pupils.at(size_t(0)).at("baseColor"))});
-            specs.push_back({"cf_Ohitomi_R02", 408, pupils.at(size_t(1)).at("id").asInt(), "ChaFileFace.Pupil2", "EyeTex", vec4Of(pupils.at(size_t(1)).at("baseColor"))});
+            specs.push_back({"cf_Ohitomi_L02", 408, pupils.at(size_t(0)).at("id").asInt(), "ChaFileFace.Pupil1", "EyeTex", kkColor(vec4Of(pupils.at(size_t(0)).at("baseColor")))});
+            specs.push_back({"cf_Ohitomi_R02", 408, pupils.at(size_t(1)).at("id").asInt(), "ChaFileFace.Pupil2", "EyeTex", kkColor(vec4Of(pupils.at(size_t(1)).at("baseColor")))});
             for (const Spec& sp : specs) {
                 if (rendererName != sp.renderer) continue;
                 std::string key;
                 auto tex = rowTexture(sp.category, sp.id, sp.property, sp.texKey, sp.renderer, &key);
-                if (!tex) return -1;
                 Vec4 c[3] = {sp.color, Vec4{1, 1, 1, 1}, Vec4{1, 1, 1, 1}};
+                // KoiSkinOverlayX paints the iris over the eye part (cards that use it often pair it with a "no iris" item).
+                int overlayType = rendererName == "cf_Ohitomi_L02" ? card::MaterialEdits::OverlayEyeL
+                                  : rendererName == "cf_Ohitomi_R02" ? card::MaterialEdits::OverlayEyeR : -1;
+                card::MaterialEdits::Image ov;
+                if (overlayType >= 0 && b.edits && b.edits->decodeSkinOverlay(overlayType, ov)) {
+                    unity::TextureData out;
+                    if (tex) { out = *tex; out.rgba = tintTexture(*tex, nullptr, c); }
+                    else { out.width = ov.width; out.height = ov.height; out.rgba.assign(static_cast<size_t>(ov.width) * ov.height * 4, 0); }
+                    out.name = std::string(sp.renderer) + "_iris";
+                    alphaOver(out.rgba, out.width, out.height, ov);
+                    return b.addSceneTexture(out.name, "card (KoiSkinOverlayX)", out.width, out.height, std::move(out.rgba));
+                }
+                if (!tex) return -1;
                 return b.bake(tex, key, nullptr, "-", c, uf->name());
             }
             return -1;
@@ -826,6 +991,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             blend(rowTexture(404, faceV.at("lipLineId").asInt(), "ChaFileFace.lipLineId", "LiplineTex", "lipline"), vec4Of(faceV.at("lipLineColor")));
             blend(rowTexture(403, mk.at("lipId").asInt(), pre + "ChaFileMakeup.lipId", "LipTex", "lip"), vec4Of(mk.at("lipColor")));
             blend(rowTexture(401, mk.at("eyeshadowId").asInt(), pre + "ChaFileMakeup.eyeshadowId", "EyeshadowTex", "eyeshadow"), vec4Of(mk.at("eyeshadowColor")));
+            card::MaterialEdits::Image fov;
+            if (b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayFace, fov)) alphaOver(out.rgba, out.width, out.height, fov);
             return b.addSceneTexture(out.name, uf->name(), out.width, out.height, std::move(out.rgba));
         };
         int faceSkin = -2;   // computed once, on the first face renderer that needs it
@@ -850,6 +1017,41 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
         b.localOv = moveOv.empty() ? nullptr : &moveOv;
+
+        // The garment's body mask: the game hides the body under clothing with an alpha mask in body UV space.
+        if (ref.group == "Outfit") {
+            std::string mab = item.listItem.get("OverBodyMaskAB"), mname = item.listItem.get("OverBodyMask");
+            if (!mname.empty() && mname != "0" && !mab.empty() && mab != "0") {
+                std::string w;
+                auto mb = resolver.openItemBundle(item, mab, &w);
+                if (mb) {
+                    PPtr mp = mb->findAsset(mname);
+                    if (mp.isNull()) mp = mb->findTexture(mname);
+                    if (!mp.isNull()) { if (auto mt = b.decode(*mb, mp, ref.partId)) bodyMasks.push_back(mt); }
+                    else scene.warn(ref.partId, "body mask '" + mname + "' not found in " + mab);
+                }
+            }
+            std::string bab = item.listItem.get("OverBraMaskAB"), bname = item.listItem.get("OverBraMask");
+            if (!bname.empty() && bname != "0" && !bab.empty() && bab != "0") {
+                std::string w;
+                auto bb = resolver.openItemBundle(item, bab, &w);
+                if (bb) {
+                    PPtr bp = bb->findAsset(bname);
+                    if (bp.isNull()) bp = bb->findTexture(bname);
+                    if (!bp.isNull()) { if (auto bt = b.decode(*bb, bp, ref.partId)) braMasks.push_back(bt); }
+                }
+            }
+        }
+
+        b.meCoordinate = outfit;
+        b.meType = -1;
+        b.meSlot = 0;
+        if (ref.group == "Outfit") { b.meType = card::MaterialEdits::Clothing; b.meSlot = ref.subKind >= 0 ? 0 : std::max(0, ref.slot); }
+        else if (ref.group == "Accessories") { b.meType = card::MaterialEdits::Accessory; b.meSlot = std::max(0, ref.accIndex); }
+        else if (ref.group == "Hair") {
+            b.meType = card::MaterialEdits::Hair;
+            b.meSlot = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+        } else if (ref.group == "Head") { b.meType = card::MaterialEdits::Character; }
 
         std::vector<std::string> skipped;
         size_t before = scene.meshes.size();
@@ -904,8 +1106,44 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         b.localOv = nullptr;
+        b.meType = -1;
         scene.parts.push_back(std::move(part));
     }
+
+    // Hide the triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep):
+    // the game masks the body this way, and the bra the same way (OverBraMask).
+    auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
+                          const std::vector<std::shared_ptr<unity::TextureData>>& masks) {
+        if (masks.empty()) return;
+        size_t dropped = 0, total = 0;
+        for (auto& part : scene.parts) {
+            if (!pick(part)) continue;
+            for (int mi : part.meshes) {
+                SceneMesh& m = scene.meshes[static_cast<size_t>(mi)];
+                for (auto& sub : m.submeshes) {
+                    std::vector<uint32_t> keep;
+                    for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
+                        ++total;
+                        float u = 0, v = 0;
+                        for (int k = 0; k < 3; ++k) { u += m.vertices[sub.indices[t + static_cast<size_t>(k)]].uv.x; v += m.vertices[sub.indices[t + static_cast<size_t>(k)]].uv.y; }
+                        u /= 3; v /= 3;
+                        u -= std::floor(u); v -= std::floor(v);
+                        bool hidden = false;
+                        for (const auto& mk : masks) {
+                            int x = std::min(mk->width - 1, static_cast<int>(u * mk->width)), y = std::min(mk->height - 1, static_cast<int>((1.0f - v) * mk->height));
+                            if (mk->rgba[(static_cast<size_t>(y) * mk->width + x) * 4] < 128) { hidden = true; break; }
+                        }
+                        if (hidden) { ++dropped; continue; }
+                        keep.insert(keep.end(), sub.indices.begin() + static_cast<long>(t), sub.indices.begin() + static_cast<long>(t) + 3);
+                    }
+                    sub.indices = std::move(keep);
+                }
+            }
+        }
+        scene.warn(what, what + " mask: " + std::to_string(dropped) + " of " + std::to_string(total) + " triangles hidden under clothing (as the game does)");
+    };
+    applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
+    applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks);
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
     if (topCoversBra)
@@ -915,6 +1153,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
+    settleHeels(scene);
     return scene;
 }
 
