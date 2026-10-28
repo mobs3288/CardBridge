@@ -31,12 +31,12 @@ bool contains(const std::string& s, const char* sub) { return s.find(sub) != std
 
 
 // The game shows card colours more saturated than their stored values (measured against the cards' own pictures: a
-// vest colour of saturation 0.25 renders at 0.49, hair 0.20 at 0.47 - about sqrt(s) at unchanged value; skin is
+// vest colour of saturation 0.25 renders at 0.49, hair 0.20 at 0.47 - about twice the saturation at unchanged value (a square-root fit turned near-white colours mint); skin is
 // not converted). Hue and value are kept.
 Vec4 kkColor(Vec4 c) {
     float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z});
     if (mx <= 1e-4f || mx - mn <= 1e-5f) return c;
-    float s = (mx - mn) / mx, k = std::sqrt(s) / s;
+    float s = (mx - mn) / mx, k = std::min(2.0f, 1.0f / s);   // saturation doubled, capped at 1
     return {mx - (mx - c.x) * k, mx - (mx - c.y) * k, mx - (mx - c.z) * k, c.w};
 }
 
@@ -418,6 +418,18 @@ struct Builder {
         } else {
             sm.name = m->name;
             sm.shader = m->shaderName;
+            if (const Vec4* c = m->color("_ShadowColor")) sm.shadow = {c->x, c->y, c->z};
+            if (const Vec4* c = m->color("_LineColor")) sm.outlineColor = {c->x, c->y, c->z};
+            float specPow = 0.0f;
+            for (const auto& f : m->floats) {
+                if (f.first == "_SpecularPower") specPow = f.second;
+                else if (f.first == "_LineWidthS") sm.outlineWidth = f.second;
+                else if (f.first == "_LineWidth") sm.outlineWidth = f.second;
+            }
+            if (const Vec4* c = m->color("_SpecularColor")) {
+                float k = std::min(1.0f, std::max(0.0f, specPow));   // _SpecularPower is the highlight strength in these shaders
+                sm.specular = {c->x * k, c->y * k, c->z * k};
+            }
             sm.alpha = contains(m->shaderName, "alpha");
             sm.doubleSided = sm.alpha || contains(m->shaderName, "hair");   // hair cards are drawn from both sides in the game; a culled PMX loses half of them
             if (look && matIndex == 0) {

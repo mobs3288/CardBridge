@@ -173,8 +173,14 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
                 pm.diffuse = mat.diffuse;
-                pm.ambient = {mat.diffuse.x * 0.5f, mat.diffuse.y * 0.5f, mat.diffuse.z * 0.5f};
-                pm.drawFlags = mat.doubleSided ? 0x01 : 0x00;
+                // MMD shades as diffuse * light + ambient: the game's shadow colour goes to ambient so the dark side keeps
+                // the tint the card's shader gives it.
+                pm.ambient = {mat.diffuse.x * mat.shadow.x, mat.diffuse.y * mat.shadow.y, mat.diffuse.z * mat.shadow.z};
+                pm.specular = mat.specular;
+                pm.specularPower = mat.specularPower;
+                pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f ? 0x10 : 0x00);
+                pm.edgeColor = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
+                pm.edgeSize = std::min(2.0f, mat.outlineWidth * 20.0f);
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
                     if (texMap[ti] < 0) {
