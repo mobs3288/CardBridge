@@ -278,6 +278,11 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
             }
         }
     }
+    if (std::getenv("CARDBRIDGE_DEBUG_CBV") && mat.name == std::getenv("CARDBRIDGE_DEBUG_CBV") && prog.isPixel())
+        for (const auto& cb : prog.cbuffers) {
+            if (cb.slot < 0 || cb.slot >= 8) continue;
+            for (const auto& pm : cb.params) { const float* f = &out.data[static_cast<size_t>(cb.slot)][pm.offset / 4]; std::fprintf(stderr, "cbv %s = %.3f %.3f %.3f %.3f\n", pm.name.c_str(), f[0], f[1], f[2], f[3]); }
+        }
     out.ptr.assign(8, nullptr);
     for (size_t i = 0; i < 8; ++i) if (!out.data[i].empty()) out.ptr[i] = out.data[i].data();
 }
@@ -302,6 +307,7 @@ struct MatTextures : shader::ISm4Textures {
         const std::string* name = nullptr;
         for (const auto& b : prog->textures) if (static_cast<int>(b.reg) == t) name = &b.name;
         if (!name) return;
+        if (const char* drop = std::getenv("CARDBRIDGE_DROP_TEX")) { if (*name == drop) return; }   // debug: treat this texture as missing (white)
         for (const auto& tb : mat->texProps)
             if (tb.name == *name && tb.texture >= 0) {
                 size_t ti = static_cast<size_t>(tb.texture);
