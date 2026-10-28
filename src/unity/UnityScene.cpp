@@ -144,6 +144,7 @@ std::vector<RendererInfo> UnityFile::renderersUnder(int64_t rootId) const {
             r.enabled = v.at("m_Enabled").asBool(true);
             r.goId = x->goId;
             r.xformId = xid;
+            r.componentId = pid;
             r.name = x->name;
             r.mesh = r.skinned ? toPPtr(v.at("m_Mesh")) : filterMesh;
             for (const auto& m : v.at("m_Materials").asArray()) r.materials.push_back(toPPtr(m));
@@ -183,6 +184,24 @@ std::vector<MonoInfo> UnityFile::monoBehavioursUnder(int64_t rootId) const {
         }
     }
     return out;
+}
+
+PPtr UnityFile::findAsset(const std::string& name) const {
+    auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); }); return s; };
+    std::string want = lower(name);
+    for (const auto* o : sf_->ofClass(142)) {   // AssetBundle
+        Value v = sf_->read(*o);
+        for (const auto& e : v.at("m_Container").asArray()) {
+            std::string path = lower(e.at("first").asStr());
+            std::string stem = path;
+            auto sl = stem.find_last_of('/');
+            if (sl != std::string::npos) stem = stem.substr(sl + 1);
+            auto dot = stem.find_last_of('.');
+            if (dot != std::string::npos) stem = stem.substr(0, dot);
+            if (stem == want || path == want) return toPPtr(e.at("second").at("asset"));
+        }
+    }
+    return {};
 }
 
 PPtr UnityFile::findTexture(const std::string& name) const {

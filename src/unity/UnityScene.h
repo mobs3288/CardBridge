@@ -73,6 +73,7 @@ struct RendererInfo {
     bool enabled = true;
     int64_t goId = 0;
     int64_t xformId = 0;
+    int64_t componentId = 0;   // the renderer component's object id (ChaClothesComponent lists refer to it)
     std::string name;
     PPtr mesh;
     std::vector<PPtr> materials;
@@ -112,6 +113,9 @@ public:
     std::vector<MonoInfo> monoBehavioursUnder(int64_t rootXformId) const;
     // A Texture2D in this bundle by its name (null PPtr if there is none).
     PPtr findTexture(const std::string& name) const;
+    // An asset by the name the game loads it with: the AssetBundle container key's file stem,
+    // case-insensitive (this is NOT the object's own m_Name - e.g. container 'Theresa_C6' holds a texture named 'Lor').
+    PPtr findAsset(const std::string& name) const;
     // True if `xformId` is the transform of, or a descendant of, any GameObject in `goIds`.
     bool isUnderGameObject(int64_t xformId, const std::vector<int64_t>& goIds) const;
 

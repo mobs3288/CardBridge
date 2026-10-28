@@ -76,6 +76,11 @@ void CreateDirectories(const std::string& path) {
     if (ec) throw FormatError("cannot create folder " + path);
 }
 
+bool RemoveFile(const std::string& path) {
+    std::error_code ec;
+    return fs::remove(ToPath(path), ec);
+}
+
 std::vector<std::string> ListFiles(const std::string& root, const std::vector<std::string>& exts,
                                    std::vector<std::string>* skipped) {
     std::vector<std::string> out;

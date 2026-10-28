@@ -20,7 +20,7 @@ struct ExportOptions {
 };
 
 struct ExportResult {
-    std::string folder, pmxPath, manifestPath;
+    std::string folder, pmxPath, manifestPath, previewPath;
     size_t vertices = 0, triangles = 0, materials = 0, bones = 0, textures = 0, parts = 0;
 };
 

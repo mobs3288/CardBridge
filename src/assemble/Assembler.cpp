@@ -1,9 +1,12 @@
 #include "assemble/Assembler.h"
 
 #include "core/Bytes.h"
+#include "shape/Shape.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
+#include <memory>
 #include <set>
 
 namespace cardbridge::assemble {
@@ -22,22 +25,47 @@ struct Rig {
 
 bool contains(const std::string& s, const char* sub) { return s.find(sub) != std::string::npos; }
 
-// Adds every transform of a prefab to the scene skeleton; returns false if the prefab root is missing.
+// A local transform the card's shape sliders replace on a named bone.
+struct LocalOverride {
+    Vec3 pos;
+    Quat rot;
+    bool hasRot = false;
+    Vec3 scl{1, 1, 1};
+};
+using Overrides = std::map<std::string, LocalOverride>;
+
+// Adds every transform of a prefab to the scene skeleton, with world matrices built from local transforms
+// (so a bone's shape override moves its whole subtree); returns false if the prefab root is missing.
 bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& prefabName, const Mat4& base,
-                  int attachParent, const std::string& source) {
+                  int attachParent, const std::string& source, const Overrides* overrides = nullptr) {
     auto roots = uf.findXformsByName(prefabName);
     if (roots.empty()) return false;
     int64_t rootId = roots[0];
-    Mat4 rootInv = inverse(uf.worldMatrix(rootId));
     std::map<int64_t, int> idx;
+    std::map<int64_t, Mat4> worlds;
     for (int64_t id : uf.subtree(rootId)) {
         const unity::Xform* x = uf.xform(id);
-        Mat4 w = base * (rootInv * uf.worldMatrix(id));
+        Mat4 w;
         int parent = attachParent;
-        if (id != rootId) {
+        if (id == rootId) {
+            w = base;
+        } else {
+            Vec3 pos = x->pos, scl = x->scl;
+            Quat rot = x->rot;
+            if (overrides) {
+                auto ov = overrides->find(x->name);
+                if (ov != overrides->end()) {
+                    pos = ov->second.pos;
+                    scl = ov->second.scl;
+                    if (ov->second.hasRot) rot = ov->second.rot;
+                }
+            }
+            auto pw = worlds.find(x->parent);
+            w = (pw != worlds.end() ? pw->second : base) * Mat4::TRS(pos, rot, scl);
             auto p = idx.find(x->parent);
             if (p != idx.end()) parent = p->second;
         }
+        worlds[id] = w;
         int existing = scene.boneIndex(x->name);
         if (existing >= 0 || rig.world.count(x->name)) {   // duplicate name: keep the first, map this id to it
             idx[id] = existing >= 0 ? existing : parent;
@@ -53,6 +81,117 @@ bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& pref
         rig.world[x->name] = w;
     }
     return true;
+}
+
+// The card's body sliders as local transforms for the skeleton's driven bones (ChaControl.UpdateShapeBodyValueFromCustomInfo
+// followed by ShapeBodyInfoFemale.Update/UpdateAlways, copied as generated code in shape/).
+Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver, UnityFile& base, UnityFile& rigFile,
+                            const std::string& rigPrefab, Scene& scene) {
+    Overrides out;
+    std::string why;
+    shape::AnimKeys anm;
+    bool haveAnm = false;
+    for (const auto& [name, bytes] : base.readTextAssets())
+        if (name == "cf_anmShapeBody") { anm = shape::AnimKeys::Parse(bytes); haveAnm = true; }
+    auto custom = resolver.openBaseBundle("list/customshape.unity3d", &why);
+    std::string catText;
+    if (custom)
+        for (const auto& [name, bytes] : custom->readTextAssets())
+            if (name == "cf_custombody") catText.assign(bytes.begin(), bytes.end());
+    if (!haveAnm || catText.empty()) {
+        scene.warn("body", "the library has no body shape tables (cf_anmShapeBody / list/customshape.unity3d); default proportions are used");
+        return out;
+    }
+    std::map<std::string, int> srcIds;
+    const auto& srcNames = shape::BodySrcNames();
+    for (size_t i = 0; i < srcNames.size(); ++i) srcIds[srcNames[i]] = static_cast<int>(i);
+    shape::CategoryTable cats = shape::ParseCategories(catText, srcIds);
+
+    // Local transforms of every rig bone, so partial assignments (only pos.x ...) keep the rest.
+    std::map<std::string, shape::ShapeBone> bones;
+    auto roots = rigFile.findXformsByName(rigPrefab);
+    if (roots.empty()) return out;
+    for (int64_t id : rigFile.subtree(roots[0])) {
+        const unity::Xform* x = rigFile.xform(id);
+        if (bones.count(x->name)) continue;
+        shape::ShapeBone sb;
+        sb.pos = x->pos;
+        sb.scl = x->scl;
+        bones[x->name] = sb;
+    }
+
+    shape::ShapeState S;
+    S.typeBone = static_cast<int>(card.body.at("typeBone").asInt());
+    if (S.typeBone != 0)
+        scene.warn("body", "this body uses an alternative bone type (typeBone " + std::to_string(S.typeBone) +
+                           "); its correction table is not loaded, proportions may be slightly off");
+    const auto& dstNames = shape::BodyDstNames();
+    S.dstFn = [&](int i) -> shape::ShapeBone* {
+        if (i < 0 || static_cast<size_t>(i) >= dstNames.size()) return nullptr;
+        auto it = bones.find(dstNames[static_cast<size_t>(i)]);
+        return it == bones.end() ? nullptr : &it->second;
+    };
+    auto fc = [&](const char* n) -> shape::ShapeBone* { auto it = bones.find(n); return it == bones.end() ? nullptr : &it->second; };
+    S.fixCorrect[0] = fc("cf_d_shoulder_L");
+    S.fixCorrect[1] = fc("cf_d_shoulder_R");
+
+    const Value& vals = card.body.at("shapeValueBody");
+    std::vector<float> v;
+    for (size_t i = 0; i < vals.size(); ++i) v.push_back(static_cast<float>(vals.at(i).asFloat()));
+    if (v.size() > 13) {
+        float nip = static_cast<float>(card.status.at("nipStandRate").asFloat());
+        v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
+    }
+    for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
+    shape::RunBodyUpdate(S, 7);
+    shape::RunBodyUpdateAlways(S);
+
+    for (const auto& [name, sb] : bones) {
+        LocalOverride o;
+        o.pos = sb.pos;
+        o.scl = sb.scl;
+        o.hasRot = sb.rotSet;
+        if (sb.rotSet) o.rot = shape::EulerToQuat(sb.rot);
+        out[name] = o;
+    }
+    return out;
+}
+
+// How an item's materials are coloured. The game builds clothing textures at run time from the list row's
+// MainTex and ColorMaskTex plus the card's colours and assigns them to the first material of the renderers its
+// ChaClothesComponent lists; accessories keep the prefab texture and are tinted through their colour mask.
+struct ItemLook {
+    int tex1 = -1, tex2 = -1;             // baked scene textures for the clothing main / second texture
+    std::set<int64_t> use1, use2;         // renderer component ids that get tex1 / tex2 on material 0
+    bool materialTint = false;            // accessories: tint each material's own texture by its _ColorMask
+    Vec4 colors[3]{{1, 1, 1, 1}, {1, 1, 1, 1}, {1, 1, 1, 1}};
+};
+
+// main * lerp-by-mask of the three colours: red channel region gets colour 1, green colour 2, blue colour 3,
+// everything outside the mask stays as it is. A missing mask is the game's dummy: pure red, so colour 1 everywhere.
+std::vector<uint8_t> tintTexture(const unity::TextureData& main, const unity::TextureData* mask, const Vec4 c[3]) {
+    std::vector<uint8_t> out(main.rgba.size());
+    for (int y = 0; y < main.height; ++y)
+        for (int x = 0; x < main.width; ++x) {
+            size_t i = (static_cast<size_t>(y) * main.width + x) * 4;
+            float mr = 1, mg = 0, mb = 0;
+            if (mask && mask->width > 0 && mask->height > 0) {
+                int mx = std::min(mask->width - 1, x * mask->width / main.width);
+                int my = std::min(mask->height - 1, y * mask->height / main.height);
+                const uint8_t* m = &mask->rgba[(static_cast<size_t>(my) * mask->width + mx) * 4];
+                mr = m[0] / 255.0f; mg = m[1] / 255.0f; mb = m[2] / 255.0f;
+            }
+            float col[3] = {main.rgba[i] / 255.0f, main.rgba[i + 1] / 255.0f, main.rgba[i + 2] / 255.0f};
+            const float mk[3] = {mr, mg, mb};
+            for (int k = 0; k < 3; ++k) {
+                const Vec4& cc = c[k];
+                float tint[3] = {cc.x, cc.y, cc.z};
+                for (int ch = 0; ch < 3; ++ch) col[ch] = col[ch] + (col[ch] * tint[ch] - col[ch]) * mk[k];
+            }
+            for (int ch = 0; ch < 3; ++ch) out[i + static_cast<size_t>(ch)] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, col[ch] * 255.0f)));
+            out[i + 3] = main.rgba[i + 3];
+        }
+    return out;
 }
 
 struct Builder {
@@ -85,9 +224,51 @@ struct Builder {
         return result;
     }
 
-    // `defaultTexture`: the texture the item's list row names, used by materials the prefab leaves without one
-    // (the game assigns it at run time with SetTexture(_MainTex, ...)).
-    int materialFor(UnityFile& uf, const PPtr& p, const std::string& partId, const Vec4* fallbackColor, int defaultTexture = -1) {
+    std::map<std::string, std::shared_ptr<unity::TextureData>> decoded;   // "<bundle>#<pathId>" -> decoded pixels
+    std::map<std::string, int> bakedCache;                                  // tint recipe -> scene texture
+
+    std::shared_ptr<unity::TextureData> decode(UnityFile& uf, const PPtr& p, const std::string& partId) {
+        std::string key = uf.name() + "#" + std::to_string(p.pathId);
+        auto it = decoded.find(key);
+        if (it != decoded.end()) return it->second;
+        std::string why;
+        auto t = uf.readTexture(p, &why);
+        std::shared_ptr<unity::TextureData> out;
+        if (t) out = std::make_shared<unity::TextureData>(std::move(*t));
+        else scene.warn(partId, "texture not loaded: " + why);
+        decoded[key] = out;
+        return out;
+    }
+
+    int addSceneTexture(const std::string& name, const std::string& source, int w, int h, std::vector<uint8_t>&& rgba) {
+        SceneTexture st;
+        st.name = name;
+        st.source = source;
+        st.width = w;
+        st.height = h;
+        st.pixelHash = Fnv1a64(rgba.data(), rgba.size());
+        st.rgba = std::move(rgba);
+        scene.textures.push_back(std::move(st));
+        return static_cast<int>(scene.textures.size()) - 1;
+    }
+
+    // A texture tinted by a colour mask, cached by (main, mask, colours).
+    int bake(const std::shared_ptr<unity::TextureData>& main, const std::string& mainKey, const std::shared_ptr<unity::TextureData>& mask,
+             const std::string& maskKey, const Vec4 c[3], const std::string& source) {
+        if (!main) return -1;
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f", c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, c[2].x, c[2].y, c[2].z);
+        std::string key = mainKey + "|" + maskKey + buf;
+        auto it = bakedCache.find(key);
+        if (it != bakedCache.end()) return it->second;
+        int idx = addSceneTexture(main->name + "_tint", source, main->width, main->height, tintTexture(*main, mask.get(), c));
+        bakedCache[key] = idx;
+        return idx;
+    }
+
+    // `look` (may be null) says how this item's materials are coloured; `matIndex` is the material's slot on its renderer.
+    int materialFor(UnityFile& uf, const PPtr& p, const std::string& partId, const Vec4* fallbackColor, const ItemLook* look,
+                    const RendererInfo& r, size_t matIndex) {
         SceneMaterial sm;
         std::string why;
         auto m = uf.readMaterial(p, &why);
@@ -100,10 +281,27 @@ struct Builder {
             sm.shader = m->shaderName;
             sm.alpha = contains(m->shaderName, "alpha");
             sm.doubleSided = sm.alpha;
-            if (const PPtr* tp = m->texture("_MainTex"))
-                if (!tp->isNull()) sm.texture = textureFor(uf, *tp, partId);
-            if (sm.texture < 0) sm.texture = defaultTexture;
-            if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
+            if (look && matIndex == 0) {
+                if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
+                else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
+            }
+            if (sm.texture < 0) {
+                const PPtr* tp = m->texture("_MainTex");
+                if (tp && !tp->isNull()) {
+                    if (look && look->materialTint) {
+                        auto main = decode(uf, *tp, partId);
+                        const PPtr* mp = m->texture("_ColorMask");
+                        std::shared_ptr<unity::TextureData> mask;
+                        std::string maskKey = "-";
+                        if (mp && !mp->isNull() && mp->isLocal()) { mask = decode(uf, *mp, partId); maskKey = uf.name() + "#" + std::to_string(mp->pathId); }
+                        sm.texture = bake(main, uf.name() + "#" + std::to_string(tp->pathId), mask, maskKey, look->colors, uf.name());
+                    } else {
+                        sm.texture = textureFor(uf, *tp, partId);
+                    }
+                }
+            }
+            if (sm.texture < 0 && look && look->materialTint) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
+            else if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
         }
         scene.materials.push_back(std::move(sm));
         return static_cast<int>(scene.materials.size()) - 1;
@@ -136,7 +334,7 @@ struct Builder {
 
     int addRenderer(UnityFile& uf, const RendererInfo& r, int64_t prefabRoot, int part, const std::string& partId,
                     const Mat4& placement, int staticBone, const Vec4* fallbackColor, bool accessoryMode = false,
-                    int defaultTexture = -1) {
+                    const ItemLook* look = nullptr) {
         std::string why;
         auto mesh = uf.readMesh(r.mesh, &why);
         if (!mesh) {
@@ -256,7 +454,7 @@ struct Builder {
                 scene.materials.push_back(plain);
                 ss.material = static_cast<int>(scene.materials.size()) - 1;
             } else {
-                ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, defaultTexture);
+                ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, look, r, mi);
             }
             sm.submeshes.push_back(std::move(ss));
         }
@@ -294,7 +492,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         scene.error("", "the library has no chara/oo_base.unity3d (" + why + ") - cannot build a skeleton");
         return scene;
     }
-    if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig")) {
+    Overrides shapeOv;
+    if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene);
+    if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) {
         scene.error("", "prefab '" + opt.bodyRigPrefab + "' not found in oo_base.unity3d");
         return scene;
     }
@@ -342,9 +542,44 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     }
 
     // --- card items ------------------------------------------------------
-    for (const auto& ref : resolve::ItemsFromCard(card, outfit)) {
+    std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
+    auto vec4Of = [](const Value& v) {
+        return Vec4{static_cast<float>(v.at(size_t(0)).asFloat()), static_cast<float>(v.at(size_t(1)).asFloat()),
+                    static_cast<float>(v.at(size_t(2)).asFloat()), static_cast<float>(v.size() > 3 ? v.at(size_t(3)).asFloat() : 1.0)};
+    };
+    const Value& sk2 = card.body.at("skinMainColor");
+    Vec4 skinColor{1, 1, 1, 1};
+    if (sk2.size() >= 3) skinColor = vec4Of(sk2);
+
+    bool topCoversBra = false;
+    for (size_t wi = 0; wi < work.size(); ++wi) {
+        const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
         if (item.status == resolve::ItemStatus::Empty) continue;
+
+        // A jacket-type (2) or sailor-type (1) top is mostly empty itself: the garments are its sub-parts A/B/C,
+        // categories 210+k / 200+k, with ids from the coordinate's subPartsId (ChaControl.ChangeClothesSubParts).
+        if (ref.slot == 0 && ref.subKind < 0 && item.ok()) {
+            int topKind = std::atoi(item.listItem.get("Kind").c_str());
+            if (topKind == 1 || topKind == 2) {
+                static const char* letter[3] = {"A", "B", "C"};
+                static const char* sname[3] = {"a", "b", "c"};
+                const Value& ids = card.outfits[static_cast<size_t>(outfit)].clothes.at("subPartsId");
+                for (int k = 0; k < 3; ++k) {
+                    resolve::ItemRef sub;
+                    sub.partId = ref.partId + ".sub_" + sname[k];
+                    sub.label = std::string("top part ") + letter[k];
+                    sub.group = "Outfit";
+                    sub.property = "outfit" + std::to_string(outfit) + ".ChaFileClothes.Clothes" + (topKind == 1 ? "Sailor" : "Jacket") + "Sub" + letter[k];
+                    sub.category = (topKind == 1 ? 200 : 210) + k;
+                    sub.id = ids.at(static_cast<size_t>(k)).asInt();
+                    sub.slot = 0;
+                    sub.subKind = k;
+                    sub.outfit = outfit;
+                    work.push_back(sub);
+                }
+            }
+        }
 
         ScenePart part;
         part.id = ref.partId;
@@ -401,27 +636,108 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 scene.warn(ref.partId, "attach node '" + ref.attachNode + "' not found on the skeleton; placed at the origin");
             }
         }
-
-        const Value& sk2 = card.body.at("skinMainColor");
-        Vec4 skinColor{1, 1, 1, 1};
-        if (sk2.size() >= 3) skinColor = {static_cast<float>(sk2.at(size_t(0)).asFloat()), static_cast<float>(sk2.at(size_t(1)).asFloat()),
-                                           static_cast<float>(sk2.at(size_t(2)).asFloat()), 1.0f};
         bool accessoryMode = ref.group == "Accessories";
 
-        // The list row's own texture (base-game garments carry none in the prefab).
-        int listTexture = -1;
-        std::string texRel = item.listItem.get("MainTexAB"), texName = item.listItem.get("MainTex");
-        if (!texName.empty() && texName != "0" && !texRel.empty() && texRel != "0") {
-            std::string whyTex;
-            auto tb = resolver.openItemBundle(item, texRel, &whyTex);
-            if (!tb) {
-                scene.warn(ref.partId, "texture bundle '" + texRel + "' not loaded: " + whyTex);
-            } else {
-                PPtr tp = tb->findTexture(texName);
-                if (tp.isNull()) scene.warn(ref.partId, "texture '" + texName + "' not found in " + texRel);
-                else listTexture = b.textureFor(*tb, tp, ref.partId);
+        // ---- colouring: what the game does at run time with the card's colours ----
+        ItemLook look;
+        bool haveLook = false;
+        if (ref.group == "Outfit" && ref.outfit >= 0) {
+            // Sub-parts use the top's colours; part C's first colour is the fourth slot (ChaControl.ChangeCustomClothes).
+            size_t colorSlot = ref.subKind >= 0 ? 0 : static_cast<size_t>(std::max(0, ref.slot));
+            const Value& ci = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(colorSlot).at("colorInfo");
+            Vec4 c[3] = {vec4Of(ci.at(size_t(0)).at("baseColor")), vec4Of(ci.at(size_t(1)).at("baseColor")), vec4Of(ci.at(size_t(2)).at("baseColor"))};
+            if (ref.subKind == 2) c[0] = vec4Of(ci.at(size_t(3)).at("baseColor"));
+
+            // The list row's textures; a list bundle of "0" means the item's own bundle.
+            auto listTex = [&](const char* abKey, const char* nameKey, std::string& keyOut) -> std::shared_ptr<unity::TextureData> {
+                std::string ab = item.listItem.get(abKey), name = item.listItem.get(nameKey);
+                if (name.empty() || name == "0") return nullptr;
+                std::shared_ptr<UnityFile> tb = uf;
+                if (!ab.empty() && ab != "0") {
+                    std::string w;
+                    tb = resolver.openItemBundle(item, ab, &w);
+                    if (!tb) { scene.warn(ref.partId, "texture bundle '" + ab + "' not loaded: " + w); return nullptr; }
+                }
+                PPtr tp = tb->findAsset(name);
+                if (tp.isNull()) tp = tb->findTexture(name);
+                if (tp.isNull()) { scene.warn(ref.partId, "texture '" + name + "' not found in " + tb->name()); return nullptr; }
+                keyOut = tb->name() + "#" + std::to_string(tp.pathId);
+                return b.decode(*tb, tp, ref.partId);
+            };
+            std::string k1, k2, k3, k4;
+            auto main1 = listTex("MainTexAB", "MainTex", k1);
+            auto mask1 = listTex("ColorMaskAB", "ColorMaskTex", k2);
+            auto main2 = listTex("MainTex02AB", "MainTex02", k3);
+            auto mask2 = listTex("ColorMask02AB", "ColorMask02Tex", k4);
+            // The game only builds a texture when it has both the main texture and its mask.
+            if (main1 && mask1) { look.tex1 = b.bake(main1, k1, mask1, k2, c, uf->name()); haveLook = true; }
+            if (main2 && mask2) { look.tex2 = b.bake(main2, k3, mask2, k4, c, uf->name()); haveLook = true; }
+            if (haveLook) {
+                for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                    if (mb.className != "ChaClothesComponent") continue;
+                    auto collect = [&](const char* field, std::set<int64_t>& into) {
+                        for (const auto& pp : mb.fields.at(field).asArray())
+                            if (pp.at("m_FileID").asInt() == 0 && pp.at("m_PathID").asInt() != 0) into.insert(pp.at("m_PathID").asInt());
+                    };
+                    collect("rendNormal01", look.use1);
+                    collect("rendAlpha01", look.use1);
+                    collect("rendNormal02", look.use2);
+                    collect("rendAlpha02", look.use2);
+                }
+            }
+        } else if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
+            const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
+            if (col.size() >= 3) {
+                for (int k = 0; k < 3; ++k) look.colors[k] = vec4Of(col.at(static_cast<size_t>(k)));
+                look.materialTint = true;
+                haveLook = true;
             }
         }
+
+        // Face parts: the game builds each one's texture from the list row the card's face ids select,
+        // tinted with the card's colours (ChaControl.ChangeSettingEyebrow / Eyeline / Eye ...).
+        const Value& faceV = card.face;
+        auto faceTextureFor = [&](const std::string& rendererName) -> int {
+            struct Spec { const char* renderer; int category; int64_t id; const char* property; const char* texKey; Vec4 color; };
+            auto colorOf = [&](const char* field) { return vec4Of(faceV.at(field)); };
+            std::vector<Spec> specs;
+            specs.push_back({"cf_O_mayuge", 406, faceV.at("eyebrowId").asInt(), "ChaFileFace.eyebrowId", "EyebrowTex", colorOf("eyebrowColor")});
+            specs.push_back({"cf_O_eyeline", 412, faceV.at("eyelineUpId").asInt(), "ChaFileFace.eyelineUpId", "EyelineUpTex", colorOf("eyelineColor")});
+            specs.push_back({"cf_O_eyeline_low", 413, faceV.at("eyelineDownId").asInt(), "ChaFileFace.eyelineDownId", "EyelineDownTex", colorOf("eyelineColor")});
+            specs.push_back({"cf_O_noseline", 414, faceV.at("noseId").asInt(), "ChaFileFace.noseId", "NoseTex", Vec4{0.25f, 0.2f, 0.2f, 1.0f}});
+            specs.push_back({"cf_Ohitomi_L", 407, faceV.at("whiteId").asInt(), "ChaFileFace.whiteId", "EyeWhiteTex", colorOf("whiteBaseColor")});
+            specs.push_back({"cf_Ohitomi_R", 407, faceV.at("whiteId").asInt(), "ChaFileFace.whiteId", "EyeWhiteTex", colorOf("whiteBaseColor")});
+            const Value& pupils = faceV.at("pupil");
+            specs.push_back({"cf_Ohitomi_L02", 408, pupils.at(size_t(0)).at("id").asInt(), "ChaFileFace.Pupil1", "EyeTex", vec4Of(pupils.at(size_t(0)).at("baseColor"))});
+            specs.push_back({"cf_Ohitomi_R02", 408, pupils.at(size_t(1)).at("id").asInt(), "ChaFileFace.Pupil2", "EyeTex", vec4Of(pupils.at(size_t(1)).at("baseColor"))});
+            for (const Spec& sp : specs) {
+                if (rendererName != sp.renderer) continue;
+                resolve::ItemRef fr;
+                fr.partId = ref.partId + "." + sp.renderer;
+                fr.group = "Face";
+                fr.property = sp.property;
+                fr.category = sp.category;
+                fr.id = sp.id;
+                resolve::ResolvedItem fi = resolver.resolve(card, fr);
+                if (!fi.ok()) {
+                    scene.warn(ref.partId, std::string(sp.renderer) + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
+                    return -1;
+                }
+                std::string texName = fi.listItem.get(sp.texKey), ab = fi.listItem.get("MainAB");
+                if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return -1;   // "none"
+                std::string w;
+                auto tb = resolver.openItemBundle(fi, ab, &w);
+                if (!tb) { scene.warn(ref.partId, std::string(sp.renderer) + ": texture bundle not loaded: " + w); return -1; }
+                PPtr tp = tb->findAsset(texName);
+                if (tp.isNull()) tp = tb->findTexture(texName);
+                if (tp.isNull()) { scene.warn(ref.partId, std::string(sp.renderer) + ": texture '" + texName + "' not found in " + ab); return -1; }
+                auto tex = b.decode(*tb, tp, ref.partId);
+                Vec4 c[3] = {sp.color, Vec4{1, 1, 1, 1}, Vec4{1, 1, 1, 1}};
+                return b.bake(tex, tb->name() + "#" + std::to_string(tp.pathId), nullptr, "-", c, tb->name());
+            }
+            return -1;
+        };
+
         std::vector<std::string> skipped;
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(roots[0])) {
@@ -434,7 +750,17 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                    (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye") || contains(r.name, "o_tang")));
             if (hiddenByDefault) { skipped.push_back(r.name); continue; }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
-            int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, listTexture);
+            ItemLook faceLook;
+            const ItemLook* lookPtr = haveLook ? &look : nullptr;
+            if (ref.group == "Head") {
+                int ft = faceTextureFor(r.name);
+                if (ft >= 0) {
+                    faceLook.tex1 = ft;
+                    faceLook.use1.insert(r.componentId);
+                    lookPtr = &faceLook;
+                }
+            }
+            int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
             if (mi >= 0) part.meshes.push_back(mi);
         }
         if (!skipped.empty()) {
@@ -446,8 +772,18 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (item.assetName() == "p_dummy") part.detail = "intentionally empty item (p_dummy)";
             else scene.warn(ref.partId, "no renderable geometry found in the prefab");
         }
+        if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         scene.parts.push_back(std::move(part));
     }
+
+    // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
+    if (topCoversBra)
+        for (auto& p : scene.parts)
+            if (p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0 && !p.meshes.empty()) {
+                p.includeInExport = false;
+                p.visibleInPreview = false;
+                p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
+            }
     return scene;
 }
 

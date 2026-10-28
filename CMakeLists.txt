@@ -70,7 +70,9 @@ add_library(cardbridge_core STATIC
     src/assemble/Assembler.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
+    src/export/Preview.cpp
     src/library/Library.cpp
+    src/shape/Shape.cpp
 )
 target_include_directories(cardbridge_core PUBLIC src)
 target_link_libraries(cardbridge_core PUBLIC nlohmann_json::nlohmann_json PRIVATE stb_image cardbridge_stb_write)
