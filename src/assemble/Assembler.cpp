@@ -547,12 +547,13 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 }
 
 
-// Shoes with a heel are modelled for a foot that points down (the game poses the foot that way); on the flat T-pose
-// foot they stand on the heel with the toes in the air. Rotate the foot about the ankle by the angle that puts the
-// toe tip and the heel at the same height, skinning-weighted so the leg-to-foot blend stays smooth. Nothing happens
-// without shoes or when the sole is already level.
+// Shoes with a heel are modelled for a flat foot: the sole is level and the heel stack hangs below it, so on the T-pose
+// foot the toes float a heel-height above the floor. A heeled shoe is worn with the forefoot flat on the floor, the arch
+// ramping up and the heel seat raised, the stack vertical (the look of the reference model's boots). This lowers the
+// forefoot by the heel height through a smooth ramp over the arch, weighted by the vertices' foot-bone weights so the
+// leg-to-foot blend stays smooth. Nothing happens without shoes or when the sole is already level.
 void settleHeels(Scene& scene) {
-    bool tilted = false;
+    bool lowered = false;
     for (const char* side : {"L", "R"}) {
         int foot = scene.boneIndex(std::string("cf_j_foot_") + side);
         if (foot < 0) continue;
@@ -570,60 +571,52 @@ void settleHeels(Scene& scene) {
                 if (v.weight[k] > 0 && v.bone[k] >= 0 && inSet[static_cast<size_t>(v.bone[k])]) w += v.weight[k];
             return w;
         };
-        // The sole of the shoe: its foot-bound vertices on this side (x on the side's half of the body).
+        // The shoe's foot-bound vertices on this side, relative to the ankle.
         std::vector<Vec3> sole;
         for (const auto& part : scene.parts) {
             if (!part.includeInExport || part.group != "Outfit") continue;
-            bool shoe = part.id.size() > 6 && (part.id.compare(part.id.size() - 6, 6, ".shoes") == 0 ||
-                        part.id.find(".shoes_") != std::string::npos);
+            bool shoe = part.id.find(".shoes") != std::string::npos;
             if (!shoe) continue;
             for (int mi : part.meshes)
                 for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices)
-                    if (footWeight(v) > 0.5f && (v.pos.x - 0.0f) * (pivot.x) > 0) sole.push_back({v.pos.x - pivot.x, v.pos.y - pivot.y, v.pos.z - pivot.z});
+                    if (footWeight(v) > 0.5f && v.pos.x * pivot.x > 0) sole.push_back({v.pos.x - pivot.x, v.pos.y - pivot.y, v.pos.z - pivot.z});
         }
         if (sole.size() < 50) continue;
         float maxZ = -1e30f;
         for (const Vec3& q : sole) maxZ = std::max(maxZ, q.z);
         if (maxZ <= 0) continue;
-        auto drop = [&](float theta, float& toe, float& heel) {   // lowest y' of the toe end and of the heel end after rotating
-            float c = std::cos(theta), sn = std::sin(theta);
-            toe = heel = 1e30f;
-            for (const Vec3& q : sole) {
-                float y = q.y * c - q.z * sn;
-                if (q.z > 0.6f * maxZ) toe = std::min(toe, y);
-                else if (q.z < 0.15f * maxZ) heel = std::min(heel, y);
-            }
-        };
-        float best = 0, bestErr = 1e30f;
-        for (int d = 0; d <= 60; ++d) {
-            float theta = static_cast<float>(d) * 0.75f * 3.14159265f / 180.0f, toe, heel;
-            drop(theta, toe, heel);
-            float err = std::fabs(toe - heel);
-            if (err < bestErr) { bestErr = err; best = theta; }
+        float toeLow = 1e30f, heelLow = 1e30f;
+        for (const Vec3& q : sole) {
+            if (q.z > 0.6f * maxZ) toeLow = std::min(toeLow, q.y);
+            else if (q.z < 0.15f * maxZ) heelLow = std::min(heelLow, q.y);
         }
-        if (best < 2.0f * 3.14159265f / 180.0f) continue;   // level already
-        float c = std::cos(best), sn = std::sin(best);
-        auto rotP = [&](Vec3 pnt) { float dy = pnt.y - pivot.y, dz = pnt.z - pivot.z; return Vec3{pnt.x, pivot.y + dy * c - dz * sn, pivot.z + dz * c + dy * sn}; };
-        auto rotD = [&](Vec3 d) { return Vec3{d.x, d.y * c - d.z * sn, d.z * c + d.y * sn}; };
+        if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) std::fprintf(stderr, "heel %s: sole %zu maxZ %g toeLow %g heelLow %g\n", side, sole.size(), maxZ, toeLow, heelLow);
+        const float heelHeight = toeLow - heelLow;   // how far the stack hangs below the forefoot sole
+        if (heelHeight < 0.004f) continue;           // level already (scene units are metres: 4 mm)
+        // The ramp starts where the heel stack ends (vertices hanging well below the sole) and runs over the arch.
+        float stackFront = -1e30f;
+        for (const Vec3& q : sole)
+            if (q.y < toeLow - 0.25f * heelHeight) stackFront = std::max(stackFront, q.z);
+        const float rampStart = pivot.z + std::max(stackFront, 0.0f) + 0.01f * maxZ;
+        const float rampEnd = rampStart + std::max(0.35f * maxZ, 0.6f * heelHeight / 0.6f);
+        auto drop = [&](float z) {
+            float t = std::min(1.0f, std::max(0.0f, (z - rampStart) / (rampEnd - rampStart)));
+            return heelHeight * t * t * (3.0f - 2.0f * t);
+        };
         for (auto& mesh : scene.meshes)
             for (auto& v : mesh.vertices) {
                 float w = footWeight(v);
-                if (w <= 0) continue;
-                Vec3 r = rotP(v.pos);
-                v.pos = {v.pos.x, v.pos.y + (r.y - v.pos.y) * w, v.pos.z + (r.z - v.pos.z) * w};
-                Vec3 n = rotD(v.normal);
-                v.normal = {v.normal.x, v.normal.y + (n.y - v.normal.y) * w, v.normal.z + (n.z - v.normal.z) * w};
+                if (w > 0) v.pos.y -= drop(v.pos.z) * w;
             }
         for (size_t i = 0; i < scene.bones.size(); ++i)
-            if (inSet[i] && static_cast<int>(i) != foot) scene.bones[i].pos = rotP(scene.bones[i].pos);
-        char buf[160];
-        std::snprintf(buf, sizeof buf, "foot %s tilted %.1f degrees about the ankle so the heeled shoe stands on heel and toe", side, best * 180.0f / 3.14159265f);
+            if (inSet[i] && static_cast<int>(i) != foot) scene.bones[i].pos.y -= drop(scene.bones[i].pos.z);
+        char buf[200];
+        std::snprintf(buf, sizeof buf, "foot %s: forefoot lowered %.1f cm over the arch so the heeled shoe stands on heel stack and toes", side, heelHeight * 100.0f);
         scene.warn("", buf);
-        tilted = true;
+        lowered = true;
     }
-    if (!tilted) return;
-    // The ankle stays where it was and the toes dropped below the floor: lift the whole character so the shoes stand on
-    // y = 0, as the heel raises the ankle in the game.
+    if (!lowered) return;
+    // Keep the lowest point of the character on y = 0.
     float lowest = 1e30f;
     for (const auto& mesh : scene.meshes)
         for (const auto& v : mesh.vertices) lowest = std::min(lowest, v.pos.y);
@@ -633,6 +626,7 @@ void settleHeels(Scene& scene) {
         for (auto& b : scene.bones) b.pos.y -= lowest;
     }
 }
+
 } // namespace
 
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
