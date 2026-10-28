@@ -206,6 +206,16 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
     Bytes prev = RenderPreviewPng(scene);
     fileio::WriteFile(res.previewPath, prev.data(), prev.size());
+    {   // a head close-up, to compare face and hair against the card's own picture
+        PreviewOptions head;
+        head.views = 1;
+        head.viewWidth = 640;
+        head.viewHeight = 640;
+        head.yTop = 1.0f;
+        head.yBottom = 0.84f;
+        Bytes hp = RenderPreviewPng(scene, head);
+        fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
+    }
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range);
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");

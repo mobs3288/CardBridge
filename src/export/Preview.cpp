@@ -38,7 +38,10 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
     float cx = (mn.x + mx.x) * 0.5f, cz = (mn.z + mx.z) * 0.5f;
     float radius = std::max({mx.x - mn.x, mx.z - mn.z}) * 0.5f;
     float spanY = mx.y - mn.y;
-    float scale = std::min(static_cast<float>(opt.viewHeight) * 0.96f / spanY, static_cast<float>(opt.viewWidth) * 0.96f / (2.0f * radius));
+    float y0 = mn.y + opt.yBottom * spanY, y1 = mn.y + opt.yTop * spanY;
+    bool closeUp = (opt.yTop - opt.yBottom) < 0.9f;
+    float scale = closeUp ? static_cast<float>(opt.viewHeight) / (y1 - y0)
+                          : std::min(static_cast<float>(opt.viewHeight) * 0.96f / spanY, static_cast<float>(opt.viewWidth) * 0.96f / (2.0f * radius));
 
     for (int view = 0; view < opt.views; ++view) {
         float yaw = opt.yawDegrees[view] * 3.14159265f / 180.0f;
@@ -51,7 +54,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
             // Camera on the +Z side looking back at the model (the model faces +Z): screen x is -x.
             float rx = x * cs + z * sn, rz = -x * sn + z * cs;
             sx = opt.viewWidth * 0.5f - rx * scale;
-            sy = opt.viewHeight - 0.02f * opt.viewHeight - (v.pos.y - mn.y) * scale;
+            sy = closeUp ? opt.viewHeight - (v.pos.y - y0) * scale : opt.viewHeight - 0.02f * opt.viewHeight - (v.pos.y - mn.y) * scale;
             sz = rz;
             float nx = v.normal.x * cs + v.normal.z * sn, nzz = -v.normal.x * sn + v.normal.z * cs;
             (void)nx;

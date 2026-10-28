@@ -2,6 +2,8 @@
 
 #include "core/Bytes.h"
 
+#include <bc7decomp.h>   // third_party/bc7decomp (Richard Geldreich, MIT or public domain)
+
 namespace cardbridge::unity {
 
 namespace {
@@ -85,6 +87,25 @@ std::vector<uint8_t> decodeDxt(int width, int height, const uint8_t* data, size_
     return out;
 }
 
+std::vector<uint8_t> decodeBc7(int width, int height, const uint8_t* data, size_t size) {
+    int bw = (width + 3) / 4, bh = (height + 3) / 4;
+    if (size < static_cast<size_t>(bw) * bh * 16) throw FormatError("texture data shorter than its size implies");
+    std::vector<uint8_t> out(static_cast<size_t>(width) * height * 4);
+    for (int by = 0; by < bh; ++by)
+        for (int bx = 0; bx < bw; ++bx) {
+            bc7decomp::color_rgba px[16];
+            if (!bc7decomp::unpack_bc7(data + (static_cast<size_t>(by) * bw + bx) * 16, px)) throw FormatError("invalid BC7 block");
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) {
+                    int X = bx * 4 + x, Y = by * 4 + y;
+                    if (X >= width || Y >= height) continue;
+                    uint8_t* o = &out[(static_cast<size_t>(Y) * width + X) * 4];
+                    o[0] = px[y * 4 + x].r; o[1] = px[y * 4 + x].g; o[2] = px[y * 4 + x].b; o[3] = px[y * 4 + x].a;
+                }
+        }
+    return out;
+}
+
 } // namespace
 
 std::vector<uint8_t> DecodeTexture(int fmt, int width, int height, const uint8_t* data, size_t size) {
@@ -124,6 +145,7 @@ std::vector<uint8_t> DecodeTexture(int fmt, int width, int height, const uint8_t
         return out;
     case 10: return decodeDxt(width, height, data, size, false);
     case 12: return decodeDxt(width, height, data, size, true);
+    case 25: return decodeBc7(width, height, data, size);
     default:
         throw FormatError("unsupported Unity texture format " + std::to_string(fmt));
     }
