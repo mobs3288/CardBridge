@@ -49,7 +49,16 @@ struct MaterialEdits {
     enum SkinOverlayType { OverlayBody = 3, OverlayFace = 4, OverlayEyeL = 8, OverlayEyeR = 10 };
     bool decodeSkinOverlay(int type, Image& out) const;
 
-    bool empty() const { return mainTex.empty() && skinOverlays.empty() && floats.empty() && colors.empty() && shaders.empty() && rendererEnabled.empty(); }
+    // KoiClothesOverlayX (KKEx "KCOX"): an image painted over a garment's texture, for this coordinate, keyed by the garment's
+    // object name in the game (ct_clothesTop, ct_top_parts_B, ...). `replace` clears the garment's own texture first.
+    struct ClothesOverlay {
+        Bytes png;
+        bool replace = false;
+    };
+    std::map<std::string, ClothesOverlay> clothesOverlays;
+    bool decodeClothesOverlay(const std::string& garment, Image& out, bool& replace) const;
+
+    bool empty() const { return mainTex.empty() && skinOverlays.empty() && clothesOverlays.empty() && floats.empty() && colors.empty() && shaders.empty() && rendererEnabled.empty(); }
 
     // The embedded texture replacing `material`'s main texture, or -1.
     int mainTexFor(int coordinate, int objectType, int slot, const std::string& material) const;

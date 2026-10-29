@@ -57,8 +57,27 @@ bool MaterialEdits::decodeSkinOverlay(int type, Image& out) const {
     return it != skinOverlays.end() && decodeImage(it->second, out);
 }
 
+bool MaterialEdits::decodeClothesOverlay(const std::string& garment, Image& out, bool& replace) const {
+    auto it = clothesOverlays.find(garment);
+    if (it == clothesOverlays.end() || !decodeImage(it->second.png, out)) return false;
+    replace = it->second.replace;
+    return true;
+}
+
 MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
     MaterialEdits me;
+
+    // KCOX: "Overlays" is a MessagePack blob of coordinate -> {garment object name -> [png bytes, replace]}.
+    const Value& kcox = extended.at("KCOX").at(size_t(1));
+    if (kcox.isMap() && kcox.at("Overlays").isBin()) {
+        Value overlays = MsgPackParse(kcox.at("Overlays").asBin());
+        for (const auto& kv : overlays.asMap()) {
+            if (!kv.first.isInt() || kv.first.asInt() != coordinate) continue;
+            for (const auto& g : kv.second.asMap())
+                if (g.first.isStr() && g.second.at(size_t(0)).isBin() && g.second.at(size_t(0)).size() > 0)
+                    me.clothesOverlays[g.first.asStr()] = {g.second.at(size_t(0)).asBin(), g.second.at(size_t(1)).asBool()};
+        }
+    }
 
     // KSOX: Lookup maps coordinate -> {overlay type -> texture id}; the images sit beside it as "_TextureID_<id>".
     const Value& ksox = extended.at("KSOX").at(size_t(1));
