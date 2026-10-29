@@ -588,7 +588,13 @@ struct Builder {
                         std::shared_ptr<unity::TextureData> mask;
                         std::string maskKey = "-";
                         if (mp && !mp->isNull() && mp->isLocal()) { mask = decode(uf, *mp, partId); maskKey = uf.name() + "#" + std::to_string(mp->pathId); }
-                        sm.texture = bake(main, uf.name() + "#" + std::to_string(tp->pathId), mask, maskKey, look->colors, uf.name());
+                        Vec4 tint[3] = {look->colors[0], look->colors[1], look->colors[2]};
+                        if (edits && meType >= 0)   // MaterialEditor colour overrides replace the card's slot colours in the tint
+                            for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) {
+                                int k = e->property == "Color" ? 0 : e->property == "Color2" ? 1 : e->property == "Color3" ? 2 : -1;
+                                if (k >= 0) tint[k] = Vec4{e->value[0], e->value[1], e->value[2], e->value[3]};
+                            }
+                        sm.texture = bake(main, uf.name() + "#" + std::to_string(tp->pathId), mask, maskKey, tint, uf.name());
                     } else {
                         sm.texture = textureFor(uf, *tp, partId);
                     }
