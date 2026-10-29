@@ -59,6 +59,7 @@ UnityFile::UnityFile(std::shared_ptr<UnityBundle> bundle) : bundle_(std::move(bu
     for (const auto* o : sf_->ofClass(cls::GameObject)) {
         Value v = sf_->read(*o);
         goNames_[o->pathId] = v.at("m_Name").asStr();
+        goActive_[o->pathId] = v.at("m_IsActive").asBool(true);
         auto& comps = goComponents_[o->pathId];
         for (const auto& c : v.at("m_Component").asArray()) {
             const Value& pp = c.has("component") ? c.at("component") : c.at("second");
@@ -149,6 +150,10 @@ std::vector<RendererInfo> UnityFile::renderersUnder(int64_t rootId) const {
             RendererInfo r;
             r.skinned = cid == cls::SkinnedMeshRenderer;
             r.enabled = v.at("m_Enabled").asBool(true);
+            for (const Xform* a = x; a && r.active; a = xform(a->parent)) {
+                auto ga = goActive_.find(a->goId);
+                if (ga != goActive_.end() && !ga->second) r.active = false;
+            }
             r.goId = x->goId;
             r.xformId = xid;
             r.componentId = pid;
