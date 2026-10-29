@@ -64,6 +64,7 @@ struct SceneMaterial {
 struct SceneShader {
     std::string name;            // e.g. "Shader Forge/main_opaque"
     std::vector<uint8_t> blob;   // decompressed Direct3D 11 program blob
+    std::vector<std::pair<std::string, std::string>> texDefaults;   // texture property -> default ("white", "black", "bump", "gray")
 };
 
 struct SceneSubmesh {

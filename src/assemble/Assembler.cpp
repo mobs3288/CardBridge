@@ -373,6 +373,7 @@ struct Builder {
                 SceneShader sh;
                 sh.name = name;
                 sh.blob = std::move(*blob);
+                sh.texDefaults = uf.readShaderTextureDefaults(pathId);
                 scene.shaders.push_back(std::move(sh));
                 result = static_cast<int>(scene.shaders.size()) - 1;
             }
