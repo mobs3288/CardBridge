@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <limits>
 #include <cstring>
+#include <thread>
 #include <map>
 #include <memory>
 
@@ -307,7 +308,8 @@ struct MatTextures : shader::ISm4Textures {
         const std::string* name = nullptr;
         for (const auto& b : prog->textures) if (static_cast<int>(b.reg) == t) name = &b.name;
         if (!name) return;
-        if (const char* drop = std::getenv("CARDBRIDGE_DROP_TEX")) { if (*name == drop) return; }   // debug: treat this texture as missing (white)
+        static const char* const drop = std::getenv("CARDBRIDGE_DROP_TEX");
+        if (drop && *name == drop) return;   // debug: treat this texture as missing (white)
         for (const auto& tb : mat->texProps)
             if (tb.name == *name && tb.texture >= 0) {
                 size_t ti = static_cast<size_t>(tb.texture);
@@ -580,6 +582,160 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             }
         }
     }
+}
+
+namespace {
+
+// A mesh laid flat: every vertex goes to its own UV position on a 1 m plane facing +Z, so the shader sees the material as a flat
+// sheet in front of the light and the camera, with the tangent frame of the texture itself.
+assemble::SceneMesh FlattenToUv(const assemble::SceneMesh& m) {
+    assemble::SceneMesh f = m;
+    for (auto& v : f.vertices) { v.pos = {v.uv.x - 0.5f, v.uv.y - 0.5f, 0.0f}; v.normal = {0, 0, 1}; }
+    return f;
+}
+
+void BuildTexMips(const assemble::Scene& scene, ViewState& st, int ti) {
+    if (ti < 0 || st.built[static_cast<size_t>(ti)]) return;
+    st.mips[static_cast<size_t>(ti)] = BuildMips(scene.textures[static_cast<size_t>(ti)]);
+    st.built[static_cast<size_t>(ti)] = true;
+}
+
+} // namespace
+
+void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report) {
+    ViewState st;
+    st.mips.assign(scene.textures.size(), Mips{});
+    st.built.assign(scene.textures.size(), false);
+    const float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    int baked = 0;
+    const size_t originalTextures = scene.textures.size();
+    for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+        auto& mat = scene.materials[mi];
+        const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
+        if (!sr) continue;
+        // The submeshes of exported parts that use this material, each on a flattened copy of its mesh.
+        struct Use { size_t flat; const std::vector<uint32_t>* indices; };
+        std::vector<Use> uses;
+        std::vector<assemble::SceneMesh> flats;
+        for (const auto& part : scene.parts) {
+            if (!part.includeInExport) continue;
+            for (int me : part.meshes) {
+                const auto& mesh = scene.meshes[static_cast<size_t>(me)];
+                size_t flatIdx = static_cast<size_t>(-1);
+                for (const auto& sub : mesh.submeshes) {
+                    if (sub.material != static_cast<int>(mi)) continue;
+                    if (flatIdx == static_cast<size_t>(-1)) { flats.push_back(FlattenToUv(mesh)); flatIdx = flats.size() - 1; }
+                    uses.push_back({flatIdx, &sub.indices});
+                }
+            }
+        }
+        if (uses.empty()) continue;
+        int W = 512, H = 512;
+        if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures) { W = scene.textures[static_cast<size_t>(mat.texture)].width; H = scene.textures[static_cast<size_t>(mat.texture)].height; }
+        while (std::max(W, H) > maxSize) { W = std::max(1, W / 2); H = std::max(1, H / 2); }
+        W = std::max(W, 64); H = std::max(H, 64);
+
+        // The textures the shader reads are built before the worker threads start (they only read from here on).
+        for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
+        for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
+
+        CbSet psCb;
+        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
+        std::vector<std::vector<PsIn>> vsOut(flats.size());
+        bool ok = true;
+        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], ComputeTangents(flats[f]), scene.globalProps, L, camPos, vsOut[f]);
+        if (!ok) continue;
+
+        std::vector<float> img(static_cast<size_t>(W) * H * 4, 0.0f);
+        std::vector<uint8_t> cov(static_cast<size_t>(W) * H, 0);
+        auto worker = [&](unsigned wi) {
+            MatTextures mt;
+            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
+            for (const auto& use : uses) {
+                const auto& fm = flats[use.flat];
+                const auto& vo = vsOut[use.flat];
+                for (size_t t = 0; t + 2 < use.indices->size(); t += 3) {
+                    uint32_t i0 = (*use.indices)[t], i1 = (*use.indices)[t + 1], i2 = (*use.indices)[t + 2];
+                    float ax = fm.vertices[i0].uv.x * W, ay = (1.0f - fm.vertices[i0].uv.y) * H;
+                    float bx = fm.vertices[i1].uv.x * W, by = (1.0f - fm.vertices[i1].uv.y) * H;
+                    float cx = fm.vertices[i2].uv.x * W, cy = (1.0f - fm.vertices[i2].uv.y) * H;
+                    float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+                    if (std::fabs(den) < 1e-8f) continue;
+                    int x0 = std::max(0, static_cast<int>(std::floor(std::min({ax, bx, cx})))), x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max({ax, bx, cx}))));
+                    int y0 = std::max(0, static_cast<int>(std::floor(std::min({ay, by, cy})))), y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max({ay, by, cy}))));
+                    for (int y = y0; y <= y1; ++y) {
+                        if (static_cast<unsigned>(y) % hw != wi) continue;
+                        for (int x = x0; x <= x1; ++x) {
+                            float px = x + 0.5f, py = y + 0.5f;
+                            float l0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den;
+                            float l1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den;
+                            float l2 = 1.0f - l0 - l1;
+                            if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                            size_t ti = static_cast<size_t>(y) * W + x;
+                            if (cov[ti]) continue;   // overlapping UV islands: the first one wins
+                            shader::Sm4Io io;
+                            io.constantBuffers = psCb.ptr;
+                            io.textures = &mt;
+                            for (const auto& l : sr->links)
+                                for (int ch = 0; ch < 4; ++ch)
+                                    io.input[l.psReg][ch] = l0 * vo[i0].r[l.psReg][ch] + l1 * vo[i1].r[l.psReg][ch] + l2 * vo[i2].r[l.psReg][ch];
+                            for (const auto& in : sr->programs[sr->pi].code.inputs) {
+                                if (in.reg >= 32) continue;
+                                if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = px; io.input[in.reg][1] = py; io.input[in.reg][2] = 0.5f; io.input[in.reg][3] = 1; }
+                                else if (in.semantic == "SV_IsFrontFace") { uint32_t bits = 0xFFFFFFFFu; std::memcpy(&io.input[in.reg][0], &bits, 4); }
+                            }
+                            std::string why;
+                            if (!shader::RunSm4(sr->ps, io, &why)) continue;
+                            cov[ti] = 1;
+                            float a = io.discarded ? 0.0f : io.output[0][3];
+                            if (!mat.alpha && a >= 0.5f) a = 1.0f;
+                            for (int c = 0; c < 3; ++c) img[ti * 4 + static_cast<size_t>(c)] = io.output[0][c];
+                            img[ti * 4 + 3] = a;
+                        }
+                    }
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker, w);
+        worker(0);
+        for (auto& th : pool) th.join();
+
+        // Pad the islands so bilinear filtering and mips do not pull in empty texels at the seams.
+        for (int pass = 0; pass < 6; ++pass) {
+            std::vector<uint8_t> cov2 = cov;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    size_t ti = static_cast<size_t>(y) * W + x;
+                    if (cov[ti]) continue;
+                    for (int d = 0; d < 4; ++d) {
+                        int nx = x + (d == 0) - (d == 1), ny = y + (d == 2) - (d == 3);
+                        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                        size_t ni = static_cast<size_t>(ny) * W + nx;
+                        if (!cov[ni]) continue;
+                        for (int c = 0; c < 4; ++c) img[ti * 4 + static_cast<size_t>(c)] = img[ni * 4 + static_cast<size_t>(c)];
+                        cov2[ti] = 1;
+                        break;
+                    }
+                }
+            cov.swap(cov2);
+        }
+        assemble::SceneTexture bt;
+        bt.name = "baked_" + mat.name;
+        bt.source = "shader bake (" + mat.shader + ")";
+        bt.width = W; bt.height = H;
+        bt.rgba.resize(static_cast<size_t>(W) * H * 4);
+        for (size_t i = 0; i < bt.rgba.size(); ++i) bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, img[i] * 255.0f + 0.5f)));
+        scene.textures.push_back(std::move(bt));
+        st.mips.push_back(Mips{});
+        st.built.push_back(false);
+        // The shader's colour is now in the texture: the PMX material multiplies by white and keeps its alpha.
+        mat.texture = static_cast<int>(scene.textures.size()) - 1;
+        mat.diffuse = {1.0f, 1.0f, 1.0f, mat.diffuse.w};
+        ++baked;
+    }
+    if (report) *report = "baked " + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
 } // namespace cardbridge::exporter
