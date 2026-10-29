@@ -271,6 +271,7 @@ struct ItemLook {
     int tex1 = -1, tex2 = -1;             // baked scene textures for the clothing main / second texture
     std::set<int64_t> use1, use2;         // renderer component ids that get tex1 / tex2 on material 0
     bool materialTint = false;            // accessories: tint each material's own texture by its _ColorMask
+    std::set<int64_t> tintOnly;           // accessories: the renderers the game colours (rendNormal / rendHair); empty = all
     Vec4 colors[3]{{1, 1, 1, 1}, {1, 1, 1, 1}, {1, 1, 1, 1}};
 };
 
@@ -593,7 +594,7 @@ struct Builder {
             if (sm.texture < 0) {
                 const PPtr* tp = m->texture("_MainTex");
                 if (tp && !tp->isNull()) {
-                    if (look && look->materialTint) {
+                    if (look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) {
                         auto main = decode(uf, *tp, partId);
                         const PPtr* mp = m->texture("_ColorMask");
                         std::shared_ptr<unity::TextureData> mask;
@@ -611,7 +612,7 @@ struct Builder {
                     }
                 }
             }
-            if (sm.texture < 0 && look && look->materialTint) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
+            if (sm.texture < 0 && look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
             else if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
         }
         if (sm.texture >= 0) {   // the texture this exporter assigns (baked, tinted or replaced) is what the shader gets as _MainTex
@@ -1681,6 +1682,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 
         // Which renderers get which run-time colours (ChaAccessoryComponent: rendNormal/rendAlpha/rendHair; ChaCustomHairComponent: rendHair).
         std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem, rtHairAcs;
+        bool haveAccComponent = false;
         bool useC[3] = {true, true, true};
         for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
             auto ids = [&](const char* field, std::set<int64_t>& into) {
@@ -1690,6 +1692,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             };
             if (std::getenv("CARDBRIDGE_DEBUG_MB")) std::fprintf(stderr, "mb %s on %s\n", mb.className.c_str(), ref.partId.c_str());
             if (mb.className == "ChaAccessoryComponent") {
+                haveAccComponent = true;
                 ids("rendNormal", rtNormal); ids("rendAlpha", rtAlpha); ids("rendHair", rtHair);
                 useC[0] = mb.fields.at("useColor01").asInt() != 0;
                 useC[1] = mb.fields.at("useColor02").asInt() != 0;
@@ -1698,6 +1701,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 ids("rendHair", rtHairItem);
                 ids("rendAccessory", rtHairAcs);
             }
+        }
+        if (look.materialTint && haveAccComponent) {   // ChangeAccessoryColor sets colours 1-3 on rendNormal only; rendAlpha gets just _Color4 and rendHair the hair colour
+            look.tintOnly = rtNormal;
+            look.tintOnly.insert(rtHair.begin(), rtHair.end());
+            if (look.tintOnly.empty()) look.tintOnly.insert(-1);   // a component that lists none: nothing is tinted
         }
         Vec4 hairColor{1, 1, 1, 1};
         Value hacInfo;   // HairAccessoryCustomizer data of this accessory slot (a map when the card has it)
@@ -1874,13 +1882,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // Hide the triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep):
     // the game masks the body this way, and the bra the same way (OverBraMask).
     auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
-                          const std::vector<std::shared_ptr<unity::TextureData>>& masks) {
+                          const std::vector<std::shared_ptr<unity::TextureData>>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
         if (masks.empty()) return;
         size_t dropped = 0, total = 0;
         for (auto& part : scene.parts) {
             if (!pick(part)) continue;
             for (int mi : part.meshes) {
                 SceneMesh& m = scene.meshes[static_cast<size_t>(mi)];
+                if (meshOk && !meshOk(m)) continue;
                 for (auto& sub : m.submeshes) {
                     std::vector<uint32_t> keep;
                     for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
@@ -1904,7 +1913,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         scene.warn(what, what + " mask: " + std::to_string(dropped) + " of " + std::to_string(total) + " triangles hidden under clothing (as the game does)");
     };
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
-    applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks);
+    applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
+               [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
     if (topCoversBra)
