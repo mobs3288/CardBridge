@@ -141,6 +141,8 @@ public:
     std::optional<Bytes> readShaderBlob(int64_t shaderPathId, std::string* why = nullptr) const;
     // The shader's texture properties with their default texture ("white", "black", "bump", "gray"): what Unity binds when a material leaves the slot empty.
     std::vector<std::pair<std::string, std::string>> readShaderTextureDefaults(int64_t shaderPathId) const;
+    // The declared default of every colour, vector and float property of a shader (floats in .x).
+    std::vector<std::pair<std::string, Vec4>> readShaderPropDefaults(int64_t shaderPathId) const;
 
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;

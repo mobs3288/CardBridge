@@ -379,6 +379,34 @@ struct Builder {
     std::map<std::string, int> shaderCache;    // "<bundle>#<pathId>" -> scene shader (-1 = unreadable)
     std::map<std::string, int> shaderTexCache; // "<bundle>#<pathId>" -> scene texture, at most 1024 px on a side
 
+    resolve::Resolver* resolverPtr = nullptr;
+    std::map<std::string, int> shaderByNameCache;
+
+    // A shader by its Unity name, for MaterialEditor shader overrides: one already in the scene, else found in the base bundles
+    // that carry the character shaders.
+    int shaderByName(const std::string& name) {
+        auto c = shaderByNameCache.find(name);
+        if (c != shaderByNameCache.end()) return c->second;
+        int result = -1;
+        for (size_t i = 0; i < scene.shaders.size() && result < 0; ++i)
+            if (scene.shaders[i].name == name) result = static_cast<int>(i);
+        static const char* bundles[] = {"chara/bo_head_00.unity3d", "chara/oo_base.unity3d", "chara/mm_base.unity3d", "chara/co_top_00.unity3d", "chara/ao_hair_00.unity3d"};
+        for (const char* bp : bundles) {
+            if (result >= 0 || !resolverPtr) break;
+            std::string why;
+            auto f = resolverPtr->openBaseBundle(bp, &why);
+            if (!f) continue;
+            for (const auto* o : f->serialized().ofClass(48)) {   // Shader
+                Value v = f->serialized().read(*o);
+                std::string n = v.at("m_ParsedForm").at("m_Name").asStr();
+                if (n.empty()) n = v.at("m_Name").asStr();
+                if (n == name) { result = shaderFor(*f, o->pathId, name); break; }
+            }
+        }
+        shaderByNameCache[name] = result;
+        return result;
+    }
+
     int shaderFor(UnityFile& uf, int64_t pathId, const std::string& name) {
         std::string key = uf.name() + "#" + std::to_string(pathId);
         auto it = shaderCache.find(key);
@@ -393,6 +421,7 @@ struct Builder {
                 sh.name = name;
                 sh.blob = std::move(*blob);
                 sh.texDefaults = uf.readShaderTextureDefaults(pathId);
+                sh.propDefaults = uf.readShaderPropDefaults(pathId);
                 scene.shaders.push_back(std::move(sh));
                 result = static_cast<int>(scene.shaders.size()) - 1;
             }
@@ -571,6 +600,35 @@ struct Builder {
             if (!found) { SceneTexBinding b; b.name = "_MainTex"; b.texture = sm.texture; sm.texProps.push_back(std::move(b)); }
         }
         if (edits && meType >= 0) {
+            // MaterialEditor's shader, float and colour overrides for this material.
+            const unity::MaterialData* m_original = m ? &*m : nullptr;
+            for (const auto* e : edits->editsFor(edits->shaders, meCoordinate, meType, meSlot, sm.name)) {
+                int si = shaderByName(e->property);
+                if (si < 0) continue;
+                // Changing a material's shader keeps the values of properties both shaders have; the new shader's own
+                // properties start at its declared defaults (the card's run-time colours are for the old shader).
+                if (m_original) {
+                    for (const auto& d : scene.shaders[static_cast<size_t>(si)].propDefaults) {
+                        bool had = false;
+                        for (const auto& c : m_original->colors) if (c.first == d.first) had = true;
+                        for (const auto& f : m_original->floats) if (f.first == d.first) had = true;
+                        if (had) continue;
+                        bool set = false;
+                        for (auto& pr : sm.props) if (pr.first == d.first) { pr.second = d.second; set = true; }
+                        if (!set) sm.props.emplace_back(d.first, d.second);
+                    }
+                }
+                sm.shaderIndex = si;
+                sm.shader = e->property;
+                sm.alpha = contains(e->property, "alpha");
+                sm.doubleSided = sm.alpha || contains(e->property, "hair");
+            }
+            auto setProp = [&](const std::string& name, Vec4 v) {
+                for (auto& pr : sm.props) if (pr.first == name) { pr.second = v; return; }
+                sm.props.emplace_back(name, v);
+            };
+            for (const auto* e : edits->editsFor(edits->floats, meCoordinate, meType, meSlot, sm.name)) setProp("_" + e->property, Vec4{e->value[0], 0, 0, 0});
+            for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) setProp("_" + e->property, Vec4{e->value[0], e->value[1], e->value[2], e->value[3]});
             int id = edits->mainTexFor(meCoordinate, meType, meSlot, sm.name);
             if (id >= 0) {
                 int t = embeddedTexture(id, partId);
@@ -784,6 +842,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     scene.name = card.displayName();
     Rig rig;
     Builder b{nullptr, scene, rig, {}};
+    b.resolverPtr = &resolver;
     b.openCab = [&resolver](const std::string& n) { std::string w; return resolver.openByCab(n, &w); };
 
     int outfit = opt.outfit;
@@ -1538,7 +1597,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         } else if (ref.group == "Head") { b.meType = card::MaterialEdits::Character; }
 
         // Which renderers get which run-time colours (ChaAccessoryComponent: rendNormal/rendAlpha/rendHair; ChaCustomHairComponent: rendHair).
-        std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem;
+        std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem, rtHairAcs;
         bool useC[3] = {true, true, true};
         for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
             auto ids = [&](const char* field, std::set<int64_t>& into) {
@@ -1554,15 +1613,27 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 useC[2] = mb.fields.at("useColor03").asInt() != 0;
             } else if (mb.className == "ChaCustomHairComponent") {
                 ids("rendHair", rtHairItem);
+                ids("rendAccessory", rtHairAcs);
             }
         }
         Vec4 hairColor{1, 1, 1, 1};
-        std::vector<std::string> skipped;
+        Value hacInfo;   // HairAccessoryCustomizer data of this accessory slot (a map when the card has it)
+        if (accessoryMode && ref.outfit >= 0 && ref.accIndex >= 0) {
+            const Value& payload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+            if (payload.isBin()) hacInfo = MsgPackParse(payload.asBin()).atInt(ref.outfit).atInt(ref.accIndex);
+        }
+        std::vector<std::string> skipped, skippedByEditor;
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(roots[0])) {
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
                 std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0);
             if (!r.enabled) continue;
+            if (b.edits && b.meType >= 0) {   // MaterialEditor can switch a renderer off
+                bool off = false;
+                for (const auto* e : b.edits->editsFor(b.edits->rendererEnabled, b.meCoordinate, b.meType, b.meSlot, r.name))
+                    if (e->property == "0" && e->value[0] == 0.0f) off = true;
+                if (off) { skippedByEditor.push_back(r.name); continue; }
+            }
             if (onlyHelperMaterials(*uf, r)) continue;
             std::string path = "/" + uf->pathOf(r.xformId) + "/";
             // Variants the game keeps switched off in the default state: the pulled-off ("nuge") top and
@@ -1615,7 +1686,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
                                ? 0.2f * std::min(1.0f, std::max(0.0f, static_cast<float>(card.status.at("hohoAkaRate").asFloat(0.0))))
                                : -1.0f;
-            b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0;
+            // Hair accessories: the HairAccessoryCustomizer slot setting decides gloss and colours (ColorMatch = the character's hair colours); a slot
+            // without that data keeps the prefab's own.
+            b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0 && (ref.group == "Hair" || (hacInfo.isMap() && hacInfo.at("HairGloss").asBool()));
             auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
             if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
                 const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
@@ -1625,9 +1698,22 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     if (useC[2]) b.runtime.emplace_back("_Color3", vec4Of(col.at(size_t(2))));
                 }
                 if (rtAlpha.count(r.componentId)) b.runtime.emplace_back("_Color4", vec4Of(col.at(size_t(3))));
-                if (rtHair.count(r.componentId)) {
-                    Vec4 sc = rawColor(card.hair.at("parts").at(size_t(0)).at("startColor"));
-                    b.runtime.emplace_back("_Color", sc); b.runtime.emplace_back("_Color2", sc); b.runtime.emplace_back("_Color3", sc);
+                if (hacInfo.isMap()) {
+                    const Value& hp0 = card.hair.at("parts").at(size_t(0));
+                    if (rtHairItem.count(r.componentId)) {
+                        if (hacInfo.at("ColorMatch").asBool()) {
+                            b.runtime.emplace_back("_Color", rawColor(hp0.at("baseColor")));
+                            b.runtime.emplace_back("_Color2", rawColor(hp0.at("startColor")));
+                            b.runtime.emplace_back("_Color3", rawColor(hp0.at("endColor")));
+                            b.runtime.emplace_back("_LineColor", vec4Of(hp0.at("outlineColor")));
+                        } else {
+                            b.runtime.emplace_back("_LineColor", vec4Of(hacInfo.at("OutlineColor")));
+                        }
+                    }
+                    if (rtHairAcs.count(r.componentId)) {
+                        Vec4 ac = vec4Of(hacInfo.at("AccessoryColor"));
+                        b.runtime.emplace_back("_Color", ac); b.runtime.emplace_back("_Color2", ac); b.runtime.emplace_back("_Color3", ac);
+                    }
                 }
             } else if (ref.group == "Hair" && rtHairItem.count(r.componentId)) {
                 size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
@@ -1639,6 +1725,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
             int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
             if (mi >= 0) part.meshes.push_back(mi);
+        }
+        if (!skippedByEditor.empty()) {
+            std::string list;
+            for (const auto& n : skippedByEditor) list += (list.empty() ? "" : ", ") + n;
+            scene.warn(ref.partId, "left out, switched off in the card's MaterialEditor data: " + list);
         }
         if (!skipped.empty()) {
             std::string list;
