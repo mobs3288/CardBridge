@@ -238,6 +238,18 @@ std::string UnityFile::externalName(const PPtr& p) const {
     return "external#" + std::to_string(p.fileId);
 }
 
+void MeshData::applyBlendShape(size_t shape, float weight) {
+    if (shape >= blendShapes.size() || weight == 0.0f) return;
+    const BlendShape& s = blendShapes[shape];
+    float k = weight * 0.01f;
+    for (size_t i = s.first; i < static_cast<size_t>(s.first) + s.count && i < blendVertices.size(); ++i) {
+        const BlendVertex& b = blendVertices[i];
+        if (b.index >= positions.size()) continue;
+        positions[b.index] = positions[b.index] + b.dPos * k;
+        if (b.index < normals.size()) normals[b.index] = normals[b.index] + b.dNormal * k;
+    }
+}
+
 std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) const {
     auto fail = [&](const std::string& m) -> std::optional<MeshData> { if (why) *why = m; return std::nullopt; };
     if (p.isNull()) return fail("no mesh assigned");
@@ -336,6 +348,19 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
             for (int c = 0; c < 4; ++c)
                 mt.m[r * 4 + c] = static_cast<float>(bp.at("e" + std::to_string(r) + std::to_string(c)).asFloat());
         m.bindPoses.push_back(mt);
+    }
+
+    if (v.has("m_Shapes")) {
+        const Value& bs = v.at("m_Shapes");
+        for (const auto& bv : bs.at("vertices").asArray()) {
+            MeshData::BlendVertex b;
+            b.index = static_cast<uint32_t>(bv.at("index").asInt());
+            b.dPos = toVec3(bv.at("vertex"));
+            b.dNormal = toVec3(bv.at("normal"));
+            m.blendVertices.push_back(b);
+        }
+        for (const auto& sh : bs.at("shapes").asArray())
+            m.blendShapes.push_back({static_cast<uint32_t>(sh.at("firstVertex").asInt()), static_cast<uint32_t>(sh.at("vertexCount").asInt())});
     }
 
     const Bytes& ib = v.at("m_IndexBuffer").asBin();

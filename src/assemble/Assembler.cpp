@@ -237,7 +237,13 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
         return r;
     };
     const Value& vals = card.face.at("shapeValueFace");
-    for (size_t i = 0; i < vals.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), static_cast<float>(vals.at(i).asFloat()));
+    const bool neutral = std::getenv("CARDBRIDGE_FACE_NEUTRAL") != nullptr;   // debug: every slider at 0.5
+    for (size_t i = 0; i < vals.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), neutral ? 0.5f : static_cast<float>(vals.at(i).asFloat()));
+    if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) {
+        std::fprintf(stderr, "face values:");
+        for (size_t i = 0; i < vals.size(); ++i) std::fprintf(stderr, " %zu=%.3f", i, vals.at(i).asFloat());
+        std::fprintf(stderr, "\n");
+    }
     shape::RunHeadUpdate(S);
     shape::RunHeadUpdateAlways(S);
 
@@ -247,6 +253,9 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
         o.scl = sb.scl;
         o.hasRot = sb.rotSet;
         if (sb.rotSet) o.rot = shape::EulerToQuat(sb.rot);
+        if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
+            std::fprintf(stderr, "headshape %s pos %g %g %g scl %g %g %g rot%s %g %g %g\n", name.c_str(), o.pos.x, o.pos.y, o.pos.z, o.scl.x, o.scl.y, o.scl.z,
+                         sb.rotSet ? "*" : "", sb.rot.x, sb.rot.y, sb.rot.z);
         out[name] = o;
     }
     return out;
@@ -318,6 +327,8 @@ struct Builder {
     std::vector<std::pair<std::string, Vec4>> runtime;
     bool glossForThisRenderer = false;
     int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
+    // Head only: blend-shape weights (0..100) of the character's resting expression, by renderer GameObject id and shape index.
+    const std::map<int64_t, std::vector<std::pair<int, float>>>* blend = nullptr;
     float blushAlpha = -1;       // face material only: alpha of _overcolor2, the emotion blush (ChaControl.ChangeHohoAkaRate); < 0 = leave
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
@@ -594,6 +605,11 @@ struct Builder {
             return -1;
         }
         if (mesh->positions.empty() || mesh->subMeshTriangles.empty()) return -1;
+        if (blend) {
+            auto bw = blend->find(r.goId);
+            if (bw != blend->end())
+                for (const auto& [shapeIndex, weight] : bw->second) mesh->applyBlendShape(static_cast<size_t>(shapeIndex), weight);
+        }
 
         SceneMesh sm;
         sm.name = r.name;
@@ -1240,6 +1256,47 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
 
+        // The game always plays the face's blend shapes (FaceBlendShape on the head prefab): eyes open, mouth closed, the
+        // eyebrow in its pattern. The sculpted mesh alone is a different face; every Head renderer a control targets gets the
+        // resting-state weights (FBSBase.CalculateBlendShape at blink open-rate 1 and voice 0, no gaze offset).
+        std::map<int64_t, std::vector<std::pair<int, float>>> blendWeights;
+        b.blend = nullptr;
+        if (ref.group == "Head") {
+            std::map<int64_t, std::map<int, float>> sum;
+            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                if (mb.className != "FaceBlendShape") continue;
+                auto status = [&](const char* key, double def) { return card.status.at(key).asFloat(def); };
+                const float lookUp = static_cast<float>(mb.fields.at("EyeLookUpCorrect").asFloat(0.1));
+                struct Ctrl { const char* field; int ptn; float openRate, openMax; };
+                const Ctrl ctrls[3] = {
+                    {"EyebrowCtrl", static_cast<int>(status("eyebrowPtn", 0)), 1.0f, std::min(1.0f, std::max(0.0f, static_cast<float>(status("eyebrowOpenMax", 1)))) },
+                    {"EyesCtrl", static_cast<int>(status("eyesPtn", 0)), 1.0f, std::min(0.92f, std::max(0.0f, static_cast<float>(status("eyesOpenMax", 1)))) },
+                    {"MouthCtrl", static_cast<int>(status("mouthPtn", 0)), 0.0f, std::min(1.0f, std::max(0.0f, static_cast<float>(status("mouthOpenMax", 1)))) }};
+                for (const Ctrl& c : ctrls) {
+                    const Value& ctl = mb.fields.at(c.field);
+                    float openMax = c.openMax;
+                    if (std::string(c.field) == "EyesCtrl") openMax = std::min(openMax, 1.0f - lookUp);   // EyeLookController.SetCorrectOpenMax, gaze straight ahead
+                    float num = static_cast<float>(ctl.at("OpenMin").asFloat(0.0)) + (openMax - static_cast<float>(ctl.at("OpenMin").asFloat(0.0))) * c.openRate;
+                    int num3 = static_cast<int>(std::min(100.0f, std::max(0.0f, num * 100.0f)));
+                    for (const auto& tg : ctl.at("FBSTarget").asArray()) {
+                        int64_t go = tg.at("ObjTarget").at("m_PathID").asInt();
+                        const auto& ptns = tg.at("PtnSet").asArray();
+                        if (go == 0 || ptns.empty()) continue;
+                        const Value& ps = ptns[static_cast<size_t>(c.ptn >= 0 && static_cast<size_t>(c.ptn) < ptns.size() ? c.ptn : 0)];
+                        int close = static_cast<int>(ps.at("Close").asInt()), open = static_cast<int>(ps.at("Open").asInt());
+                        if (close >= 0) sum[go][close] += static_cast<float>(100 - num3);
+                        if (open >= 0) sum[go][open] += static_cast<float>(num3);
+                    }
+                }
+            }
+            for (const auto& [go, shapes] : sum)
+                for (const auto& [idx, w] : shapes) {
+                    blendWeights[go].emplace_back(idx, std::min(100.0f, w));
+                    if (std::getenv("CARDBRIDGE_DEBUG_BLEND")) std::fprintf(stderr, "blend go %lld shape %d weight %g\n", static_cast<long long>(go), idx, w);
+                }
+            if (!blendWeights.empty()) b.blend = &blendWeights;
+        }
+
         b.hairParent = nullptr;
         if (ref.group == "Hair") {
             auto hp = rig.world.find("cf_J_FaceUp_ty");
@@ -1367,6 +1424,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.localOv = nullptr;
         b.hairParent = nullptr;
         b.blushAlpha = -1;
+        b.blend = nullptr;
         b.meType = -1;
         scene.parts.push_back(std::move(part));
     }

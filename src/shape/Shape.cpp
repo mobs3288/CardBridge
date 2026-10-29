@@ -1,5 +1,6 @@
 #include "shape/Shape.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace cardbridge::shape {
@@ -53,7 +54,12 @@ bool AnimKeys::get(const std::string& name, float rate, Vec3 v[3], const bool fl
     auto it = d_.find(name);
     if (it == d_.end() || it->second.empty()) return false;
     const auto& keys = it->second;
-    rate = std::min(1.0f, std::max(0.0f, rate));   // cards can store slightly out-of-range sliders; the game clamps
+    // The game clamps a slider to 0..1. The SliderUnlocker plugin (BepisPlugins) lets cards go beyond it and replaces the
+    // result outside the range with a straight line through the first and last key (SliderMath.Calculate*); many cards
+    // rely on it (values like -0.5 or 1.3). The rotation extrapolation is skipped for a few names, as the plugin does.
+    const float rawRate = rate;
+    const bool beyond = rawRate < 0.0f || rawRate > 1.0f;
+    rate = std::min(1.0f, std::max(0.0f, rate));
     auto sample = [&](int group, Vec3 Key::*field) {
         if (rate == 0.0f) { v[group] = keys.front().*field; return; }
         if (rate == 1.0f) { v[group] = keys.back().*field; return; }
@@ -69,6 +75,32 @@ bool AnimKeys::get(const std::string& name, float rate, Vec3 v[3], const bool fl
     if (flag[0]) sample(0, &Key::pos);
     if (flag[1]) sample(1, &Key::rot);
     if (flag[2]) sample(2, &Key::scl);
+    if (beyond && keys.size() >= 2) {
+        const Key& k0 = keys.front();
+        const Key& kn = keys.back();
+        auto line = [&](Vec3 a, Vec3 b) { return a + (b + a * -1.0f) * rawRate; };
+        if (flag[0]) v[0] = line(k0.pos, kn.pos);
+        if (flag[2]) v[2] = line(k0.scl, kn.scl);
+        auto has = [&](const char* s) { return name.find(s) != std::string::npos; };
+        bool keepRot = has("cf_s_Mune") || has("cf_s_Mouth") || has("cf_s_LegLow") || has("cf_s_MayuTip") || (has("thigh") && has("01")) ||
+                       (name.rfind("cf_a_bust", 0) == 0 && name.size() >= 5 && name.compare(name.size() - 5, 5, "_size") == 0);
+        if (flag[1] && !keepRot) {
+            // SliderMath.CalculateRotation: the full turn from the first to the last key, unwrapped to the direction of the first step.
+            const Vec3 r0 = k0.rot, r1 = keys[1].rot, rn = kn.rot;
+            float d1[3] = {r1.x - r0.x, r1.y - r0.y, r1.z - r0.z};
+            float dn[3] = {rn.x - r0.x, rn.y - r0.y, rn.z - r0.z};
+            for (int a = 0; a < 3; ++a) {
+                bool up = d1[a] >= 0.0f;
+                if (dn[a] > 0.0f && !up) dn[a] -= 360.0f;
+                else if (dn[a] < 0.0f && up) dn[a] += 360.0f;
+            }
+            const float base[3] = {r0.x, r0.y, r0.z}, last[3] = {rn.x, rn.y, rn.z};
+            float out[3];
+            for (int a = 0; a < 3; ++a)
+                out[a] = rawRate < 0.0f ? base[a] - dn[a] * std::fabs(rawRate) : last[a] + dn[a] * std::fabs(rawRate - 1.0f);
+            v[1] = {out[0], out[1], out[2]};
+        }
+    }
     return true;
 }
 
