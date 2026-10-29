@@ -436,6 +436,18 @@ std::optional<Bytes> UnityFile::readShaderBlob(int64_t shaderPathId, std::string
     }
 }
 
+std::vector<std::pair<std::string, std::string>> UnityFile::readShaderTextureDefaults(int64_t shaderPathId) const {
+    std::vector<std::pair<std::string, std::string>> out;
+    const ObjectInfo* o = sf_->find(shaderPathId);
+    if (!o) return out;
+    try {
+        Value v = sf_->read(*o);
+        for (const auto& p : v.at("m_ParsedForm").at("m_PropInfo").at("m_Props").asArray())
+            if (p.at("m_Type").asInt() == 4) out.emplace_back(p.at("m_Name").asStr(), p.at("m_DefTexture").at("m_DefaultName").asStr());
+    } catch (const std::exception&) {}
+    return out;
+}
+
 std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* why) const {
     auto fail = [&](const std::string& m) -> std::optional<TextureData> { if (why) *why = m; return std::nullopt; };
     if (p.isNull()) return fail("no texture assigned");

@@ -329,8 +329,13 @@ struct MatTextures : shader::ISm4Textures {
                 SampleBilinear(st->mips[ti], 0, cl ? coord[0] : coord[0] - std::floor(coord[0]), cl ? coord[1] : coord[1] - std::floor(coord[1]), out, cl);
                 return;
             }
-        // A texture the material does not have: Unity's defaults (white; a flat normal map).
-        if (name->find("Normal") != std::string::npos || name->find("Bump") != std::string::npos) { out[0] = 0.5f; out[1] = 0.5f; out[2] = 1.0f; out[3] = 0.5f; }   // flat normal in Unity's packed form (x in alpha)
+        // A texture the material leaves empty: the shader's declared default (Unity's built-in white / black / gray / bump).
+        std::string def = "white";
+        if (mat->shaderIndex >= 0 && static_cast<size_t>(mat->shaderIndex) < scene->shaders.size())
+            for (const auto& d : scene->shaders[static_cast<size_t>(mat->shaderIndex)].texDefaults) if (d.first == *name) def = d.second;
+        if (def == "black") { out[0] = out[1] = out[2] = out[3] = 0.0f; }
+        else if (def == "gray" || def == "grey") { out[0] = out[1] = out[2] = out[3] = 0.5f; }
+        else if (def == "bump") { out[0] = 0.5f; out[1] = 0.5f; out[2] = 1.0f; out[3] = 0.5f; }   // flat normal in Unity's packed form (x in alpha)
     }
 };
 

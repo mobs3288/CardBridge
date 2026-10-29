@@ -130,6 +130,8 @@ public:
     std::string externalNameOf(const PPtr& p) const { return p.fileId > 0 ? externalName(p) : std::string(); }
     // The decompressed Direct3D 11 program blob of a Shader object (what tools/extract_shaders.py writes).
     std::optional<Bytes> readShaderBlob(int64_t shaderPathId, std::string* why = nullptr) const;
+    // The shader's texture properties with their default texture ("white", "black", "bump", "gray"): what Unity binds when a material leaves the slot empty.
+    std::vector<std::pair<std::string, std::string>> readShaderTextureDefaults(int64_t shaderPathId) const;
 
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;
