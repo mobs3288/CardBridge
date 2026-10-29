@@ -770,6 +770,10 @@ struct Builder {
         }
 
         Mat4 staticM = placement * (rootInv * rendererW);
+        if (hairParent) {   // a hair mesh without a skin hangs on the hair parent (cf_J_FaceUp_ty) like the prefab does in the game
+            staticM = *hairParent * (rootInv * rendererW);
+            if (int fi = scene.boneIndex("cf_J_FaceUp_ty"); fi >= 0) staticBone = fi;
+        }
         for (size_t v = 0; v < n; ++v) {
             SceneVertex& out = sm.vertices[v];
             Vec3 p = mesh->positions[v];

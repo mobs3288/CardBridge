@@ -38,6 +38,28 @@ bool readManifest(const std::string& path, ModEntry& e) {
     e.name = tagText(xml, "name");
     e.version = tagText(xml, "version");
     e.author = tagText(xml, "author");
+    e.listIds.clear();
+    for (const auto& entry : z.entries()) {   // the (category, id) rows of the mod's character lists
+        std::string lower = entry.name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lower.find("list/characustom/") == std::string::npos || lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".csv") != 0) continue;
+        Bytes raw = z.read(entry);
+        size_t pos = (raw.size() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF) ? 3 : 0;
+        int64_t category = -1;
+        for (size_t line = 0; pos < raw.size(); ++line) {
+            size_t end = pos;
+            while (end < raw.size() && raw[end] != '\n') ++end;
+            if (line == 0 || line >= 4) {
+                size_t k = pos;
+                int64_t v = 0;
+                bool digits = false;
+                for (; k < end && raw[k] >= '0' && raw[k] <= '9'; ++k) { v = v * 10 + (raw[k] - '0'); digits = true; }
+                if (line == 0) { if (!digits) break; category = v; }
+                else if (digits) { e.listIds.push_back(category); e.listIds.push_back(v); }
+            }
+            pos = end + 1;
+        }
+    }
     return !e.guid.empty();
 }
 
@@ -54,7 +76,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
         try {
             Bytes raw = fileio::ReadFile(cachePath);
             auto j = nlohmann::json::parse(raw.begin(), raw.end());
-            if (j.value("version", 0) == 1)
+            if (j.value("version", 0) == 2)
                 for (const auto& e : j["entries"]) {
                     ModEntry m;
                     m.path = e.value("path", "");
@@ -64,6 +86,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
                     m.author = e.value("author", "");
                     m.size = e.value("size", uint64_t(0));
                     m.mtime = e.value("mtime", int64_t(0));
+                    m.listIds = e.value("ids", std::vector<int64_t>{});
                     cached[m.path] = m;
                 }
         } catch (const std::exception&) {
@@ -118,16 +141,21 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
 
     ModIndex idx;
     nlohmann::json out;
-    out["version"] = 1;
+    out["version"] = 2;
     out["root"] = root;
     auto& arr = out["entries"] = nlohmann::json::array();
     for (size_t i = 0; i < results.size(); ++i) {
         if (!ok[i]) continue;
         const ModEntry& e = results[i];
-        idx.byGuid_[e.guid].push_back(e);
+        auto& vec = idx.byGuid_[e.guid];
+        vec.push_back(e);
         ++idx.count_;
+        for (size_t k = 0; k + 1 < e.listIds.size(); k += 2) {
+            auto& at = idx.byListId_[{static_cast<int>(e.listIds[k]), e.listIds[k + 1]}];
+            if (at.empty() || at.back().first != e.guid || at.back().second != vec.size() - 1) at.emplace_back(e.guid, vec.size() - 1);
+        }
         arr.push_back({{"path", e.path}, {"guid", e.guid}, {"name", e.name}, {"version", e.version},
-                       {"author", e.author}, {"size", e.size}, {"mtime", e.mtime}});
+                       {"author", e.author}, {"size", e.size}, {"mtime", e.mtime}, {"ids", e.listIds}});
     }
     if (!cachePath.empty()) {
         try {
@@ -141,6 +169,17 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
     st.failed = failed;
     if (stats) *stats = st;
     return idx;
+}
+
+std::vector<const ModEntry*> ModIndex::findByListId(int category, int64_t id) const {
+    std::vector<const ModEntry*> out;
+    auto it = byListId_.find({category, id});
+    if (it == byListId_.end()) return out;
+    for (const auto& [guid, idx] : it->second) {
+        auto g = byGuid_.find(guid);
+        if (g != byGuid_.end() && idx < g->second.size()) out.push_back(&g->second[idx]);
+    }
+    return out;
 }
 
 const std::vector<ModEntry>* ModIndex::find(const std::string& guid) const {

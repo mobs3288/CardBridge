@@ -280,6 +280,16 @@ void integrationTests() {
 
         // every GUID the card names is installed
         for (const auto& r : c.rows) CHECK(mi.find(r.modId) != nullptr);
+        // a mod's list rows are found again by their raw (category, id), which is how a card without resolve rows names them
+        for (const auto& r : c.rows) {
+            const auto* files = mi.find(r.modId);
+            if (!files || (*files)[0].listIds.size() < 2) continue;
+            const auto& e = (*files)[0];
+            bool found = false;
+            for (const auto* hit : mi.findByListId(static_cast<int>(e.listIds[0]), e.listIds[1])) found = found || hit->path == e.path;
+            CHECK(found);
+            break;
+        }
 
         assemble::AssembleOptions ao;
         ao.outfit = 0;

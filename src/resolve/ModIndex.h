@@ -14,6 +14,8 @@ struct ModEntry {
     std::string path;        // UTF-8, absolute, forward slashes
     uint64_t size = 0;
     int64_t mtime = 0;
+    // The (category, id) of every row in the mod's character lists, flattened: category, id, category, id ...
+    std::vector<int64_t> listIds;
 };
 
 // Index of the Sideloader mods under a folder: GUID -> .zipmod/.zip files.
@@ -30,11 +32,14 @@ public:
                           const std::function<void(size_t, size_t)>& progress = {});
 
     const std::vector<ModEntry>* find(const std::string& guid) const;
+    // The mods whose lists define (category, id). A card saved without Sideloader's resolve info names its mod items by this raw id.
+    std::vector<const ModEntry*> findByListId(int category, int64_t id) const;
     size_t guidCount() const { return byGuid_.size(); }
     size_t zipCount() const { return count_; }
 
 private:
     std::map<std::string, std::vector<ModEntry>> byGuid_;
+    std::map<std::pair<int, int64_t>, std::vector<std::pair<std::string, size_t>>> byListId_;   // -> (guid, index in byGuid_[guid])
     size_t count_ = 0;
 };
 
