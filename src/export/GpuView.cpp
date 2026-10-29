@@ -58,7 +58,9 @@ struct GpuView::Impl {
     ID3D11SamplerState* samplerClamp = nullptr;
     ID3D11RasterizerState* raster = nullptr;
     ID3D11DepthStencilState* depth = nullptr;
+    ID3D11DepthStencilState* depthOverlay = nullptr;   // depth test without write, for the highlight tint
     ID3D11BlendState* blend = nullptr;
+    ID3D11BlendState* blendOverlay = nullptr;          // ordinary src-alpha blending, for the highlight
     // Per-frame constant buffers, by (material, stage, slot).
     std::map<std::tuple<int, int, int>, ID3D11Buffer*> cbufs;
     // Render targets, recreated on a size change.
@@ -153,7 +155,7 @@ float4 ps(VO i) : SV_Target {
         return ok;
     }
 
-    ~Impl() { Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(blend); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
+    ~Impl() { Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
 
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
 
@@ -268,10 +270,23 @@ bool GpuView::Init(std::string* why) {
     D3D11_DEPTH_STENCIL_DESC dd{};
     dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
     I.dev->CreateDepthStencilState(&dd, &I.depth);
+    D3D11_DEPTH_STENCIL_DESC od = dd;
+    od.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; od.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    I.dev->CreateDepthStencilState(&od, &I.depthOverlay);
     D3D11_BLEND_DESC bd{};
     bd.AlphaToCoverageEnable = TRUE;   // the shaders' alpha cut-out (eyelines, lashes, hair tips) without sorting
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     I.dev->CreateBlendState(&bd, &I.blend);
+    D3D11_BLEND_DESC ob{};
+    ob.RenderTarget[0].BlendEnable = TRUE;
+    ob.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    ob.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    ob.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    ob.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    ob.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    ob.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    ob.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    I.dev->CreateBlendState(&ob, &I.blendOverlay);
     const uint8_t px[4][4] = {{255, 255, 255, 255}, {0, 0, 0, 0}, {128, 128, 128, 128}, {128, 128, 255, 128}};
     for (int i = 0; i < 4; ++i) I.MakeTexture(1, 1, px[i], I.defaults[i], false);
     I.MakeFallback();
@@ -356,7 +371,8 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
     return true;
 }
 
-bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra) {
+bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                     int highlightPart) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene || W < 8 || H < 8) return false;
     const assemble::Scene& scene = *I.scene;
@@ -509,6 +525,41 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 }
             }
         }
+
+    // Hovered component: tint its visible surface, then draw the same silhouette ring the game's outlines use in a warm
+    // colour so the part pops out of the model. Depth-tested against the finished frame, never written.
+    if (highlightPart >= 0 && static_cast<size_t>(highlightPart) < scene.parts.size() && visible(static_cast<size_t>(highlightPart)) &&
+        I.olVs && I.olPs && I.olIl && I.olCb && I.depthOverlay && I.blendOverlay) {
+        const auto& part = scene.parts[static_cast<size_t>(highlightPart)];
+        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+        ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
+        ctx->IASetInputLayout(I.olIl);
+        ctx->VSSetShader(I.olVs, nullptr, 0);
+        ctx->PSSetShader(I.olPs, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &I.olCb);
+        ctx->PSSetConstantBuffers(0, 1, &I.olCb);
+        for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
+            float cbv[24];
+            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+            const float colr[4] = {1.0f, 0.62f, 0.16f, pass == 0 ? 0.38f : 0.95f};
+            const float px = 2.2f * H / 800.0f;
+            const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
+                                  pass == 0 ? 0.0f : 0.004f, 0.0f};
+            std::memcpy(cbv + 16, colr, 16);
+            std::memcpy(cbv + 20, prm, 16);
+            ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
+            for (int mi : part.meshes) {
+                const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
+                if (!gm.vb) continue;
+                ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+                for (const auto& gs : gm.subs) {
+                    if (!gs.ib || !gs.count) continue;
+                    ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                    ctx->DrawIndexed(gs.count, 0, 0);
+                }
+            }
+        }
+    }
 
     ctx->ResolveSubresource(I.resolve, 0, I.msaa, 0, DXGI_FORMAT_B8G8R8A8_UNORM);
     ctx->CopyResource(I.staging, I.resolve);

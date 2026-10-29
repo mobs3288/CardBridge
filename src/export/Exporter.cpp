@@ -177,6 +177,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
 
 ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt) {
     ExportResult res;
+    auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     std::string stem = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
 
     if (fileio::Exists(opt.outDir) && !opt.overwrite) {
@@ -185,6 +186,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             throw FormatError("output folder already has files: " + opt.outDir + " (use a new folder or --overwrite)");
     }
     fileio::CreateDirectories(fileio::Join(opt.outDir, "textures"));
+    log("writing textures and materials");
     // A re-export replaces the previous one: stale textures from an earlier run must not linger beside it.
     if (opt.overwrite)
         for (const std::string& f : fileio::ListFiles(fileio::Join(opt.outDir, "textures"), {".png"})) fileio::RemoveFile(f);
@@ -255,6 +257,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                         std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + ".png";
                         Bytes png = encodePng(t);
                         fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
+                        log("texture " + t.name + " (" + std::to_string(t.width) + "x" + std::to_string(t.height) + ")");
                         textureFiles[ti] = file;
                         texMap[ti] = static_cast<int>(model.textures.size());
                         model.textures.push_back(file);
@@ -270,12 +273,14 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         range[pi].second = static_cast<int>(model.materials.size()) - range[pi].first;
     }
 
+    log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
     Bytes pmxBytes = pmx::WritePmx(model);
     std::string pmxFile = stem + ".pmx";
     res.pmxPath = fileio::Join(opt.outDir, pmxFile);
     fileio::WriteFile(res.pmxPath, pmxBytes.data(), pmxBytes.size());
 
     // A picture of what was written (front, side, back): a conversion can be judged without a PMX viewer.
+    log("rendering preview images");
     res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
     Bytes prev = RenderPreviewPng(scene);
     fileio::WriteFile(res.previewPath, prev.data(), prev.size());
@@ -329,6 +334,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range);
+    log("writing manifest");
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");
     fileio::WriteTextFile(res.manifestPath, manifest.dump(2) + "\n");
 

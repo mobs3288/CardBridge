@@ -1010,6 +1010,7 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
     Scene scene;
     scene.name = card.displayName();
+    auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     Rig rig;
     Builder b{nullptr, scene, rig, {}};
     b.resolverPtr = &resolver;
@@ -1055,6 +1056,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (!materialEdits.empty()) b.edits = &materialEdits;
 
     // --- shared skeleton and body ---------------------------------------
+    log("loading the shared skeleton and body");
     std::string why;
     auto base = resolver.openBaseBundle("chara/oo_base.unity3d", &why);
     if (!base) {
@@ -1332,10 +1334,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                    "the card's base skin colour is used instead");
         }
         scene.parts.push_back(std::move(part));
+        log("body: " + std::to_string(scene.parts.back().meshes.size()) + " mesh(es)");
     }
 
     // --- card items ------------------------------------------------------
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
+    log("assembling " + std::to_string(work.size()) + " card item(s)");
     for (const auto& wr : work) {   // which installed mods ship the same bundle path (the one loaded last is what the game uses)
         resolve::ResolvedItem probe = resolver.resolve(card, wr);
         resolver.registerBundleProvider(probe);
@@ -2099,11 +2103,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.stOverride.clear();
         b.blend = nullptr;
         b.meType = -1;
+        std::string logId = part.id, logStatus = part.status;
+        size_t logMeshes = part.meshes.size();
         scene.parts.push_back(std::move(part));
+        log(logId + ": " + (logStatus.empty() ? std::string("ok") : logStatus) + ", " + std::to_string(logMeshes) + " mesh(es)");
     }
 
     // Hide the triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep):
     // the game masks the body this way, and the bra the same way (OverBraMask).
+    log("applying clothing masks");
     auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
                           const std::vector<std::shared_ptr<unity::TextureData>>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
         if (masks.empty()) return;
@@ -2155,7 +2163,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto cl = [&](int c) { return std::sqrt(m.m[c] * m.m[c] + m.m[4 + c] * m.m[4 + c] + m.m[8 + c] * m.m[8 + c]); };
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
+    log("running " + std::to_string(scene.createJobs.size()) + " game create material(s)");
     exporter::RunCreateJobs(scene);
+    log("create materials done");
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
             std::fprintf(stderr, "mat %s shader=%s idx=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex);

@@ -344,6 +344,7 @@ int cmdConvert(const Args& a) {
 
     assemble::AssembleOptions ao;
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
+    ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
@@ -364,7 +365,8 @@ int cmdConvert(const Args& a) {
     if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour
         std::string bakeNote;
         auto tb0 = std::chrono::steady_clock::now();
-        exporter::BakeShaderTextures(scene, 1024, !a.has("bake-flat"), &bakeNote);
+        exporter::BakeShaderTextures(scene, 1024, !a.has("bake-flat"), &bakeNote,
+                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); });
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
@@ -397,6 +399,7 @@ int cmdConvert(const Args& a) {
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
     eo.assetLibrary = a.get("library");
     eo.modsFolder = a.get("mods");
+    eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     try {
         auto r = exporter::ExportScene(scene, c, eo);
         double secs = std::chrono::duration<double>(t1 - t0).count();

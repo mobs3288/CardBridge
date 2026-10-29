@@ -454,8 +454,14 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
     };
 
     const int step = std::max(1, opt.step);
+    auto highlightTint = [](float& r, float& g, float& b) {   // the same warm mix GpuView uses for its hover tint
+        r = r * 0.62f + 0.98f * 0.38f;
+        g = g * 0.62f + 0.52f * 0.38f;
+        b = b * 0.62f + 0.10f * 0.38f;
+    };
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         if (!visible(pi)) continue;
+        const bool highlight = static_cast<int>(pi) == opt.highlightPart;
         for (int mi : scene.parts[pi].meshes) {
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             std::vector<Pt> P(mesh.vertices.size());
@@ -546,6 +552,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                 if (!okRun || io.discarded) continue;
                                 r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
                                 if (al < 0.5f) continue;
+                                if (highlight) highlightTint(r, g, bl);
                                 zbuf[zi] = z;
                                 auto q2 = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
                                 uint32_t shadedPx = 0xFF000000u | (q2(r) << 16) | (q2(g) << 8) | q2(bl);
@@ -571,6 +578,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
                             g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
                             bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            if (highlight) highlightTint(r, g, bl);
                             zbuf[zi] = z;
                             auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
                             uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
@@ -605,7 +613,8 @@ void BuildTexMips(const assemble::Scene& scene, ViewState& st, int ti) {
 
 } // namespace
 
-void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report) {
+void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
+                        const std::function<void(const std::string&)>& progress) {
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
@@ -767,6 +776,8 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         mat.diffuse = {1.0f, 1.0f, 1.0f, mat.diffuse.w};
         mat.bakedLit = lit;
         ++baked;
+        if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
+                               mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
     if (report) *report = std::string(lit ? "baked (shaded, front light) " : "baked (colour only) ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
