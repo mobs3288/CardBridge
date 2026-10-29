@@ -16,6 +16,7 @@
 #include "card/CardFile.h"
 #include "core/FileIo.h"
 #include "export/Exporter.h"
+#include "export/Preview.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -93,7 +94,7 @@ void usage() {
         "cardbridge " "0.1.0-m1" " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
-        "             [--outfit N] [--scale F] [--overwrite] [--mod-cache <file>]\n"
+        "             [--outfit N] [--scale F] [--overwrite] [--no-bake] [--mod-cache <file>]\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -357,6 +358,13 @@ int cmdConvert(const Args& a) {
     for (const auto& is : scene.issues)
         if (is.severity == "error") { std::fprintf(stderr, "conversion failed.\n"); return 3; }
 
+    if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour
+        std::string bakeNote;
+        auto tb0 = std::chrono::steady_clock::now();
+        exporter::BakeShaderTextures(scene, 1024, &bakeNote);
+        std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
+    }
+
     exporter::ExportOptions eo;
     eo.outDir = out;
     eo.overwrite = a.has("overwrite");
@@ -386,7 +394,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

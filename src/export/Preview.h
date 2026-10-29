@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace cardbridge::exporter {
@@ -42,6 +43,11 @@ struct ViewOptions {
     int step = 1;                                      // 2 = every other pixel in each direction (fast, while dragging)
     bool shaded = false;                               // run the game's own compiled shaders per pixel (materials without one keep the plain look)
 };
+
+// Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's
+// texture with the result, so the PMX carries the colour the game's shader produces. Materials without a shader are left alone.
+// maxSize caps the baked texture's longer side.
+void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, std::string* report = nullptr);
 
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).
 void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int width, int height, const ViewOptions& opt,
