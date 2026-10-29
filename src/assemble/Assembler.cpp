@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <functional>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <set>
@@ -317,6 +318,7 @@ struct Builder {
     std::vector<std::pair<std::string, Vec4>> runtime;
     bool glossForThisRenderer = false;
     int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
+    float blushAlpha = -1;       // face material only: alpha of _overcolor2, the emotion blush (ChaControl.ChangeHohoAkaRate); < 0 = leave
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
@@ -490,6 +492,8 @@ struct Builder {
                 for (auto& pr : sm.props) if (pr.first == rp.first) { pr.second = rp.second; found = true; }
                 if (!found) sm.props.push_back(rp);
             }
+            if (blushAlpha >= 0)
+                for (auto& pr : sm.props) if (pr.first == "_overcolor2") pr.second.w = blushAlpha;
             for (const auto& f : m->floats) sm.props.emplace_back(f.first, Vec4{f.second, 0, 0, 0});
             for (const auto& tb : m->textures) {
                 SceneTexBinding b;
@@ -722,6 +726,17 @@ struct Builder {
         return static_cast<int>(scene.meshes.size()) - 1;
     }
 };
+
+// True when the path ("/a/b/") runs through a clothes-state node other than the worn one: n_top_b, n_bot_c ...
+bool hiddenClothesState(const std::string& path) {
+    for (const char* kind : {"/n_top_", "/n_bot_"}) {
+        for (size_t at = path.find(kind); at != std::string::npos; at = path.find(kind, at + 1)) {
+            size_t state = at + std::strlen(kind);
+            if (state + 1 < path.size() && path[state + 1] == '/' && path[state] != 'a') return true;
+        }
+    }
+    return false;
+}
 
 bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
     if (r.materials.empty()) return false;
@@ -971,16 +986,36 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
         bool accessoryMode = ref.group == "Accessories";
+        bool garmentAsAccessory = false;
+        if (accessoryMode) {
+            // A garment prefab (cf_o_root with the body's own bone names) worn through an accessory slot is bound to the
+            // character's skeleton by bone name like any garment; it does not hang on the slot's attach node, whose offset
+            // would lift a vest authored in body space by the node's height.
+            for (int64_t xid : uf->subtree(roots[0]))
+                if (const unity::Xform* x = uf->xform(xid); x && x->name == "cf_o_root") {
+                    accessoryMode = false;
+                    garmentAsAccessory = true;
+                    placement = Mat4();
+                    staticBone = 0;
+                    break;
+                }
+        }
 
         // ---- colouring: what the game does at run time with the card's colours ----
         ItemLook look;
         bool haveLook = false;
-        if (ref.group == "Outfit" && ref.outfit >= 0) {
-            // Sub-parts use the top's colours; part C's first colour is the fourth slot (ChaControl.ChangeCustomClothes).
-            size_t colorSlot = ref.subKind >= 0 ? 0 : static_cast<size_t>(std::max(0, ref.slot));
-            const Value& ci = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(colorSlot).at("colorInfo");
-            Vec4 c[3] = {kkColor(vec4Of(ci.at(size_t(0)).at("baseColor"))), kkColor(vec4Of(ci.at(size_t(1)).at("baseColor"))), kkColor(vec4Of(ci.at(size_t(2)).at("baseColor")))};
-            if (ref.subKind == 2) c[0] = kkColor(vec4Of(ci.at(size_t(3)).at("baseColor")));
+        if ((ref.group == "Outfit" || garmentAsAccessory) && ref.outfit >= 0) {
+            Vec4 c[3];
+            if (garmentAsAccessory) {   // a garment in an accessory slot is coloured by that slot's three colours
+                const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(std::max(0, ref.accIndex))).at("color");
+                for (size_t k = 0; k < 3; ++k) c[k] = kkColor(vec4Of(col.at(k)));
+            } else {
+                // Sub-parts use the top's colours; part C's first colour is the fourth slot (ChaControl.ChangeCustomClothes).
+                size_t colorSlot = ref.subKind >= 0 ? 0 : static_cast<size_t>(std::max(0, ref.slot));
+                const Value& ci = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(colorSlot).at("colorInfo");
+                for (size_t k = 0; k < 3; ++k) c[k] = kkColor(vec4Of(ci.at(k).at("baseColor")));
+                if (ref.subKind == 2) c[0] = kkColor(vec4Of(ci.at(size_t(3)).at("baseColor")));
+            }
 
             // The list row's textures; a list bundle of "0" means the item's own bundle.
             auto listTex = [&](const char* abKey, const char* nameKey, std::string& keyOut) -> std::shared_ptr<unity::TextureData> {
@@ -1244,12 +1279,16 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::vector<std::string> skipped;
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(roots[0])) {
+            if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
+                std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0);
             if (!r.enabled) continue;
             if (onlyHelperMaterials(*uf, r)) continue;
             std::string path = "/" + uf->pathOf(r.xformId) + "/";
             // Variants the game keeps switched off in the default state: the pulled-off ("nuge") top and
             // bottom, and the face's tears, gag eyes and tongue.
-            bool hiddenByDefault = path.find("/n_top_b/") != std::string::npos || path.find("/n_bot_b/") != std::string::npos ||
+            // A garment prefab holds one node per clothes state: n_top_a / n_bot_a is the worn state, b and c the pulled-off
+            // ones (c = shorts or skirt hanging from one leg); an object inactive in the prefab is off in every state.
+            bool hiddenByDefault = !r.active || hiddenClothesState(path) ||
                                    (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye") || contains(r.name, "o_tang")));
             if (hiddenByDefault) { skipped.push_back(r.name); continue; }
             // Debug aid: CARDBRIDGE_SKIP=name1,name2 leaves those renderers out (to find which mesh draws an artefact).
@@ -1286,6 +1325,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
             b.runtime.clear();
+            // The face material's _overcolor2 alpha is the blush of the character's emotion state: 0 at rate 0, 0.2 at rate 1.
+            b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
+                               ? 0.2f * std::min(1.0f, std::max(0.0f, static_cast<float>(card.status.at("hohoAkaRate").asFloat(0.0))))
+                               : -1.0f;
             b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0;
             auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
             if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
@@ -1323,6 +1366,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         b.localOv = nullptr;
         b.hairParent = nullptr;
+        b.blushAlpha = -1;
         b.meType = -1;
         scene.parts.push_back(std::move(part));
     }

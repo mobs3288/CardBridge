@@ -74,6 +74,7 @@ struct Xform {
 struct RendererInfo {
     bool skinned = false;
     bool enabled = true;
+    bool active = true;   // the GameObject and every ancestor are active (Unity draws nothing under an inactive object)
     int64_t goId = 0;
     int64_t xformId = 0;
     int64_t componentId = 0;   // the renderer component's object id (ChaClothesComponent lists refer to it)
@@ -144,6 +145,7 @@ private:
     std::map<int64_t, Xform> xforms_;
     std::map<int64_t, int64_t> goToXform_;
     std::map<int64_t, std::string> goNames_;
+    std::map<int64_t, bool> goActive_;   // goId -> m_IsActive
     std::map<int64_t, std::vector<std::pair<int, int64_t>>> goComponents_;   // goId -> (classId, componentId)
 };
 
