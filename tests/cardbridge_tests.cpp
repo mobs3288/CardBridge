@@ -22,11 +22,14 @@
 #include "pmx/PmxWriter.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
+#include "shape/Shape.h"
 #include "resolve/Resolver.h"
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <functional>
 #include <string>
@@ -68,6 +71,58 @@ std::string tempPath(const std::string& name) {
 }
 
 void unitTests() {
+    test("shape sliders: key frames interpolate inside 0..1, extrapolate beyond it (SliderUnlocker)", [] {
+        Bytes d;
+        auto i32 = [&](int32_t v) { for (int k = 0; k < 4; ++k) d.push_back(static_cast<uint8_t>(v >> (8 * k))); };
+        auto f32 = [&](float f) { uint32_t u; std::memcpy(&u, &f, 4); i32(static_cast<int32_t>(u)); };
+        i32(2);
+        for (const char* name : {"k", "cf_s_Mouth_x"}) {
+            d.push_back(static_cast<uint8_t>(std::strlen(name)));
+            for (const char* c = name; *c; ++c) d.push_back(static_cast<uint8_t>(*c));
+            i32(2);
+            const float keys[2][9] = {{0, 0, 0, 0, 0, 0, 1, 1, 1}, {1, 2, 3, 90, 0, 0, 3, 1, 1}};
+            for (int k = 0; k < 2; ++k) { i32(k); for (float f : keys[k]) f32(f); }
+        }
+        auto anm = shape::AnimKeys::Parse(d);
+        const bool all[3] = {true, true, true};
+        Vec3 v[3];
+        auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(anm.get("k", 0.5f, v, all));
+        CHECK(near(v[0].x, 0.5f) && near(v[0].y, 1.0f) && near(v[2].x, 2.0f) && near(v[1].x, 45.0f));
+        anm.get("k", 1.5f, v, all);
+        CHECK(near(v[0].x, 1.5f) && near(v[0].z, 4.5f) && near(v[2].x, 4.0f) && near(v[1].x, 135.0f));
+        anm.get("k", -0.5f, v, all);
+        CHECK(near(v[0].y, -1.0f) && near(v[2].x, 0.0f) && near(v[1].x, -45.0f));
+        anm.get("cf_s_Mouth_x", 1.5f, v, all);   // the plugin leaves these rotations clamped
+        CHECK(near(v[0].x, 1.5f) && near(v[1].x, 90.0f));
+    });
+    test("scene validation: finds out-of-range indices, bad weights and a part floating above the head", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        SceneTexture t; t.width = 1; t.height = 1; t.rgba = {255, 255, 255, 255};
+        s.textures.push_back(t);
+        s.materials.push_back(SceneMaterial{});
+        auto addPart = [&](const std::string& id, float y0, float y1) {
+            SceneMesh m;
+            m.name = id;
+            for (float y : {y0, y1, y1}) { SceneVertex v; v.pos = {0, y, 0}; m.vertices.push_back(v); }
+            SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
+            m.submeshes.push_back(sub);
+            s.meshes.push_back(m);
+            ScenePart p; p.id = id; p.meshes = {static_cast<int>(s.meshes.size()) - 1};
+            s.parts.push_back(p);
+        };
+        addPart("head", 1.3f, 1.6f);
+        addPart("outfit0.top", 0.8f, 1.4f);
+        CHECK(exporter::ValidateScene(s).empty());
+        addPart("outfit0.acc44", 2.0f, 2.5f);   // a vest lifted by its attach node
+        auto f = exporter::ValidateScene(s);
+        CHECK(f.size() == 1 && f[0].find("outfit0.acc44") != std::string::npos);
+        s.meshes[0].vertices[0].weight[0] = 0.5f;
+        s.meshes[1].submeshes[0].indices[2] = 9;
+        CHECK(exporter::ValidateScene(s).size() == 3);
+    });
     test("sha256", [] {
         std::string s = "abc";
         CHECK(Sha256Hex(reinterpret_cast<const uint8_t*>(s.data()), s.size()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -271,6 +326,11 @@ void integrationTests() {
             std::printf("  golden: %zu reference textures compared\n", compared);
         }
 
+        {
+            auto findings = exporter::ValidateScene(scene);
+            for (const auto& f : findings) std::printf("  scene finding: %s\n", f.c_str());
+            CHECK(findings.empty());
+        }
         exporter::ExportOptions eo;
         eo.outDir = tempPath("e2e");
         eo.overwrite = true;

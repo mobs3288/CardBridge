@@ -768,6 +768,77 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     if (report) *report = std::string(lit ? "baked (shaded, front light) " : "baked (colour only) ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
+void RunCreateJobs(assemble::Scene& scene) {
+    if (scene.createJobs.empty()) return;
+    ViewState st;
+    st.mips.assign(scene.textures.size(), Mips{});
+    st.built.assign(scene.textures.size(), false);
+    const float L[3] = {0.0f, 0.0f, 1.0f}, camPos[3] = {0.0f, 0.0f, 5.0f};
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    for (auto& job : scene.createJobs) {
+        auto& mat = job.material;
+        const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
+        if (!sr) { scene.warn("", "create material '" + mat.name + "': its shader could not be run; the texture keeps its plain input"); continue; }
+        // Graphics.Blit: one quad over the whole target, UV 0..1.
+        assemble::SceneMesh quad;
+        const Vec2 uvs[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        for (const Vec2& uv : uvs) {
+            assemble::SceneVertex v;
+            v.pos = {uv.x - 0.5f, uv.y - 0.5f, 0.0f};
+            v.normal = {0, 0, 1};
+            v.uv = uv;
+            quad.vertices.push_back(v);
+        }
+        for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
+        for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
+        CbSet psCb;
+        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
+        std::vector<PsIn> vo;
+        if (!RunVertexStage(*sr, mat, quad, ComputeTangents(quad), scene.globalProps, L, camPos, vo)) continue;
+        const int W = job.width, H = job.height;
+        std::vector<uint8_t> rgba(static_cast<size_t>(W) * H * 4, 0);
+        auto worker = [&](unsigned wi) {
+            MatTextures mt;
+            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
+            for (int y = static_cast<int>(wi); y < H; y += static_cast<int>(hw))
+                for (int x = 0; x < W; ++x) {
+                    const float u = (x + 0.5f) / W, v = 1.0f - (y + 0.5f) / H;
+                    // The quad is two triangles split on the diagonal u == v; both interpolate the varyings the same way.
+                    const bool lower = v <= u;
+                    const size_t i0 = 0, i1 = lower ? 1 : 2, i2 = lower ? 2 : 3;
+                    const float l0 = lower ? 1.0f - u : 1.0f - v, l1 = lower ? u - v : u, l2 = lower ? v : v - u;
+                    shader::Sm4Io io;
+                    io.constantBuffers = psCb.ptr;
+                    io.textures = &mt;
+                    for (const auto& l : sr->links)
+                        for (int ch = 0; ch < 4; ++ch)
+                            io.input[l.psReg][ch] = l0 * vo[i0].r[l.psReg][ch] + l1 * vo[i1].r[l.psReg][ch] + l2 * vo[i2].r[l.psReg][ch];
+                    for (const auto& in : sr->programs[sr->pi].code.inputs) {
+                        if (in.reg >= 32) continue;
+                        if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = x + 0.5f; io.input[in.reg][1] = y + 0.5f; io.input[in.reg][2] = 0.5f; io.input[in.reg][3] = 1; }
+                        else if (in.semantic == "SV_IsFrontFace") { uint32_t bits = 0xFFFFFFFFu; std::memcpy(&io.input[in.reg][0], &bits, 4); }
+                    }
+                    std::string why;
+                    if (!shader::RunSm4(sr->ps, io, &why) || io.discarded) continue;
+                    uint8_t* o = &rgba[(static_cast<size_t>(y) * W + x) * 4];
+                    for (int c = 0; c < 4; ++c) o[c] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, io.output[0][c] * 255.0f + 0.5f)));
+                }
+        };
+        std::vector<std::thread> pool;
+        for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker, w);
+        worker(0);
+        for (auto& th : pool) th.join();
+        auto& tex = scene.textures[static_cast<size_t>(job.texture)];
+        tex.width = W;
+        tex.height = H;
+        tex.rgba = std::move(rgba);
+        tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
+        st.mips[static_cast<size_t>(job.texture)] = Mips{};
+        st.built[static_cast<size_t>(job.texture)] = false;
+    }
+    scene.createJobs.clear();
+}
+
 namespace detail {   // used by GpuView.cpp
 void FillShaderConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3],
                          std::vector<std::vector<float>>& data, const std::vector<std::pair<std::string, Vec4>>* globals) {

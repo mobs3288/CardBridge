@@ -50,6 +50,10 @@ struct ViewOptions {
 // carries the toon shading too (the material is then unlit); otherwise the material is a flat sheet and only its colour is baked.
 void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr);
 
+// Runs every pending Scene::createJobs: the game's "create" materials (eye iris and white, face and body skin) drawn over one quad
+// into their placeholder textures. Called once, at the end of assembly.
+void RunCreateJobs(assemble::Scene& scene);
+
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).
 void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int width, int height, const ViewOptions& opt,
                 ViewState& state, std::vector<uint32_t>& bgra);

@@ -62,6 +62,15 @@ struct SceneMaterial {
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
 };
 
+// A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and
+// white, face and body skin: Graphics.Blit into a render texture). `material` carries the shader, colours and input textures;
+// the result is written into Scene::textures[texture] (a placeholder until then) by export::RunCreateJobs.
+struct SceneCreateJob {
+    SceneMaterial material;
+    int texture = -1;            // index into Scene::textures that receives the result
+    int width = 512, height = 512;
+};
+
 struct SceneShader {
     std::string name;            // e.g. "Shader Forge/main_opaque"
     std::vector<uint8_t> blob;   // decompressed Direct3D 11 program blob
@@ -108,6 +117,7 @@ struct Scene {
     std::vector<SceneTexture> textures;
     std::vector<SceneMaterial> materials;
     std::vector<SceneShader> shaders;
+    std::vector<SceneCreateJob> createJobs;
     // Shader globals the game sets for every material (Shader.SetGlobalTexture / SetGlobalColor / SetGlobalFloat):
     // the shadow ramp, the ambient shadow colour, the outline colour and width.
     std::vector<SceneTexBinding> globalTextures;
