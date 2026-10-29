@@ -3,6 +3,7 @@
 #include "core/Bytes.h"
 #include "shape/Shape.h"
 #include "card/MaterialEdits.h"
+#include "export/Preview.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1091,7 +1092,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 
         // The texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
         auto rowTexture = [&](int category, int64_t id, const std::string& property, const char* texKey, const std::string& what,
-                              std::string* keyOut = nullptr) -> std::shared_ptr<unity::TextureData> {
+                              std::string* keyOut = nullptr, const char* abKey = "MainAB") -> std::shared_ptr<unity::TextureData> {
             resolve::ItemRef fr;
             fr.partId = ref.partId + "." + what;
             fr.group = "Face";
@@ -1104,7 +1105,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 scene.warn(ref.partId, what + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
                 return nullptr;
             }
-            std::string texName = fi.listItem.get(texKey), ab = fi.listItem.get("MainAB");
+            std::string texName = fi.listItem.get(texKey), ab = fi.listItem.get(abKey);
             if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return nullptr;   // "none"
             std::string w;
             auto tb = resolver.openItemBundle(fi, ab, &w);
@@ -1114,6 +1115,49 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (tp.isNull()) { scene.warn(ref.partId, what + ": texture '" + texName + "' not found in " + ab); return nullptr; }
             if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
             return b.decode(*tb, tp, ref.partId);
+        };
+
+        // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
+        // (run by export::RunCreateJobs at the end of assembly) and returns the placeholder texture that will hold the result.
+        using TexInput = std::pair<std::string, std::shared_ptr<unity::TextureData>>;
+        std::map<const unity::TextureData*, int> inputTexCache;
+        auto createJob = [&](const char* matName, const std::vector<TexInput>& texs, const std::vector<std::pair<std::string, Vec4>>& props, int size) -> int {
+            std::string w;
+            auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w);
+            if (!mm) { scene.warn(ref.partId, std::string("create material ") + matName + ": mm_base.unity3d not in the library (" + w + ")"); return -1; }
+            PPtr mp = mm->findAsset(matName);
+            if (mp.isNull()) { scene.warn(ref.partId, std::string("create material ") + matName + " not found in mm_base.unity3d"); return -1; }
+            std::vector<std::pair<std::string, Vec4>> savedRuntime = std::move(b.runtime);
+            b.runtime.clear();
+            RendererInfo none;
+            b.materialFor(*mm, mp, ref.partId, nullptr, nullptr, none, 0);
+            b.runtime = std::move(savedRuntime);
+            SceneCreateJob job;
+            job.material = std::move(scene.materials.back());
+            scene.materials.pop_back();
+            for (const auto& [name, td] : texs) {
+                int idx = -1;
+                if (td) {
+                    auto it = inputTexCache.find(td.get());
+                    if (it == inputTexCache.end()) {
+                        auto copy = td->rgba;
+                        it = inputTexCache.emplace(td.get(), b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy))).first;
+                    }
+                    idx = it->second;
+                }
+                bool set = false;
+                for (auto& tb : job.material.texProps) if (tb.name == name) { tb.texture = idx; set = true; }
+                if (!set) { SceneTexBinding nb; nb.name = name; nb.texture = idx; job.material.texProps.push_back(nb); }
+            }
+            for (const auto& [name, v] : props) {
+                bool set = false;
+                for (auto& pr : job.material.props) if (pr.first == name) { pr.second = v; set = true; }
+                if (!set) job.material.props.emplace_back(name, v);
+            }
+            job.width = job.height = size;
+            job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
+            scene.createJobs.push_back(std::move(job));
+            return scene.createJobs.back().texture;
         };
 
         // Face parts: the game builds each one's texture from the list row the card's face ids select,
@@ -1149,6 +1193,23 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     return b.addSceneTexture(out.name, "card (KoiSkinOverlayX)", out.width, out.height, std::move(out.rgba));
                 }
                 if (!tex) return -1;
+                // The iris and the white of the eye are drawn through the game's own create shaders (iris: gradient between the two
+                // colours by the gradation mask; white: base and sub colour).
+                const bool isWhite = rendererName == "cf_Ohitomi_L" || rendererName == "cf_Ohitomi_R";
+                const bool isIris = rendererName == "cf_Ohitomi_L02" || rendererName == "cf_Ohitomi_R02";
+                if (isWhite) {
+                    int job = createJob("cf_m_eyewhite_create", {{"_MainTex", tex}}, {{"_Color", colorOf("whiteBaseColor")}, {"_Color2", colorOf("whiteSubColor")}}, 512);
+                    if (job >= 0) return job;
+                } else if (isIris) {
+                    const Value& pu = pupils.at(rendererName == "cf_Ohitomi_L02" ? size_t(0) : size_t(1));
+                    auto grad = rowTexture(409, pu.at("gradMaskId").asInt(), "ChaFileFace.PupilGrad", "ColorMaskTex", std::string(sp.renderer) + ".gradation", nullptr, "ColorMaskAB");
+                    const float gy = static_cast<float>(pu.at("gradOffsetY").asFloat()), gs = static_cast<float>(pu.at("gradScale").asFloat());
+                    int job = createJob("cf_m_eye_create", {{"_MainTex", tex}, {"_ColorMask", grad}},
+                                        {{"_Color", kkColor(vec4Of(pu.at("baseColor")))}, {"_Color2", kkColor(vec4Of(pu.at("subColor")))},
+                                         {"_Blend", Vec4{static_cast<float>(pu.at("gradBlend").asFloat()), 0, 0, 0}},
+                                         {"_grad", Vec4{0.0f, -0.5f + gy, 0.0f, -1.0f + 2.0f * gs}}}, 512);
+                    if (job >= 0) return job;
+                }
                 return b.bake(tex, key, nullptr, "-", c, uf->name());
             }
             return -1;
@@ -1472,6 +1533,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
+    exporter::RunCreateJobs(scene);
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
             std::fprintf(stderr, "mat %s shader=%s idx=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex);

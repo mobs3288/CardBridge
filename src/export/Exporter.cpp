@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -40,6 +41,59 @@ Bytes encodePng(const assemble::SceneTexture& t) {
 }
 
 } // namespace
+
+std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
+    std::vector<std::string> out;
+    auto add = [&](const std::string& s) { if (out.size() < 200) out.push_back(s); };
+    const int nb = static_cast<int>(scene.bones.size()), nt = static_cast<int>(scene.textures.size()), nm = static_cast<int>(scene.materials.size());
+    for (size_t i = 0; i < scene.textures.size(); ++i) {
+        const auto& t = scene.textures[i];
+        if (t.width <= 0 || t.height <= 0 || t.rgba.size() != static_cast<size_t>(t.width) * static_cast<size_t>(t.height) * 4)
+            add("texture " + std::to_string(i) + " '" + t.name + "' has pixel data that does not match its size");
+    }
+    for (size_t i = 0; i < scene.materials.size(); ++i) {
+        const auto& m = scene.materials[i];
+        if (m.texture >= nt) add("material '" + m.name + "' names texture " + std::to_string(m.texture) + " of " + std::to_string(nt));
+        for (const auto& tb : m.texProps)
+            if (tb.texture >= nt) add("material '" + m.name + "' binds " + tb.name + " to texture " + std::to_string(tb.texture) + " of " + std::to_string(nt));
+    }
+    // The body's height (head part's top) is the yardstick for "far outside".
+    float headTop = 0;
+    for (const auto& p : scene.parts)
+        if (p.id == "head")
+            for (int mi : p.meshes)
+                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) headTop = std::max(headTop, v.pos.y);
+    for (const auto& part : scene.parts) {
+        if (!part.includeInExport) continue;
+        float lo = 1e30f, hi = -1e30f;
+        for (int mi : part.meshes) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            for (size_t v = 0; v < mesh.vertices.size(); ++v) {
+                const auto& sv = mesh.vertices[v];
+                if (!std::isfinite(sv.pos.x) || !std::isfinite(sv.pos.y) || !std::isfinite(sv.pos.z)) { add("part " + part.id + " mesh '" + mesh.name + "' vertex " + std::to_string(v) + " is not finite"); break; }
+                lo = std::min(lo, sv.pos.y);
+                hi = std::max(hi, sv.pos.y);
+                float wsum = 0;
+                for (int k = 0; k < 4; ++k) {
+                    wsum += sv.weight[k];
+                    if (sv.weight[k] > 0 && (sv.bone[k] < 0 || sv.bone[k] >= nb)) { add("part " + part.id + " mesh '" + mesh.name + "' vertex " + std::to_string(v) + " uses bone " + std::to_string(sv.bone[k]) + " of " + std::to_string(nb)); v = mesh.vertices.size(); break; }
+                }
+                if (v < mesh.vertices.size() && std::fabs(wsum - 1.0f) > 1e-3f) { add("part " + part.id + " mesh '" + mesh.name + "' vertex " + std::to_string(v) + " weights sum to " + std::to_string(wsum)); break; }
+            }
+            for (const auto& sub : mesh.submeshes) {
+                if (sub.material < 0 || sub.material >= nm) add("part " + part.id + " mesh '" + mesh.name + "' has a submesh with material " + std::to_string(sub.material) + " of " + std::to_string(nm));
+                if (sub.indices.size() % 3 != 0) add("part " + part.id + " mesh '" + mesh.name + "' has an index count that is not a multiple of 3");
+                for (uint32_t ix : sub.indices)
+                    if (ix >= mesh.vertices.size()) { add("part " + part.id + " mesh '" + mesh.name + "' has a triangle index outside its vertices"); break; }
+            }
+        }
+        if (headTop > 0 && lo <= hi && part.id != "body") {
+            if (hi > headTop * 1.25f) add("part " + part.id + " reaches " + std::to_string(hi) + " above the floor, the head ends at " + std::to_string(headTop) + " (transform applied twice?)");
+            if (lo < -0.15f * headTop) add("part " + part.id + " reaches " + std::to_string(lo) + " below the floor");
+        }
+    }
+    return out;
+}
 
 nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,
                              const std::string& pmxFile, const std::vector<std::string>& textureFiles,
@@ -110,7 +164,10 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
         if (is.severity == "error") anyError = true;
     }
     j["issues"] = std::move(issues);
+    std::vector<std::string> findings = ValidateScene(scene);
+    j["scene_findings"] = findings;
     j["validation"] = {{"card_parse", "passed"},
+                       {"scene_structure", findings.empty() ? "passed" : "findings"},
                        {"assets_resolved", allResolved == expected ? "passed" : "partial"},
                        {"scene_assembled", anyError ? "failed" : "passed"},
                        {"pmx_validated", "not_run"},
