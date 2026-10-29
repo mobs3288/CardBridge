@@ -34,7 +34,18 @@ for r in json.load(open(truth + '/renderers.json', encoding='utf-8')):
     o = np.asarray(Image.open(ours[name]).convert('RGBA').resize((g.shape[1], g.shape[0]))).astype(float)
     mk = (g[..., 3] > 200) & (o[..., 3] > 200)
     if mk.sum() < 100: continue
-    ge = enc(g[..., :3])[mk].mean(0)
+    gm = enc(g[..., :3])
+    mat0 = r['materials'][0]
+    mt = mat0['textures'].get('_ColorMask')
+    if name.startswith('acc') and mt and mt.get('file'):
+        # An accessory's main texture is dumped untinted (the game's shader colours it by the mask); tint it the way CardBridge bakes it.
+        k = np.asarray(Image.open(truth + '/' + mt['file']).convert('RGBA').resize((g.shape[1], g.shape[0]))).astype(float)[..., :3] / 255.0
+        c = [np.array(mat0['colors'].get(n, [1, 1, 1, 1])[:3]) for n in ('_Color', '_Color2', '_Color3')]
+        t = 1.0 + k[..., 0:1] * (c[0] - 1.0)
+        t = t + k[..., 1:2] * (c[1] - t)
+        t = t + k[..., 2:3] * (c[2] - t)
+        gm = gm * t
+    ge = gm[mk].mean(0)
     oe = o[..., :3][mk].mean(0)
     rows.append((float(np.abs(ge - oe).max()), name, ge.round(0).tolist(), oe.round(0).tolist()))
 rows.sort(reverse=True)
