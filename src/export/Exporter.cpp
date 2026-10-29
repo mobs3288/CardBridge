@@ -183,6 +183,11 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.ambient = {mat.diffuse.x * mat.shadow.x, mat.diffuse.y * mat.shadow.y, mat.diffuse.z * mat.shadow.z};
                 pm.specular = mat.specular;
                 pm.specularPower = mat.specularPower;
+                if (mat.bakedLit) {   // the texture holds the game's lighting already: show it as it is, no second shading
+                    pm.diffuse = {0.0f, 0.0f, 0.0f, pm.diffuse.w};
+                    pm.ambient = {1.0f, 1.0f, 1.0f};
+                    pm.specular = {0.0f, 0.0f, 0.0f};
+                }
                 pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f ? 0x10 : 0x00);
                 pm.edgeColor = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
                 pm.edgeSize = std::min(2.0f, mat.outlineWidth * 20.0f);
