@@ -33,6 +33,7 @@ struct SceneTexture {
     int width = 0, height = 0;
     std::vector<uint8_t> rgba;   // top row first
     bool clamp = false;          // the texture's wrap mode is clamp (ramps), not repeat
+    bool srgb = true;            // the texture is flagged sRGB (colour data); false for masks and other linear data
     uint64_t pixelHash = 0;      // FNV-1a 64 of rgba
 };
 
@@ -73,6 +74,9 @@ struct SceneCreateJob {
     // An image laid over the result (a KoiSkinOverlayX layer from the card), source-over, scaled to the target; empty = none.
     std::vector<uint8_t> overlay;
     int overlayWidth = 0, overlayHeight = 0;
+    // The game runs the draw in linear light: sRGB-flagged textures are decoded when sampled, the colour properties are linear
+    // values and the result is encoded when it is written (clothes). Otherwise everything is combined as stored.
+    bool linear = false;
     bool overlayReplaces = false;   // the overlay replaces the result instead of covering it (KoiClothesOverlayX "override")
 };
 

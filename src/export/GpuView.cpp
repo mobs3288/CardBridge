@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <tuple>
@@ -72,6 +73,48 @@ struct GpuView::Impl {
     ID3D11PixelShader* fbPs = nullptr;
     ID3D11InputLayout* fbIl = nullptr;
     ID3D11Buffer* fbCb = nullptr;
+    // Outline: the material's silhouette ring (_LineWidthS, _LineColor) drawn as a copy of the mesh pushed out along its normals in
+    // screen space and slightly back in depth, so only the part beyond the surface shows.
+    ID3D11VertexShader* olVs = nullptr;
+    ID3D11PixelShader* olPs = nullptr;
+    ID3D11InputLayout* olIl = nullptr;
+    ID3D11Buffer* olCb = nullptr;
+
+    bool MakeOutline() {
+        typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
+        HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (!dll) return false;
+        auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
+        if (!compile) return false;
+        static const char src[] = R"HLSL(
+cbuffer C : register(b0) { float4 r0, r1, r2, r3, color, param; };   // param: ring half width in clip units (x, y), depth push (z)
+struct VI { float3 p : POSITION; float3 n : NORMAL; };
+float4 vs(VI i) : SV_Position {
+    float4 p = float4(i.p, 1);
+    float4 o = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p));
+    float2 n = float2(dot(r0.xyz, i.n), dot(r1.xyz, i.n));
+    float l = length(n);
+    if (l > 1e-5) o.xy += n / l * param.xy * o.w;
+    o.z += param.z * o.w;
+    return o;
+}
+float4 ps() : SV_Target { return color; }
+)HLSL";
+        ID3DBlob *vb = nullptr, *pb = nullptr, *err = nullptr;
+        if (FAILED(compile(src, sizeof(src) - 1, "outline", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vb, &err)) || !vb) { Rel(err); return false; }
+        if (FAILED(compile(src, sizeof(src) - 1, "outline", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) { Rel(vb); Rel(err); return false; }
+        bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &olVs)) &&
+                  SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &olPs));
+        const D3D11_INPUT_ELEMENT_DESC el[2] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, nrm), D3D11_INPUT_PER_VERTEX_DATA, 0}};
+        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 2, vb->GetBufferPointer(), vb->GetBufferSize(), &olIl));
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 6 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &olCb));
+        Rel(vb); Rel(pb); Rel(err);
+        return ok;
+    }
 
     bool MakeFallback() {
         typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
@@ -110,7 +153,7 @@ float4 ps(VO i) : SV_Target {
         return ok;
     }
 
-    ~Impl() { Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(blend); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
+    ~Impl() { Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(blend); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
 
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
 
@@ -232,6 +275,7 @@ bool GpuView::Init(std::string* why) {
     const uint8_t px[4][4] = {{255, 255, 255, 255}, {0, 0, 0, 0}, {128, 128, 128, 128}, {128, 128, 255, 128}};
     for (int i = 0; i < 4; ++i) I.MakeTexture(1, 1, px[i], I.defaults[i], false);
     I.MakeFallback();
+    I.MakeOutline();
     return true;
 }
 
@@ -446,6 +490,22 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                     ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                     ctx->DrawIndexed(gs.count, 0, 0);
+                    if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE")) {
+                        float cbv[24];
+                        for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                        const float colr[4] = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
+                        const float px = 1.2f * std::min(2.0f, mat.outlineWidth) * H / 800.0f;   // ring width in pixels
+                        const float prm[4] = {px * 2.0f / W, px * 2.0f / H, 0.004f, 0.0f};
+                        std::memcpy(cbv + 16, colr, 16);
+                        std::memcpy(cbv + 20, prm, 16);
+                        ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
+                        ctx->IASetInputLayout(I.olIl);
+                        ctx->VSSetShader(I.olVs, nullptr, 0);
+                        ctx->PSSetShader(I.olPs, nullptr, 0);
+                        ctx->VSSetConstantBuffers(0, 1, &I.olCb);
+                        ctx->PSSetConstantBuffers(0, 1, &I.olCb);
+                        ctx->DrawIndexed(gs.count, 0, 0);
+                    }
                 }
             }
         }

@@ -295,6 +295,7 @@ struct MatTextures : shader::ISm4Textures {
     const assemble::SceneMaterial* mat = nullptr;
     float lod = 0;
     bool trace = false;
+    bool decodeSrgb = false;   // sRGB-flagged textures give linear values (a create job run in linear light)
     void Sample(int t, int, const float coord[4], float lodIn, float out[4]) override {
         SampleImpl(t, coord, lodIn, out);
         if (trace) {
@@ -320,6 +321,8 @@ struct MatTextures : shader::ISm4Textures {
                 bool cl = scene->textures[ti].clamp;
                 float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
                 SampleBilinear(m, l, u, v, out, cl);
+                if (decodeSrgb && scene->textures[ti].srgb)
+                    for (int c = 0; c < 3; ++c) out[c] = out[c] <= 0.04045f ? out[c] / 12.92f : std::pow((out[c] + 0.055f) / 1.055f, 2.4f);
                 return;
             }
         for (const auto& tb : scene->globalTextures)
@@ -792,6 +795,10 @@ void RunCreateJobs(assemble::Scene& scene) {
         }
         for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
         for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
+        if (job.linear)   // colour properties arrive as linear values
+            for (auto& pr : mat.props)
+                if (pr.first.rfind("_Color", 0) == 0)
+                    for (float* c : {&pr.second.x, &pr.second.y, &pr.second.z}) *c = *c <= 0.04045f ? *c / 12.92f : std::pow((*c + 0.055f) / 1.055f, 2.4f);
         CbSet psCb;
         FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
         std::vector<PsIn> vo;
@@ -800,7 +807,7 @@ void RunCreateJobs(assemble::Scene& scene) {
         std::vector<uint8_t> rgba(static_cast<size_t>(W) * H * 4, 0);
         auto worker = [&](unsigned wi) {
             MatTextures mt;
-            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
+            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0; mt.decodeSrgb = job.linear;
             for (int y = static_cast<int>(wi); y < H; y += static_cast<int>(hw))
                 for (int x = 0; x < W; ++x) {
                     const float u = (x + 0.5f) / W, v = 1.0f - (y + 0.5f) / H;
@@ -822,7 +829,11 @@ void RunCreateJobs(assemble::Scene& scene) {
                     std::string why;
                     if (!shader::RunSm4(sr->ps, io, &why) || io.discarded) continue;
                     uint8_t* o = &rgba[(static_cast<size_t>(y) * W + x) * 4];
-                    for (int c = 0; c < 4; ++c) o[c] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, io.output[0][c] * 255.0f + 0.5f)));
+                    for (int c = 0; c < 4; ++c) {
+                        float v = std::min(1.0f, std::max(0.0f, io.output[0][c]));
+                        if (job.linear && c < 3) v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+                        o[c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+                    }
                 }
         };
         std::vector<std::thread> pool;
