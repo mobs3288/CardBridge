@@ -16,6 +16,9 @@
 #include "card/CardFile.h"
 #include "core/FileIo.h"
 #include "export/Exporter.h"
+#include <stb_image_write.h>
+
+#include "export/GpuView.h"
 #include "export/Preview.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
@@ -365,6 +368,28 @@ int cmdConvert(const Args& a) {
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
+    if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
+        exporter::GpuView gpu;
+        std::string why;
+        if (!gpu.Init(&why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
+        else {
+            exporter::ViewCamera cam;
+            cam.pitchDeg = 4;
+            std::vector<uint32_t> px;
+            auto g0 = std::chrono::steady_clock::now();
+            bool ok = gpu.Render(cam, 640, 800, nullptr, px);
+            ok = ok && gpu.Render(cam, 640, 800, nullptr, px);
+            std::fprintf(stderr, "  gpu view: %s, second frame %.1f ms, %d material(s) without a shader\n", ok ? "ok" : "failed",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());
+            for (const auto& m : scene.materials) if (m.shaderIndex < 0) std::fprintf(stderr, "    no shader: %s (%s)\n", m.name.c_str(), m.shader.c_str());
+            if (ok) {
+                std::vector<uint8_t> rgba(px.size() * 4);
+                for (size_t i = 0; i < px.size(); ++i) { rgba[i * 4] = (px[i] >> 16) & 255; rgba[i * 4 + 1] = (px[i] >> 8) & 255; rgba[i * 4 + 2] = px[i] & 255; rgba[i * 4 + 3] = 255; }
+                stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, rgba.data(), 640 * 4);
+            }
+        }
+    }
+
     exporter::ExportOptions eo;
     eo.outDir = out;
     eo.overwrite = a.has("overwrite");
@@ -394,7 +419,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

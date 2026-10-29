@@ -72,6 +72,7 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
     src/export/Preview.cpp
+    src/export/GpuView.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp
     src/shader/Dxbc.cpp
@@ -81,6 +82,9 @@ add_library(cardbridge_core STATIC
 )
 target_include_directories(cardbridge_core PUBLIC src PRIVATE third_party/bc7decomp)
 target_link_libraries(cardbridge_core PUBLIC nlohmann_json::nlohmann_json PRIVATE stb_image cardbridge_stb_write)
+if(WIN32)
+    target_link_libraries(cardbridge_core PUBLIC d3d11)   # the GPU view runs the game's DXBC shaders
+endif()
 if(MSVC)
     target_compile_options(cardbridge_core PRIVATE /W4)
 else()
@@ -88,14 +92,14 @@ else()
 endif()
 
 add_executable(cardbridge cli/main.cpp)
-target_link_libraries(cardbridge PRIVATE cardbridge_core)
+target_link_libraries(cardbridge PRIVATE cardbridge_core cardbridge_stb_write)
 if(WIN32 AND NOT MSVC)
     # The exe has to start from a plain folder with nothing beside it.
     target_link_options(cardbridge PRIVATE -static)
 endif()
 
 
-# The viewer: a Win32 window over the same core (plain GDI blit of the software renderer; no GPU dependency).
+# The viewer: a Win32 window over the same core (GDI blit of a frame drawn by the software renderer or by Direct3D 11).
 if(WIN32)
     add_executable(cardbridge_viewer WIN32 viewer/main.cpp)
     target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)

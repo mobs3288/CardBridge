@@ -137,6 +137,7 @@ std::vector<UnityProgram> ParseUnityShaderBlob(const Bytes& blob, std::vector<st
             continue;
         }
         size_t total = U32(sp, at + 24);
+        prog.dxbc.assign(sp.begin() + static_cast<std::ptrdiff_t>(at), sp.begin() + static_cast<std::ptrdiff_t>(at + total));
         ParseHeader(sp, at, prog);
         ParseTail(Tokenize(sp, at + total), prog);
         out.push_back(std::move(prog));

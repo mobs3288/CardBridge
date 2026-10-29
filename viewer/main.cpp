@@ -9,6 +9,7 @@
 //   F/S/B front/side/back, I issues, click a part row to hide/show it
 
 #include "assemble/Assembler.h"
+#include "export/GpuView.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
@@ -169,6 +170,9 @@ struct App {
 
     exporter::ViewCamera cam;
     exporter::ViewStatePtr state = exporter::NewViewState();
+    exporter::GpuView gpu;                    // the game's shaders on Direct3D 11
+    std::shared_ptr<Loaded> gpuScene;         // the scene the GPU copy was made from (keeps it alive while the GPU draws it)
+    bool gpuOk = false;
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
@@ -256,6 +260,11 @@ void Render(int w, int h) {
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     g.hidden.resize(L->scene.parts.size(), 0);
     g.vopt.textured = g.textured;
+    if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate
+        if (g.gpu.Render(g.cam, w, h, &g.hidden, g.frame)) return;
+        g.gpuOk = false;
+    }
+    // Software shaders are slow: only once the view has been still for a moment.
     const bool still = GetTickCount64() - g.lastInput > 300;
     g.vopt.shaded = g.shaded && still;
     if (g.shaded && !still) SetTimer(g.hwnd, 1, 320, nullptr);   // come back and draw the shaded picture
@@ -354,6 +363,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         { std::lock_guard<std::mutex> lk(g.mu); L = g.loaded; }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         g.state = exporter::NewViewState();
+        g.gpuOk = false;
+        g.gpuScene.reset();
+        if (L && g.gpu.ready() && g.gpu.Load(L->scene)) { g.gpuScene = L; g.gpuOk = true; }
         g.dirty = true;
         if (L) SetWindowTextW(hwnd, Utf8ToWide("CardBridge viewer - " + (L->title.empty() ? g.cardPath : L->title)).c_str());
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -463,6 +475,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
                              CW_USEDEFAULT, 1280, 800, nullptr, nullptr, inst, nullptr);
     ShowWindow(g.hwnd, show);
+    g.gpu.Init();   // no device: the software shaders stay
     CoInitialize(nullptr);
     if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
     if (g.settings.library.empty()) g.settings.library = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (made by 'cardbridge library import')");

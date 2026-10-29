@@ -768,4 +768,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     if (report) *report = std::string(lit ? "baked (shaded, front light) " : "baked (colour only) ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
+namespace detail {   // used by GpuView.cpp
+void FillShaderConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3],
+                         std::vector<std::vector<float>>& data, const std::vector<std::pair<std::string, Vec4>>* globals) {
+    CbSet c;
+    FillConstants(prog, mat, lightDir, camPos, c, globals);
+    data = std::move(c.data);
+}
+std::vector<Vec3> ComputeMeshTangents(const assemble::SceneMesh& m) { return ComputeTangents(m); }
+} // namespace detail
+
 } // namespace cardbridge::exporter
