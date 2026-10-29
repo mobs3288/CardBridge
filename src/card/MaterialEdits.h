@@ -29,6 +29,17 @@ struct MaterialEdits {
         std::vector<uint8_t> rgba;   // top row first
     };
 
+    // MaterialEditor's other per-material overrides (property names without the leading underscore: "Color", "rimpower").
+    struct Edit {
+        int coordinate = 0, objectType = 0, slot = 0;
+        std::string material;       // material name (renderer name for renderer edits)
+        std::string property;       // property, or the shader name for a shader edit
+        float value[4] = {0, 0, 0, 0};
+    };
+    std::vector<Edit> floats, colors, shaders, rendererEnabled;
+    // The overrides that apply to one material of one item.
+    std::vector<const Edit*> editsFor(const std::vector<Edit>& list, int coordinate, int objectType, int slot, const std::string& material) const;
+
     std::vector<MainTex> mainTex;
     std::map<int, Bytes> encoded;    // TexID -> PNG/JPEG bytes as stored in the card
 
@@ -38,7 +49,7 @@ struct MaterialEdits {
     enum SkinOverlayType { OverlayBody = 3, OverlayFace = 4, OverlayEyeL = 8, OverlayEyeR = 10 };
     bool decodeSkinOverlay(int type, Image& out) const;
 
-    bool empty() const { return mainTex.empty() && skinOverlays.empty(); }
+    bool empty() const { return mainTex.empty() && skinOverlays.empty() && floats.empty() && colors.empty() && shaders.empty() && rendererEnabled.empty(); }
 
     // The embedded texture replacing `material`'s main texture, or -1.
     int mainTexFor(int coordinate, int objectType, int slot, const std::string& material) const;

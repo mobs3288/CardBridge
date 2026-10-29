@@ -1,6 +1,7 @@
 #include "card/MaterialEdits.h"
 
 #include "core/MsgPack.h"
+#include <cstdlib>
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -17,6 +18,13 @@ Value inner(const Value& payload, const char* key) {
 }
 
 } // namespace
+
+std::vector<const MaterialEdits::Edit*> MaterialEdits::editsFor(const std::vector<Edit>& list, int coordinate, int objectType, int slot, const std::string& material) const {
+    std::vector<const Edit*> out;
+    for (const auto& e : list)
+        if (e.coordinate == coordinate && e.objectType == objectType && e.slot == slot && e.material == material) out.push_back(&e);
+    return out;
+}
 
 int MaterialEdits::mainTexFor(int coordinate, int objectType, int slot, const std::string& material) const {
     for (const auto& m : mainTex)
@@ -88,6 +96,35 @@ MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
         m.texId = static_cast<int>(row.at("TexID").asInt());
         me.mainTex.push_back(std::move(m));
     }
+
+    auto readList = [&](const char* key, std::vector<MaterialEdits::Edit>& into, const char* nameKey, auto&& fill) {
+        const Value rows = inner(payload, key);   // kept alive for the loop
+        for (const auto& row : rows.asArray()) {
+            MaterialEdits::Edit e;
+            e.coordinate = static_cast<int>(row.at("CoordinateIndex").asInt());
+            e.objectType = static_cast<int>(row.at("ObjectType").asInt());
+            e.slot = static_cast<int>(row.at("Slot").asInt());
+            e.material = row.at(nameKey).asStr();
+            fill(row, e);
+            into.push_back(std::move(e));
+        }
+    };
+    readList("MaterialFloatPropertyList", me.floats, "MaterialName", [](const Value& row, MaterialEdits::Edit& e) {
+        e.property = row.at("Property").asStr();
+        const Value& v = row.at("Value");
+        e.value[0] = v.isStr() ? static_cast<float>(std::atof(v.asStr().c_str())) : static_cast<float>(v.asFloat());
+    });
+    readList("MaterialColorPropertyList", me.colors, "MaterialName", [](const Value& row, MaterialEdits::Edit& e) {
+        e.property = row.at("Property").asStr();
+        const Value& v = row.at("Value");
+        for (size_t k = 0; k < 4; ++k) e.value[k] = static_cast<float>(v.at(k).asFloat(1.0));
+    });
+    readList("MaterialShaderList", me.shaders, "MaterialName", [](const Value& row, MaterialEdits::Edit& e) { e.property = row.at("ShaderName").asStr(); });
+    readList("RendererPropertyList", me.rendererEnabled, "RendererName", [](const Value& row, MaterialEdits::Edit& e) {
+        e.property = std::to_string(row.at("Property").asInt());   // 0 = Enabled
+        const Value& v = row.at("Value");
+        e.value[0] = v.isStr() ? static_cast<float>(std::atof(v.asStr().c_str())) : static_cast<float>(v.asFloat());
+    });
     return me;
 }
 

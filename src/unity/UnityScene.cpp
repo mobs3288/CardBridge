@@ -482,6 +482,24 @@ std::vector<std::pair<std::string, std::string>> UnityFile::readShaderTextureDef
     return out;
 }
 
+std::vector<std::pair<std::string, Vec4>> UnityFile::readShaderPropDefaults(int64_t shaderPathId) const {
+    std::vector<std::pair<std::string, Vec4>> out;
+    const ObjectInfo* o = sf_->find(shaderPathId);
+    if (!o) return out;
+    try {
+        Value v = sf_->read(*o);
+        for (const auto& p : v.at("m_ParsedForm").at("m_PropInfo").at("m_Props").asArray()) {
+            int64_t type = p.at("m_Type").asInt();
+            if (type == 4) continue;   // textures
+            const Value& d = p.has("m_DefValue") ? p.at("m_DefValue") : p.at("m_DefValues");
+            Vec4 val{static_cast<float>(d.at(size_t(0)).asFloat()), static_cast<float>(d.at(size_t(1)).asFloat()),
+                     static_cast<float>(d.at(size_t(2)).asFloat()), static_cast<float>(d.at(size_t(3)).asFloat())};
+            out.emplace_back(p.at("m_Name").asStr(), val);
+        }
+    } catch (const std::exception&) {}
+    return out;
+}
+
 std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* why) const {
     auto fail = [&](const std::string& m) -> std::optional<TextureData> { if (why) *why = m; return std::nullopt; };
     if (p.isNull()) return fail("no texture assigned");
