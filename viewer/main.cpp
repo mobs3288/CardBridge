@@ -197,7 +197,7 @@ PanelLayout LayoutFor(int H) {
     l.reset = {250, 88, 308, 112};
     l.all = {314, 88, 370, 112};
     const int logH = std::clamp(H / 3, 130, 330);
-    l.footerTop = H - 30;
+    l.footerTop = H - 34;
     l.logBottom = l.footerTop - 4;
     l.logTop = std::max(170, l.logBottom - logH);
     l.partsTop = 146;
@@ -271,12 +271,12 @@ void Log(const std::string& text, LogKind kind = LogKind::Info) {
     char ts[16];
     std::snprintf(ts, sizeof ts, "%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
     // Wrap long messages here, so the paint loop stays a plain line blitter. The log text column is
-    // kPanel - 66 - 8 px wide in 12 px Consolas, which fits about 44 characters.
+    // kPanel - 76 - 8 px wide in 12 px Consolas, which fits about 40 characters.
     std::vector<std::string> parts;
     std::string rest = text;
-    while (rest.size() > 44) {
-        size_t cut = rest.rfind(' ', 44);
-        if (cut == std::string::npos || cut < 20) cut = 44;
+    while (rest.size() > 40) {
+        size_t cut = rest.rfind(' ', 40);
+        if (cut == std::string::npos || cut < 20) cut = 40;
         parts.push_back(rest.substr(0, cut));
         rest = rest.substr(cut + (rest[cut] == ' ' ? 1 : 0));
     }
@@ -311,6 +311,17 @@ std::string Count(size_t n) {
     else if (n >= 10000) std::snprintf(b, sizeof b, "%.1fk", n / 1000.0);
     else std::snprintf(b, sizeof b, "%zu", n);
     return b;
+}
+
+// Long paths and names must not run out of the panel and over the model: keep the start (the drive) and the
+// useful tail, or cut the end for hints.
+std::string Shorten(const std::string& s, size_t maxChars) {
+    if (s.size() <= maxChars || maxChars < 12) return s;
+    const size_t tail = maxChars - 9;   // "D:/..." + tail
+    return s.substr(0, 6) + "..." + s.substr(s.size() - tail);
+}
+std::string ClipText(const std::string& s, size_t maxChars) {
+    return s.size() <= maxChars ? s : s.substr(0, maxChars - 3) + "...";
 }
 
 bool EnsureResolver(std::string& err) {
@@ -357,7 +368,7 @@ bool EnsureResolver(std::string& err) {
 void StartLoad(const std::string& path, int outfit) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     g.cardPath = path;
-    g.status = "loading " + path + " ...";
+    g.status = "loading " + fileio::FileName(path) + " ...";   // the full path is in the log
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
     std::thread([path, outfit]() {
@@ -565,11 +576,14 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     RECT all{0, 0, kPanel, rc.bottom};
     FillRect(dc, &all, bg);
     DeleteObject(bg);
+    // Belt and braces: nothing the panel draws may cross into the viewport, whatever the path or name length.
+    int savedDc = SaveDC(dc);
+    if (savedDc) IntersectClipRect(dc, 0, 0, kPanel, rc.bottom);
 
     // header -----------------------------------------------------------------------------------------------------------
     std::string title = L ? L->title : std::string("CardBridge viewer");
     if (title.empty()) title = "CardBridge viewer";
-    DrawTextAt(dc, g.fontTitle, RGB(238, 241, 248), 10, 7, title);
+    DrawTextAt(dc, g.fontTitle, RGB(238, 241, 248), 10, 7, ClipText(title, 38));
     if (L && !L->scene.parts.empty()) {
         std::string stats = Count(Triangles(L->scene)) + " triangles, " + std::to_string(L->scene.materials.size()) + " materials, " +
                             std::to_string(L->scene.parts.size()) + " parts";
@@ -586,12 +600,13 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
         // The assembly threw (unsupported card, broken container): show why instead of a row of zeros.
         DrawTextAt(dc, g.fontBold, RGB(240, 110, 110), 10, 34, "could not assemble this card");
         RECT noteClip{10, 54, kPanel - 10, 74};
-        if (!L->notes.empty()) DrawTextAt(dc, g.fontUi, RGB(220, 180, 180), 10, 54, L->notes[0], &noteClip);
+        if (!L->notes.empty()) DrawTextAt(dc, g.fontUi, RGB(220, 180, 180), 10, 54, ClipText(L->notes[0], 54), &noteClip);
         DrawTextAt(dc, g.fontUi, RGB(140, 150, 168), 10, 76, "details in the log below  ·  O opens another card");
     } else {
         DrawTextAt(dc, g.fontUi, RGB(190, 200, 215), 10, 34, "drop a card .png onto this window, or press O");
-        DrawTextAt(dc, g.fontUi, RGB(140, 150, 168), 10, 54, g.status);
-        DrawTextAt(dc, g.fontUi, RGB(120, 130, 150), 10, 72, "library: " + (g.settings.library.empty() ? std::string("(not set)") : g.settings.library));
+        DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(140, 150, 168), 10, 54, ClipText(g.status, 54));
+        DrawTextAt(dc, g.fontUi, RGB(120, 130, 150), 10, 72,
+                   "library: " + (g.settings.library.empty() ? std::string("(not set)") : Shorten(g.settings.library, 42)));
     }
 
     Button(dc, l.open, "Open", g.hoverButton == 1, false, true);
@@ -613,7 +628,8 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
         DrawTextRight(dc, g.fontSmall, RGB(110, 120, 138), kPanel - 10, 128, right, nullptr);
     }
     if (!L) {
-        DrawTextAt(dc, g.fontUi, RGB(120, 130, 150), 10, l.partsTop + 4, "no card loaded");
+        DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(120, 130, 150), 10, l.partsTop + 4,
+                   g.busy ? "loading the card ..." : "no card loaded");
     } else if (g.showIssues) {
         std::vector<std::pair<std::string, LogKind>> lines;
         for (const auto& i : L->scene.issues) {
@@ -724,7 +740,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
             const LogLine& line = g.logLines[static_cast<size_t>(i)];
             int y = top + (i - start) * lineH;
             DrawTextAt(dc, g.fontLog, RGB(90, 96, 110), 10, y, line.time, &lc);
-            DrawTextAt(dc, g.fontLog, KindColor(line.kind), 66, y, line.text, &lc);
+            DrawTextAt(dc, g.fontLog, KindColor(line.kind), 76, y, line.text, &lc);
         }
     }
 
@@ -733,7 +749,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     RECT fr{0, l.footerTop, kPanel, rc.bottom};
     FillRect(dc, &fr, foot);
     DeleteObject(foot);
-    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, "E export  O open  I issues  A all  T tex  H shader  R reset");
+    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  I issues  A all  T tex  H shader  R reset", 64));
     std::string hint = "L library  M mods  C clear log  ·  drop a card to open it";
     if (g.busy) hint = "working ...";
     else if (g.exporting) hint = "exporting PMX ...";
@@ -747,7 +763,8 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
         hint = modsInfo;
     }
     DrawTextAt(dc, g.fontSmall, g.busy ? RGB(120, 200, 255) : g.exporting ? RGB(240, 170, 90) : RGB(120, 130, 148), 10,
-               l.footerTop + 16, hint);
+               l.footerTop + 16, ClipText(hint, 64));
+    if (savedDc) RestoreDC(dc, savedDc);
     (void)paint;
 }
 
