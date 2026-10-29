@@ -335,6 +335,7 @@ struct Builder {
     // Textures the game puts on a material at run time besides its main one (face lips and eye shadow, body nipples and underhair):
     // property -> scene texture, bound for the renderer being added. Colours for them go through `runtime`.
     std::vector<std::pair<std::string, int>> extraTex;
+    std::vector<std::pair<std::string, Vec4>> stOverride;   // texture property -> scale.xy offset.xy (the eye look controller's iris and highlight placement)
     float blushAlpha = -1;       // face material only: alpha of _overcolor2, the emotion blush (ChaControl.ChangeHohoAkaRate); < 0 = leave
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
@@ -553,6 +554,8 @@ struct Builder {
                 for (auto& tb : sm.texProps) if (tb.name == name) { tb.texture = tex; set = true; }
                 if (!set) { SceneTexBinding nb; nb.name = name; nb.texture = tex; sm.texProps.push_back(nb); }
             }
+            for (const auto& [name, st] : stOverride)
+                for (auto& tb : sm.texProps) if (tb.name == name) tb.st = st;
             if (hairGlossTexture >= 0 && glossForThisRenderer) {
                 bool set = false;
                 for (auto& tb : sm.texProps) if (tb.name == "_HairGloss") { tb.texture = hairGlossTexture; set = true; }
@@ -977,7 +980,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 auto it = inputTexCache.find(td.get());
                 if (it == inputTexCache.end()) {
                     auto copy = td->rgba;
-                    it = inputTexCache.emplace(td.get(), b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy))).first;
+                    int made = b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy));
+                    scene.textures[static_cast<size_t>(made)].clamp = td->wrapMode == 1;   // gradation masks and ramps clamp
+                    it = inputTexCache.emplace(td.get(), made).first;
                 }
                 idx = it->second;
             }
@@ -1682,6 +1687,43 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 b.extraTex = faceOverlayTex;
                 b.runtime = faceOverlayColors;
             }
+            // Iris renderers: highlights (_overtex1 up, _overtex2 down), their colours, the tilt, and the iris / highlight placement the
+            // EyeLookMaterialControll computes from the card's pupil sliders with the gaze straight ahead.
+            b.stOverride.clear();
+            if (ref.group == "Head" && (r.name == "cf_Ohitomi_L02" || r.name == "cf_Ohitomi_R02")) {
+                const bool left = r.name == "cf_Ohitomi_L02";
+                auto lerp = [](float a, float bb, float t) { return a + (bb - a) * t; };
+                auto F = [&](const char* k, double def) { return static_cast<float>(faceV.at(k).asFloat(def)); };
+                const Value* ctl = nullptr;
+                std::vector<unity::MonoInfo> mbs = uf->monoBehavioursUnder(roots[0]);
+                for (const auto& mb : mbs) if (mb.className == "EyeLookMaterialControll" && mb.goId == r.goId) { ctl = &mb.fields; break; }
+                int hlUp = -1, hlDown = -1;
+                if (auto t = rowTexture(410, faceV.at("hlUpId").asInt(), "ChaFileFace.hlUpId", "EyeHiUpTex", "highlight up")) { auto c2 = t->rgba; hlUp = b.addSceneTexture(t->name, "eye highlight", t->width, t->height, std::move(c2)); }
+                if (auto t = rowTexture(411, faceV.at("hlDownId").asInt(), "ChaFileFace.hlDownId", "EyeHiDownTex", "highlight down")) { auto c2 = t->rgba; hlDown = b.addSceneTexture(t->name, "eye highlight", t->width, t->height, std::move(c2)); }
+                b.extraTex = {{"_overtex1", hlUp}, {"_overtex2", hlDown}};
+                b.runtime = {{"_overcolor1", vec4Of(faceV.at("hlUpColor"))}, {"_overcolor2", vec4Of(faceV.at("hlDownColor"))},
+                             {"_rotation", Vec4{(left ? 1.0f : -1.0f) * lerp(0.02f, -0.02f, static_cast<float>(faceV.at("shapeValueFace").at(size_t(33)).asFloat(0.5))), 0, 0, 0}}};
+                if (ctl) {
+                    float offX = lerp(0.2f, -0.6f, F("pupilX", 0.5)) * (left ? 1.0f : -1.0f), offY = lerp(-0.5f, 0.5f, F("pupilY", 0.5));
+                    float sx = lerp(1.8f, -0.2f, F("pupilWidth", 0.9)), sy = lerp(1.8f, -0.2f, F("pupilHeight", 0.9));
+                    float hx = offX, hy = offY, mag = std::sqrt(hx * hx + hy * hy);
+                    if (mag > 1.0f) { hx /= mag; hy /= mag; }
+                    auto invLerp = [](float v) { return (v + 1.0f) * 0.5f; };
+                    float inW = static_cast<float>(ctl->at("InsideWait").asFloat()), outW = static_cast<float>(ctl->at("OutsideWait").asFloat());
+                    float upW = static_cast<float>(ctl->at("UpWait").asFloat()), dnW = static_cast<float>(ctl->at("DownWait").asFloat());
+                    float power = static_cast<float>(ctl->at("power").asFloat(0.001));
+                    float num = lerp(inW, outW, invLerp(hx)), num2 = lerp(dnW, upW, invLerp(hy));
+                    float num3 = lerp(1.0f, 5.0f, sx), num4 = lerp(1.0f, 5.0f, sy);
+                    auto clampf = [](float v, float lo, float hi) { return std::min(hi, std::max(lo, v)); };
+                    float vx = clampf(num * (power * num3), static_cast<float>(ctl->at("InsideLimit").asFloat()), static_cast<float>(ctl->at("OutsideLimit").asFloat()));
+                    float vy = clampf(num2 * (power * num4), static_cast<float>(ctl->at("UpLimit").asFloat()), static_cast<float>(ctl->at("DownLimit").asFloat()));
+                    float hlUpY = lerp(0.1f, -0.1f, F("hlUpY", 0.5)), hlDownY = lerp(0.1f, -0.1f, F("hlDownY", 0.5));
+                    b.stOverride = {{"_MainTex", Vec4{1 + sx, 1 + sy, vx - sx * 0.5f, vy - sy * 0.5f}},
+                                    {"_overtex1", Vec4{1 + sx, 1 + sy, vx - sx * 0.5f, vy + hlUpY - sy * 0.5f}},
+                                    {"_overtex2", Vec4{1 + sx, 1 + sy, vx - sx * 0.5f, vy + hlDownY - sy * 0.5f}}};
+                    if (std::getenv("CARDBRIDGE_DEBUG_EYE")) std::fprintf(stderr, "eye %s main_st %g %g %g %g up_st y %g down_st y %g\n", r.name.c_str(), 1 + sx, 1 + sy, vx - sx * 0.5f, vy - sy * 0.5f, vy + hlUpY - sy * 0.5f, vy + hlDownY - sy * 0.5f);
+                }
+            }
             // The face material's _overcolor2 alpha is the blush of the character's emotion state: 0 at rate 0, 0.2 at rate 1.
             b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
                                ? 0.2f * std::min(1.0f, std::max(0.0f, static_cast<float>(card.status.at("hohoAkaRate").asFloat(0.0))))
@@ -1745,6 +1787,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.hairParent = nullptr;
         b.blushAlpha = -1;
         b.extraTex.clear();
+        b.stOverride.clear();
         b.blend = nullptr;
         b.meType = -1;
         scene.parts.push_back(std::move(part));
