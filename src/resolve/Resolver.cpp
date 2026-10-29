@@ -97,15 +97,46 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
         }
     }
 
+    // The item by its raw list id among the installed mods' lists. A card saved without Sideloader's resolve information names its mod
+    // items this way, and Sideloader falls back to it when the named mod (or its installed version) does not define the slot. With
+    // several mods defining the id, the one loaded first (by path) keeps it: Sideloader gives the later ones a new id.
+    auto byRawId = [&]() {
+        auto owners = mods_.findByListId(ref.category, ref.id);
+        if (owners.empty()) return false;
+        const ModEntry& m = **std::min_element(owners.begin(), owners.end(), [](const ModEntry* a, const ModEntry* b) { return a->path < b->path; });
+        if (!modListsLoaded_[m.path]) {
+            modListsLoaded_[m.path] = true;
+            lists_.addMod(m.path, m.guid, nullptr);
+        }
+        const ListItem* ml = lists_.findMod(m.guid, ref.category, ref.id);
+        if (!ml) return false;
+        r.modGuid = m.guid;
+        r.modName = m.name; r.modVersion = m.version; r.modAuthor = m.author; r.modPath = m.path;
+        r.ambiguous = r.ambiguous || owners.size() > 1;
+        r.listItem = *ml;
+        r.status = ItemStatus::ResolvedMod;
+        r.detail = "resolved by raw list id";
+        return true;
+    };
+
     if (row) {
         r.modGuid = row->modId;
         const auto* files = mods_.find(row->modId);
         if (!files || files->empty()) {
+            if (byRawId()) return r;
             r.status = ItemStatus::MissingMod;
             r.detail = "mod '" + row->modId + "' is not installed under the mods folder";
             return r;
         }
-        const ModEntry& m = (*files)[0];
+        // Several installed files can carry one GUID (versions of a pack); take one whose lists define the item, the newest by path.
+        const ModEntry* pick = &(*files)[0];
+        bool pickHas = false;
+        for (const ModEntry& cand : *files) {
+            bool has = false;
+            for (size_t k = 0; k + 1 < cand.listIds.size() && !has; k += 2) has = cand.listIds[k] == ref.category && cand.listIds[k + 1] == ref.id;
+            if ((has && !pickHas) || (has == pickHas && cand.path > pick->path)) { pick = &cand; pickHas = has; }
+        }
+        const ModEntry& m = *pick;
         r.modName = m.name; r.modVersion = m.version; r.modAuthor = m.author; r.modPath = m.path;
         if (files->size() > 1) r.ambiguous = true;
         if (!modListsLoaded_[m.path]) {
@@ -114,6 +145,7 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
         }
         const ListItem* li = lists_.findMod(row->modId, ref.category, ref.id);
         if (!li) {
+            if (byRawId()) return r;
             r.status = ItemStatus::MissingListEntry;
             r.detail = "mod '" + row->modId + "' has no list entry for category " + std::to_string(ref.category) + " slot " + std::to_string(ref.id);
             return r;
@@ -125,26 +157,7 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
 
     const ListItem* li = lists_.findBase(ref.category, ref.id);
     if (!li) {
-        // A card saved without Sideloader's resolve information names its mod items by the raw list id; the game finds them
-        // among the installed mods' lists. With several mods defining the id, the one loaded first (by path) keeps it: Sideloader gives the
-        // later ones a new id.
-        auto owners = mods_.findByListId(ref.category, ref.id);
-        if (!owners.empty()) {
-            const ModEntry& m = **std::min_element(owners.begin(), owners.end(), [](const ModEntry* a, const ModEntry* b) { return a->path < b->path; });
-            if (!modListsLoaded_[m.path]) {
-                modListsLoaded_[m.path] = true;
-                lists_.addMod(m.path, m.guid, nullptr);
-            }
-            if (const ListItem* ml = lists_.findMod(m.guid, ref.category, ref.id)) {
-                r.modGuid = m.guid;
-                r.modName = m.name; r.modVersion = m.version; r.modAuthor = m.author; r.modPath = m.path;
-                r.ambiguous = r.ambiguous || owners.size() > 1;
-                r.listItem = *ml;
-                r.status = ItemStatus::ResolvedMod;
-                r.detail = "resolved by raw list id (the card carries no resolve information)";
-                return r;
-            }
-        }
+        if (byRawId()) return r;
         r.status = ItemStatus::MissingListEntry;
         r.detail = "id " + std::to_string(ref.id) + " is not in the base game lists and the card names no mod for it";
         return r;
