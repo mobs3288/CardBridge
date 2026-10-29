@@ -569,6 +569,17 @@ struct Builder {
                 else if (f.first == "_LineWidthS") sm.outlineWidth = f.second;
                 else if (f.first == "_LineWidth") sm.outlineWidth = f.second;
             }
+            // A property the material does not store has the shader's declared default, which is what the game draws with.
+            if (sm.shaderIndex >= 0) {
+                bool storedWidth = false, storedColor = m->color("_LineColor") != nullptr;
+                for (const auto& f : m->floats) storedWidth = storedWidth || f.first == "_LineWidthS" || f.first == "_LineWidth";
+                for (const auto& d : scene.shaders[static_cast<size_t>(sm.shaderIndex)].propDefaults) {
+                    if (!storedWidth && (d.first == "_LineWidthS" || d.first == "_LineWidth")) sm.outlineWidth = d.second.x;
+                    if (!storedColor && d.first == "_LineColor") sm.outlineColor = {d.second.x, d.second.y, d.second.z};
+                }
+            }
+            for (const auto& rp : runtime)   // the card's own outline colour (hair)
+                if (rp.first == "_LineColor") sm.outlineColor = {rp.second.x, rp.second.y, rp.second.z};
             if (const Vec4* c = m->color("_SpecularColor")) {
                 float k = std::min(1.0f, std::max(0.0f, specPow));   // _SpecularPower is the highlight strength in these shaders
                 sm.specular = {c->x * k, c->y * k, c->z * k};
@@ -988,6 +999,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     auto copy = td->rgba;
                     int made = b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy));
                     scene.textures[static_cast<size_t>(made)].clamp = td->wrapMode == 1;   // gradation masks and ramps clamp
+                    scene.textures[static_cast<size_t>(made)].srgb = td->colorSpace == 1;
                     it = inputTexCache.emplace(td.get(), made).first;
                 }
                 idx = it->second;
@@ -1303,6 +1315,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     int size = std::min(1024, std::max(mainT->width, mainT->height));
                     int job = createJobFor(ref.partId, "cf_m_clothesN_create", texs, props, size);
                     if (job >= 0) {
+                        scene.createJobs.back().linear = true;
                         // KoiClothesOverlayX paints an image over the garment's texture (named by the garment's object in the game).
                         static const char* const kGarmentNames[] = {"ct_clothesTop", "ct_clothesBot", "ct_bra", "ct_shorts", "ct_gloves", "ct_panst", "ct_socks", "ct_shoes_inner", "ct_shoes_outer"};
                         static const char* const kSubNames[] = {"ct_top_parts_A", "ct_top_parts_B", "ct_top_parts_C"};

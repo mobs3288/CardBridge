@@ -47,6 +47,7 @@ struct TextureData {
     std::string name;
     int width = 0, height = 0;
     int unityFormat = 0;
+    int colorSpace = 1;                   // Unity m_ColorSpace: 1 = sRGB, 0 = linear data
     std::vector<uint8_t> rgba;            // width*height*4, top row first (PNG order)
 };
 
