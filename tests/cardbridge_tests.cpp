@@ -10,6 +10,8 @@
 // Without them the integration tests are skipped, not failed.
 
 #include "assemble/Assembler.h"
+#include "assemble/DynamicBone.h"
+#include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
@@ -150,6 +152,80 @@ void unitTests() {
         CHECK(me.decodeClothesOverlay("ct_top_parts_B", img, replace));
         CHECK(replace && img.width == 1 && img.height == 1);
         CHECK(!me.decodeClothesOverlay("ct_clothesTop", img, replace));
+    });
+
+    test("dynamic bone: a stiff chain keeps its pose, a loose one hangs down, a collider pushes it out", [] {
+        using assemble::DbCollider; using assemble::DbParams; using assemble::DbTree;
+        // a chain of four nodes one unit apart along +X, root fixed at the origin
+        auto chain = [] {
+            std::vector<Mat4> local(4);
+            std::vector<int> parent = {-1, 0, 1, 2};
+            for (int i = 1; i < 4; ++i) local[static_cast<size_t>(i)] = Mat4::TRS({1, 0, 0}, Quat{}, {1, 1, 1});
+            DbTree t;
+            t.Init(local, parent, Mat4{});
+            return t;
+        };
+        DbParams p;
+        p.root = 0;
+        p.stiffness = 1.0f; p.elasticity = 0.1f; p.damping = 0.2f;
+        p.force = {0, -0.01f, 0};
+        DbTree stiff = chain();
+        assemble::SettleDynamicBone(stiff, p, {});
+        for (int i = 1; i < 4; ++i) CHECK(std::fabs(stiff.WorldOf(i).translation().y) < 1e-3f && std::fabs(stiff.WorldOf(i).translation().x - i) < 1e-3f);
+
+        p.stiffness = 0.0f; p.elasticity = 0.0f; p.damping = 0.5f;
+        DbTree loose = chain();
+        assemble::SettleDynamicBone(loose, p, {});
+        Vec3 tip = loose.WorldOf(3).translation();
+        CHECK(tip.y < -2.5f && std::fabs(tip.x) < 0.2f);   // hangs straight down from the root
+        for (int i = 1; i < 4; ++i) {   // bone lengths are kept
+            Vec3 a = loose.WorldOf(i).translation(), b = loose.WorldOf(i - 1).translation();
+            CHECK(std::fabs(std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)) - 1.0f) < 1e-2f);
+        }
+
+        DbCollider c;   // a sphere in the way of the hanging chain
+        c.center = {0.2f, -1.0f, 0.0f};
+        c.radius = 0.5f;
+        DbTree blocked = chain();
+        assemble::SettleDynamicBone(blocked, p, {c});
+        Vec3 b1 = blocked.WorldOf(1).translation();
+        CHECK(std::sqrt((b1.x - 0.2f) * (b1.x - 0.2f) + (b1.y + 1.0f) * (b1.y + 1.0f)) >= 0.4f);   // the length constraint runs after the collision, so a little overlap can remain
+    });
+
+    test("KKABMX: the compressed bone table is read, one entry for every coordinate or one per coordinate", [] {
+        // [ ["cf_J_FaceBase", [[[0.92, 0.92, 0.96], 1.0]]], ["cf_d_sk_top", [ [[0.9,1,0.9],1.0,[0,0,0],[0,0,0]], [[1,1,1],1.0,[0,0,0],[0,0,0]] ]] ] as MessagePack
+        Bytes m = B({0x92, 0x92, 0xad});
+        for (char ch : std::string("cf_J_FaceBase")) m.push_back(static_cast<uint8_t>(ch));
+        auto f32 = [&](float v) { uint32_t u; std::memcpy(&u, &v, 4); m.push_back(0xca); for (int s = 24; s >= 0; s -= 8) m.push_back(static_cast<uint8_t>(u >> s)); };
+        m.push_back(0x91); m.push_back(0x92); m.push_back(0x93); f32(0.92f); f32(0.92f); f32(0.96f); f32(1.0f);
+        m.push_back(0x92); m.push_back(0xab);
+        for (char ch : std::string("cf_d_sk_top")) m.push_back(static_cast<uint8_t>(ch));
+        m.push_back(0x92);
+        for (int k = 0; k < 2; ++k) { m.push_back(0x94); m.push_back(0x93); f32(k == 0 ? 0.9f : 1.0f); f32(1.0f); f32(k == 0 ? 0.9f : 1.0f); f32(1.0f); m.push_back(0x93); f32(0); f32(0); f32(0); m.push_back(0x93); f32(0); f32(0); f32(0); }
+        // wrap as an uncompressed block (a single LZ4 literal run) in ext type 99
+        Bytes block;
+        block.push_back(static_cast<uint8_t>(m.size() < 15 ? m.size() << 4 : 0xF0));
+        size_t extra = m.size() >= 15 ? m.size() - 15 : 0;
+        if (m.size() >= 15) { while (extra >= 255) { block.push_back(255); extra -= 255; } block.push_back(static_cast<uint8_t>(extra)); }
+        block.insert(block.end(), m.begin(), m.end());
+        Bytes ext = {0xc9, 0, 0, 0, 0, 99, 0xce, 0, 0, 0, 0};
+        uint32_t ul = static_cast<uint32_t>(m.size());
+        for (int i = 0; i < 4; ++i) ext[7 + static_cast<size_t>(i)] = static_cast<uint8_t>(ul >> (24 - 8 * i));
+        uint32_t el = static_cast<uint32_t>(1 + 5 + block.size());
+        for (int i = 0; i < 4; ++i) ext[1 + static_cast<size_t>(i)] = static_cast<uint8_t>(el >> (24 - 8 * i));
+        ext.insert(ext.end(), block.begin(), block.end());
+        Value payload(Value::Map{{Value(std::string("boneData")), Value(ext)}});
+        Value::Array arr;
+        arr.emplace_back(int64_t{0});
+        arr.emplace_back(payload);
+        Value extended(Value::Map{{Value(std::string("KKABMPlugin.ABMData")), Value(arr)}});
+        card::AbmxTable t = card::LoadAbmx(extended);
+        const card::AbmxMod* face = t.find("cf_J_FaceBase", 3);   // one entry: every coordinate
+        CHECK(face && std::fabs(face->scale.z - 0.96f) < 1e-6f && face->hasScale());
+        const card::AbmxMod* sk0 = t.find("cf_d_sk_top", 0);
+        const card::AbmxMod* sk1 = t.find("cf_d_sk_top", 1);
+        CHECK(sk0 && sk1 && sk0->hasScale() && !sk1->hasScale());
+        CHECK(t.find("cf_d_sk_top", 5) == nullptr);
     });
 
     test("sha256", [] {

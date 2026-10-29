@@ -1,7 +1,9 @@
 #include "assemble/Assembler.h"
+#include "assemble/DynamicBone.h"
 
 #include "core/Bytes.h"
 #include "shape/Shape.h"
+#include "card/Abmx.h"
 #include "card/MaterialEdits.h"
 #include "core/MsgPack.h"
 #include "export/Preview.h"
@@ -45,6 +47,37 @@ struct LocalOverride {
     Vec3 scl{1, 1, 1};
 };
 using Overrides = std::map<std::string, LocalOverride>;
+
+Quat quatMul(Quat a, Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// KKABMX on top of the game's shape: for every bone of the prefab the table names, the local scale, rotation and position the
+// plugin writes (BoneModifier.Apply) from the bone's own values at that moment (the shape override when there is one).
+void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, const card::AbmxTable& table, int coordinate) {
+    if (table.empty()) return;
+    auto roots = uf.findXformsByName(prefabName);
+    if (roots.empty()) return;
+    std::set<std::string> done;
+    for (int64_t id : uf.subtree(roots[0])) {
+        const unity::Xform* x = uf.xform(id);
+        if (!x || !done.insert(x->name).second) continue;
+        const card::AbmxMod* m = table.find(x->name, coordinate);
+        if (!m || m->empty()) continue;
+        LocalOverride o;
+        o.pos = x->pos; o.scl = x->scl; o.rot = x->rot;
+        auto it = ov.find(x->name);
+        if (it != ov.end()) o = it->second;
+        Quat baseRot = it != ov.end() && it->second.hasRot ? it->second.rot : x->rot;
+        Vec3 basePos = o.pos, baseScl = o.scl;
+        if (m->hasScale()) o.scl = {baseScl.x * m->scale.x, baseScl.y * m->scale.y, baseScl.z * m->scale.z};
+        if (m->hasRotation()) { o.rot = quatMul(baseRot, shape::EulerToQuat(m->rotation)); o.hasRot = true; }
+        if (m->hasLength()) o.pos = basePos * m->length + m->position;
+        else if (m->hasPosition()) o.pos = basePos + m->position;
+        ov[x->name] = o;
+    }
+}
 
 // Adds every transform of a prefab to the scene skeleton, with world matrices built from local transforms
 // (so a bone's shape override moves its whole subtree); returns false if the prefab root is missing.
@@ -317,9 +350,118 @@ void alphaOver(std::vector<uint8_t>& dst, int dw, int dh, const card::MaterialEd
         }
 }
 
+// Runs the DynamicBone components of an item's prefab to rest, as the game's still character does, and returns the world matrices (in the
+// prefab's own space, like UnityFile::worldMatrix) of every transform they move. `P` is the world matrix the prefab's root hangs on.
+bool settleItem(UnityFile& uf, int64_t prefabRoot, const Mat4& P, const Mat4* P0, const std::vector<DbCollider>& colliders,
+                const std::map<int64_t, Mat4>* localOv, std::map<int64_t, Mat4>& simW) {
+    std::vector<unity::MonoInfo> dbs;
+    for (auto& mb : uf.monoBehavioursUnder(prefabRoot))
+        if (mb.className == "DynamicBone") dbs.push_back(std::move(mb));
+    if (dbs.empty()) return false;
+
+    std::vector<int64_t> ids = uf.subtree(prefabRoot);
+    std::map<int64_t, int> index;
+    for (size_t i = 0; i < ids.size(); ++i) index[ids[i]] = static_cast<int>(i);
+    std::map<int64_t, int64_t> xformOfGo;
+    for (const auto& [id, x] : uf.xforms()) xformOfGo[x.goId] = id;
+    std::vector<Mat4> locals(ids.size());
+    std::vector<int> parents(ids.size(), -1);
+    for (size_t i = 1; i < ids.size(); ++i) {
+        const unity::Xform* x = uf.xform(ids[i]);
+        auto ov = localOv ? localOv->find(ids[i]) : std::map<int64_t, Mat4>::const_iterator{};
+        locals[i] = (localOv && ov != localOv->end()) ? ov->second : Mat4::TRS(x->pos, x->rot, x->scl);
+        auto pi = index.find(x->parent);
+        parents[i] = pi != index.end() ? pi->second : 0;
+    }
+    DbTree tree;
+    tree.Init(locals, parents, P);
+    DbTree before = tree;   // the same item where the game first put it, on the character before its shape sliders and bone modifiers
+    int updates = 0;
+    if (P0) {
+        before.rootWorld = *P0;
+        updates = std::getenv("CARDBRIDGE_DB_STEPS") ? std::atoi(std::getenv("CARDBRIDGE_DB_STEPS")) : 10;
+    }
+
+    auto vec3 = [](const Value& v) { return Vec3{static_cast<float>(v.at("x").asFloat()), static_cast<float>(v.at("y").asFloat()), static_cast<float>(v.at("z").asFloat())}; };
+    auto curve = [](const Value& v) {
+        DbCurve c;
+        for (const auto& k : v.at("m_Curve").asArray())
+            c.keys.push_back({static_cast<float>(k.at("time").asFloat()), static_cast<float>(k.at("value").asFloat()),
+                              static_cast<float>(k.at("inSlope").asFloat()), static_cast<float>(k.at("outSlope").asFloat())});
+        return c;
+    };
+    auto nodeOf = [&](const Value& pptr) -> int {
+        if (pptr.at("m_FileID").asInt() != 0) return -1;
+        auto it = index.find(pptr.at("m_PathID").asInt());
+        return it == index.end() ? -1 : it->second;
+    };
+    std::set<int> moved;
+    for (const auto& mb : dbs) {
+        const Value& f = mb.fields;
+        DbParams p;
+        p.root = nodeOf(f.at("m_Root"));
+        if (p.root < 0) continue;
+        auto go = xformOfGo.find(mb.goId);
+        if (go != xformOfGo.end()) { auto oi = index.find(go->second); if (oi != index.end()) p.owner = oi->second; }
+        p.updateRate = static_cast<float>(f.at("m_UpdateRate").asFloat(60.0));
+        p.damping = static_cast<float>(f.at("m_Damping").asFloat());
+        p.elasticity = static_cast<float>(f.at("m_Elasticity").asFloat());
+        p.stiffness = static_cast<float>(f.at("m_Stiffness").asFloat());
+        p.inert = static_cast<float>(f.at("m_Inert").asFloat());
+        p.radius = static_cast<float>(f.at("m_Radius").asFloat());
+        p.endLength = static_cast<float>(f.at("m_EndLength").asFloat());
+        p.endOffset = vec3(f.at("m_EndOffset"));
+        p.gravity = vec3(f.at("m_Gravity"));
+        p.force = vec3(f.at("m_Force"));
+        p.freezeAxis = static_cast<int>(f.at("m_FreezeAxis").asInt());
+        p.dampingC = curve(f.at("m_DampingDistrib"));
+        p.elasticityC = curve(f.at("m_ElasticityDistrib"));
+        p.stiffnessC = curve(f.at("m_StiffnessDistrib"));
+        p.inertC = curve(f.at("m_InertDistrib"));
+        p.radiusC = curve(f.at("m_RadiusDistrib"));
+        for (const auto& e : f.at("m_Exclusions").asArray()) if (int n = nodeOf(e); n >= 0) p.exclusions.push_back(n);
+        for (const auto& e : f.at("m_notRolls").asArray()) if (int n = nodeOf(e); n >= 0) p.notRolls.push_back(n);
+        int steps = SettleDynamicBone(tree, p, colliders, updates > 0 ? &before : nullptr, updates);
+        if (std::getenv("CARDBRIDGE_DEBUG_DB")) {
+            Mat4 ow = p.owner >= 0 ? tree.WorldOf(p.owner, true) : P;
+            std::fprintf(stderr, "dbsettle root=%s owner=%s scale.x=%.3f steps=%d radius=%g\n", uf.xform(ids[static_cast<size_t>(p.root)])->name.c_str(),
+                         p.owner >= 0 ? uf.xform(ids[static_cast<size_t>(p.owner)])->name.c_str() : "?", std::sqrt(ow.m[0] * ow.m[0] + ow.m[4] * ow.m[4] + ow.m[8] * ow.m[8]), steps, p.radius);
+        }
+        std::vector<int> stack{p.root};
+        while (!stack.empty()) {
+            int n = stack.back();
+            stack.pop_back();
+            moved.insert(n);
+            for (int c : tree.children[static_cast<size_t>(n)]) stack.push_back(c);
+        }
+    }
+    if (moved.empty()) return false;
+    const Mat4 rootW = uf.worldMatrix(prefabRoot, localOv);
+    const Mat4 toPrefab = rootW * inverse(P);
+    for (int n : moved) simW[ids[static_cast<size_t>(n)]] = toPrefab * tree.WorldOf(n);
+    if (std::getenv("CARDBRIDGE_DEBUG_DB")) {
+        auto cl = [&](int c) { return std::sqrt(P.m[c] * P.m[c] + P.m[4 + c] * P.m[4 + c] + P.m[8 + c] * P.m[8 + c]); };
+        std::fprintf(stderr, "dbanchor pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", P.m[3], P.m[7], P.m[11], cl(0), cl(1), cl(2));
+    }
+    if (std::getenv("CARDBRIDGE_DEBUG_DB"))
+        for (int n : moved) {
+            Vec3 a = tree.WorldOf(n, true).translation(), c = tree.WorldOf(n).translation();
+            std::fprintf(stderr, "dbnode %s rest %.4f %.4f %.4f sim %.4f %.4f %.4f\n", uf.pathOf(ids[static_cast<size_t>(n)]).c_str(), a.x, a.y, a.z, c.x, c.y, c.z);
+        }
+    return true;
+}
+
 struct Builder {
     const std::map<int64_t, Mat4>* localOv = nullptr;   // local-matrix overrides for the prefab being added (accessory N_move nodes)
     Mat4 W(UnityFile& uf, int64_t id) const { return uf.worldMatrix(id, localOv); }
+    // The same with the DynamicBone settle applied (prefab space): the pose a hair or accessory chain ends in.
+    Mat4 Wp(UnityFile& uf, int64_t id) const {
+        if (simW) {
+            auto it = simW->find(id);
+            if (it != simW->end()) return it->second;
+        }
+        return W(uf, id);
+    }
     Scene& scene;
     Rig& rig;
     std::map<std::string, int> textureCache;   // "<bundle>#<pathId>" -> scene texture
@@ -338,6 +480,9 @@ struct Builder {
     std::vector<std::pair<std::string, int>> extraTex;
     std::vector<std::pair<std::string, Vec4>> stOverride;   // texture property -> scale.xy offset.xy (the eye look controller's iris and highlight placement)
     float blushAlpha = -1;       // face material only: alpha of _overcolor2, the emotion blush (ChaControl.ChangeHohoAkaRate); < 0 = leave
+    const std::map<int64_t, Mat4>* simW = nullptr;   // settled world matrices (prefab space) of the item being added
+    std::vector<DbCollider> dbColliders;   // the body's DynamicBoneColliders, in world space
+    const Rig* rigDefault = nullptr;       // the skeleton without shape sliders and bone modifiers: where the game's hair started
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
@@ -677,7 +822,7 @@ struct Builder {
         SceneBone nb;
         nb.name = partId + "/" + x->name;
         nb.parent = parent;
-        nb.pos = (placement * (inverse(W(uf, prefabRoot)) * W(uf, xformId))).translation();
+        nb.pos = (placement * (inverse(W(uf, prefabRoot)) * Wp(uf, xformId))).translation();
         nb.source = partId;
         scene.bones.push_back(nb);
         int idx = static_cast<int>(scene.bones.size()) - 1;
@@ -707,7 +852,7 @@ struct Builder {
         size_t n = mesh->vertexCount();
         sm.vertices.resize(n);
 
-        Mat4 rendererW = W(uf, r.xformId);
+        Mat4 rendererW = Wp(uf, r.xformId);
         Mat4 rootInv = inverse(W(uf, prefabRoot));
         bool skinned = r.skinned && !r.boneXforms.empty() && !mesh->skin.empty() && mesh->bindPoses.size() >= r.boneXforms.size();
         if (r.skinned && !skinned && !r.boneXforms.empty())
@@ -721,7 +866,7 @@ struct Builder {
                 int64_t bid = r.boneXforms[i];
                 if (!uf.xform(bid)) { boneIdx.push_back(staticBone); boneMat.push_back(placement * (rootInv * rendererW)); continue; }
                 boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
-                boneMat.push_back(placement * (rootInv * W(uf, bid)) * mesh->bindPoses[i]);
+                boneMat.push_back(placement * (rootInv * Wp(uf, bid)) * mesh->bindPoses[i]);
             }
         } else if (skinned) {
             for (size_t i = 0; i < r.boneXforms.size(); ++i) {
@@ -735,17 +880,17 @@ struct Builder {
                 } else {
                     // A bone only this item has (a mod's necklace joint ...): keep its offset from the nearest ancestor the
                     // shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
-                    bw = rootInv * W(uf, r.boneXforms[i]);
+                    bw = rootInv * Wp(uf, r.boneXforms[i]);
                     bool anchored = false;
                     for (const unity::Xform* a = bx ? uf.xform(bx->parent) : nullptr; a; a = uf.xform(a->parent)) {
                         auto ar = rig.world.find(a->name);
                         if (ar == rig.world.end()) continue;
-                        bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * W(uf, r.boneXforms[i])));
+                        bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * Wp(uf, r.boneXforms[i])));
                         anchored = true;
                         break;
                     }
                     // A hair item's prefab hangs under the head's hair parent (cf_J_FaceUp_ty) in the game.
-                    if (!anchored && hairParent) bw = *hairParent * (rootInv * W(uf, r.boneXforms[i]));
+                    if (!anchored && hairParent) bw = *hairParent * (rootInv * Wp(uf, r.boneXforms[i]));
                     if (bx && bi < 0) {
                         // A bone only this item has (a mod's necklace joint ...): add it, parented to the
                         // nearest ancestor the scene already knows.
@@ -918,9 +1063,37 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     }
     Overrides shapeOv;
     if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene);
+    const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
+    applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
     if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) {
         scene.error("", "prefab '" + opt.bodyRigPrefab + "' not found in oo_base.unity3d");
         return scene;
+    }
+    {   // the colliders every DynamicBone of the character is given (ChaControl.LoadCharaFbxData: the body bone prefab's DynamicBoneColliders)
+        std::map<int64_t, std::string> goName;
+        for (const auto& [id, x] : base->xforms()) goName[x.goId] = x.name;
+        for (int64_t root : base->findXformsByName(opt.bodyRigPrefab))
+            for (const auto& mb : base->monoBehavioursUnder(root)) {
+                if (mb.className != "DynamicBoneCollider") continue;
+                auto nm = goName.find(mb.goId);
+                if (nm == goName.end()) continue;
+                auto w = rig.world.find(nm->second);
+                if (w == rig.world.end()) continue;
+                DbCollider c;
+                c.center = {static_cast<float>(mb.fields.at("m_Center").at("x").asFloat()), static_cast<float>(mb.fields.at("m_Center").at("y").asFloat()), static_cast<float>(mb.fields.at("m_Center").at("z").asFloat())};
+                c.radius = static_cast<float>(mb.fields.at("m_Radius").asFloat(0.5));
+                c.height = static_cast<float>(mb.fields.at("m_Height").asFloat());
+                c.direction = static_cast<int>(mb.fields.at("m_Direction").asInt());
+                c.inside = mb.fields.at("m_Bound").asInt() == 1;
+                c.world = w->second;
+                b.dbColliders.push_back(c);
+                if (std::getenv("CARDBRIDGE_DEBUG_DB")) {
+                    Vec3 cw = c.world.point(c.center);
+                    float sc = std::sqrt(c.world.m[2] * c.world.m[2] + c.world.m[6] * c.world.m[6] + c.world.m[10] * c.world.m[10]);
+                    std::fprintf(stderr, "dbcollider enabled=%lld %s center %.3f %.3f %.3f r %.3f h %.3f dir %d inside %d\n", static_cast<long long>(mb.fields.at("m_Enabled").asInt(-1)), nm->second.c_str(), cw.x, cw.y, cw.z, c.radius * sc, c.height * sc, c.direction, c.inside ? 1 : 0);
+                }
+            }
+        if (std::getenv("CARDBRIDGE_DEBUG_DB")) std::fprintf(stderr, "dbcolliders %zu\n", b.dbColliders.size());
     }
     int headAttach = scene.boneIndex(opt.headAttachBone);
     Mat4 headBase;
@@ -944,6 +1117,18 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
     }
+    Rig rigDefault;   // the same skeleton as the game first built it, before sliders and bone modifiers moved anything
+    {
+        Scene scratch;
+        Overrides none;
+        addRigPrefab(scratch, rigDefault, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", nullptr);
+        Mat4 headBase0;
+        auto hw0 = rigDefault.world.find(opt.headAttachBone);
+        if (hw0 != rigDefault.world.end()) headBase0 = hw0->second;
+        addRigPrefab(scratch, rigDefault, *base, opt.headRigPrefab, headBase0, -1, "rig", nullptr);
+        b.rigDefault = &rigDefault;
+    }
+    applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
     if (!addRigPrefab(scene, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv))
         scene.warn("", "prefab '" + opt.headRigPrefab + "' not found in oo_base.unity3d");
 
@@ -1670,6 +1855,20 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (hp != rig.world.end()) b.hairParent = &hp->second;
             else scene.warn(ref.partId, "hair parent node cf_J_FaceUp_ty not found; the hair is placed at the model origin");
         }
+        std::map<int64_t, Mat4> simW;   // hair and accessory chains settle under their DynamicBones
+        b.simW = nullptr;
+        // Off by default: against the game dumps the settle helped one card in four and hurt the others (docs: sidecar notes), so hair and accessory chains
+        // stay at their authored pose unless CARDBRIDGE_DYNBONE=1.
+        if (std::getenv("CARDBRIDGE_DYNBONE") && ((ref.group == "Hair" && b.hairParent) || accessoryMode)) {
+            const Mat4 anchor = ref.group == "Hair" ? *b.hairParent : placement;
+            Mat4 start;
+            const Mat4* startPtr = nullptr;
+            if (b.rigDefault) {
+                auto sw = b.rigDefault->world.find(ref.group == "Hair" ? std::string("cf_J_FaceUp_ty") : ref.attachNode);
+                if (sw != b.rigDefault->world.end()) { start = sw->second; startPtr = &start; }
+            }
+            if (settleItem(*uf, roots[0], anchor, startPtr, b.dbColliders, b.localOv, simW)) b.simW = &simW;
+        }
         b.meCoordinate = outfit;
         b.meType = -1;
         b.meSlot = 0;
@@ -1691,6 +1890,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 for (const auto& pp : fv.asArray()) if (pp.at("m_FileID").asInt() == 0 && pp.at("m_PathID").asInt() != 0) into.insert(pp.at("m_PathID").asInt());
             };
             if (std::getenv("CARDBRIDGE_DEBUG_MB")) std::fprintf(stderr, "mb %s on %s\n", mb.className.c_str(), ref.partId.c_str());
+            if (mb.className == "DynamicBone" && std::getenv("CARDBRIDGE_DEBUG_DB")) {
+                const Value& f = mb.fields;
+                auto v3 = [&](const char* k) { const Value& v = f.at(k); return std::to_string(v.at("x").asFloat()) + "," + std::to_string(v.at("y").asFloat()) + "," + std::to_string(v.at("z").asFloat()); };
+                std::fprintf(stderr, "db %s go=%lld root=%lld rate=%g damp=%g elas=%g stiff=%g inert=%g rad=%g endlen=%g endoff=%s grav=%s force=%s freeze=%lld coll=%zu excl=%zu norolls=%zu curves=%zu/%zu/%zu\n", ref.partId.c_str(), static_cast<long long>(mb.goId),
+                             static_cast<long long>(f.at("m_Root").at("m_PathID").asInt()), f.at("m_UpdateRate").asFloat(), f.at("m_Damping").asFloat(), f.at("m_Elasticity").asFloat(), f.at("m_Stiffness").asFloat(), f.at("m_Inert").asFloat(),
+                             f.at("m_Radius").asFloat(), f.at("m_EndLength").asFloat(), v3("m_EndOffset").c_str(), v3("m_Gravity").c_str(), v3("m_Force").c_str(), static_cast<long long>(f.at("m_FreezeAxis").asInt()),
+                             f.at("m_Colliders").asArray().size(), f.at("m_Exclusions").asArray().size(), f.at("m_notRolls").asArray().size(),
+                             f.at("m_DampingDistrib").at("m_Curve").asArray().size(), f.at("m_ElasticityDistrib").at("m_Curve").asArray().size(), f.at("m_StiffnessDistrib").at("m_Curve").asArray().size());
+            }
             if (mb.className == "ChaAccessoryComponent") {
                 haveAccComponent = true;
                 ids("rendNormal", rtNormal); ids("rendAlpha", rtAlpha); ids("rendHair", rtHair);
@@ -1870,6 +2078,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         b.localOv = nullptr;
+        b.simW = nullptr;
         b.hairParent = nullptr;
         b.blushAlpha = -1;
         b.extraTex.clear();
@@ -1924,6 +2133,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
             }
+    if (std::getenv("CARDBRIDGE_DEBUG_RIG"))
+        for (const char* nm : {"cf_j_neck", "cf_j_head", "cf_s_head", "cf_J_N_FaceRoot", "cf_J_FaceRoot", "cf_J_FaceBase", "cf_J_FaceUp_ty", "a_n_headside", "cf_J_Mouth_L", "cf_J_Chin_Base", "cf_J_FaceUp_tz", "cf_J_Eye_tx_L", "cf_J_NoseBridge_ty"}) {
+            auto w = rig.world.find(nm);
+            if (w == rig.world.end()) { std::fprintf(stderr, "rig %s missing\n", nm); continue; }
+            const Mat4& m = w->second;
+            auto cl = [&](int c) { return std::sqrt(m.m[c] * m.m[c] + m.m[4 + c] * m.m[4 + c] + m.m[8 + c] * m.m[8 + c]); };
+            std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
+        }
     exporter::RunCreateJobs(scene);
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
