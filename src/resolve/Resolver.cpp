@@ -196,14 +196,38 @@ std::shared_ptr<unity::UnityFile> Resolver::openBundle(const ResolvedItem& item,
     return openItemBundle(item, rel, why);
 }
 
+namespace {
+std::string lowerOf(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; }
+}
+
+void Resolver::registerBundleProvider(const ResolvedItem& item) {
+    if (item.status != ItemStatus::ResolvedMod || item.modPath.empty()) return;
+    std::string rel = item.bundleRel();
+    if (rel.empty()) return;
+    try {
+        ZipArchive z(item.modPath);
+        if (!z.find("abdata/" + rel)) {
+            bool any = false;
+            std::string want = lowerOf("abdata/" + rel);
+            for (const auto& e : z.entries()) if (lowerOf(e.name) == want) { any = true; break; }
+            if (!any) return;
+        }
+    } catch (...) { return; }
+    auto& v = providers_[lowerOf(rel)];
+    if (std::find(v.begin(), v.end(), item.modPath) == v.end()) v.push_back(item.modPath);
+}
+
 std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& item, const std::string& rel, std::string* why) {
     if (item.status == ItemStatus::ResolvedBase) return openBaseBundle(rel, why);
 
-    std::string key = item.modPath + "|" + rel;
+    std::string modPath = item.modPath;
+    if (auto pr = providers_.find(lowerOf(rel)); pr != providers_.end() && pr->second.size() > 1)
+        modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    std::string key = modPath + "|" + rel;
     auto it = cache_.find(key);
     if (it != cache_.end()) return it->second;
     try {
-        ZipArchive z(item.modPath);
+        ZipArchive z(modPath);
         std::string want = "abdata/" + rel;
         std::string lowerWant = want;
         std::transform(lowerWant.begin(), lowerWant.end(), lowerWant.begin(), [](unsigned char c) { return std::tolower(c); });

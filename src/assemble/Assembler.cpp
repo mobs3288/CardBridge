@@ -1120,6 +1120,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 
     // --- card items ------------------------------------------------------
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
+    for (const auto& wr : work) {   // which installed mods ship the same bundle path (the one loaded last is what the game uses)
+        resolve::ResolvedItem probe = resolver.resolve(card, wr);
+        resolver.registerBundleProvider(probe);
+    }
     const Value& sk2 = card.body.at("skinMainColor");
     Vec4 skinColor{1, 1, 1, 1};
     if (sk2.size() >= 3) skinColor = vec4Of(sk2);
