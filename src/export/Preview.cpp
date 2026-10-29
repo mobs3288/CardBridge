@@ -828,6 +828,18 @@ void RunCreateJobs(assemble::Scene& scene) {
         for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker, w);
         worker(0);
         for (auto& th : pool) th.join();
+        if (!job.overlay.empty() && job.overlayWidth > 0 && job.overlayHeight > 0)
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const int ox = std::min(job.overlayWidth - 1, x * job.overlayWidth / W), oy = std::min(job.overlayHeight - 1, y * job.overlayHeight / H);
+                    const uint8_t* o = &job.overlay[(static_cast<size_t>(oy) * job.overlayWidth + ox) * 4];
+                    const float a = o[3] / 255.0f;
+                    if (a <= 0.0f) continue;
+                    uint8_t* d = &rgba[(static_cast<size_t>(y) * W + x) * 4];
+                    const float da = d[3] / 255.0f, oa = a + da * (1.0f - a);
+                    for (int c = 0; c < 3; ++c) d[c] = static_cast<uint8_t>((o[c] * a + d[c] * da * (1.0f - a)) / std::max(oa, 1e-6f));
+                    d[3] = static_cast<uint8_t>(oa * 255.0f);
+                }
         auto& tex = scene.textures[static_cast<size_t>(job.texture)];
         tex.width = W;
         tex.height = H;
