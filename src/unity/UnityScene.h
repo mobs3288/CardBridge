@@ -31,6 +31,13 @@ struct MeshData {
     std::vector<BoneInfluence> skin;      // empty if the mesh is not skinned
     std::vector<Mat4> bindPoses;
     std::vector<std::vector<uint32_t>> subMeshTriangles;   // 3 indices per triangle
+    // Blend shapes (m_Shapes): one frame per shape in these meshes, so a shape index is a channel's frameIndex.
+    struct BlendVertex { uint32_t index = 0; Vec3 dPos, dNormal; };
+    struct BlendShape { uint32_t first = 0, count = 0; };
+    std::vector<BlendVertex> blendVertices;
+    std::vector<BlendShape> blendShapes;
+    // Adds `weight` (0..100, Unity's SetBlendShapeWeight) of shape `shape` to positions and normals.
+    void applyBlendShape(size_t shape, float weight);
     size_t vertexCount() const { return positions.size(); }
 };
 
