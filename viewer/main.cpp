@@ -172,6 +172,7 @@ struct App {
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
+    ULONGLONG lastInput = 0;   // tick of the last camera change: the game shaders run only once the view has been still for a moment
     bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
     POINT last{};
     int drag = 0;   // 1 orbit, 2 pan
@@ -255,7 +256,9 @@ void Render(int w, int h) {
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     g.hidden.resize(L->scene.parts.size(), 0);
     g.vopt.textured = g.textured;
-    g.vopt.shaded = g.shaded;
+    const bool still = GetTickCount64() - g.lastInput > 300;
+    g.vopt.shaded = g.shaded && still;
+    if (g.shaded && !still) SetTimer(g.hwnd, 1, 320, nullptr);   // come back and draw the shaded picture
     g.vopt.hiddenParts = &g.hidden;
     g.vopt.step = g.interacting ? 3 : 1;
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
@@ -342,6 +345,7 @@ void ResetView(float yaw) { g.cam = {}; g.cam.yawDeg = yaw; g.dirty = true; Inva
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_TIMER: KillTimer(hwnd, 1); g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
@@ -389,12 +393,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g.drag == 1) { g.cam.yawDeg -= dx * 0.5f; g.cam.pitchDeg = std::max(-89.0f, std::min(89.0f, g.cam.pitchDeg - dy * 0.5f)); }
             else { RECT rc; GetClientRect(hwnd, &rc); g.cam.panX += dx / rc.bottom; g.cam.panY += dy / rc.bottom; }
             g.last = {x, y};
+            g.lastInput = GetTickCount64();
             g.dirty = true;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
-        g.drag = 0; g.interacting = false; ReleaseCapture();
+        g.drag = 0; g.interacting = false; g.lastInput = GetTickCount64(); ReleaseCapture();
         g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_MOUSEWHEEL: {
@@ -402,7 +407,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         ScreenToClient(hwnd, &pt);
         if (pt.x < kPanel) { g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3)); }
-        else g.cam.zoom = std::max(0.2f, std::min(20.0f, g.cam.zoom * (d > 0 ? 1.12f : 1 / 1.12f)));
+        else { g.cam.zoom = std::max(0.2f, std::min(20.0f, g.cam.zoom * (d > 0 ? 1.12f : 1 / 1.12f))); g.lastInput = GetTickCount64(); }
         g.dirty = true;
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
