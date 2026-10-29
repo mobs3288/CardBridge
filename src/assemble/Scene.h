@@ -69,6 +69,9 @@ struct SceneCreateJob {
     SceneMaterial material;
     int texture = -1;            // index into Scene::textures that receives the result
     int width = 512, height = 512;
+    // An image laid over the result (a KoiSkinOverlayX layer from the card), source-over, scaled to the target; empty = none.
+    std::vector<uint8_t> overlay;
+    int overlayWidth = 0, overlayHeight = 0;
 };
 
 struct SceneShader {

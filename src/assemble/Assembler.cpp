@@ -330,6 +330,9 @@ struct Builder {
     int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
     // Head only: blend-shape weights (0..100) of the character's resting expression, by renderer GameObject id and shape index.
     const std::map<int64_t, std::vector<std::pair<int, float>>>* blend = nullptr;
+    // Textures the game puts on a material at run time besides its main one (face lips and eye shadow, body nipples and underhair):
+    // property -> scene texture, bound for the renderer being added. Colours for them go through `runtime`.
+    std::vector<std::pair<std::string, int>> extraTex;
     float blushAlpha = -1;       // face material only: alpha of _overcolor2, the emotion blush (ChaControl.ChangeHohoAkaRate); < 0 = leave
     const Mat4* hairParent = nullptr;   // world matrix of the hair parent node while a hair item is added
     const card::MaterialEdits* edits = nullptr;
@@ -513,6 +516,11 @@ struct Builder {
                 for (const auto& st : m->texST) if (st.first == tb.first) b.st = st.second;
                 b.texture = shaderTexture(uf, tb.second, partId);
                 sm.texProps.push_back(std::move(b));
+            }
+            for (const auto& [name, tex] : extraTex) {
+                bool set = false;
+                for (auto& tb : sm.texProps) if (tb.name == name) { tb.texture = tex; set = true; }
+                if (!set) { SceneTexBinding nb; nb.name = name; nb.texture = tex; sm.texProps.push_back(nb); }
             }
             if (hairGlossTexture >= 0 && glossForThisRenderer) {
                 bool set = false;
@@ -856,6 +864,76 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         return Vec4{static_cast<float>(v.at(size_t(0)).asFloat()), static_cast<float>(v.at(size_t(1)).asFloat()),
                     static_cast<float>(v.at(size_t(2)).asFloat()), static_cast<float>(v.size() > 3 ? v.at(size_t(3)).asFloat() : 1.0)};
     };
+    // The texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
+    auto rowTextureFor = [&](const std::string& partId, int category, int64_t id, const std::string& property, const char* texKey, const std::string& what,
+                          std::string* keyOut = nullptr, const char* abKey = "MainAB") -> std::shared_ptr<unity::TextureData> {
+        resolve::ItemRef fr;
+        fr.partId = partId + "." + what;
+        fr.group = "Face";
+        fr.property = property;
+        fr.category = category;
+        fr.id = id;
+        resolve::ResolvedItem fi = resolver.resolve(card, fr);
+        if (fi.status == resolve::ItemStatus::Empty) return nullptr;
+        if (!fi.ok()) {
+            scene.warn(partId, what + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
+            return nullptr;
+        }
+        std::string texName = fi.listItem.get(texKey), ab = fi.listItem.get(abKey);
+        if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return nullptr;   // "none"
+        std::string w;
+        auto tb = resolver.openItemBundle(fi, ab, &w);
+        if (!tb) { scene.warn(partId, what + ": texture bundle not loaded: " + w); return nullptr; }
+        PPtr tp = tb->findAsset(texName);
+        if (tp.isNull()) tp = tb->findTexture(texName);
+        if (tp.isNull()) { scene.warn(partId, what + ": texture '" + texName + "' not found in " + ab); return nullptr; }
+        if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
+        return b.decode(*tb, tp, partId);
+    };
+
+    // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
+    // (run by export::RunCreateJobs at the end of assembly) and returns the placeholder texture that will hold the result.
+    using TexInput = std::pair<std::string, std::shared_ptr<unity::TextureData>>;
+    std::map<const unity::TextureData*, int> inputTexCache;
+    auto createJobFor = [&](const std::string& partId, const char* matName, const std::vector<TexInput>& texs, const std::vector<std::pair<std::string, Vec4>>& props, int size) -> int {
+        std::string w;
+        auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w);
+        if (!mm) { scene.warn(partId, std::string("create material ") + matName + ": mm_base.unity3d not in the library (" + w + ")"); return -1; }
+        PPtr mp = mm->findAsset(matName);
+        if (mp.isNull()) { scene.warn(partId, std::string("create material ") + matName + " not found in mm_base.unity3d"); return -1; }
+        std::vector<std::pair<std::string, Vec4>> savedRuntime = std::move(b.runtime);
+        b.runtime.clear();
+        RendererInfo none;
+        b.materialFor(*mm, mp, partId, nullptr, nullptr, none, 0);
+        b.runtime = std::move(savedRuntime);
+        SceneCreateJob job;
+        job.material = std::move(scene.materials.back());
+        scene.materials.pop_back();
+        for (const auto& [name, td] : texs) {
+            int idx = -1;
+            if (td) {
+                auto it = inputTexCache.find(td.get());
+                if (it == inputTexCache.end()) {
+                    auto copy = td->rgba;
+                    it = inputTexCache.emplace(td.get(), b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy))).first;
+                }
+                idx = it->second;
+            }
+            bool set = false;
+            for (auto& tb : job.material.texProps) if (tb.name == name) { tb.texture = idx; set = true; }
+            if (!set) { SceneTexBinding nb; nb.name = name; nb.texture = idx; job.material.texProps.push_back(nb); }
+        }
+        for (const auto& [name, v] : props) {
+            bool set = false;
+            for (auto& pr : job.material.props) if (pr.first == name) { pr.second = v; set = true; }
+            if (!set) job.material.props.emplace_back(name, v);
+        }
+        job.width = job.height = size;
+        job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
+        scene.createJobs.push_back(std::move(job));
+        return scene.createJobs.back().texture;
+    };
+
     {
         ScenePart part;
         part.id = "body";
@@ -874,6 +952,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             Vec4 skin{1, 1, 1, 1};
             if (sk.size() >= 3) skin = {static_cast<float>(sk.at(size_t(0)).asFloat()), static_cast<float>(sk.at(size_t(1)).asFloat()),
                                          static_cast<float>(sk.at(size_t(2)).asFloat()), 1.0f};
+            std::vector<std::pair<std::string, int>> bodyOverlayTex;
+            std::vector<std::pair<std::string, Vec4>> bodyOverlayColors;
             for (const auto& r : base->renderersUnder(roots[0])) {
                 if (!r.enabled) continue;
                 if (r.name != "o_body_a") {   // helpers, shadow casters, anatomy meshes that are hidden in the character maker
@@ -887,22 +967,80 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     PPtr bt = base->findTexture("cf_body_00_t"), bm = base->findTexture("cf_body_00_mc");
                     if (!bt.isNull() && !bm.isNull()) {
                         Vec4 c[3] = {skin, vec4Of(card.body.at("skinSubColor")), Vec4{1, 1, 1, 1}};
-                        bodyLook.tex1 = b.bake(b.decode(*base, bt, "body"), "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
+                        // The game draws the skin through cf_m_body_create (base, colour mask, two skin colours, paint 1 and 2 placed by
+                        // their layout rows, sunburn, nail colour); nipples and underhair are overlays on the body material.
+                        const Value& bd = card.body;
+                        auto layoutRow = [&](int64_t id, const Value& l) {
+                            Vec4 v = vec4Of(l), out{0, 0, 0, 0};
+                            resolve::ItemRef fr;
+                            fr.partId = "body.paintlayout";
+                            fr.group = "Face";
+                            fr.property = "ChaFileBody.paintLayoutId";
+                            fr.category = 3;
+                            fr.id = id;
+                            resolve::ResolvedItem fi = resolver.resolve(card, fr);
+                            if (!fi.ok()) return out;   // layout 0 / none: the paint has no placement and shows nothing
+                            auto num = [&](const char* k) { return static_cast<float>(std::atof(fi.listItem.get(k).c_str())); };
+                            auto lerp = [](float a, float bb, float t) { return a + (bb - a) * t; };
+                            out.x = lerp(num("CenterX") + num("MoveX"), num("CenterX") - num("MoveX"), v.x);
+                            out.y = lerp(num("CenterY") + num("MoveY"), num("CenterY") - num("MoveY"), v.y);
+                            out.z = lerp(-1.0f, 1.0f, v.z);
+                            out.w = lerp(num("CenterScale") - num("AddScale"), num("CenterScale") + num("AddScale"), v.w);
+                            return out;
+                        };
+                        std::vector<TexInput> texs = {{"_MainTex", b.decode(*base, bt, "body")}, {"_ColorMask", b.decode(*base, bm, "body")}};
+                        std::vector<std::pair<std::string, Vec4>> props = {{"_Color", vec4Of(sk)}, {"_Color2", c[1]}, {"_Color4", vec4Of(bd.at("sunburnColor"))}, {"_Color5", vec4Of(bd.at("nailColor"))}};
+                        const char* paintTex[2] = {"_Texture3", "_Texture6"};
+                        const char* paintCol[2] = {"_Color3", "_Color6"};
+                        const char* paintVec[2] = {"_paint1", "_paint2"};
+                        for (size_t k = 0; k < 2; ++k) {
+                            texs.push_back({paintTex[k], rowTextureFor("body", 421, bd.at("paintId").at(k).asInt(), "ChaFileBody.paintId", "PaintTex", "paint" + std::to_string(k + 1))});
+                            props.emplace_back(paintCol[k], vec4Of(bd.at("paintColor").at(k)));
+                            props.emplace_back(paintVec[k], layoutRow(bd.at("paintLayoutId").at(k).asInt(), bd.at("paintLayout").at(k)));
+                        }
+                        texs.push_back({"_Texture4", rowTextureFor("body", 422, bd.at("sunburnId").asInt(), "ChaFileBody.sunburnId", "SunburnTex", "sunburn")});
+                        int job = createJobFor("body", "cf_m_body_create", texs, props, 1024);
+                        if (job >= 0) {
+                            bodyLook.tex1 = job;
+                            card::MaterialEdits::Image ov;
+                            if (b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayBody, ov)) {
+                                scene.createJobs.back().overlay = ov.rgba;
+                                scene.createJobs.back().overlayWidth = ov.width;
+                                scene.createJobs.back().overlayHeight = ov.height;
+                            }
+                            auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const char* prop, const char* key, const char* what, Vec4 col) {
+                                auto t = rowTextureFor("body", category, id, prop, key, what);
+                                int idx = -1;
+                                if (t) { auto copy = t->rgba; idx = b.addSceneTexture(t->name, "body overlay", t->width, t->height, std::move(copy)); }
+                                bodyOverlayTex.emplace_back(texName, idx);
+                                bodyOverlayColors.emplace_back(colName, col);
+                            };
+                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", vec4Of(bd.at("nipColor")));
+                            addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
+                            bodyOverlayColors.emplace_back("_nipsize", Vec4{static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
+                        } else {
+                            bodyLook.tex1 = b.bake(b.decode(*base, bt, "body"), "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
+                            card::MaterialEdits::Image ov;
+                            if (bodyLook.tex1 >= 0 && b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayBody, ov)) {
+                                auto& st = scene.textures[static_cast<size_t>(bodyLook.tex1)];
+                                alphaOver(st.rgba, st.width, st.height, ov);
+                                st.pixelHash = Fnv1a64(st.rgba.data(), st.rgba.size());
+                            }
+                        }
                         bodyLook.use1.insert(r.componentId);
                         bodyLookPtr = &bodyLook;
-                        card::MaterialEdits::Image ov;
-                        if (bodyLook.tex1 >= 0 && b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayBody, ov)) {
-                            auto& st = scene.textures[static_cast<size_t>(bodyLook.tex1)];
-                            alphaOver(st.rgba, st.width, st.height, ov);
-                            st.pixelHash = Fnv1a64(st.rgba.data(), st.rgba.size());
-                        }
                     }
                 }
+                b.extraTex = bodyOverlayTex;
+                b.runtime = bodyOverlayColors;
                 int mi = b.addRenderer(*base, r, roots[0], partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
+                b.extraTex.clear();
+                b.runtime.clear();
                 if (mi >= 0) part.meshes.push_back(mi);
             }
-            scene.warn("body", "body skin texture is built at runtime by the game from the card's skin settings; "
-                               "the card's base skin colour is used instead");
+            if (scene.createJobs.empty())   // the body's create material did not run
+                scene.warn("body", "body skin texture is built at runtime by the game from the card's skin settings; "
+                                   "the card's base skin colour is used instead");
         }
         scene.parts.push_back(std::move(part));
     }
@@ -1090,74 +1228,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         // tinted with the card's colours (ChaControl.ChangeSettingEyebrow / Eyeline / Eye ...).
         const Value& faceV = card.face;
 
-        // The texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
         auto rowTexture = [&](int category, int64_t id, const std::string& property, const char* texKey, const std::string& what,
-                              std::string* keyOut = nullptr, const char* abKey = "MainAB") -> std::shared_ptr<unity::TextureData> {
-            resolve::ItemRef fr;
-            fr.partId = ref.partId + "." + what;
-            fr.group = "Face";
-            fr.property = property;
-            fr.category = category;
-            fr.id = id;
-            resolve::ResolvedItem fi = resolver.resolve(card, fr);
-            if (fi.status == resolve::ItemStatus::Empty) return nullptr;
-            if (!fi.ok()) {
-                scene.warn(ref.partId, what + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
-                return nullptr;
-            }
-            std::string texName = fi.listItem.get(texKey), ab = fi.listItem.get(abKey);
-            if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return nullptr;   // "none"
-            std::string w;
-            auto tb = resolver.openItemBundle(fi, ab, &w);
-            if (!tb) { scene.warn(ref.partId, what + ": texture bundle not loaded: " + w); return nullptr; }
-            PPtr tp = tb->findAsset(texName);
-            if (tp.isNull()) tp = tb->findTexture(texName);
-            if (tp.isNull()) { scene.warn(ref.partId, what + ": texture '" + texName + "' not found in " + ab); return nullptr; }
-            if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
-            return b.decode(*tb, tp, ref.partId);
+                              std::string* keyOut = nullptr, const char* abKey = "MainAB") {
+            return rowTextureFor(ref.partId, category, id, property, texKey, what, keyOut, abKey);
         };
 
-        // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
-        // (run by export::RunCreateJobs at the end of assembly) and returns the placeholder texture that will hold the result.
-        using TexInput = std::pair<std::string, std::shared_ptr<unity::TextureData>>;
-        std::map<const unity::TextureData*, int> inputTexCache;
-        auto createJob = [&](const char* matName, const std::vector<TexInput>& texs, const std::vector<std::pair<std::string, Vec4>>& props, int size) -> int {
-            std::string w;
-            auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w);
-            if (!mm) { scene.warn(ref.partId, std::string("create material ") + matName + ": mm_base.unity3d not in the library (" + w + ")"); return -1; }
-            PPtr mp = mm->findAsset(matName);
-            if (mp.isNull()) { scene.warn(ref.partId, std::string("create material ") + matName + " not found in mm_base.unity3d"); return -1; }
-            std::vector<std::pair<std::string, Vec4>> savedRuntime = std::move(b.runtime);
-            b.runtime.clear();
-            RendererInfo none;
-            b.materialFor(*mm, mp, ref.partId, nullptr, nullptr, none, 0);
-            b.runtime = std::move(savedRuntime);
-            SceneCreateJob job;
-            job.material = std::move(scene.materials.back());
-            scene.materials.pop_back();
-            for (const auto& [name, td] : texs) {
-                int idx = -1;
-                if (td) {
-                    auto it = inputTexCache.find(td.get());
-                    if (it == inputTexCache.end()) {
-                        auto copy = td->rgba;
-                        it = inputTexCache.emplace(td.get(), b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy))).first;
-                    }
-                    idx = it->second;
-                }
-                bool set = false;
-                for (auto& tb : job.material.texProps) if (tb.name == name) { tb.texture = idx; set = true; }
-                if (!set) { SceneTexBinding nb; nb.name = name; nb.texture = idx; job.material.texProps.push_back(nb); }
-            }
-            for (const auto& [name, v] : props) {
-                bool set = false;
-                for (auto& pr : job.material.props) if (pr.first == name) { pr.second = v; set = true; }
-                if (!set) job.material.props.emplace_back(name, v);
-            }
-            job.width = job.height = size;
-            job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
-            scene.createJobs.push_back(std::move(job));
-            return scene.createJobs.back().texture;
+        auto createJob = [&](const char* matName, const std::vector<TexInput>& texs, const std::vector<std::pair<std::string, Vec4>>& props, int size) {
+            return createJobFor(ref.partId, matName, texs, props, size);
         };
 
         // Face parts: the game builds each one's texture from the list row the card's face ids select,
@@ -1218,6 +1295,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         // The face skin: the head's own base texture tinted by its colour mask with the card's two skin colours,
         // then the makeup layers (cheek, lip line, lips, eye shadow) blended on top in the same UV layout
         // (ChaControl.ChangeSettingFaceBaseTex/Color and the overlay textures of the face material).
+        std::vector<std::pair<std::string, int>> faceOverlayTex;        // lips, eye shadow: bound on the face material
+        std::vector<std::pair<std::string, Vec4>> faceOverlayColors;
         auto faceSkinTexture = [&]() -> int {
             auto fromHead = [&](const char* abKey, const char* nameKey, std::string& key) -> std::shared_ptr<unity::TextureData> {
                 std::string ab = item.listItem.get(abKey), name = item.listItem.get(nameKey);
@@ -1238,15 +1317,65 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto base = fromHead("MainTexAB", "MainTex", k1);
             if (!base) return -1;
             auto mask = fromHead("ColorMaskAB", "ColorMaskTex", k2);
-            Vec4 c[3] = {skinColor, vec4Of(card.body.at("skinSubColor")), Vec4{1, 1, 1, 1}};
-            unity::TextureData out = *base;
-            out.name = base->name + "_skin";
-            out.rgba = tintTexture(*base, mask.get(), c);
-
             const auto& oc = card.outfits[static_cast<size_t>(std::max(0, ref.outfit < 0 ? 0 : ref.outfit))];
             bool coordMakeup = oc.enableMakeup;
             const Value& mk = coordMakeup ? oc.makeup : faceV.at("baseMakeup");
             std::string pre = coordMakeup ? "outfit" + std::to_string(ref.outfit < 0 ? 0 : ref.outfit) + "." : "";
+
+            // The game draws the skin through its cf_m_face_create material (base, colour mask, two skin colours, paint 1 and 2,
+            // cheek, lip line, mole); lips and eye shadow are overlays on the face material itself (_overtex1 / _overtex3).
+            {
+                const std::string which = ref.partId + ".face";
+                auto layout = [&](const Value& l, bool mole) {
+                    auto lerp = [](float a, float bb, float t) { return a + (bb - a) * t; };
+                    Vec4 v = vec4Of(l);
+                    return mole ? Vec4{lerp(0.25f, -0.25f, v.x), lerp(0.3f, -0.3f, v.y), 0.0f, lerp(0.0f, 0.7f, v.w)}
+                                : Vec4{lerp(0.25f, -0.25f, v.x), lerp(0.3f, -0.3f, v.y), lerp(1.0f, -1.0f, v.z), lerp(-8.0f, 0.7f, v.w)};
+                };
+                std::vector<TexInput> texs = {{"_MainTex", base}, {"_ColorMask", mask}};
+                std::vector<std::pair<std::string, Vec4>> props = {{"_Color", skinColor}, {"_Color2", vec4Of(card.body.at("skinSubColor"))}};
+                const char* paintTex[2] = {"_Texture3", "_Texture7"};
+                const char* paintCol[2] = {"_Color3", "_Color7"};
+                const char* paintVec[2] = {"_paint1", "_paint2"};
+                for (size_t k = 0; k < 2; ++k) {
+                    texs.push_back({paintTex[k], rowTexture(405, mk.at("paintId").at(k).asInt(), pre + "ChaFileMakeup.paintId", "PaintTex", "paint" + std::to_string(k + 1))});
+                    props.emplace_back(paintCol[k], vec4Of(mk.at("paintColor").at(k)));
+                    props.emplace_back(paintVec[k], layout(mk.at("paintLayout").at(k), false));
+                }
+                texs.push_back({"_Texture4", rowTexture(402, mk.at("cheekId").asInt(), pre + "ChaFileMakeup.cheekId", "CheekTex", "cheek")});
+                props.emplace_back("_Color4", vec4Of(mk.at("cheekColor")));
+                texs.push_back({"_Texture5", rowTexture(404, faceV.at("lipLineId").asInt(), "ChaFileFace.lipLineId", "LiplineTex", "lipline")});
+                props.emplace_back("_Color5", vec4Of(faceV.at("lipLineColor")));
+                texs.push_back({"_Texture6", rowTexture(415, faceV.at("moleId").asInt(), "ChaFileFace.moleId", "MoleTex", "mole")});
+                props.emplace_back("_Color6", vec4Of(faceV.at("moleColor")));
+                props.emplace_back("_hokuro", layout(faceV.at("moleLayout"), true));
+                int job = createJobFor(which, "cf_m_face_create", texs, props, 1024);
+                if (job >= 0) {
+                    card::MaterialEdits::Image fov;
+                    if (b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayFace, fov)) {
+                        scene.createJobs.back().overlay = fov.rgba;
+                        scene.createJobs.back().overlayWidth = fov.width;
+                        scene.createJobs.back().overlayHeight = fov.height;
+                    }
+                    faceOverlayTex.clear();
+                    faceOverlayColors.clear();
+                    auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const std::string& prop, const char* key, const char* what, Vec4 col) {
+                        auto t = rowTexture(category, id, prop, key, what);
+                        int idx = -1;   // "none": the game clears the slot
+                        if (t) { auto copy = t->rgba; idx = b.addSceneTexture(t->name, "face overlay", t->width, t->height, std::move(copy)); }
+                        faceOverlayTex.emplace_back(texName, idx);
+                        faceOverlayColors.emplace_back(colName, col);
+                    };
+                    addOverlay("_overtex1", "_overcolor1", 403, mk.at("lipId").asInt(), pre + "ChaFileMakeup.lipId", "LipTex", "lip", vec4Of(mk.at("lipColor")));
+                    addOverlay("_overtex3", "_overcolor3", 401, mk.at("eyeshadowId").asInt(), pre + "ChaFileMakeup.eyeshadowId", "EyeshadowTex", "eyeshadow", vec4Of(mk.at("eyeshadowColor")));
+                    return job;
+                }
+            }
+
+            Vec4 c[3] = {skinColor, vec4Of(card.body.at("skinSubColor")), Vec4{1, 1, 1, 1}};
+            unity::TextureData out = *base;
+            out.name = base->name + "_skin";
+            out.rgba = tintTexture(*base, mask.get(), c);
             auto blend = [&](const std::shared_ptr<unity::TextureData>& ov, Vec4 col) {
                 if (!ov) return;
                 for (int y = 0; y < out.height; ++y)
@@ -1443,6 +1572,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
             b.runtime.clear();
+            b.extraTex.clear();
+            if (ref.group == "Head" && contains(r.name, "cf_O_face") && !faceOverlayTex.empty()) {
+                b.extraTex = faceOverlayTex;
+                b.runtime = faceOverlayColors;
+            }
             // The face material's _overcolor2 alpha is the blush of the character's emotion state: 0 at rate 0, 0.2 at rate 1.
             b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
                                ? 0.2f * std::min(1.0f, std::max(0.0f, static_cast<float>(card.status.at("hohoAkaRate").asFloat(0.0))))
@@ -1485,6 +1619,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.localOv = nullptr;
         b.hairParent = nullptr;
         b.blushAlpha = -1;
+        b.extraTex.clear();
         b.blend = nullptr;
         b.meType = -1;
         scene.parts.push_back(std::move(part));
