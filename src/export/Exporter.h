@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <functional>
 #include <string>
 
 namespace cardbridge::exporter {
@@ -17,6 +18,8 @@ struct ExportOptions {
     int outfit = 0;                // recorded in the manifest
     std::string assetLibrary;      // recorded as provenance only
     std::string modsFolder;        // recorded as provenance only
+    // Optional progress sink (the viewer's live log): called with short stage descriptions.
+    std::function<void(const std::string&)> log;
 };
 
 struct ExportResult {

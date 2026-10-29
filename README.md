@@ -1,7 +1,7 @@
 # CardBridge
 
 <p align="center">
-  <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="360">
+  <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="500">
 </p>
 
 **CardBridge** converts Koikatsu character cards into rigged 3D models (PMX) with separately addressable outfit parts, entirely offline and **completely separate from the game**: it reads the card, a CardBridge asset library and the user's mod files, and needs no Koikatsu install to run. It never launches or controls the game.
@@ -143,8 +143,12 @@ cardbridge inspect "<card.png>" --library "<library folder>" --mods "<mods folde
 # convert (writes <out>\<name>.pmx, <out>\textures\*.png, <out>\<name>.cardbridge.json)
 cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folder>" --out "<out folder>"
 
-# look at a card in a window, without exporting (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel,
-# Left/Right switch outfit, T toggles textures, I lists the problems, click a part to hide it; drop a card on the window to open it
+# look at a card in a window (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel.
+# Hover a part row to light that part up in the model, click to hide/show it, right-click to solo it, click a group
+# header to fold it. The log panel shows every load/bake/export stage as it happens; E (or Export PMX) exports the
+# scene currently on screen to a new folder, with the same live log. Keys: Left/Right outfit, T textures, H game
+# shaders, F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.
+# Drop a card .png on the window to open it.
 cardbridge_viewer "<card.png>" --library "<library folder>" --mods "<mods folder>"      # the folders are remembered
 ```
 
@@ -154,100 +158,87 @@ Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed)
 
 ## FAQ
 
-<details>
-<summary><strong>Is this vibecoding?</strong></summary>
+**Q: Is this vibecoding?**
 
-**Yes.**
+> **A:** Yes.
+>
+> The vibes are immaculate. The vertices are under investigation.
 
-The vibes are immaculate. The vertices are under investigation.
+**Q: Can you code?**
 
-</details>
+> **A:** Yes. I use AI coding tools extensively because they can implement things faster than I can write everything manually. I still make architectural decisions, review code, debug issues, and validate the results.
 
-<details>
-<summary><strong>Can you code?</strong></summary>
+**Q: Then why not do it manually?**
 
-**Yes.**
+> **A:** Because I'm too lazy to do everything manually, and Claude Opus 5.5 can often implement things faster than I can.
+>
+> Why spend hours writing code when I can spend those hours reviewing AI-generated code, debugging it, reverse-engineering Unity AssetBundles, and questioning every life decision that led me here?
+>
+> **Work smarter, not harder.** Or at least make the computer do the hard part.
 
-I can code. I just choose to outsource the suffering.
+**Q: So the AI writes everything?**
 
-</details>
+> **A:** A substantial amount of the code is AI-generated. I'm not going to pretend otherwise.
+>
+> I direct the implementation, make architectural decisions, investigate problems, review changes, test the results, and decide what needs fixing. AI-generated code can be wrong, inefficient, or unnecessarily complicated.
+>
+> If something breaks, it's still my problem.
+>
+> **AI-assisted development. Human-operated suffering.**
 
-<details>
-<summary><strong>Then why not do it manually?</strong></summary>
+**Q: Why build this instead of just using KKPMX?**
 
-Because I'm too lazy to do it, and my code is garbage compared to Opus 5.5.
+> **A:** KKPMX already exists and is useful. CardBridge is my attempt to build an alternative with a standalone workflow, extensible mod support, better diagnostics, and eventually an integrated editing experience.
+>
+> These are goals, not claims that CardBridge is already better. The conversion pipeline still needs substantial validation.
+>
+> The objective isn't to reinvent everything just for the sake of it. It's to build something that better fits my needs.
+>
+> *(The meme stays, though.)*
 
-Why spend hours manually writing code when I can spend those hours reviewing AI-generated code, debugging it, reverse-engineering Unity asset bundles, and questioning every life decision that led me here?
+**Q: Why Koikatsu, though?**
 
-**Work smarter, not harder.** Or at least make the computer do the hard part.
+> **A:** Because creating anime-style characters in Koikatsu is much more accessible than building them from scratch in general-purpose 3D software.
+>
+> Its character creator makes it easy to customise faces, hairstyles, clothing, body proportions, and other details without needing to model everything manually. Combined with its modding ecosystem, it offers a convenient way to create and customise anime characters.
+>
+> The problem is getting those characters out of the game and into an editable PMX model without spending hours fixing materials, hair, accessories, and other conversion issues.
+>
+> That's where CardBridge comes in: bridging the gap between Koikatsu's character creation workflow and the broader MMD/PMX ecosystem.
+>
+> And honestly, creating anime characters is fun. Reverse-engineering Unity AssetBundles to get them out is where the suffering begins. 💀
 
-</details>
+**Q: Is CardBridge production-ready?**
 
-<details>
-<summary><strong>So the AI writes everything?</strong></summary>
+> **A:** No.
+>
+> Milestone 1, the headless proof of concept, is complete. However, successfully generating a PMX file doesn't mean the resulting model faithfully reproduces the original character.
+>
+> Colours can be wrong, hair can disappear or move, materials can break, and geometry or deformation can require further work.
+>
+> The feasibility study suggests the approach is viable. The complete conversion pipeline still needs to prove itself through testing.
 
-The AI writes code. I make architectural decisions, review the implementation, test the results, hunt down bugs, and decide whether the output is actually usable.
+**Q: Will it support every mod?**
 
-If something breaks, it's still my problem.
+> **A:** That's the goal, not a promise.
+>
+> Mods can introduce different assets, dependencies, material configurations, and structures. CardBridge aims to handle these through extensible asset resolution, clear diagnostics, and compatibility testing.
+>
+> If a mod breaks the converter, I'd rather know exactly why than silently export a broken model.
 
-**AI-assisted development. Human-operated suffering.**
+**Q: Why is the project called CardBridge?**
 
-</details>
+> **A:** It bridges the gap between a character card and an editable 3D model.
+>
+> Also, `CardToPMXButHopefullyItActuallyWorksAndEasyToUseWithoutAnyManualModification` was too long.
 
-<details>
-<summary><strong>Why build this instead of just using KKPMX?</strong></summary>
+**Q: Why is the logo AI-generated?**
 
-Have you seen the meme?
-
-Seriously, though: CardBridge aims to provide a standalone workflow, better diagnostics, extensible mod support, and an integrated editing experience. KKPMX is useful prior art, but it isn't the foundation or a runtime dependency.
-
-The goal isn't to hate on a tool for existing. It's to build something that better fits this project's needs.
-
-*(The meme stays, though.)*
-
-</details>
-
-<details>
-<summary><strong>Is CardBridge production-ready?</strong></summary>
-
-Absolutely not. Milestone 1 (the headless proof of concept) is done, but the output is not yet a faithful likeness of the card.
-
-The feasibility study says the approach is viable, but that does not mean the entire conversion pipeline works yet. Don't mistake a README, a plan, or a successfully generated file for a verified 3D model.
-
-</details>
-
-<details>
-<summary><strong>Will it support every mod?</strong></summary>
-
-That's the goal, not a promise.
-
-Mods can use different assets, dependencies, and structures. CardBridge will prioritise extensible resolution, clear diagnostics, and compatibility testing instead of pretending every mod is supported.
-
-If a mod breaks the converter, ideally we'll know exactly why.
-
-</details>
-
-<details>
-<summary><strong>Why is the project called CardBridge?</strong></summary>
-
-It bridges the gap between a character card and an editable 3D model.
-
-Also, `CardToPMXButHopefullyItActuallyWorksAndEasyToUseWithoutAnyManualModification` was too long.
-
-</details>
-
-<details>
-<summary><strong>Why is the logo AI-generated?</strong></summary>
-
-Because my entire budget went to Claude.
-
-And I suck at design.
-
-I'm trying to reverse-engineer Unity AssetBundles and build a standalone PMX exporter, not become a graphic designer.
-
-**Priorities, people.** 💀
-
-</details>
+> **A:** Because my entire budget went to Claude, and I suck at design.
+>
+> I'm trying to reverse-engineer Unity AssetBundles and build a standalone PMX exporter, not become a graphic designer.
+>
+> **Priorities, people.** 💀
 
 ## Milestones
 

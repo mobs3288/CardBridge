@@ -4,6 +4,8 @@
 #include "card/CardFile.h"
 #include "resolve/Resolver.h"
 
+#include <functional>
+
 namespace cardbridge::assemble {
 
 struct AssembleOptions {
@@ -13,6 +15,8 @@ struct AssembleOptions {
     std::string headRigPrefab = "p_cf_head_bone";
     bool applyShape = true;                // apply the card's body sliders to the skeleton
     std::string headAttachBone = "cf_s_head";   // where the head rig hangs (ChaReference HeadParent)
+    // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
+    std::function<void(const std::string&)> log;
 };
 
 // Builds the scene for one outfit: the shared skeleton from the base game,

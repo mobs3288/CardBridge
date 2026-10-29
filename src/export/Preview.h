@@ -4,6 +4,7 @@
 #include "core/Bytes.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,13 +43,15 @@ struct ViewOptions {
     const std::vector<char>* hiddenParts = nullptr;   // per scene part: 1 = do not draw (on top of visibleInPreview)
     int step = 1;                                      // 2 = every other pixel in each direction (fast, while dragging)
     bool shaded = false;                               // run the game's own compiled shaders per pixel (materials without one keep the plain look)
+    int highlightPart = -1;                            // scene part drawn with a warm tint (the viewer's hovered part), -1 = none
 };
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's
 // texture with the result, so the PMX carries the colour the game's shader produces. Materials without a shader are left alone.
 // maxSize caps the baked texture's longer side. lit = run on the real mesh with the front view's light and camera, so the texture
 // carries the toon shading too (the material is then unlit); otherwise the material is a flat sheet and only its colour is baked.
-void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr);
+void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr,
+                        const std::function<void(const std::string&)>& progress = {});
 
 // Runs every pending Scene::createJobs: the game's "create" materials (eye iris and white, face and body skin) drawn over one quad
 // into their placeholder textures. Called once, at the end of assembly.
