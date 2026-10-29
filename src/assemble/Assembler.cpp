@@ -1175,9 +1175,16 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         if (mp.isNull()) { scene.warn(partId, std::string("create material ") + matName + " not found in mm_base.unity3d"); return -1; }
         std::vector<std::pair<std::string, Vec4>> savedRuntime = std::move(b.runtime);
         b.runtime.clear();
+        // the create material is the game's own, not the renderer being built: the eye's highlight textures and placement belong to the renderer
+        auto savedExtra = std::move(b.extraTex);
+        auto savedSt = std::move(b.stOverride);
+        b.extraTex.clear();
+        b.stOverride.clear();
         RendererInfo none;
         b.materialFor(*mm, mp, partId, nullptr, nullptr, none, 0);
         b.runtime = std::move(savedRuntime);
+        b.extraTex = std::move(savedExtra);
+        b.stOverride = std::move(savedSt);
         SceneCreateJob job;
         job.material = std::move(scene.materials.back());
         scene.materials.pop_back();
@@ -1202,6 +1209,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             bool set = false;
             for (auto& pr : job.material.props) if (pr.first == name) { pr.second = v; set = true; }
             if (!set) job.material.props.emplace_back(name, v);
+        }
+        if (std::getenv("CARDBRIDGE_DEBUG_CREATE")) {
+            std::fprintf(stderr, "createjob %s part %s size %d props:", matName, partId.c_str(), size);
+            for (const auto& pr : job.material.props) std::fprintf(stderr, " %s=(%.3f %.3f %.3f %.3f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
+            std::fprintf(stderr, " tex:");
+            for (const auto& tb : job.material.texProps) std::fprintf(stderr, " %s=%d", tb.name.c_str(), tb.texture);
+            std::fprintf(stderr, "\n");
         }
         job.width = job.height = size;
         job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
@@ -1611,7 +1625,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     const Value& pu = pupils.at(rendererName == "cf_Ohitomi_L02" ? size_t(0) : size_t(1));
                     auto grad = rowTexture(409, pu.at("gradMaskId").asInt(), "ChaFileFace.PupilGrad", "ColorMaskTex", std::string(sp.renderer) + ".gradation", nullptr, "ColorMaskAB");
                     const float gy = static_cast<float>(pu.at("gradOffsetY").asFloat()), gs = static_cast<float>(pu.at("gradScale").asFloat());
-                    if (std::getenv("CARDBRIDGE_DEBUG_EYE")) std::fprintf(stderr, "iris blend %g offY %g scale %g\n", pu.at("gradBlend").asFloat(), gy, gs);
+                    if (std::getenv("CARDBRIDGE_DEBUG_EYE")) std::fprintf(stderr, "iris blend %g offY %g scale %g main %s %dx%d grad %s %dx%d\n", pu.at("gradBlend").asFloat(), gy, gs, tex ? tex->name.c_str() : "-", tex ? tex->width : 0, tex ? tex->height : 0, grad ? grad->name.c_str() : "-", grad ? grad->width : 0, grad ? grad->height : 0);
                     int job = createJob("cf_m_eye_create", {{"_MainTex", tex}, {"_ColorMask", grad}},
                                         {{"_Color", kkColor(vec4Of(pu.at("baseColor")))}, {"_Color2", kkColor(vec4Of(pu.at("subColor")))},
                                          {"_Blend", Vec4{static_cast<float>(pu.at("gradBlend").asFloat()), 0, 0, 0}},
