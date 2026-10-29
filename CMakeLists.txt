@@ -61,6 +61,7 @@ add_library(cardbridge_core STATIC
     src/core/ZipArchive.cpp
     src/card/CardFile.cpp
     src/card/MaterialEdits.cpp
+    src/card/Abmx.cpp
     src/unity/UnityBundle.cpp
     src/unity/UnitySerialized.cpp
     src/unity/UnityScene.cpp
@@ -69,6 +70,7 @@ add_library(cardbridge_core STATIC
     src/resolve/ListTable.cpp
     src/resolve/Resolver.cpp
     src/assemble/Assembler.cpp
+    src/assemble/DynamicBone.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
     src/export/Preview.cpp
