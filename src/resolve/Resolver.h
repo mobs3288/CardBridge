@@ -65,6 +65,9 @@ public:
     // Same lookup for another bundle the item's list row names (its texture bundle):
     // inside the mod's zip for a mod item, else the library.
     std::shared_ptr<unity::UnityFile> openItemBundle(const ResolvedItem& item, const std::string& rel, std::string* why);
+    // Sideloader keeps one bundle per bundle path: when two installed mods ship the same path (a newer copy of the same asset pack under
+    // another GUID), the one loaded last wins. Items of the character call this so openItemBundle picks the mod the game would.
+    void registerBundleProvider(const ResolvedItem& item);
     // A base-game bundle by its abdata-relative path, e.g. "chara/oo_base.unity3d".
     std::shared_ptr<unity::UnityFile> openBaseBundle(const std::string& rel, std::string* why);
     // The library bundle that holds an object a material points at in "another file" (a PPtr's external name, e.g.
@@ -79,6 +82,7 @@ private:
     std::string abdata_;
     std::map<std::string, bool> modListsLoaded_;
     std::map<std::string, std::shared_ptr<unity::UnityFile>> cache_;
+    std::map<std::string, std::vector<std::string>> providers_;   // lower-case bundle path -> zipmods of this character that contain it
     std::map<std::string, std::string> cabIndex_;   // lower-case CAB name -> library-relative bundle path
     bool cabIndexBuilt_ = false;
 };
