@@ -1348,6 +1348,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     const Value& pu = pupils.at(rendererName == "cf_Ohitomi_L02" ? size_t(0) : size_t(1));
                     auto grad = rowTexture(409, pu.at("gradMaskId").asInt(), "ChaFileFace.PupilGrad", "ColorMaskTex", std::string(sp.renderer) + ".gradation", nullptr, "ColorMaskAB");
                     const float gy = static_cast<float>(pu.at("gradOffsetY").asFloat()), gs = static_cast<float>(pu.at("gradScale").asFloat());
+                    if (std::getenv("CARDBRIDGE_DEBUG_EYE")) std::fprintf(stderr, "iris blend %g offY %g scale %g\n", pu.at("gradBlend").asFloat(), gy, gs);
                     int job = createJob("cf_m_eye_create", {{"_MainTex", tex}, {"_ColorMask", grad}},
                                         {{"_Color", kkColor(vec4Of(pu.at("baseColor")))}, {"_Color2", kkColor(vec4Of(pu.at("subColor")))},
                                          {"_Blend", Vec4{static_cast<float>(pu.at("gradBlend").asFloat()), 0, 0, 0}},
