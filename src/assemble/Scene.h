@@ -73,6 +73,7 @@ struct SceneCreateJob {
     // An image laid over the result (a KoiSkinOverlayX layer from the card), source-over, scaled to the target; empty = none.
     std::vector<uint8_t> overlay;
     int overlayWidth = 0, overlayHeight = 0;
+    bool overlayReplaces = false;   // the overlay replaces the result instead of covering it (KoiClothesOverlayX "override")
 };
 
 struct SceneShader {

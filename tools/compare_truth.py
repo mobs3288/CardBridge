@@ -41,6 +41,11 @@ def load_pmx_materials(path):
     return mats
 
 
+def plain_name(name):
+    # AccessoryClothes clones a garment into an accessory as CTA_<renderer>_; CardBridge keeps the garment's own name
+    return name[4:-1] if name.startswith('CTA_') and name.endswith('_') else name
+
+
 def nearest_mean(a, b, cap=4000):
     if len(a) > cap: a = a[np.linspace(0, len(a) - 1, cap).astype(int)]
     if len(b) > cap: b = b[np.linspace(0, len(b) - 1, cap).astype(int)]
@@ -55,7 +60,7 @@ def main():
     rows = []
     missing = []
     for r, pts in truth:
-        name = r['name']
+        name = plain_name(r['name'])
         cands = [(i, n, p) for i, (n, p) in enumerate(mats) if i not in used and n.split('/', 1)[-1].split('#')[0] == name]
         if not cands:
             missing.append((name, len(pts)))

@@ -1265,6 +1265,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (tp.isNull()) tp = tb->findTexture(name);
                 if (tp.isNull()) { scene.warn(ref.partId, "texture '" + name + "' not found in " + tb->name()); return nullptr; }
                 keyOut = tb->name() + "#" + std::to_string(tp.pathId);
+                if (std::getenv("CARDBRIDGE_DEBUG_CLOTHES")) std::fprintf(stderr, "clothes texture %s %s = %s\n", ref.partId.c_str(), name.c_str(), keyOut.c_str());
                 return b.decode(*tb, tp, ref.partId);
             };
             std::string k1, k2, k3, k4;
@@ -1301,7 +1302,22 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     }
                     int size = std::min(1024, std::max(mainT->width, mainT->height));
                     int job = createJobFor(ref.partId, "cf_m_clothesN_create", texs, props, size);
-                    if (job >= 0) return job;
+                    if (job >= 0) {
+                        // KoiClothesOverlayX paints an image over the garment's texture (named by the garment's object in the game).
+                        static const char* const kGarmentNames[] = {"ct_clothesTop", "ct_clothesBot", "ct_bra", "ct_shorts", "ct_gloves", "ct_panst", "ct_socks", "ct_shoes_inner", "ct_shoes_outer"};
+                        static const char* const kSubNames[] = {"ct_top_parts_A", "ct_top_parts_B", "ct_top_parts_C"};
+                        const char* garment = ref.subKind >= 0 && ref.subKind < 3 ? kSubNames[ref.subKind] : ref.slot >= 0 && ref.slot < 9 ? kGarmentNames[ref.slot] : nullptr;
+                        card::MaterialEdits::Image ov;
+                        bool replace = false;
+                        if (garment && b.edits && b.edits->decodeClothesOverlay(garment, ov, replace)) {
+                            SceneCreateJob& cj = scene.createJobs.back();
+                            cj.overlay = std::move(ov.rgba);
+                            cj.overlayWidth = ov.width;
+                            cj.overlayHeight = ov.height;
+                            cj.overlayReplaces = replace;
+                        }
+                        return job;
+                    }
                 }
                 return b.bake(mainT, mainKey, maskT, maskKey, c, uf->name());
             };

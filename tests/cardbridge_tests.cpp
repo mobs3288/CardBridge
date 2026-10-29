@@ -11,6 +11,7 @@
 
 #include "assemble/Assembler.h"
 #include "card/CardFile.h"
+#include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "core/Inflate.h"
 #include "core/Lz4.h"
@@ -123,6 +124,34 @@ void unitTests() {
         s.meshes[1].submeshes[0].indices[2] = 9;
         CHECK(exporter::ValidateScene(s).size() == 3);
     });
+    test("KoiClothesOverlayX: overlays are read for the asked coordinate only, with the replace flag", [] {
+        Bytes png = tinyPng();
+        auto overlayFor = [&](int coordinate, bool replace) {   // {coordinate: {"ct_top_parts_B": [png, replace]}} as MessagePack
+            Bytes m = B({0x81, coordinate, 0x81, 0xae});
+            for (char c : std::string("ct_top_parts_B")) m.push_back(static_cast<uint8_t>(c));
+            m.push_back(0x92);
+            m.push_back(0xc4);
+            m.push_back(static_cast<uint8_t>(png.size()));
+            m.insert(m.end(), png.begin(), png.end());
+            m.push_back(replace ? 0xc3 : 0xc2);
+            return m;
+        };
+        auto extendedWith = [&](Bytes overlays) {
+            Value::Array kcox;
+            kcox.emplace_back(int64_t{1});
+            kcox.emplace_back(Value::Map{{Value(std::string("Overlays")), Value(std::move(overlays))}});
+            return Value(Value::Map{{Value(std::string("KCOX")), Value(std::move(kcox))}});
+        };
+        card::MaterialEdits::Image img;
+        bool replace = false;
+        card::MaterialEdits other = card::LoadMaterialEdits(extendedWith(overlayFor(1, false)), 0);
+        CHECK(!other.decodeClothesOverlay("ct_top_parts_B", img, replace));
+        card::MaterialEdits me = card::LoadMaterialEdits(extendedWith(overlayFor(2, true)), 2);
+        CHECK(me.decodeClothesOverlay("ct_top_parts_B", img, replace));
+        CHECK(replace && img.width == 1 && img.height == 1);
+        CHECK(!me.decodeClothesOverlay("ct_clothesTop", img, replace));
+    });
+
     test("sha256", [] {
         std::string s = "abc";
         CHECK(Sha256Hex(reinterpret_cast<const uint8_t*>(s.data()), s.size()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
