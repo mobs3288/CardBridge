@@ -46,8 +46,9 @@ struct ViewOptions {
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's
 // texture with the result, so the PMX carries the colour the game's shader produces. Materials without a shader are left alone.
-// maxSize caps the baked texture's longer side.
-void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, std::string* report = nullptr);
+// maxSize caps the baked texture's longer side. lit = run on the real mesh with the front view's light and camera, so the texture
+// carries the toon shading too (the material is then unlit); otherwise the material is a flat sheet and only its colour is baked.
+void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr);
 
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).
 void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int width, int height, const ViewOptions& opt,

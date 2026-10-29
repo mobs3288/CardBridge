@@ -5,7 +5,7 @@
 //
 // Library and mods folders are remembered in %LOCALAPPDATA%\CardBridge\viewer.json. Drop a card on the window to open it.
 //
-//   mouse: left drag orbit, right/middle drag pan, wheel zoom      keys: Left/Right outfit, T textures, R reset view,
+//   mouse: left drag orbit, right/middle drag pan, wheel zoom      keys: Left/Right outfit, T textures, H the game shaders on/off, R reset view,
 //   F/S/B front/side/back, I issues, click a part row to hide/show it
 
 #include "assemble/Assembler.h"
@@ -172,7 +172,7 @@ struct App {
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
-    bool interacting = false, dirty = true, showIssues = false, textured = true;
+    bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
     POINT last{};
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0;
@@ -255,6 +255,7 @@ void Render(int w, int h) {
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     g.hidden.resize(L->scene.parts.size(), 0);
     g.vopt.textured = g.textured;
+    g.vopt.shaded = g.shaded;
     g.vopt.hiddenParts = &g.hidden;
     g.vopt.step = g.interacting ? 3 : 1;
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
@@ -300,7 +301,7 @@ void Paint(HWND hwnd) {
         size_t warn = 0, err = 0;
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         line(std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I] list", warn + err ? RGB(240, 190, 90) : RGB(120, 200, 120));
-        line("O open  Left/Right outfit  T tex  R reset", RGB(120, 130, 150));
+        line("O open  Left/Right outfit  T tex  H shader  R reset", RGB(120, 130, 150));
         if (!g.modsInfo.empty()) line("mods: " + g.modsInfo, g.modsInfo.rfind("NO ", 0) == 0 || g.modsInfo.rfind("no ", 0) == 0 ? RGB(240, 110, 110) : RGB(120, 200, 120));
         y += 6;
         if (g.showIssues) {
@@ -410,6 +411,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::shared_ptr<Loaded> L;
         { std::lock_guard<std::mutex> lk(g.mu); L = g.loaded; }
         if (wp == 'T') { g.textured = !g.textured; g.dirty = true; }
+        else if (wp == 'H') { g.shaded = !g.shaded; g.dirty = true; }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
         else if (wp == 'S') ResetView(90);

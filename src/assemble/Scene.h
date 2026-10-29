@@ -59,6 +59,7 @@ struct SceneMaterial {
     std::vector<std::pair<std::string, Vec4>> props;
     std::vector<SceneTexBinding> texProps;
     int shaderIndex = -1;
+    bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
 };
 
 struct SceneShader {

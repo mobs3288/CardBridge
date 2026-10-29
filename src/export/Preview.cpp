@@ -564,7 +564,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             }
                             if (al < 0.5f) continue;
                             float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                            float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                            float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
                             r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
                             g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
                             bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
@@ -602,11 +602,29 @@ void BuildTexMips(const assemble::Scene& scene, ViewState& st, int ti) {
 
 } // namespace
 
-void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report) {
+void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report) {
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
-    const float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
+    float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
+    if (lit) {   // the light and camera of the front view the shaded picture uses, so the texture holds the same shading
+        Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+        for (const auto& part : scene.parts) {
+            if (!part.includeInExport || !part.visibleInPreview) continue;
+            for (int me : part.meshes)
+                for (const auto& v : scene.meshes[static_cast<size_t>(me)].vertices) {
+                    mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
+                    mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
+                }
+        }
+        const float pit = 4.0f * 3.14159265f / 180.0f, toCam[3] = {0.0f, std::sin(pit), std::cos(pit)};
+        float n = 0;
+        for (int c = 0; c < 3; ++c) L[c] = toCam[c] + (c == 1 ? 0.45f : 0.0f);
+        for (float c : L) n += c * c;
+        for (float& c : L) c /= std::sqrt(n);
+        const float ctr[3] = {(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
+        for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
+    }
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     int baked = 0;
     const size_t originalTextures = scene.textures.size();
@@ -625,7 +643,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report
                 size_t flatIdx = static_cast<size_t>(-1);
                 for (const auto& sub : mesh.submeshes) {
                     if (sub.material != static_cast<int>(mi)) continue;
-                    if (flatIdx == static_cast<size_t>(-1)) { flats.push_back(FlattenToUv(mesh)); flatIdx = flats.size() - 1; }
+                    if (flatIdx == static_cast<size_t>(-1)) { flats.push_back(lit ? mesh : FlattenToUv(mesh)); flatIdx = flats.size() - 1; }
                     uses.push_back({flatIdx, &sub.indices});
                 }
             }
@@ -660,6 +678,12 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report
                     float ax = fm.vertices[i0].uv.x * W, ay = (1.0f - fm.vertices[i0].uv.y) * H;
                     float bx = fm.vertices[i1].uv.x * W, by = (1.0f - fm.vertices[i1].uv.y) * H;
                     float cx = fm.vertices[i2].uv.x * W, cy = (1.0f - fm.vertices[i2].uv.y) * H;
+                    {   // UVs outside 0..1 repeat: the triangle lands in the tile its centre is in
+                        float tu = std::floor((fm.vertices[i0].uv.x + fm.vertices[i1].uv.x + fm.vertices[i2].uv.x) / 3.0f);
+                        float tv = std::floor((fm.vertices[i0].uv.y + fm.vertices[i1].uv.y + fm.vertices[i2].uv.y) / 3.0f);
+                        ax -= tu * W; bx -= tu * W; cx -= tu * W;
+                        ay += tv * H; by += tv * H; cy += tv * H;
+                    }
                     float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
                     if (std::fabs(den) < 1e-8f) continue;
                     int x0 = std::max(0, static_cast<int>(std::floor(std::min({ax, bx, cx})))), x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max({ax, bx, cx}))));
@@ -702,6 +726,11 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report
         worker(0);
         for (auto& th : pool) th.join();
 
+        if (std::getenv("CARDBRIDGE_DEBUG_MAT")) {
+            size_t covered = 0, solid = 0;
+            for (size_t i = 0; i < cov.size(); ++i) if (cov[i]) { ++covered; if (img[i * 4 + 3] >= 0.5f) ++solid; }
+            std::fprintf(stderr, "bake %s (%s): %dx%d, %zu texels covered, %zu with alpha >= 0.5, alpha flag %d\n", mat.name.c_str(), mat.shader.c_str(), W, H, covered, solid, mat.alpha ? 1 : 0);
+        }
         // Pad the islands so bilinear filtering and mips do not pull in empty texels at the seams.
         for (int pass = 0; pass < 6; ++pass) {
             std::vector<uint8_t> cov2 = cov;
@@ -733,9 +762,10 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, std::string* report
         // The shader's colour is now in the texture: the PMX material multiplies by white and keeps its alpha.
         mat.texture = static_cast<int>(scene.textures.size()) - 1;
         mat.diffuse = {1.0f, 1.0f, 1.0f, mat.diffuse.w};
+        mat.bakedLit = lit;
         ++baked;
     }
-    if (report) *report = "baked " + std::to_string(baked) + " material texture(s) through the game's shaders";
+    if (report) *report = std::string(lit ? "baked (shaded, front light) " : "baked (colour only) ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
 } // namespace cardbridge::exporter
