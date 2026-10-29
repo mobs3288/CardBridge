@@ -3,6 +3,7 @@
 #include "core/Bytes.h"
 #include "shape/Shape.h"
 #include "card/MaterialEdits.h"
+#include "core/MsgPack.h"
 #include "export/Preview.h"
 
 #include <algorithm>
@@ -155,8 +156,9 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     }
     for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
-        for (int id : {1, 26, 27})
+        for (int id : {0, 1, 26, 27})
             std::fprintf(stderr, "src %d %s scl %g %g %g\n", id, srcNames[static_cast<size_t>(id)].c_str(), S.src(id).scl.x, S.src(id).scl.y, S.src(id).scl.z);
+    if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) { std::fprintf(stderr, "body values:"); for (size_t i = 0; i < v.size(); ++i) std::fprintf(stderr, " %zu=%.3f", i, v[i]); std::fprintf(stderr, "\n"); }
     shape::RunBodyUpdate(S, 7);
     shape::RunBodyUpdateAlways(S);
 
@@ -695,6 +697,7 @@ struct Builder {
             Vec3 p = mesh->positions[v];
             Vec3 nrm = v < mesh->normals.size() ? mesh->normals[v] : Vec3{0, 1, 0};
             out.uv = v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{};
+            out.uv1 = v < mesh->uv1.size() ? mesh->uv1[v] : out.uv;
             if (skinned) {
                 const unity::BoneInfluence& bi = mesh->skin[v];
                 Vec3 pos{}, nr{};
@@ -1417,6 +1420,37 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 const Value& sv = flat.at(static_cast<size_t>(k * 3 + 2));
                 Vec3 scl = {static_cast<float>(sv.at(size_t(0)).asFloat()), static_cast<float>(sv.at(size_t(1)).asFloat()), static_cast<float>(sv.at(size_t(2)).asFloat())};
                 for (int64_t n : nodes) moveOv[n] = Mat4::TRS(pos, shape::EulerToQuat(rot), scl);
+            }
+        }
+        // Hair length: a hair prefab's "_s" bones sit at baseLength + Lerp(0, addLength, lengthRate) along y (ChaCustomHairComponent.Update).
+        // The rate is the hair part's length slider for a hair item and, for a hair accessory, the HairAccessoryCustomizer slot setting.
+        if (accessoryMode || ref.group == "Hair") {
+            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                if (mb.className != "ChaCustomHairComponent") continue;
+                double rate = mb.fields.at("lengthRate").asFloat();
+                if (ref.group == "Hair") {
+                    size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+                    rate = card.hair.at("parts").at(kind).at("length").asFloat(rate);
+                } else if (ref.outfit >= 0 && ref.accIndex >= 0) {
+                    const Value& payload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+                    if (payload.isBin()) {
+                        Value all = MsgPackParse(payload.asBin());
+                        const Value& info = all.atInt(ref.outfit).atInt(ref.accIndex);
+                        if (info.isMap()) rate = info.at("HairLength").asFloat(rate);
+                    }
+                }
+                const double add = mb.fields.at("addLength").asFloat();
+                if (std::getenv("CARDBRIDGE_DEBUG_HAIRLEN")) std::fprintf(stderr, "hairlen %s rate %g add %g trf %zu base %zu\n", ref.partId.c_str(), rate, add, mb.fields.at("trfLength").size(), mb.fields.at("baseLength").size());
+                const auto& trf = mb.fields.at("trfLength").asArray();
+                const auto& baseLen = mb.fields.at("baseLength").asArray();
+                for (size_t i = 0; i < trf.size() && i < baseLen.size(); ++i) {
+                    int64_t id = trf[i].at("m_PathID").asInt();
+                    const unity::Xform* x = id ? uf->xform(id) : nullptr;
+                    if (!x) continue;
+                    Vec3 p = x->pos;
+                    p.y = static_cast<float>(baseLen[i].asFloat() + add * rate);
+                    moveOv[id] = Mat4::TRS(p, x->rot, x->scl);
+                }
             }
         }
         b.localOv = moveOv.empty() ? nullptr : &moveOv;

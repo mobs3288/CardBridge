@@ -328,6 +328,10 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
             m.uv0.resize(count);
             for (size_t i = 0; i < count; ++i) m.uv0[i] = {tmp[i * 2], tmp[i * 2 + 1]};
         }
+        if (readChannel(4, 2, tmp)) {
+            m.uv1.resize(count);
+            for (size_t i = 0; i < count; ++i) m.uv1[i] = {tmp[i * 2], tmp[i * 2 + 1]};
+        }
     } catch (const FormatError& e) {
         return fail(e.what());
     }

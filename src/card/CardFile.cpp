@@ -1,4 +1,5 @@
 #include "card/CardFile.h"
+#include <cstdlib>
 
 #include "core/FileIo.h"
 #include "core/MsgPack.h"
@@ -80,6 +81,71 @@ Value decodeCoordinate(const Bytes& blob, Outfit& out) {
     out.makeup = chunk();
     if (r.remaining() != 0) throw FormatError("coordinate section has trailing bytes");
     return Value();
+}
+
+} // namespace
+
+
+namespace {
+
+// The MoreAccessories plugin keeps the accessory slots beyond the game's 20 as XML in the card's extended data:
+// <accessorySet type="<coordinate>"><accessory type id parentKey addMove<k><r><axis> color<n><channel> .../>...</accessorySet>.
+// Slot 20 + n of that outfit is the n-th <accessory>. They are appended to the outfit's accessory parts in the shape the
+// card's own PartsInfo has, so everything downstream reads them like the first 20.
+std::string xmlAttr(const std::string& tag, const std::string& name) {
+    std::string key = " " + name + "=\"";
+    size_t at = tag.find(key);
+    if (at == std::string::npos) return {};
+    at += key.size();
+    size_t end = tag.find('"', at);
+    return end == std::string::npos ? std::string() : tag.substr(at, end - at);
+}
+
+void appendMoreAccessories(Card& c) {
+    const Value& more = c.extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories");
+    if (!more.isStr()) return;
+    const std::string& xml = more.asStr();
+    int coordinate = -1;
+    size_t pos = 0;
+    while ((pos = xml.find('<', pos)) != std::string::npos) {
+        size_t end = xml.find('>', pos);
+        if (end == std::string::npos) break;
+        std::string tag = xml.substr(pos, end - pos);
+        pos = end + 1;
+        if (tag.compare(0, 13, "<accessorySet") == 0) { coordinate = std::atoi(xmlAttr(tag, "type").c_str()); continue; }
+        if (tag.compare(0, 10, "<accessory") != 0 || tag.compare(0, 13, "<accessorySet") == 0) continue;
+        if (coordinate < 0 || static_cast<size_t>(coordinate) >= c.outfits.size()) continue;
+        auto num = [&](const std::string& n, double def) { std::string v = xmlAttr(tag, n); return v.empty() ? def : std::atof(v.c_str()); };
+        Value::Array colors;
+        for (int k = 0; k < 4; ++k) {
+            Value::Array rgba;
+            const char* ch = "rgba";
+            for (int j = 0; j < 4; ++j) rgba.emplace_back(num("color" + std::to_string(k) + ch[j], 1.0));
+            colors.emplace_back(std::move(rgba));
+        }
+        Value::Array flat;   // addMove[2][3] flattened: per move node a position, a rotation (degrees) and a scale
+        for (int k = 0; k < 2; ++k)
+            for (int r = 0; r < 3; ++r) {
+                Value::Array v3;
+                for (const char* axis : {"x", "y", "z"})
+                    v3.emplace_back(num("addMove" + std::to_string(k) + std::to_string(r) + axis, r == 2 ? 1.0 : 0.0));
+                flat.emplace_back(std::move(v3));
+            }
+        Value::Array addMove;
+        addMove.emplace_back(int64_t{2});
+        addMove.emplace_back(int64_t{3});
+        addMove.emplace_back(std::move(flat));
+        Value::Map part;
+        part.emplace_back(Value(std::string("type")), Value(static_cast<int64_t>(std::atoi(xmlAttr(tag, "type").c_str()))));
+        part.emplace_back(Value(std::string("id")), Value(static_cast<int64_t>(std::atoi(xmlAttr(tag, "id").c_str()))));
+        part.emplace_back(Value(std::string("parentKey")), Value(xmlAttr(tag, "parentKey")));
+        part.emplace_back(Value(std::string("color")), Value(std::move(colors)));
+        part.emplace_back(Value(std::string("addMove")), Value(std::move(addMove)));
+        Value& acc = c.outfits[static_cast<size_t>(coordinate)].accessory;
+        if (!acc.isMap()) continue;
+        for (auto& kv : acc.map())
+            if (kv.first.isStr() && kv.first.asStr() == "parts" && kv.second.isArray()) kv.second.array().emplace_back(Value(std::move(part)));
+    }
 }
 
 } // namespace
@@ -184,6 +250,7 @@ Card LoadCard(const std::string& path) {
                 rr.category = static_cast<int>(row.at("CategoryNo").asInt());
                 c.rows.push_back(std::move(rr));
             }
+            appendMoreAccessories(c);
         }
     } catch (const CardError&) {
         throw;

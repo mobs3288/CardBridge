@@ -394,7 +394,7 @@ bool RunVertexStage(const ShaderRuntime& sr, const assemble::SceneMaterial& mat,
             if (in.semantic == "POSITION") { r[0] = v.pos.x; r[1] = v.pos.y; r[2] = v.pos.z; r[3] = 1; }
             else if (in.semantic == "NORMAL") { r[0] = v.normal.x; r[1] = v.normal.y; r[2] = v.normal.z; r[3] = 0; }
             else if (in.semantic == "TANGENT") { r[0] = tangents[i].x; r[1] = tangents[i].y; r[2] = tangents[i].z; r[3] = 1; }
-            else if (in.semantic == "TEXCOORD") { r[0] = v.uv.x; r[1] = v.uv.y; r[2] = 0; r[3] = 0; }
+            else if (in.semantic == "TEXCOORD") { const Vec2& t = in.index == 1 ? v.uv1 : v.uv; r[0] = t.x; r[1] = t.y; r[2] = 0; r[3] = 0; }
             else if (in.semantic == "COLOR") { r[0] = r[1] = r[2] = r[3] = 1; }
         }
         io.discarded = false;
@@ -787,6 +787,7 @@ void RunCreateJobs(assemble::Scene& scene) {
             v.pos = {uv.x - 0.5f, uv.y - 0.5f, 0.0f};
             v.normal = {0, 0, 1};
             v.uv = uv;
+            v.uv1 = uv;
             quad.vertices.push_back(v);
         }
         for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);

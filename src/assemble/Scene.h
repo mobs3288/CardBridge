@@ -22,6 +22,7 @@ struct SceneBone {
 struct SceneVertex {
     Vec3 pos, normal;
     Vec2 uv;                  // Unity convention (v up); the PMX writer flips v
+    Vec2 uv1;                 // the second UV set (TEXCOORD1: the body's nipple placement); equals uv when the mesh has none
     int bone[4] = {0, 0, 0, 0};
     float weight[4] = {1, 0, 0, 0};
 };

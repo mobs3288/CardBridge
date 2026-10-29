@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Compiled against the game's own Unity 5.6 / Mono 2.0 assemblies (nothing from the game is copied into the repo). -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>CardBridgeSidecar</AssemblyName>
+    <OutputType>Library</OutputType>
+    <NoStdLib>true</NoStdLib>
+    <NoConfig>true</NoConfig>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>7.3</LangVersion>
+    <GamePath Condition="'$(GamePath)' == ''">E:\Game\[ScrewThisNoise] Koikatsu BetterRepack RX21</GamePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Plugin.cs" />
+    <Reference Include="mscorlib"><HintPath>$(GamePath)\Koikatu_Data\Managed\mscorlib.dll</HintPath></Reference>
+    <Reference Include="System"><HintPath>$(GamePath)\Koikatu_Data\Managed\System.dll</HintPath></Reference>
+    <Reference Include="System.Core"><HintPath>$(GamePath)\Koikatu_Data\Managed\System.Core.dll</HintPath></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(GamePath)\Koikatu_Data\Managed\UnityEngine.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(GamePath)\Koikatu_Data\Managed\Assembly-CSharp.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp-firstpass"><HintPath>$(GamePath)\Koikatu_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath></Reference>
+    <Reference Include="BepInEx"><HintPath>$(GamePath)\BepInEx\core\BepInEx.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>
