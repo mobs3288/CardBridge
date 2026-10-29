@@ -33,6 +33,7 @@ struct TextureBinding {
 
 struct UnityProgram {
     Dxbc code;
+    Bytes dxbc;              // the container itself, as Direct3D 11 takes it
     std::vector<std::string> keywords;
     std::vector<CbLayout> cbuffers;
     std::vector<TextureBinding> textures;
