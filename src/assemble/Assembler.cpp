@@ -1228,6 +1228,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         bool haveLook = false;
         if ((ref.group == "Outfit" || garmentAsAccessory) && ref.outfit >= 0) {
             Vec4 c[3];
+            const Value* clothesInfo = nullptr;   // the garment's colorInfo (patterns and tiling), absent for a garment worn as an accessory
             if (garmentAsAccessory) {   // a garment in an accessory slot is coloured by that slot's three colours
                 const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(std::max(0, ref.accIndex))).at("color");
                 for (size_t k = 0; k < 3; ++k) c[k] = kkColor(vec4Of(col.at(k)));
@@ -1235,6 +1236,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 // Sub-parts use the top's colours; part C's first colour is the fourth slot (ChaControl.ChangeCustomClothes).
                 size_t colorSlot = ref.subKind >= 0 ? 0 : static_cast<size_t>(std::max(0, ref.slot));
                 const Value& ci = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(colorSlot).at("colorInfo");
+                clothesInfo = &ci;
                 for (size_t k = 0; k < 3; ++k) c[k] = kkColor(vec4Of(ci.at(k).at("baseColor")));
                 if (ref.subKind == 2) c[0] = kkColor(vec4Of(ci.at(size_t(3)).at("baseColor")));
             }
@@ -1261,8 +1263,40 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto main2 = listTex("MainTex02AB", "MainTex02", k3);
             auto mask2 = listTex("ColorMask02AB", "ColorMask02Tex", k4);
             // The game only builds a texture when it has both the main texture and its mask.
-            if (main1 && mask1) { look.tex1 = b.bake(main1, k1, mask1, k2, c, uf->name()); haveLook = true; }
-            if (main2 && mask2) { look.tex2 = b.bake(main2, k3, mask2, k4, c, uf->name()); haveLook = true; }
+            // Garments are built by the game's cf_m_clothesN_create material: the main texture and colour mask, the three colours, and a
+            // pattern (mt_pattern list texture, its colour and tiling) per colour slot.
+            auto clothesTexture = [&](const std::shared_ptr<unity::TextureData>& mainT, const std::string& mainKey, const std::shared_ptr<unity::TextureData>& maskT, const std::string& maskKey) -> int {
+                if (clothesInfo) {
+                    const Value& ci = *clothesInfo;
+                    const bool subC = ref.subKind == 2;
+                    auto tile = [&](size_t k, int axis) { const Value& t = ci.at(k).at("tiling"); double v = t.isArray() ? t.at(static_cast<size_t>(axis)).asFloat(1.0) : t.at(axis == 0 ? "x" : "y").asFloat(1.0); return static_cast<float>(v); };
+                    std::vector<TexInput> texs = {{"_MainTex", mainT}, {"_ColorMask", maskT}};
+                    std::vector<std::pair<std::string, Vec4>> props;
+                    const char* patTex[3] = {"_PatternMask1", "_PatternMask2", "_PatternMask3"};
+                    const char* col2[3] = {"_Color1_2", "_Color2_2", "_Color3_2"};
+                    const char* colN[3] = {"_Color", "_Color2", "_Color3"};
+                    for (size_t k = 0; k < 3; ++k) {
+                        texs.push_back({patTex[k], rowTextureFor(ref.partId, 430, ci.at(k).at("pattern").asInt(), "ChaFileClothes.pattern", "MainTex", "pattern" + std::to_string(k + 1), nullptr, "MainTexAB")});
+                        const size_t src = (k == 0 && subC) ? 3 : k;   // sub part C takes the fourth colour slot as its first
+                        props.emplace_back(colN[k], kkColor(vec4Of(ci.at(src).at("baseColor"))));
+                        props.emplace_back(col2[k], kkColor(vec4Of(ci.at(src).at("patternColor"))));
+                        props.emplace_back("_PatternScale" + std::to_string(k + 1) + "u", Vec4{tile(src, 0), 0, 0, 0});
+                        props.emplace_back("_PatternScale" + std::to_string(k + 1) + "v", Vec4{tile(src, 1), 0, 0, 0});
+                    }
+                    if (std::getenv("CARDBRIDGE_DEBUG_CLOTHES")) { std::fprintf(stderr, "clothes %s main %s mask %s:", ref.partId.c_str(), mainT->name.c_str(), maskT->name.c_str()); for (const auto& pr : props) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w); std::fprintf(stderr, "\n"); }
+                    if (std::getenv("CARDBRIDGE_DEBUG_CLOTHES")) {
+                        auto mean = [](const unity::TextureData& t, double out[4]) { double sum[4] = {0, 0, 0, 0}; size_t n = static_cast<size_t>(t.width) * t.height; for (size_t i = 0; i < n; ++i) for (int c = 0; c < 4; ++c) sum[c] += t.rgba[i * 4 + c]; for (int c = 0; c < 4; ++c) out[c] = n ? sum[c] / n : 0; };
+                        double a[4], bm[4]; mean(*mainT, a); mean(*maskT, bm);
+                        std::fprintf(stderr, "  main %dx%d mean %.0f %.0f %.0f %.0f  mask %dx%d mean %.0f %.0f %.0f %.0f\n", mainT->width, mainT->height, a[0], a[1], a[2], a[3], maskT->width, maskT->height, bm[0], bm[1], bm[2], bm[3]);
+                    }
+                    int size = std::min(1024, std::max(mainT->width, mainT->height));
+                    int job = createJobFor(ref.partId, "cf_m_clothesN_create", texs, props, size);
+                    if (job >= 0) return job;
+                }
+                return b.bake(mainT, mainKey, maskT, maskKey, c, uf->name());
+            };
+            if (main1 && mask1) { look.tex1 = clothesTexture(main1, k1, mask1, k2); haveLook = true; }
+            if (main2 && mask2) { look.tex2 = clothesTexture(main2, k3, mask2, k4); haveLook = true; }
             if (haveLook) {
                 for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
                     if (mb.className != "ChaClothesComponent") continue;
