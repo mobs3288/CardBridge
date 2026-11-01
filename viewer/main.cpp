@@ -7,7 +7,7 @@
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
-//   keys:  Left/Right outfit, T textures, H the game shaders on/off, R reset view, F/S/B front/side/back,
+//   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, R reset view, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
 
@@ -185,7 +185,8 @@ struct PartRow {
 
 struct PanelLayout {
     RECT open, exportPmx, issues, reset, all;
-    int partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
+    int outfitNameTop = 0, outfitChipsTop = 0;
+    int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     RECT clearLog{};
 };
 
@@ -200,7 +201,12 @@ PanelLayout LayoutFor(int H) {
     l.footerTop = H - 34;
     l.logBottom = l.footerTop - 4;
     l.logTop = std::max(170, l.logBottom - logH);
-    l.partsTop = 146;
+    // The outfit picker sits between the header buttons and the part list:
+    // a name line, then a row of numbered slots.
+    l.outfitNameTop = 126;
+    l.outfitChipsTop = 146;
+    l.partsHeadingTop = 180;
+    l.partsTop = 200;
     l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 8);
     l.clearLog = {kPanel - 58, l.logTop + 5, kPanel - 10, l.logTop + 21};
     return l;
@@ -239,6 +245,8 @@ struct App {
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0, logScroll = 0;
     int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all
+    int hoverOutfit = -1;                 // slot the cursor is over, for the name line
+    int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
     std::set<std::string> collapsedGroups;
 
@@ -368,6 +376,7 @@ bool EnsureResolver(std::string& err) {
 void StartLoad(const std::string& path, int outfit) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     g.cardPath = path;
+    g.loadingOutfit = outfit;
     g.status = "loading " + fileio::FileName(path) + " ...";   // the full path is in the log
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
@@ -380,13 +389,17 @@ void StartLoad(const std::string& path, int outfit) {
             Log("reading the card container");
             card::Card c = card::LoadCard(path);
             if (!c.supported) throw std::runtime_error(c.supportNote);
-            Log("assembling outfit " + std::to_string(outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt())) + " ...");
+            // The card's current coordinate when none is asked for; an
+            // out-of-range slot falls back to the first, the way Assembler does.
+            int shown = outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt());
+            if (shown < 0 || shown >= static_cast<int>(c.outfits.size())) shown = 0;
+            Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
-            ao.outfit = outfit;
+            ao.outfit = shown;
             ao.log = [](const std::string& m) { Log("  " + m); };
             out->scene = assemble::Assemble(c, *g.resolver, ao);
             out->outfits = static_cast<int>(c.outfits.size());
-            out->outfit = outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt());
+            out->outfit = shown;
             out->title = c.displayName();
             out->partTriangles.assign(out->scene.parts.size(), 0);
             for (size_t pi = 0; pi < out->scene.parts.size(); ++pi)
@@ -498,6 +511,33 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     return 0;
 }
 
+// The outfit slots, as a row of numbered buttons under the name line. Koikatsu
+// cards hold seven; anything beyond the row keeps to the arrow keys.
+constexpr int kOutfitChipW = 46, kOutfitChipH = 22, kOutfitChipGap = 4;
+
+int OutfitChipsPerRow() {
+    return std::max(1, (kPanel - 20 + kOutfitChipGap) / (kOutfitChipW + kOutfitChipGap));
+}
+
+RECT OutfitChipRect(const PanelLayout& l, int index) {
+    const int perRow = OutfitChipsPerRow();
+    const int x = 10 + (index % perRow) * (kOutfitChipW + kOutfitChipGap);
+    const int y = l.outfitChipsTop + (index / perRow) * (kOutfitChipH + kOutfitChipGap);
+    return RECT{x, y, x + kOutfitChipW, y + kOutfitChipH};
+}
+
+int OutfitChipAt(const PanelLayout& l, int x, int y) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return -1;
+    const int count = std::min(L->outfits, OutfitChipsPerRow());
+    for (int i = 0; i < count; ++i) {
+        POINT p{x, y};
+        RECT chip = OutfitChipRect(l, i);
+        if (PtInRect(&chip, p)) return i;
+    }
+    return -1;
+}
+
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 void Render(int w, int h) {
     std::shared_ptr<Loaded> L = Current();
@@ -594,7 +634,6 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
                    std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I]");
         std::string mode = g.gpuOk ? "Direct3D 11 shaders" : "software shaders";
         mode += g.textured ? "  ·  textured" : "  ·  untextured";
-        if (L->outfits > 1) mode += "  ·  outfit " + std::to_string(L->outfit) + "/" + std::to_string(L->outfits - 1);
         DrawTextAt(dc, g.fontUi, g.gpuOk ? RGB(110, 180, 240) : RGB(150, 160, 178), 10, 66, mode);
     } else if (L) {
         // The assembly threw (unsupported card, broken container): show why instead of a row of zeros.
@@ -620,12 +659,40 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     FillRect(dc, &d1, div);
     DeleteObject(div);
 
+    // outfit ------------------------------------------------------------------------------------------------------------
+    // The counter and the game's name for the coordinate, over a row of slots
+    // that can be clicked - Left/Right still steps through them.
+    {
+        int shown = L ? L->outfit : -1;
+        if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
+        if (L && L->outfits > 0) shown = std::clamp(shown, 0, L->outfits - 1);
+        DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, l.outfitNameTop, "OUTFIT");
+        if (L && L->outfits > 0) {
+            // Hovering a slot previews that outfit's name without loading it.
+            const int preview = g.hoverOutfit >= 0 && g.hoverOutfit < L->outfits ? g.hoverOutfit : shown;
+            const COLORREF nameColor = g.busy ? RGB(120, 200, 255)
+                                              : g.hoverOutfit >= 0 ? RGB(238, 244, 255) : RGB(206, 218, 236);
+            DrawTextAt(dc, g.fontBold, nameColor, 72, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30));
+            char count[32];
+            std::snprintf(count, sizeof count, "%d / %d", shown + 1, L->outfits);
+            DrawTextRight(dc, g.fontBold, RGB(235, 190, 90), kPanel - 10, l.outfitNameTop, count, nullptr);
+        } else {
+            DrawTextAt(dc, g.fontUi, RGB(110, 120, 138), 72, l.outfitNameTop, g.busy ? "loading ..." : "no card");
+        }
+        const int chips = L ? std::min(L->outfits, OutfitChipsPerRow()) : 0;
+        for (int i = 0; i < chips; ++i) {
+            char number[8];
+            std::snprintf(number, sizeof number, "%d", i + 1);
+            Button(dc, OutfitChipRect(l, i), number, g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
+        }
+    }
+
     // parts / issues ---------------------------------------------------------------------------------------------------
     RECT clip{10, l.partsTop, kPanel - 10, l.partsBottom};
-    DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, 126, g.showIssues ? "ISSUES" : "PARTS");
+    DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, l.partsHeadingTop, g.showIssues ? "ISSUES" : "PARTS");
     if (L) {
         std::string right = g.showIssues ? std::to_string(L->scene.issues.size()) + " finding(s)" : std::to_string(L->scene.parts.size()) + " parts";
-        DrawTextRight(dc, g.fontSmall, RGB(110, 120, 138), kPanel - 10, 128, right, nullptr);
+        DrawTextRight(dc, g.fontSmall, RGB(110, 120, 138), kPanel - 10, l.partsHeadingTop + 2, right, nullptr);
     }
     if (!L) {
         DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(120, 130, 150), 10, l.partsTop + 4,
@@ -750,7 +817,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     FillRect(dc, &fr, foot);
     DeleteObject(foot);
     DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  I issues  A all  T tex  H shader  R reset", 64));
-    std::string hint = "L library  M mods  C clear log  ·  drop a card to open it";
+    std::string hint = "1-7 outfit · L library · M mods · C clear log · drop a card";
     if (g.busy) hint = "working ...";
     else if (g.exporting) hint = "exporting PMX ...";
     if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
@@ -822,6 +889,14 @@ void OpenCard() {
     if (!c.empty()) { g.cam = {}; StartLoad(c, -1); }
 }
 
+// Picking a slot is the same reload Left/Right does, just aimed.
+void ChooseOutfit(int index) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.busy || g.cardPath.empty()) return;
+    if (index < 0 || index >= L->outfits || index == L->outfit) return;
+    StartLoad(g.cardPath, index);
+}
+
 void ChooseMods() {
     std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder");
     if (d.empty()) return;
@@ -859,7 +934,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::shared_ptr<Loaded> L = Current();
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         g.partScroll = 0;
-        g.hoverRow = g.hoverPart = -1;
+        g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
+        g.loadingOutfit = -1;
         g.soloPart = -1;
         g.state = exporter::NewViewState();
         g.gpuOk = false;
@@ -898,6 +974,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
             if (button == 4) { if (Current()) ResetView(0); return 0; }
             if (button == 5) { if (Current()) ShowAll(); return 0; }
+            int chip = OutfitChipAt(l, x, y);
+            if (chip >= 0) { ChooseOutfit(chip); return 0; }
             POINT p{x, y};
             if (PtInRect(&l.clearLog, p)) { ClearLog(); return 0; }
             std::shared_ptr<Loaded> L = Current();
@@ -977,8 +1055,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc;
         GetClientRect(hwnd, &rc);
         PanelLayout l = LayoutFor(rc.bottom);
-        int oldRow = g.hoverRow, oldPart = g.hoverPart, oldButton = g.hoverButton;
+        int oldRow = g.hoverRow, oldPart = g.hoverPart, oldButton = g.hoverButton, oldOutfit = g.hoverOutfit;
         g.hoverButton = x < kPanel ? ButtonAt(l, x, y) : 0;
+        g.hoverOutfit = x < kPanel ? OutfitChipAt(l, x, y) : -1;
         g.hoverRow = -1;
         g.hoverPart = -1;
         if (x < kPanel) {
@@ -992,7 +1071,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
         }
-        if (oldRow != g.hoverRow || oldPart != g.hoverPart || oldButton != g.hoverButton) {
+        if (oldRow != g.hoverRow || oldPart != g.hoverPart || oldButton != g.hoverButton || oldOutfit != g.hoverOutfit) {
             if (oldPart != g.hoverPart) {
                 g.lastInput = GetTickCount64();
                 g.dirty = true;
@@ -1004,12 +1083,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton) {
+        if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0) {
             bool part = g.hoverPart >= 0;
-            g.hoverRow = g.hoverPart = -1;
+            g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
             g.hoverButton = 0;
             if (part) { g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); }
-            else InvalidatePanel();
+            InvalidatePanel();
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
@@ -1055,7 +1134,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             PanelLayout l = LayoutFor(rc.bottom);
-            bool hand = ButtonAt(l, p.x, p.y) != 0 || PtInRect(&l.clearLog, p) != 0;
+            bool hand = ButtonAt(l, p.x, p.y) != 0 || PtInRect(&l.clearLog, p) != 0 ||
+                        OutfitChipAt(l, p.x, p.y) >= 0;
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();
                 if (L && !g.showIssues) {
@@ -1083,9 +1163,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'O') OpenCard();
         else if (wp == 'M') ChooseMods();
         else if (wp == 'L') ChooseLibrary();
-        else if ((wp == VK_LEFT || wp == VK_RIGHT) && L && L->outfits > 1 && !g.cardPath.empty()) {
+        else if (wp >= '1' && wp <= '9') { if (L) ChooseOutfit(static_cast<int>(wp - '1')); }
+        else if ((wp == VK_LEFT || wp == VK_RIGHT) && L && L->outfits > 1) {
             int n = L->outfits, o = (L->outfit + (wp == VK_RIGHT ? 1 : n - 1)) % n;
-            StartLoad(g.cardPath, o);
+            ChooseOutfit(o);
         }
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;

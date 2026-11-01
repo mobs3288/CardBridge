@@ -313,6 +313,23 @@ void unitTests() {
         cl.insert(cl.end(), mark.begin(), mark.end());
         CHECK(kindOf(cl) == CardErrorKind::ClothesFile);
     });
+    test("outfit names: the seven Koikatsu slots, with a numbered fallback", [] {
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.outfits.resize(7);
+        CHECK(c.outfitName(0) == "School Uniform (In School)");
+        CHECK(c.outfitName(1) == "School Uniform (Going Home)");
+        CHECK(c.outfitName(2) == "Gym Uniform");
+        CHECK(c.outfitName(3) == "Swimsuit");
+        CHECK(c.outfitName(4) == "Club Activities");
+        CHECK(c.outfitName(5) == "Casual Clothes");
+        CHECK(c.outfitName(6) == "Sleeping Over");
+        CHECK(c.outfitName(7) == "Outfit 8");
+        CHECK(c.outfitName(-1) == "Outfit 0");
+        // A family whose coordinate order is not known gets neutral names.
+        c.family = card::CardFamily::KoikatsuSunshine;
+        CHECK(c.outfitName(0) == "Outfit 1");
+    });
     test("pmx writer: counts, validation errors", [] {
         pmx::Model m;
         m.name = "t";
