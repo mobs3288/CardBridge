@@ -71,6 +71,12 @@ struct Card {
     std::vector<ResolveRow> rows;
 
     std::string displayName() const;
+
+    // The game's own name for one of a Koikatsu card's coordinate slots:
+    // "School Uniform (In School)" through "Sleeping Over" (0..6). Any other
+    // family, and any index outside those seven, falls back to "Outfit N"
+    // (one-based), so the caller can always show something.
+    std::string outfitName(int index) const;
 };
 
 // Reads and decodes a card. Never launches or touches the game. Throws

@@ -36,6 +36,26 @@ std::string Card::displayName() const {
     return n.empty() ? f : n;
 }
 
+std::string Card::outfitName(int index) const {
+    // The seven coordinate slots of a Koikatsu character, in the order the
+    // game's outfit menu lists them (the card itself stores no names).
+    static const char* kNames[] = {
+        "School Uniform (In School)",
+        "School Uniform (Going Home)",
+        "Gym Uniform",
+        "Swimsuit",
+        "Club Activities",
+        "Casual Clothes",
+        "Sleeping Over",
+    };
+    const bool koikatsu = family == CardFamily::Koikatsu || family == CardFamily::KoikatsuParty ||
+                          family == CardFamily::KoikatsuPartySP;
+    if (koikatsu && index >= 0 && index < static_cast<int>(sizeof(kNames) / sizeof(kNames[0]))) {
+        return kNames[index];
+    }
+    return "Outfit " + std::to_string(index + 1);
+}
+
 namespace {
 
 // Offset of the first byte after the PNG's IEND chunk.
