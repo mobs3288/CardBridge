@@ -370,6 +370,7 @@ int cmdConvert(const Args& a) {
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
+    std::vector<uint8_t> gpuRgba;   // written after the export, which with --overwrite clears the folder first
     if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
         exporter::GpuView gpu;
         std::string why;
@@ -385,9 +386,8 @@ int cmdConvert(const Args& a) {
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());
             for (const auto& m : scene.materials) if (m.shaderIndex < 0) std::fprintf(stderr, "    no shader: %s (%s)\n", m.name.c_str(), m.shader.c_str());
             if (ok) {
-                std::vector<uint8_t> rgba(px.size() * 4);
-                for (size_t i = 0; i < px.size(); ++i) { rgba[i * 4] = (px[i] >> 16) & 255; rgba[i * 4 + 1] = (px[i] >> 8) & 255; rgba[i * 4 + 2] = px[i] & 255; rgba[i * 4 + 3] = 255; }
-                stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, rgba.data(), 640 * 4);
+                gpuRgba.resize(px.size() * 4);
+                for (size_t i = 0; i < px.size(); ++i) { gpuRgba[i * 4] = (px[i] >> 16) & 255; gpuRgba[i * 4 + 1] = (px[i] >> 8) & 255; gpuRgba[i * 4 + 2] = px[i] & 255; gpuRgba[i * 4 + 3] = 255; }
             }
         }
     }
@@ -402,6 +402,7 @@ int cmdConvert(const Args& a) {
     eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     try {
         auto r = exporter::ExportScene(scene, c, eo);
+        if (!gpuRgba.empty()) stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, gpuRgba.data(), 640 * 4);
         double secs = std::chrono::duration<double>(t1 - t0).count();
         std::printf("wrote %s\n  %zu vertices, %zu triangles, %zu materials, %zu bones, %zu textures; %zu of %zu card items loaded (assembled in %.1fs)\n  manifest: %s\n",
                     r.pmxPath.c_str(), r.vertices, r.triangles, r.materials, r.bones, r.textures, parts - failed - 0, parts, secs, r.manifestPath.c_str(), r.previewPath.c_str());

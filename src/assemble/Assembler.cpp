@@ -613,6 +613,7 @@ struct Builder {
                     }
             result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
             scene.textures[static_cast<size_t>(result)].clamp = t->wrapMode == 1;
+            scene.textures[static_cast<size_t>(result)].srgb = t->colorSpace == 1;
         }
         shaderTexCache[key] = result;
         return result;
@@ -1026,6 +1027,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     scene.globalProps.emplace_back("_linewidthG", Vec4{0.307f, 0, 0, 0});
     scene.globalProps.emplace_back("_FaceShadowG", Vec4{std::getenv("FS") ? static_cast<float>(std::atof(std::getenv("FS"))) : 0.0f, 0, 0, 0});
     scene.globalProps.emplace_back("_FaceNormalG", Vec4{std::getenv("FN") ? static_cast<float>(std::atof(std::getenv("FN"))) : 0.0f, 0, 0, 0});
+    if (const char* ov = std::getenv("CARDBRIDGE_GLOBALS")) {   // test aid: "name=x,y,z,w;name=..." replaces shader globals
+        std::string spec = ov;
+        for (size_t at = 0; at < spec.size();) {
+            size_t end = spec.find(';', at);
+            if (end == std::string::npos) end = spec.size();
+            std::string item = spec.substr(at, end - at);
+            at = end + 1;
+            size_t eq = item.find('=');
+            float v[4] = {0, 0, 0, 0};
+            if (eq == std::string::npos || std::sscanf(item.c_str() + eq + 1, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) < 1) continue;
+            for (auto& g : scene.globalProps) if (g.first == item.substr(0, eq)) g.second = Vec4{v[0], v[1], v[2], v[3]};
+        }
+    }
     auto loadListTexture = [&](int category, int64_t id) -> int {
         const resolve::ListItem* row = resolver.baseRow(category, id);
         if (!row) return -1;
@@ -1042,6 +1056,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::vector<uint8_t> px = t->rgba;
         int idx = b.addSceneTexture(t->name, bu->name(), t->width, t->height, std::move(px));
         scene.textures[static_cast<size_t>(idx)].clamp = t->wrapMode == 1;
+        scene.textures[static_cast<size_t>(idx)].srgb = t->colorSpace == 1;
         return idx;
     };
     {
