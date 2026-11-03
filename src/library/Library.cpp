@@ -1,6 +1,7 @@
 #include "library/Library.h"
 
 #include "core/FileIo.h"
+#include "core/ZipArchive.h"
 #include "unity/UnityScene.h"
 
 #include <stb_image_write.h>
@@ -12,6 +13,53 @@
 namespace cardbridge::library {
 
 std::string AbdataRoot(const std::string& libraryRoot) { return fileio::Join(libraryRoot, "abdata"); }
+
+namespace {
+// Reads the footer of an exe with an embedded library; false when there is none.
+bool ReadFooter(const std::string& exePath, uint64_t& offset, uint64_t& size) {
+    try {
+        const uint64_t fileSize = fileio::FileSize(exePath);
+        if (fileSize < 24) return false;
+        const Bytes f = fileio::ReadRange(exePath, fileSize - 24, 24);
+        if (std::string(f.begin(), f.begin() + 8) != "CBLIBPK1") return false;
+        auto u64 = [&](size_t at) { uint64_t v = 0; for (int i = 7; i >= 0; --i) v = (v << 8) | f[at + static_cast<size_t>(i)]; return v; };
+        offset = u64(8);
+        size = u64(16);
+        return size > 22 && offset + size + 24 <= fileSize;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+} // namespace
+
+bool HasEmbeddedLibrary(const std::string& exePath) {
+    uint64_t off = 0, size = 0;
+    return ReadFooter(exePath, off, size);
+}
+
+bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why) {
+    uint64_t off = 0, size = 0;
+    if (!ReadFooter(exePath, off, size)) { if (why) *why = "this exe carries no library"; return false; }
+    try {
+        ZipArchive zip(exePath, off, size);
+        size_t done = 0;
+        for (const auto& e : zip.entries()) {
+            if (!e.name.empty() && e.name.back() == '/') { ++done; continue; }
+            if (e.name.find("..") != std::string::npos || e.name.rfind("library/", 0) != 0) continue;   // only library/..., nothing that climbs out
+            const std::string dst = fileio::Join(destParent, e.name);
+            if (!(fileio::Exists(dst) && fileio::FileSize(dst) == e.size)) {
+                const Bytes data = zip.read(e);
+                fileio::CreateDirectories(dst.substr(0, dst.find_last_of('/')));
+                fileio::WriteFile(dst, data.data(), data.size());
+            }
+            if (progress) progress(++done, zip.entries().size());
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        if (why) *why = ex.what();
+        return false;
+    }
+}
 
 bool ExtractColourGrade(const std::string& gameRoot, const std::string& libraryRoot, std::string* why) {
     const std::string dir = fileio::Join(fileio::Join(gameRoot, "abdata"), "map/scene");

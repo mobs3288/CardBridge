@@ -7,11 +7,13 @@
 
 namespace cardbridge {
 
-ZipArchive::ZipArchive(const std::string& path) : path_(path) {
-    uint64_t fileSize = fileio::FileSize(path);
+ZipArchive::ZipArchive(const std::string& path) : ZipArchive(path, 0, fileio::FileSize(path)) {}
+
+ZipArchive::ZipArchive(const std::string& path, uint64_t base, uint64_t size) : path_(path), base_(base) {
+    uint64_t fileSize = size;
     if (fileSize < 22) throw FormatError("not a zip (too small): " + path);
     size_t tailSize = static_cast<size_t>(std::min<uint64_t>(fileSize, 22 + 65535));
-    Bytes tail = fileio::ReadRange(path, fileSize - tailSize, tailSize);
+    Bytes tail = fileio::ReadRange(path, base_ + fileSize - tailSize, tailSize);
 
     // End of central directory record: scan backwards for its signature.
     size_t eocd = std::string::npos;
@@ -34,7 +36,7 @@ ZipArchive::ZipArchive(const std::string& path) : path_(path) {
     (void)entriesThisDisk;
     if (static_cast<uint64_t>(cdOffset) + cdSize > fileSize) throw FormatError("corrupt zip directory: " + path);
 
-    Bytes cd = fileio::ReadRange(path, cdOffset, cdSize);
+    Bytes cd = fileio::ReadRange(path, base_ + cdOffset, cdSize);
     ByteReader r(cd, false);
     entries_.reserve(totalEntries);
     for (uint16_t i = 0; i < totalEntries; ++i) {
@@ -73,12 +75,12 @@ Bytes ZipArchive::read(const std::string& name) const {
 Bytes ZipArchive::read(const Entry& e) const {
     if (e.method != 0 && e.method != 8)
         throw FormatError("zip entry " + e.name + " uses an unsupported method/encryption");
-    Bytes hdr = fileio::ReadRange(path_, e.localHeaderOffset, 30);
+    Bytes hdr = fileio::ReadRange(path_, base_ + e.localHeaderOffset, 30);
     ByteReader r(hdr, false);
     if (r.u32() != 0x04034b50) throw FormatError("corrupt local header for " + e.name);
     r.skip(22);
     uint16_t nameLen = r.u16(), extraLen = r.u16();
-    uint64_t dataOffset = static_cast<uint64_t>(e.localHeaderOffset) + 30 + nameLen + extraLen;
+    uint64_t dataOffset = base_ + static_cast<uint64_t>(e.localHeaderOffset) + 30 + nameLen + extraLen;
     Bytes raw = fileio::ReadRange(path_, dataOffset, e.compressedSize);
     if (e.method == 0) {
         if (raw.size() != e.size) throw FormatError("stored entry size mismatch: " + e.name);

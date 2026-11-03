@@ -23,6 +23,8 @@ public:
     };
 
     explicit ZipArchive(const std::string& path);   // throws FormatError
+    // A zip that starts `base` bytes into the file and is `size` bytes long (appended to an exe): every offset in it is relative to `base`.
+    ZipArchive(const std::string& path, uint64_t base, uint64_t size);   // throws FormatError
 
     const std::string& path() const { return path_; }
     const std::vector<Entry>& entries() const { return entries_; }
@@ -33,6 +35,7 @@ public:
 
 private:
     std::string path_;
+    uint64_t base_ = 0;
     std::vector<Entry> entries_;
     std::map<std::string, size_t> byName_;
 };

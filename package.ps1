@@ -1,24 +1,23 @@
 <#
-    Makes the release files. The release is ONE exe: CardBridge-<version>.exe is the viewer with everything in it (icon, logo, the converter,
-    the exporter). On first run it asks for the user's Koikatsu folder and builds its asset library from it (about 17 s); it asks for the
-    mods folder; after that it needs nothing. Drop a card on its window, press E to export a PMX.
+    Makes the release files. The release is ONE exe: CardBridge-<version>.exe is the viewer with everything in it: the icon, the logo, the
+    converter, the exporter and (with -Library) the base-game library, appended to the exe as a zip with a small footer. On first run it
+    unpacks the library into %LOCALAPPDATA%\CardBridge\library (about 20 s), asks for the user's mods folder, and needs nothing else.
+    Drop a card on its window, press E to export a PMX. Mods are never inside it: each user points it at their own.
 
-    Also made: CardBridge-CLI-<version>.exe (the command line converter, for scripts) and a .sha256 beside each.
+    Without -Library the exe has no game data and asks for the user's Koikatsu folder on first run instead (CardBridge-lean-<version>.exe).
 
-    The asset library holds copies of the game's data files, which belong to their authors, so it is NOT inside the exe. -LibraryPack <dir>
-    additionally zips a prepared library as a separate "library pack" for LOCAL testing; do not publish it without the owner's explicit
-    decision.
+    Also made: CardBridge-CLI-<version>.exe (the command line converter) and a .sha256 beside each file.
 
-    -BinDir <dir>        where the built exes are (default: build\bin here, or ..\build-cardbridge-rel\bin or ..\build-cardbridge\bin in Project K)
-    -OutDir <dir>        where the files go (default: dist here)
-    -LibraryPack <dir>   also zip this library folder (abdata, colorgrade, library.json)
+    -Library <dir>   the library folder to embed (abdata, colorgrade, library.json, cab_index.json); needs the owner's OK to publish
+    -BinDir <dir>    where the built exes are (default: build\bin here, or ..\build-cardbridge-rel\bin or ..\build-cardbridge\bin in Project K)
+    -OutDir <dir>    where the files go (default: dist here)
 
     The version comes from the VERSION file next to this script. Build first (build.ps1, or scripts\cardbridge.ps1 in Project K).
 #>
 param(
     [string]$BinDir = '',
     [string]$OutDir = '',
-    [string]$LibraryPack = ''
+    [string]$Library = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,20 +40,34 @@ function Publish([string]$from, [string]$to) {
     "$hash  $(Split-Path $to -Leaf)" | Set-Content -Path "$to.sha256" -Encoding ascii
     Write-Host ("{0}  ({1:N1} MB)  sha256 {2}" -f $to, ((Get-Item $to).Length / 1MB), $hash)
 }
-Publish (Join-Path $BinDir 'cardbridge_viewer.exe') (Join-Path $OutDir "CardBridge-$version.exe")
+$viewer = Join-Path $BinDir 'cardbridge_viewer.exe'
+Publish $viewer (Join-Path $OutDir "CardBridge-lean-$version.exe")
 Publish (Join-Path $BinDir 'cardbridge.exe') (Join-Path $OutDir "CardBridge-CLI-$version.exe")
 
-if ($LibraryPack) {
-    if (-not (Test-Path (Join-Path $LibraryPack 'abdata'))) { throw "not a library folder: $LibraryPack" }
-    $zip = Join-Path $OutDir "CardBridge-library-pack-$version.zip"
-    if (Test-Path $zip) { Remove-Item $zip -Force }
+if ($Library) {
+    if (-not (Test-Path (Join-Path $Library 'abdata'))) { throw "not a library folder: $Library" }
+    Write-Host 'zipping the library ...'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    # the zip holds a folder named "library": unzip it next to the exe, or into %LOCALAPPDATA%\CardBridge
     $stage = Join-Path $OutDir 'packstage'
-    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+    $zip = Join-Path $OutDir 'library.zip.tmp'
+    foreach ($p in $stage, $zip) { if (Test-Path $p) { Remove-Item $p -Recurse -Force } }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item $LibraryPack (Join-Path $stage 'library') -Recurse
+    Copy-Item $Library (Join-Path $stage 'library') -Recurse
     [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Fastest, $false)
     Remove-Item $stage -Recurse -Force
-    Write-Host ("{0}  ({1:N1} MB)  LOCAL TEST ONLY: contains game data" -f $zip, ((Get-Item $zip).Length / 1MB))
+    # exe + zip + footer ("CBLIBPK1", zip offset, zip size)
+    $out = Join-Path $OutDir "CardBridge-$version.exe"
+    $exeLen = (Get-Item $viewer).Length
+    $zipLen = (Get-Item $zip).Length
+    $o = [System.IO.File]::Create($out)
+    foreach ($f in $viewer, $zip) {
+        $i = [System.IO.File]::OpenRead($f); $i.CopyTo($o); $i.Dispose()
+    }
+    $footer = [System.Text.Encoding]::ASCII.GetBytes('CBLIBPK1') + [BitConverter]::GetBytes([uint64]$exeLen) + [BitConverter]::GetBytes([uint64]$zipLen)
+    $o.Write($footer, 0, $footer.Length)
+    $o.Dispose()
+    Remove-Item $zip -Force
+    $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+    "$hash  $(Split-Path $out -Leaf)" | Set-Content -Path "$out.sha256" -Encoding ascii
+    Write-Host ("{0}  ({1:N1} MB)  sha256 {2}" -f $out, ((Get-Item $out).Length / 1MB), $hash)
 }

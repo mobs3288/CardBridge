@@ -114,6 +114,10 @@ std::string CachedModsRoot() {
 
 struct Settings {
     std::string library, mods;
+    std::string author;      // named in the PMX model information; empty = the default author
+    std::string exportDir;   // where exports go without asking; empty = ask every time
+    std::string layers;      // an extra folder of shader layers (.hlsl)
+    bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
 };
 Settings LoadSettings() {
     Settings s;
@@ -121,6 +125,10 @@ Settings LoadSettings() {
         auto j = nlohmann::json::parse([] { Bytes b = fileio::ReadFile(SettingsPath()); return std::string(b.begin(), b.end()); }());
         s.library = j.value("library", "");
         s.mods = j.value("mods", "");
+        s.author = j.value("author", "");
+        s.exportDir = j.value("exportDir", "");
+        s.layers = j.value("layers", "");
+        s.noMods = j.value("noMods", false);
     } catch (...) {}
     return s;
 }
@@ -130,6 +138,10 @@ void SaveSettings(const Settings& s) {
         nlohmann::json j;
         j["library"] = s.library;
         j["mods"] = s.mods;
+        j["author"] = s.author;
+        j["exportDir"] = s.exportDir;
+        j["layers"] = s.layers;
+        j["noMods"] = s.noMods;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }
@@ -189,8 +201,9 @@ std::string FindLibrary() {
 
 // Where the extra shader layers live: CARDBRIDGE_LAYERS, a layers folder in the library, then the repository's cardbridge/layers
 // found from the exe upwards.
-std::vector<std::string> LayerFolders(const std::string& library) {
+std::vector<std::string> LayerFolders(const std::string& library, const std::string& extra = std::string()) {
     std::vector<std::string> out;
+    if (!extra.empty()) out.push_back(extra);
     if (const char* env = std::getenv("CARDBRIDGE_LAYERS")) out.push_back(Slashes(env));
     if (!library.empty()) out.push_back(library + "/layers");
     wchar_t exe[MAX_PATH];
@@ -260,13 +273,17 @@ struct Tweaks {
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
+// Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
+constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetAuthor = 20005, kSetExportDir = 20006,
+              kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
+void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
-    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text
+    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
     std::string label, group;
 };
@@ -297,7 +314,7 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots.
     l.outfitNameTop = 138;
     l.outfitChipsTop = 160;
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 62, 192, 68 + i * 62, 216};
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 192, 59 + i * 51, 216};
     l.partsHeadingTop = 198;
     l.partsTop = 224;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone editor needs the room
@@ -571,6 +588,8 @@ bool SliderFor(int id, SliderRef& r) {
 // Pose controls change the picture at once, no re-assembly.
 bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
 
+std::string Shorten(const std::string& s, size_t maxChars);
+
 std::vector<TweakRow> BuildTweakRows(int tab) {
     std::vector<TweakRow> rows;
     auto addSliders = [&](const std::vector<shape::SliderInfo>& list, int base, size_t have) {
@@ -596,6 +615,31 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
             rows.push_back({2, kLayerBase + static_cast<int>(i), g.layerDefs[i].name, "Shader layers"});
+    }
+    else if (tab == TabSettings) {
+        auto shown = [](const std::string& v, const char* none) { return v.empty() ? std::string(none) : Shorten(v, 50); };
+        rows.push_back({0, -1, "Asset library (the game's data)", "Library"});
+        rows.push_back({4, 0, shown(g.settings.library, "(not set)"), "Library"});
+        rows.push_back({5, kSetLibChoose, "Use another library folder ...", "Library"});
+        rows.push_back({5, kSetLibBuild, "Build a library from my Koikatsu folder ...", "Library"});
+        rows.push_back({0, -1, "Mods", "Mods"});
+        rows.push_back({4, 0, g.settings.noMods ? std::string("(no mods: base-game items only)") : shown(g.settings.mods, "(not set)"), "Mods"});
+        rows.push_back({5, kSetModsChoose, "Choose the mods folder ...", "Mods"});
+        rows.push_back({5, kSetModsReindex, "Rebuild the mod index (after adding mods)", "Mods"});
+        rows.push_back({5, kSetModsClear, "Use no mods", "Mods"});
+        rows.push_back({0, -1, "Export", "Export"});
+        rows.push_back({4, 0, "author in the PMX info: " + (g.settings.author.empty() ? std::string(CARDBRIDGE_AUTHOR) : g.settings.author), "Export"});
+        rows.push_back({5, kSetAuthor, "Change the author name ...", "Export"});
+        rows.push_back({4, 0, "exports go to: " + shown(g.settings.exportDir, "(asks every time)"), "Export"});
+        rows.push_back({5, kSetExportDir, "Always export into one folder ...", "Export"});
+        rows.push_back({5, kSetExportAsk, "Ask for the folder every time", "Export"});
+        rows.push_back({0, -1, "Shader layers", "Layers"});
+        rows.push_back({4, 0, "extra folder: " + shown(g.settings.layers, "(none)"), "Layers"});
+        rows.push_back({5, kSetLayers, "Choose a shader layers folder ...", "Layers"});
+        rows.push_back({5, kSetLayersDefault, "Use only the default places", "Layers"});
+        rows.push_back({0, -1, "CardBridge", std::string("v") + CARDBRIDGE_VERSION});
+        rows.push_back({5, kSetOpenFolder, "Open the settings folder in Explorer", "CardBridge"});
+        rows.push_back({5, kSetForget, "Forget all settings (asked again next start)", "CardBridge"});
     }
     return rows;
 }
@@ -1058,6 +1102,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
 // ---- export ------------------------------------------------------------------------------------------------------------
 std::string PickExportParent(HWND owner) {
     if (std::getenv("CARDBRIDGE_TEST_HOOKS") && std::getenv("CARDBRIDGE_EXPORT_PARENT")) return Slashes(std::getenv("CARDBRIDGE_EXPORT_PARENT"));   // scripted runs: no dialog
+    if (!g.settings.exportDir.empty() && Exists(g.settings.exportDir)) return g.settings.exportDir;   // set in the Setup tab
     return PickFolder(owner, L"Choose where the exported PMX folder should be created");
 }
 
@@ -1070,12 +1115,12 @@ void StartExport() {
     std::string stem = SafeStem(L->title.empty() ? std::string("character") : L->title);
     std::string outDir = parent + "/" + stem;
     for (int n = 2; Exists(outDir) && n < 1000; ++n) outDir = parent + "/" + stem + " (" + std::to_string(n) + ")";
-    const std::string library = g.settings.library, mods = g.settings.mods;
+    const std::string library = g.settings.library, mods = g.settings.mods, author = g.settings.author;
     const std::vector<char> hiddenNow = g.hidden;
     const assemble::Pose pose = BuildPose(*L);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, author, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
@@ -1090,6 +1135,7 @@ void StartExport() {
             eo.outfit = L->outfit;
             eo.assetLibrary = library;
             eo.modsFolder = mods;
+            eo.author = author;
             eo.log = [](const std::string& m) { Log("  " + m); };
             exporter::ExportResult r = exporter::ExportScene(scene, L->card, eo);
             double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1588,7 +1634,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             } else if (hot && L) {
                 s.FillRound(t, 7, ui::kCard);
             }
-            s.TextCentered(act ? g.fontBold : g.fontUi, !L ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
+            s.TextCentered(act ? g.fontBold : g.fontUi, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
         }
         if (L) {
             std::string right;
@@ -1597,8 +1643,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             else if (g.tweakPending) right = "applying";
             else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
             else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
+            else if (g.tab == TabSettings) right = "saved";
             else right = AnyTweak() ? "tweaked" : "as card";
-            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, right);
+            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, right);
         }
     }
 
@@ -1611,7 +1658,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         RECT sub;
         const bool inList = IntersectRect(&sub, &clip, &listClip) != 0;
         const RECT clipText{10, l.partsTop, kPanel - 14, l.partsBottom};
-        if (!L) {
+        if (!L && g.tab != TabSettings) {
             s.Text(g.fontUi, g.busy ? ui::kAccent : ui::kDim, 14, l.partsTop + 4, g.busy ? "loading the card ..." : "no card loaded");
         } else if (g.showIssues) {
             std::vector<std::pair<std::string, LogKind>> lines;
@@ -1666,6 +1713,10 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
                     } else if (row.kind == 4) {
                         s.Text(g.fontSmall, ui::kDim, 14, y + 4, row.label, &clipText);
+                    } else if (row.kind == 5) {
+                        const RECT btn{12, y + 1, kPanel - 16, y + kRowH - 1};
+                        s.FillRound(btn, 5, idx == g.hoverRow ? ui::kLineHi : ui::kCardHi);
+                        s.Text(g.fontUi, ui::kText, 20, y + 2, row.label, &clipText);
                     } else if (row.kind == 2) {
                         const bool on = TweakChanged(row.id);
                         const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
@@ -1882,6 +1933,7 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;
     const TweakRow& row = rows[static_cast<size_t>(idx)];
+    if (row.kind == 5) { if (!right) SettingsAction(row.id); return; }   // outside the lock: it opens dialogs
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     if (row.kind == 4 || (row.kind == 0 && row.id < 0)) return;
     if (row.kind == 2 && row.id >= kLayerBase && row.id < kBoneEdit) {   // a shader layer: no re-assembly, just another frame
@@ -2000,7 +2052,9 @@ void ChooseMods() {
     std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder");
     if (d.empty()) return;
     g.settings.mods = d;
+    g.settings.noMods = false;
     SaveSettings(g.settings);
+    g.resolver.reset();   // the next load indexes the new folder
     Log("mods folder: " + d, LogKind::Good);
     if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
     else InvalidatePanel();
@@ -2033,6 +2087,32 @@ void StartLibraryImport(const std::string& game) {
     }).detach();
 }
 
+// The all-in-one exe carries the library inside itself: unpack it once into the viewer's own folder (no dialogs).
+void StartEmbeddedUnpack() {
+    if (g.busy.exchange(true)) return;
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const std::string exePath = Slashes(WideToUtf8(exe));
+    const std::string dest = DefaultLibraryDir();
+    g.status = "unpacking the game data that comes with CardBridge (first run only) ...";
+    Log("unpacking the library that is inside this exe into " + dest);
+    InvalidatePanel();
+    std::thread([exePath, dest]() {
+        bool ok = false;
+        std::string why;
+        try {
+            const std::string parent = dest.substr(0, dest.find_last_of('/'));
+            ok = library::ExtractEmbeddedLibrary(exePath, parent, [](size_t done, size_t total) { if (done % 25 == 0 || done == total) Log("  unpacking " + std::to_string(done) + " / " + std::to_string(total)); }, &why)
+                 && library::CheckLibrary(dest, false).ok;
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        Log(ok ? "asset library ready: " + dest : "could not unpack the library: " + why, ok ? LogKind::Good : LogKind::Error);
+        g.busy = false;
+        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, ok ? 1 : 0);
+    }).detach();
+}
+
 // No library yet (first run) or the user asked for one (L): build it from the game folder, or point at one that exists.
 void SetupLibrary(bool offerExisting) {
     if (std::getenv("CARDBRIDGE_TEST_HOOKS") && std::getenv("CARDBRIDGE_SETUP_GAME")) { StartLibraryImport(Slashes(std::getenv("CARDBRIDGE_SETUP_GAME"))); return; }   // scripted runs: no dialogs
@@ -2058,6 +2138,159 @@ void SetupLibrary(bool offerExisting) {
 }
 
 void ChooseLibrary() { SetupLibrary(true); }
+
+// A small modal box with one text field; empty when cancelled.
+std::string PromptText(HWND owner, const wchar_t* title, const wchar_t* label, const std::string& initial) {
+    struct State { std::wstring text; bool ok = false, done = false; HWND edit = nullptr; };
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = [](HWND h, UINT m, WPARAM w, LPARAM l) -> LRESULT {
+            State* st = reinterpret_cast<State*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+            switch (m) {
+            case WM_CREATE: SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams)); return 0;
+            case WM_COMMAND:
+                if (st && LOWORD(w) == IDOK) { wchar_t buf[512] = L""; GetWindowTextW(st->edit, buf, 512); st->text = buf; st->ok = true; st->done = true; DestroyWindow(h); }
+                else if (st && LOWORD(w) == IDCANCEL) { st->done = true; DestroyWindow(h); }
+                return 0;
+            case WM_CLOSE: if (st) st->done = true; DestroyWindow(h); return 0;
+            }
+            return DefWindowProcW(h, m, w, l);
+        };
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"CardBridgePrompt";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    State st;
+    RECT orc{};
+    GetWindowRect(owner, &orc);
+    const int W = 420, H = 130;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"CardBridgePrompt", title, WS_POPUP | WS_CAPTION | WS_SYSMENU, orc.left + (orc.right - orc.left - W) / 2, orc.top + (orc.bottom - orc.top - H) / 2, W, H, owner, nullptr, GetModuleHandleW(nullptr), &st);
+    if (!dlg) return {};
+    HWND lab = CreateWindowExW(0, L"STATIC", label, WS_CHILD | WS_VISIBLE, 12, 10, W - 36, 18, dlg, nullptr, nullptr, nullptr);
+    st.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", Utf8ToWide(initial).c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 32, W - 36, 24, dlg, nullptr, nullptr, nullptr);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, W - 36 - 160, 66, 76, 26, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), nullptr, nullptr);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, W - 36 - 78, 66, 76, 26, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), nullptr, nullptr);
+    for (HWND c : {lab, st.edit, ok, cancel}) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g.fontUi), TRUE);
+    SendMessageW(st.edit, EM_SETSEL, 0, -1);
+    EnableWindow(owner, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(st.edit);
+    MSG m;
+    while (!st.done && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return st.ok ? WideToUtf8(st.text) : std::string();
+}
+
+// (Re)loads the shader layers from the default places and the user's extra folder.
+void ReloadLayers(bool announce) {
+    g.layerDefs = exporter::LoadShaderLayers(LayerFolders(g.settings.library, g.settings.layers));
+    std::string report;
+    g.gpu.SetLayers(g.layerDefs, &report);
+    if (!g.layerDefs.empty()) {
+        std::string names;
+        for (const auto& d : g.layerDefs) names += (names.empty() ? "" : ", ") + d.name;
+        Log(std::to_string(g.layerDefs.size()) + " shader layer(s): " + names + "  (V toggles, Look tab lists them)", LogKind::Good);
+        for (size_t at = 0; at < report.size();) {
+            size_t end = report.find('\n', at);
+            if (end == std::string::npos) end = report.size();
+            if (end > at) Log("layer failed: " + report.substr(at, end - at), LogKind::Warn);
+            at = end + 1;
+        }
+    } else if (announce) {
+        Log("no shader layers found", LogKind::Warn);
+    }
+    g.dirty = true;
+}
+
+// The Setup tab: what a person may need to change. Each saves to viewer.json at once.
+void SettingsAction(int id) {
+    auto reloadCard = [] { g.resolver.reset(); if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true); };
+    switch (id) {
+    case kSetLibChoose: {
+        const std::string d = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (it contains abdata)");
+        if (d.empty()) break;
+        if (!Exists(d + "/abdata")) { Log("that folder has no abdata inside: " + d, LogKind::Error); break; }
+        g.settings.library = d;
+        SaveSettings(g.settings);
+        Log("asset library: " + d, LogKind::Good);
+        reloadCard();
+        break;
+    }
+    case kSetLibBuild: {
+        const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu folder (it contains abdata)");
+        if (!game.empty()) StartLibraryImport(game);
+        break;
+    }
+    case kSetModsChoose: ChooseMods(); break;
+    case kSetModsReindex:
+        fileio::RemoveFile(ModCachePath());
+        Log("the mod index will be built again", LogKind::Info);
+        reloadCard();
+        break;
+    case kSetModsClear:
+        g.settings.mods.clear();
+        g.settings.noMods = true;
+        SaveSettings(g.settings);
+        Log("no mods folder: base-game items only", LogKind::Info);
+        reloadCard();
+        break;
+    case kSetAuthor: {
+        const std::string cur = g.settings.author.empty() ? std::string(CARDBRIDGE_AUTHOR) : g.settings.author;
+        const std::string a = PromptText(g.hwnd, L"CardBridge - author", L"Name written into the model information of every exported PMX:", cur);
+        if (a.empty()) break;
+        g.settings.author = a == CARDBRIDGE_AUTHOR ? std::string() : a;
+        SaveSettings(g.settings);
+        Log("author: " + a, LogKind::Good);
+        break;
+    }
+    case kSetExportDir: {
+        const std::string d = PickFolder(g.hwnd, L"Choose the folder exports go into");
+        if (d.empty()) break;
+        g.settings.exportDir = d;
+        SaveSettings(g.settings);
+        Log("exports go to " + d, LogKind::Good);
+        break;
+    }
+    case kSetExportAsk:
+        g.settings.exportDir.clear();
+        SaveSettings(g.settings);
+        Log("the export folder is asked every time");
+        break;
+    case kSetLayers: {
+        const std::string d = PickFolder(g.hwnd, L"Choose a folder of shader layers (.hlsl files)");
+        if (d.empty()) break;
+        g.settings.layers = d;
+        SaveSettings(g.settings);
+        ReloadLayers(true);
+        break;
+    }
+    case kSetLayersDefault:
+        g.settings.layers.clear();
+        SaveSettings(g.settings);
+        ReloadLayers(true);
+        break;
+    case kSetOpenFolder: {
+        const std::string dir = SettingsPath().substr(0, SettingsPath().find_last_of('/'));
+        fileio::CreateDirectories(dir);
+        ShellExecuteW(g.hwnd, L"open", Utf8ToWide(dir).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        break;
+    }
+    case kSetForget:
+        g.settings = Settings();
+        SaveSettings(g.settings);
+        Log("settings forgotten: the library and the mods folder are looked for again at the next start (the library on disk stays)", LogKind::Warn);
+        break;
+    default: break;
+    }
+    InvalidatePanel();
+}
 
 // ---- one picture -------------------------------------------------------------------------------------------------------
 // A slider's row repaints while it is dragged (and the tab heading, whose "tweaked" label follows it); nothing else.
@@ -2298,6 +2531,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
             g.status = "drop a Koikatsu card on this window";
             if (!g.pendingCard.empty()) { const std::string card = g.pendingCard; g.pendingCard.clear(); StartLoad(card, g.pendingOutfit); }
+            else if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
         } else {
             g.status = "library setup failed: press L to try again";
         }
@@ -2338,7 +2572,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (PtInRect(&l.clearLog, p)) { ClearLog(); return 0; }
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, false); return 0; }
-            if (L && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
+            if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
                 int idx = RowAt(rows, l, x, y);
@@ -2385,7 +2619,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, true); return 0; }
-            if (L && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
+            if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
                 int idx = RowAt(rows, l, x, y);
@@ -2459,7 +2693,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) {
                 if (y >= l.boneListTop && y < l.boneListBottom) g.hoverRow = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
-            } else if (L && !g.showIssues && g.tab != TabParts) {
+            } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
@@ -2590,7 +2824,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         OutfitChipAt(l, p.x, p.y) >= 0;
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();
-                if (L && !g.showIssues && g.tab != TabParts) {
+                if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                     hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
                 } else if (L && !g.showIssues) {
                     std::vector<PartRow> rows = BuildRows(L->scene);
@@ -2821,33 +3055,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     else Log("Direct3D 11 unavailable (" + gpuWhy + "); software renderer", LogKind::Warn);
     CoInitialize(nullptr);
     if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
-    if (g.settings.mods.empty() || !Exists(g.settings.mods)) g.settings.mods = Exists(CachedModsRoot()) ? CachedModsRoot() : std::string();
-    if (g.settings.mods.empty()) {
+    if (!g.settings.mods.empty()) g.settings.noMods = false;
+    if (!g.settings.noMods && (g.settings.mods.empty() || !Exists(g.settings.mods))) g.settings.mods = Exists(CachedModsRoot()) ? CachedModsRoot() : std::string();
+    if (g.settings.mods.empty() && !g.settings.noMods) {
         // Optional: without mods only base-game items resolve.
         std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder (Cancel to use base-game items only)");
         if (!d.empty()) g.settings.mods = d;
+        else g.settings.noMods = true;   // asked once; the Setup tab changes it
     }
     SaveSettings(g.settings);
     Log("library: " + (g.settings.library.empty() ? std::string("(not set)") : g.settings.library));
     Log("mods: " + (g.settings.mods.empty() ? std::string("(not set)") : g.settings.mods));
-    g.layerDefs = exporter::LoadShaderLayers(LayerFolders(g.settings.library));
-    if (!g.layerDefs.empty()) {
-        std::string report;
-        g.gpu.SetLayers(g.layerDefs, &report);
-        std::string names;
-        for (const auto& d : g.layerDefs) names += (names.empty() ? "" : ", ") + d.name;
-        Log(std::to_string(g.layerDefs.size()) + " shader layer(s): " + names + "  (V toggles, Look tab lists them)", LogKind::Good);
-        for (size_t at = 0; at < report.size();) {
-            size_t end = report.find('\n', at);
-            if (end == std::string::npos) end = report.size();
-            if (end > at) Log("layer failed: " + report.substr(at, end - at), LogKind::Warn);
-            at = end + 1;
-        }
-    }
+    ReloadLayers(false);
     if (g.settings.library.empty()) {   // first run: build the library from the user's game, then open the card
         g.pendingCard = card;
         g.pendingOutfit = g.wantOutfit;
-        PostMessageW(g.hwnd, WM_SETUP_LIBRARY, 0, 0);
+        wchar_t selfExe[MAX_PATH];
+        GetModuleFileNameW(nullptr, selfExe, MAX_PATH);
+        if (library::HasEmbeddedLibrary(Slashes(WideToUtf8(selfExe)))) StartEmbeddedUnpack();
+        else PostMessageW(g.hwnd, WM_SETUP_LIBRARY, 0, 0);
     } else if (!card.empty()) {
         StartLoad(card, g.wantOutfit);
     }
