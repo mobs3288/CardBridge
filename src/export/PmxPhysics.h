@@ -14,15 +14,15 @@ namespace cardbridge::exporter {
 // a chain body's mask lists the collider groups it may meet.
 constexpr uint8_t kPmxGroupChain = 1;
 
-// Physics for the PMX: every DynamicBone chain of the scene (hair, skirts, ribbons, the body's jiggle chains) becomes a kinematic anchor
-// body on the bone the chain hangs from plus one capsule body per chain bone (the root included: the component turns it to point at its
-// child too), joined by 6-DOF spring joints at the bones' heads, and every body collider becomes a kinematic capsule or sphere the chains
-// collide with. Positions are scaled by `scale` like the rest of the model.
+// Physics for the PMX: every DynamicBone chain of the scene (hair, skirts, ribbons; not the body's own breast / hip jiggle chains, which stay rigid) becomes one capsule body per
+// chain bone, the root following its bone (kinematic) and the rest free, joined by 6-DOF spring joints at the bones' heads, and every body
+// collider becomes a kinematic capsule or sphere the chains collide with. Positions are scaled by `scale` like the rest of the model.
 //
 // The mapping from the game's parameters follows what the particle update does: damping becomes the bodies' damping rates (the same
-// decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2), stiffness the
-// rotation limits and the least spring that keeps a strand standing out sideways from drooping; gravity and force are not carried (the
-// PMX world has its own gravity, 9.8 m/s^2 is assumed for the spring).
+// decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2, never more than
+// 30 rad/s for the one link it acts on), stiffness the rotation limits (at most 35 degrees a link) and the least spring that keeps a strand
+// standing out sideways from drooping; gravity and force are not carried (the PMX world has its own gravity, 9.8 m/s^2 is assumed for
+// the spring).
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale);
 
 // Face expressions: one vertex morph per scene expression (brow / eye / mouth pattern, closed or open, relative to the resting

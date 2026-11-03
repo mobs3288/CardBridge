@@ -34,6 +34,9 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 
 } // namespace
 
+// The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
+constexpr float kMaxBodySwing = 30.0f;
+
 // The least distance between the segments a-b and c-d (a segment may be a point).
 float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
     auto dot = [](Vec3 u, Vec3 v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
@@ -108,6 +111,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
+        // The body's own jiggle chains (breast, hip) are skin on the body, not cloth: whatever their limits, a light link carrying vertices of
+        // the body shivers in MikuMikuDance (and at the loosest it threw the bust and the thigh about). They stay rigid in the PMX; the game's
+        // jiggle is not carried. (A chain whose part is "body".)
+        if (ch.part == "body") continue;
         std::vector<int> bones;
         for (int b : ch.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
         if (bones.size() < 2) continue;
@@ -153,27 +160,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
         // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
         // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees, and the body's own
-        // jiggle chains (breast, hip: skin that cannot leave the body) at most 9 degrees, twisting hardly at all.
-        const float bend = std::min(ch.part == "body" ? 0.15f : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
+        // jiggle chains (breast, hip: skin that cannot leave the body) at most 3 degrees (a light link that rests on a wider stop shivers in MMD).
+        const float bend = std::min(ch.part == "body" ? 0.05f : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
         // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
         const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f));
 
         std::map<int, int> bodyOf;   // chain bone -> rigid body
-        const int anchorBone = scene.bones[static_cast<size_t>(bones[0])].parent >= 0 ? scene.bones[static_cast<size_t>(bones[0])].parent : bones[0];
-        int anchorBody = -1;
-        {   // the anchor follows the body the chain hangs from and collides with nothing
-            pmx::RigidBody rb;
-            rb.name = ch.name + " anchor";
-            rb.bone = anchorBone;
-            rb.group = kPmxGroupChain;
-            rb.mask = 0;
-            rb.mode = 0;
-            rb.shape = 0;
-            rb.size = {0.01f * scale, 0, 0};
-            rb.position = links[bones[0]].head;
-            anchorBody = static_cast<int>(model.rigidBodies.size());
-            model.rigidBodies.push_back(std::move(rb));
-        }
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
             pmx::RigidBody rb;
@@ -189,10 +181,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.moveDamping = damp;
             rb.rotDamping = damp;
             rb.friction = 0.5f;
-            rb.mode = k == 0 ? 2 : 1;   // the root keeps its place and only turns
+            // The root follows its bone and collides with nothing: it is what the chain hangs from. (A moving root, MMD's "physics with the bone
+            // aligned" mode, fed back into the bone below it and shook the whole model, breasts and thighs included.)
+            rb.mode = k == 0 ? 0 : 1;
+            if (k == 0) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
-            chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
-            chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
+            if (k > 0) {
+                chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
+                chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
+            }
             model.rigidBodies.push_back(std::move(rb));
         }
 
@@ -202,15 +199,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             auto nx = next.find(b);
             if (nx != next.end()) for (int c : nx->second) below(c, out);
         };
-        for (size_t k = 0; k < bones.size(); ++k) {
+        for (size_t k = 1; k < bones.size(); ++k) {
             const int b = bones[k];
             const Link& self = links[b];
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
-            int bodyA = anchorBody;
-            if (k > 0) {
-                auto pb = bodyOf.find(parentBone);
-                bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
-            }
+            auto pb = bodyOf.find(parentBone);
+            const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
             // The spring at this joint carries everything below it: its inertia gives the swing rate, its weight when it stands out
             // sideways gives the least stiffness that keeps the droop small.
             std::vector<int> hanging;
@@ -222,7 +216,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
                 inertia += l.mass * r * r + capsuleInertiaAcross(l.mass, l.radius, l.cylinder);
                 lever += l.mass * r;
             }
-            const float stiffnessK = std::max(inertia * omega * omega, lever * gravity / droop);
+            // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
+            // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
+            const float own = self.mass * length(sub(self.centre, self.head)) * length(sub(self.centre, self.head)) + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
+            const float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), own * kMaxBodySwing * kMaxBodySwing);
             pmx::Joint j;
             j.name = ch.name + " " + std::to_string(k);
             j.bodyA = bodyA;
