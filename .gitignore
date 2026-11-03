@@ -1,7 +1,7 @@
 # Game and mod data never belongs in the repository.
-library/
+/library/
 *.unity3d
 *.zipmod
 *.pmx
 out/
-library*/
+/library*/
