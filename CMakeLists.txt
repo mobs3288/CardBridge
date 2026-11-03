@@ -19,6 +19,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CARDBRIDGE_STANDALONE ON)
 endif()
 
+# The version lives in one file (VERSION); every binary, the manifest and the release zip take it from there.
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION CARDBRIDGE_VERSION LIMIT_COUNT 1)
+add_compile_definitions(CARDBRIDGE_VERSION="${CARDBRIDGE_VERSION}")
+
 include(FetchContent)
 
 if(CARDBRIDGE_STANDALONE)
@@ -111,11 +115,26 @@ endif()
 
 # The viewer: a Win32 window over the same core (GDI blit of a frame drawn by the software renderer or by Direct3D 11).
 if(WIN32)
-    add_executable(cardbridge_viewer WIN32 viewer/main.cpp)
+    enable_language(RC)   # the icon and the logo are resources of the exe
+    set(VIEWER_RC_DEPS viewer/viewer.rc viewer/res/cardbridge.ico viewer/res/logo.png)
+    if(MSVC)
+        set(VIEWER_RES viewer/viewer.rc)
+    else()
+        # windres is run by hand from the viewer folder (the .rc names its files relative to it): the generated rule passes
+        # absolute include paths, which windres cannot hand to its preprocessor when the checkout path has a space in it.
+        set(VIEWER_RES ${CMAKE_CURRENT_BINARY_DIR}/viewer_res.o)
+        add_custom_command(
+            OUTPUT ${VIEWER_RES}
+            COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc ${VIEWER_RES}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/viewer
+            DEPENDS ${VIEWER_RC_DEPS}
+            VERBATIM)
+    endif()
+    add_executable(cardbridge_viewer WIN32 viewer/main.cpp viewer/Ui.cpp ${VIEWER_RES})
     target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)
     if(NOT MSVC)
         target_link_options(cardbridge_viewer PRIVATE -municode -static)
-        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32)
+        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32 gdiplus)
     endif()
 endif()
 

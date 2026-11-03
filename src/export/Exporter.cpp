@@ -1,6 +1,7 @@
 #include "export/Exporter.h"
 
 #include "core/FileIo.h"
+#include "core/Version.h"
 #include "export/BoneLabels.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
@@ -104,7 +105,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     using nlohmann::json;
     json j;
     j["schema_version"] = 1;
-    j["tool"] = {{"name", "cardbridge"}, {"version", "0.1.0-m1"}};
+    j["tool"] = {{"name", "cardbridge"}, {"version", CARDBRIDGE_VERSION}};
     j["input"] = {{"filename", fileio::FileName(card.path)}, {"kind", "koikatsu_character_card"}, {"sha256", card.sha256},
                   {"family", card::FamilyName(card.family)}, {"marker", card.marker}, {"format_version", card.formatVersion}};
     j["character"] = {{"name", scene.name}, {"outfit", opt.outfit}};

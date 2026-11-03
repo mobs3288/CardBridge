@@ -300,7 +300,7 @@ try {
             $lay = WaitFor { param($l) -not $l.state.busy } 60
             $b = Shot 'slider'
             Check 'slider: the window answers during and after the drag (no deadlock)' ($answered -and $null -ne $lay) "$ms ms"
-            $d = [V]::DiffView($a.Path, $b.Path, 330)
+            $d = [V]::DiffView($a.Path, $b.Path, $lay.panel)
             Check 'slider: the character changed' ($d -gt 0.0005) ("{0:P2} of the view, slider '{1}'" -f $d, $row.label)
             # put it back by right-clicking the row (resets it)
             $lay = Layout

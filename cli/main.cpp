@@ -8,6 +8,7 @@
 // Only `library import` ever reads a game install. Every other command works
 // from the card, the CardBridge library folder and the user's mods folder.
 
+#include "core/Version.h"
 #include "shader/Dxbc.h"
 #include "shader/UnityShader.h"
 #include "shader/Sm4.h"
@@ -48,7 +49,7 @@ using namespace cardbridge;
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0-m1";
+constexpr const char* kVersion = CARDBRIDGE_VERSION;
 
 struct Args {
     std::vector<std::string> positional;
@@ -97,7 +98,7 @@ std::vector<std::string> utf8Args() {
 
 void usage() {
     std::puts(
-        "cardbridge " "0.1.0-m1" " - Koikatsu character card to PMX, offline\n"
+        "cardbridge " CARDBRIDGE_VERSION " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
         "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
