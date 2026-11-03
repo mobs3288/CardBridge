@@ -1,5 +1,7 @@
 #include "export/GpuView.h"
 
+#include "export/ColourGrade.h"
+
 #include "shader/UnityShader.h"
 
 #include <d3d11.h>
@@ -410,7 +412,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const float toCam[3] = {-sn * cp, sp, cs * cp};
-    float L[3] = {toCam[0], toCam[1] + 0.45f, toCam[2]};
+    float L[3] = {toCam[0], toCam[1], toCam[2]};   // the character maker's light shines straight along the view (its Directional Light faces -Z)
     if (const char* ld = std::getenv("CARDBRIDGE_LIGHTDIR")) std::sscanf(ld, "%f,%f,%f", &L[0], &L[1], &L[2]);   // test aid: world-space direction towards the light
     { float n = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]); for (float& c : L) c /= n; }
     const float camPos[3] = {cx + toCam[0] * 5.0f, cy + toCam[1] * 5.0f, cz + toCam[2] * 5.0f};
@@ -582,6 +584,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     for (int y = 0; y < H; ++y) std::memcpy(&bgra[static_cast<size_t>(y) * W], static_cast<const uint8_t*>(mp.pData) + static_cast<size_t>(y) * mp.RowPitch, static_cast<size_t>(W) * 4);
     ctx->Unmap(I.staging, 0);
     for (auto& px : bgra) px |= 0xFF000000u;
+    ApplyColourGrade(bgra, 0xFFE2E4E8u);
     return true;
 }
 

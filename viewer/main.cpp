@@ -12,6 +12,7 @@
 //          M mods folder, L asset library folder
 
 #include "assemble/Assembler.h"
+#include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "card/CardFile.h"
@@ -369,6 +370,7 @@ bool EnsureResolver(std::string& err) {
     g.lists = resolve::ListTable();
     g.lists.loadBaseGame(library::AbdataRoot(g.settings.library), &issues);
     g.resolver = std::make_unique<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
+    if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
     g.resolverKey = key;
     return true;
 }
@@ -1152,6 +1154,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::shared_ptr<Loaded> L = Current();
         if (wp == 'T') { g.textured = !g.textured; g.dirty = true; }
         else if (wp == 'H') { g.shaded = !g.shaded; g.dirty = true; }
+        else if (wp == 'G') { exporter::SetColourGradeEnabled(!exporter::ColourGradeEnabled()); g.dirty = true; }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
         else if (wp == 'S') ResetView(90);
