@@ -1,5 +1,7 @@
 #include "export/Preview.h"
 
+#include "assemble/Pose.h"
+
 #include <stb_image_write.h>
 
 #include <algorithm>
@@ -494,7 +496,19 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
         if (!visible(pi)) continue;
         const bool highlight = static_cast<int>(pi) == opt.highlightPart;
         for (int mi : scene.parts[pi].meshes) {
-            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            const auto& restMesh = scene.meshes[static_cast<size_t>(mi)];
+            assemble::SceneMesh posedMesh;   // the vertices moved by the pose, when there is one (submeshes and shapes are not needed to draw)
+            const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
+            if (posed) {
+                posedMesh.name = restMesh.name;
+                posedMesh.vertices = restMesh.vertices;
+                posedMesh.submeshes = restMesh.submeshes;
+                for (auto& v : posedMesh.vertices) {
+                    v.pos = assemble::SkinPoint(v, *opt.skin);
+                    v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
+                }
+            }
+            const assemble::SceneMesh& mesh = posed ? posedMesh : restMesh;
             std::vector<Pt> P(mesh.vertices.size());
             std::vector<float> NZ(mesh.vertices.size());
             for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], P[i], NZ[i]);

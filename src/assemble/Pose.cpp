@@ -2,6 +2,8 @@
 
 #include "shape/Shape.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cmath>
 
@@ -215,6 +217,60 @@ void BakePose(Scene& scene, const Pose& pose) {
         if (!IsIdentity(pose.bones[i])) scene.pose.push_back({scene.bones[i].name, pose.bones[i].pos, pose.bones[i].rot, pose.bones[i].scl});
     scene.aposeApplied = false;
     for (const auto& q : pose.base) if (q.x != 0 || q.y != 0 || q.z != 0) scene.aposeApplied = true;
+}
+
+std::string PoseFileToJson(const PoseFile& file) {
+    using json = nlohmann::json;
+    json j;
+    j["format"] = "cardbridge-pose";
+    j["version"] = 1;
+    j["a_pose"] = file.aPose;
+    j["a_pose_degrees"] = file.aPoseDegrees;
+    j["bones"] = json::object();
+    for (const auto& [name, e] : file.bones)
+        j["bones"][name] = {{"position", {e.pos.x, e.pos.y, e.pos.z}}, {"rotation_euler_degrees", {e.rot.x, e.rot.y, e.rot.z}}, {"scale", {e.scl.x, e.scl.y, e.scl.z}}};
+    return j.dump(2) + "\n";
+}
+
+bool PoseFileFromJson(const std::string& text, PoseFile& out, std::string* error) {
+    using json = nlohmann::json;
+    auto fail = [&](const std::string& m) { if (error) *error = m; return false; };
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return fail("not a JSON object");
+    if (j.value("format", std::string()) != "cardbridge-pose") return fail("not a cardbridge pose file (\"format\" is missing or different)");
+    if (!j.contains("version") || !j["version"].is_number_integer() || j["version"].get<int>() > 1) return fail("a newer pose file version than this program reads");
+    PoseFile f;
+    if (j.contains("a_pose")) { if (!j["a_pose"].is_boolean()) return fail("\"a_pose\" is not true or false"); f.aPose = j["a_pose"].get<bool>(); }
+    if (j.contains("a_pose_degrees")) { if (!j["a_pose_degrees"].is_number()) return fail("\"a_pose_degrees\" is not a number"); f.aPoseDegrees = j["a_pose_degrees"].get<float>(); }
+    if (j.contains("bones")) {
+        if (!j["bones"].is_object()) return fail("\"bones\" is not an object");
+        auto vec = [&](const json& b, const char* key, Vec3& v) {
+            if (!b.contains(key)) return true;
+            const json& a = b[key];
+            if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) return false;
+            v = {a[0].get<float>(), a[1].get<float>(), a[2].get<float>()};
+            return true;
+        };
+        for (const auto& [name, b] : j["bones"].items()) {
+            BonePose e;
+            if (!b.is_object() || !vec(b, "position", e.pos) || !vec(b, "rotation_euler_degrees", e.rot) || !vec(b, "scale", e.scl))
+                return fail("bone \"" + name + "\" needs position, rotation_euler_degrees and scale as three numbers each");
+            f.bones.emplace_back(name, e);
+        }
+    }
+    out = std::move(f);
+    return true;
+}
+
+Pose MakePose(const Scene& scene, const PoseFile& file, std::vector<std::string>* unknown) {
+    Pose p;
+    for (const auto& [name, e] : file.bones) {
+        const int b = scene.boneIndex(name);
+        if (b < 0) { if (unknown) unknown->push_back(name); continue; }
+        p.edit(static_cast<size_t>(b)) = e;
+    }
+    if (file.aPose) MakeAPose(scene, file.aPoseDegrees, p.base);
+    return p;
 }
 
 } // namespace cardbridge::assemble

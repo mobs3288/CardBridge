@@ -24,7 +24,7 @@ struct AssembleOptions {
     float nippleOffset = 0.0f;
     bool nippleInside = false;
     float nippleInsideOffset = -0.008f;
-    float areolaSize = -1.0f;              // the areola texture size (shader _nipsize); negative = the card's
+    float areolaSize = -1.0f;              // the areola size (a property of the body's material: shader _nipsize); negative = the card's
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
 };
@@ -39,8 +39,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 // Re-shapes an assembled scene in place when only the shape changed: `opt` carries the new body and face sliders, the nipple settings and
 // the outfit the scene was assembled with. The skeleton is rebuilt (the game's formulas, KKABMX, the head on the new neck) and every vertex,
 // normal, bone position and collider follows through the per-bone frames the assembly stored. A few milliseconds, no bundle is read again
-// but the small shape tables. Not redone: hair and accessory chains that were settled by a DynamicBone (off by default), blend shape offsets,
-// and the areola texture size, which is a texture, not a bone. Returns false when the scene cannot be re-shaped (no skeleton in the library).
+// but the small shape tables. Also follow the new slider values: blend shape offsets and the areola size (a property of the body material).
+// Returns false when the scene cannot be re-shaped: no skeleton in the library, or an item's DynamicBone chains were settled for the old shape
+// (Scene::chainsSettled, CARDBRIDGE_DYNBONE: off by default) - assemble again then.
 bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt);
 
 } // namespace cardbridge::assemble

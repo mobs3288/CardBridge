@@ -220,7 +220,7 @@ struct Tweaks {
     std::vector<float> body, face, bodyCard, faceCard;   // current slider values and the card's own (the defaults)
     bool nippleInside = false;
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
-    float areola = 0.0f, areolaCard = 0.0f;              // areola texture size
+    float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
 };
 enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabCount };
 const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones"};
@@ -559,8 +559,6 @@ void ApplyPoseLive(int simSteps = 0) {
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
-    static bool warned = false;
-    if (sk && !g.gpuOk && !warned) { warned = true; Log("posing needs the Direct3D 11 view; the software renderer shows the rest pose", LogKind::Warn); }
     g.dirty = true;
     if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
 }
@@ -675,6 +673,7 @@ bool ReshapeNow(bool final) {
         ao.faceShape = g.tw.face;
         ao.nippleInside = g.tw.nippleInside;
         ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+        if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
     }
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
     if (g.gpuOk) g.gpu.Refresh(final);
@@ -687,12 +686,18 @@ bool ReshapeNow(bool final) {
     return true;
 }
 
-bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kNippleIn; }
+bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola || id == kNippleIn; }
 
-// Something a slider or switch controls changed. Pose controls and the shape sliders show at once; the areola size is a texture and still
-// waits for the pointer to be still and assembles the character again.
+// Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
+// assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
+    if (id == kAreola && g.expOk) {   // the baked "as exported" copy has the old areola in its textures
+        g.expOk = false;
+        g.showExp = false;
+        g.expFor.reset();
+        Log("the areola size changed: press X to bake the as-exported view again");
+    }
     if (IsShapeId(id)) { if (!ReshapeNow(released)) ScheduleApplyTweaks(); return; }
     if (released) ScheduleApplyTweaks();
 }
@@ -1073,6 +1078,7 @@ void Render(int w, int h) {
     if (g.shaded && !still) SetTimer(g.hwnd, 1, 320, nullptr);   // come back and draw the shaded picture
     g.vopt.hiddenParts = &g.effHidden;
     g.vopt.step = g.interacting ? 3 : 1;
+    g.vopt.skin = g.skin.empty() ? nullptr : &g.skin;   // the software view shows the pose (and the physics) too
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
 }
 
@@ -1578,16 +1584,14 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         return;
     }
     if (row.kind == 0) {
-        bool any = false, texture = false;
+        bool any = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
             any = any || TweakChanged(rows[k].id);
-            texture = texture || (rows[k].id == kAreola && TweakChanged(kAreola));
             ResetTweak(rows[k].id);
         }
         if (any) {
             Log("reset " + row.label);
             if (!ReshapeNow(true)) ScheduleApplyTweaks();
-            else if (texture) ScheduleApplyTweaks();
         }
         return;
     }

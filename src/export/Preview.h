@@ -44,6 +44,10 @@ struct ViewOptions {
     int step = 1;                                      // 2 = every other pixel in each direction (fast, while dragging)
     bool shaded = false;                               // run the game's own compiled shaders per pixel (materials without one keep the plain look)
     int highlightPart = -1;                            // scene part drawn with a warm tint (the viewer's hovered part), -1 = none
+    // The pose: per bone the matrix from the rest pose to the posed one (assemble::SkinMatrices, with the physics sim's chain bones on top).
+    // Every vertex is skinned by it before it is drawn; the framing stays that of the rest pose so the picture does not jump while a bone
+    // moves. nullptr or empty = the rest pose.
+    const std::vector<Mat4>* skin = nullptr;
 };
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's
