@@ -195,6 +195,27 @@ struct LogLine {
     LogKind kind = LogKind::Info;
 };
 
+// ---- the pose the user has made: bone edits and the A-pose, what undo and redo move between ----
+struct PoseState {
+    std::map<std::string, assemble::BonePose> edits;
+    bool aPose = false;
+    float aPoseDeg = 40.0f;
+};
+
+bool SamePoseState(const PoseState& a, const PoseState& b) {
+    if (a.aPose != b.aPose || (a.aPose && a.aPoseDeg != b.aPoseDeg)) return false;
+    auto rest = [](const assemble::BonePose& e) { return assemble::IsIdentity(e); };
+    for (const auto& [name, e] : a.edits) {   // an edit that is the rest pose is the same as no edit
+        auto it = b.edits.find(name);
+        const assemble::BonePose other = it == b.edits.end() ? assemble::BonePose{} : it->second;
+        if (e.pos.x != other.pos.x || e.pos.y != other.pos.y || e.pos.z != other.pos.z || e.rot.x != other.rot.x || e.rot.y != other.rot.y ||
+            e.rot.z != other.rot.z || e.scl.x != other.scl.x || e.scl.y != other.scl.y || e.scl.z != other.scl.z) return false;
+    }
+    for (const auto& [name, e] : b.edits)
+        if (!a.edits.count(name) && !rest(e)) return false;
+    return true;
+}
+
 // ---- the loaded character ------------------------------------------------------------------------------------------
 struct Loaded {
     assemble::Scene scene;
@@ -242,7 +263,7 @@ struct PanelLayout {
     RECT clearLog{};
 };
 
-constexpr int kBoneEditRows = 11;   // heading, nine fields, the reset row
+constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
 
 PanelLayout LayoutFor(int H, bool boneTab = false) {
     PanelLayout l;
@@ -275,6 +296,7 @@ struct App {
     Settings settings;
     std::string cardPath;
     int wantOutfit = -1;
+    std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     // library state, built once
     resolve::ModIndex mods;
     resolve::ListTable lists;
@@ -323,6 +345,10 @@ struct App {
     bool tweakPending = false;                // a change is waiting for the pointer to be still
     // Posing: bone edits by bone name (they survive a re-shape or an outfit change), the automatic A-pose, the skeleton overlay.
     std::map<std::string, assemble::BonePose> boneEdits;
+    std::vector<PoseState> undoStack, redoStack;   // earlier poses (Ctrl+Z) and the ones undone (Ctrl+Y)
+    PoseState undoBase;                           // the pose when the pointer went down: a gesture is one undo step
+    bool undoBaseValid = false;
+    ULONGLONG wheelUndoTick = 0;                  // wheel steps within a moment are one undo step
     bool aPose = false;
     float aPoseDeg = 40.0f;
     bool showBones = false, showHelpers = false;
@@ -357,6 +383,9 @@ constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
 constexpr UINT WM_EXP_READY = WM_APP + 4;
+// Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
+// wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT.
+constexpr UINT WM_TEST = WM_APP + 40;
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 constexpr UINT_PTR kTimerPhysics = 3;
 
@@ -561,6 +590,122 @@ void ApplyPoseLive(int simSteps = 0) {
     if (g.expOk) g.gpuExp.SetSkin(sk);
     g.dirty = true;
     if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
+}
+
+// The file a pose is saved to / loaded from: CARDBRIDGE_POSE_PATH when set (scripted runs, no dialog), else the usual file dialog.
+std::string PosePathFromUser(bool save) {
+    if (const char* env = std::getenv("CARDBRIDGE_POSE_PATH")) return Slashes(env);
+    wchar_t file[1024] = L"pose.json";
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof of;
+    of.hwndOwner = g.hwnd;
+    of.lpstrFilter = L"CardBridge pose (*.json)\0*.json\0All files\0*.*\0";
+    of.lpstrFile = file;
+    of.nMaxFile = 1024;
+    of.lpstrDefExt = L"json";
+    of.lpstrTitle = save ? L"Save the pose" : L"Load a pose";
+    of.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    const BOOL ok = save ? GetSaveFileNameW(&of) : GetOpenFileNameW(&of);
+    return ok ? Slashes(WideToUtf8(file)) : std::string();
+}
+
+PoseState CapturePose() {
+    PoseState st;
+    st.edits = g.boneEdits;
+    st.aPose = g.aPose;
+    st.aPoseDeg = g.aPoseDeg;
+    return st;
+}
+
+void RestorePose(const PoseState& st) {
+    g.boneEdits = st.edits;
+    g.aPose = st.aPose;
+    g.aPoseDeg = st.aPoseDeg;
+    ApplyPoseLive();
+    InvalidatePanel();
+}
+
+// Records `before` as an undo step when the pose is no longer it. `merge`: a step that follows another within a moment (wheel notches) joins it.
+void PoseChanged(const PoseState& before, bool merge = false) {
+    if (SamePoseState(before, CapturePose())) return;
+    const ULONGLONG now = GetTickCount64();
+    const bool join = merge && !g.undoStack.empty() && now - g.wheelUndoTick < 700;
+    if (merge) g.wheelUndoTick = now;
+    if (join) return;
+    g.undoStack.push_back(before);
+    if (g.undoStack.size() > 200) g.undoStack.erase(g.undoStack.begin());
+    g.redoStack.clear();
+}
+
+// The pointer went up: whatever the gesture since it went down changed (a slider drag, a bone drag, a click on a switch or a reset) is one step.
+void CommitPoseEdit() {
+    if (!g.undoBaseValid) return;
+    g.undoBaseValid = false;
+    PoseChanged(g.undoBase);
+}
+
+void UndoPose(bool redo) {
+    g.undoBaseValid = false;
+    std::vector<PoseState>& from = redo ? g.redoStack : g.undoStack;
+    std::vector<PoseState>& to = redo ? g.undoStack : g.redoStack;
+    if (from.empty()) { Log(redo ? "nothing to redo" : "nothing to undo", LogKind::Warn); return; }
+    to.push_back(CapturePose());
+    const PoseState st = from.back();
+    from.pop_back();
+    RestorePose(st);
+    Log(std::string(redo ? "redo" : "undo") + " (" + std::to_string(g.undoStack.size()) + " step(s) to undo, " + std::to_string(g.redoStack.size()) + " to redo)");
+}
+
+// The pose as a file (bone edits by name and the A-pose switch). CARDBRIDGE_POSE_PATH names the file without asking (scripted runs).
+assemble::PoseFile CurrentPoseFile() {
+    assemble::PoseFile pf;
+    pf.aPose = g.aPose;
+    pf.aPoseDegrees = g.aPoseDeg;
+    for (const auto& [name, e] : g.boneEdits)
+        if (!assemble::IsIdentity(e)) pf.bones.emplace_back(name, e);
+    return pf;
+}
+
+void SavePoseFile() {
+    std::string path = PosePathFromUser(true);
+    if (path.empty()) return;
+    try {
+        const std::string text = assemble::PoseFileToJson(CurrentPoseFile());
+        fileio::WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size());
+        Log("saved the pose to " + path, LogKind::Good);
+    } catch (const std::exception& e) {
+        Log(std::string("could not save the pose: ") + e.what(), LogKind::Error);
+    }
+}
+
+void LoadPoseFile(const std::string& given = std::string()) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) { Log("open a card first", LogKind::Warn); return; }
+    const std::string path = given.empty() ? PosePathFromUser(false) : given;
+    if (path.empty()) return;
+    assemble::PoseFile pf;
+    std::string err;
+    try {
+        const Bytes raw = fileio::ReadFile(path);
+        if (!assemble::PoseFileFromJson(std::string(raw.begin(), raw.end()), pf, &err)) { Log("not a pose file: " + err, LogKind::Error); return; }
+    } catch (const std::exception& e) {
+        Log(std::string("could not read the pose: ") + e.what(), LogKind::Error);
+        return;
+    }
+    const PoseState before = CapturePose();
+    g.undoBaseValid = false;
+    g.boneEdits.clear();
+    size_t unknown = 0;
+    for (const auto& [name, e] : pf.bones) {
+        if (L->scene.boneIndex(name) < 0) { ++unknown; continue; }
+        g.boneEdits[name] = e;
+    }
+    g.aPose = pf.aPose;
+    g.aPoseDeg = pf.aPoseDegrees;
+    ApplyPoseLive();
+    InvalidatePanel();
+    PoseChanged(before);
+    Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s)" + (unknown ? ", " + std::to_string(unknown) + " bone(s) this rig does not have skipped" : std::string()), unknown ? LogKind::Warn : LogKind::Good);
 }
 
 // The physics switch: on starts every chain at rest under the current pose and a 60 Hz timer; the chains then swing and settle as bones,
@@ -833,6 +978,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
 
 // ---- export ------------------------------------------------------------------------------------------------------------
 std::string PickExportParent(HWND owner) {
+    if (std::getenv("CARDBRIDGE_TEST_HOOKS") && std::getenv("CARDBRIDGE_EXPORT_PARENT")) return Slashes(std::getenv("CARDBRIDGE_EXPORT_PARENT"));   // scripted runs: no dialog
     return PickFolder(owner, L"Choose where the exported PMX folder should be created");
 }
 
@@ -1010,11 +1156,30 @@ void DragBone(int bone, float dx, float dy, bool move) {
     const float yaw = g.cam.yawDeg * 3.14159265f / 180.0f, pit = g.cam.pitchDeg * 3.14159265f / 180.0f;
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const Vec3 right{-cs, 0.0f, -sn}, up{sp * sn, cp, -sp * cs};
-    // the tip: the first child that is shown, else the first child, else the parent's direction extended
-    int tipBone = -1;
-    for (size_t i = 0; i < n; ++i)
-        if (scene.bones[i].parent == bone && static_cast<int>(i) != bone) { if (tipBone < 0 || (exporter::IsHelperBone(scene.bones[static_cast<size_t>(tipBone)].name) && !exporter::IsHelperBone(scene.bones[i].name))) tipBone = static_cast<int>(i); }
+    // the tip: the nearest descendant that is not on the bone itself (a shown bone before a helper at the same depth; helpers such as
+    // cf_s_hand_L stand on their parent, so the search goes on below them), else the parent's direction extended
     const Vec3 pivot = g.boneWorld[static_cast<size_t>(bone)];
+    int tipBone = -1;
+    {
+        auto apart = [&](size_t i) {
+            const Vec3 d{g.boneWorld[i].x - pivot.x, g.boneWorld[i].y - pivot.y, g.boneWorld[i].z - pivot.z};
+            return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > 1e-3f;
+        };
+        std::vector<int> level{bone};
+        for (int depth = 0; depth < 4 && tipBone < 0 && !level.empty(); ++depth) {
+            std::vector<int> below;
+            int shown = -1, any = -1;
+            for (size_t i = 0; i < n; ++i) {
+                if (static_cast<int>(i) == bone || std::find(level.begin(), level.end(), scene.bones[i].parent) == level.end()) continue;
+                below.push_back(static_cast<int>(i));
+                if (!apart(i)) continue;
+                if (any < 0) any = static_cast<int>(i);
+                if (shown < 0 && !exporter::IsHelperBone(scene.bones[i].name)) shown = static_cast<int>(i);
+            }
+            tipBone = shown >= 0 ? shown : any;
+            level = std::move(below);
+        }
+    }
     Vec3 tip;
     if (tipBone >= 0) tip = g.boneWorld[static_cast<size_t>(tipBone)];
     else {
@@ -1208,6 +1373,14 @@ void DrawBonesTab(HDC dc, const PanelLayout& l, const Loaded& L) {
     DeleteObject(edge);
     const RECT headClip{10, l.boneEditTop, kPanel - 10, l.boneEditTop + kRowH};
     const int sel = g.selBoneName.empty() ? -1 : scene.boneIndex(g.selBoneName);
+    {   // undo, redo, save and load the pose: always there
+        const int ay = l.boneEditTop + 11 * kRowH;
+        DrawTextAt(dc, g.fontUi, g.undoStack.empty() ? RGB(90, 98, 112) : RGB(150, 160, 178), 12, ay + 2, "undo");
+        DrawTextAt(dc, g.fontUi, g.redoStack.empty() ? RGB(90, 98, 112) : RGB(150, 160, 178), 62, ay + 2, "redo");
+        DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 120, ay + 2, "save pose");
+        DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 195, ay + 2, "load pose");
+        DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 12, ay + 4, "Ctrl+Z / Y / S / O", nullptr);
+    }
     if (sel < 0) {
         DrawTextAt(dc, g.fontUi, RGB(140, 150, 168), 12, l.boneEditTop + 2, "click a bone in the list or in the view (turn on the skeleton)", &headClip);
         return;
@@ -1310,12 +1483,12 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
         Button(dc, l.tabs[i], kTabNames[i], g.hoverButton == 10 + i, !g.showIssues && g.tab == i, L != nullptr);
     if (L) {
         std::string right;
-        if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " finding(s)";
-        else if (g.busy && g.tab != TabParts) right = "re-shaping ...";
-        else if (g.tweakPending) right = "applying ...";
+        if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " issues";
+        else if (g.busy && g.tab != TabParts) right = "shaping";
+        else if (g.tweakPending) right = "applying";
         else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
         else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
-        else right = AnyTweak() ? "tweaked" : "as the card says";
+        else right = AnyTweak() ? "tweaked" : "as card";
         DrawTextRight(dc, g.fontSmall, g.busy || g.tweakPending ? RGB(120, 200, 255) : RGB(110, 120, 138), kPanel - 10, l.partsHeadingTop + 2, right, nullptr);
     }
     if (!L) {
@@ -1652,8 +1825,17 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
         return;
     }
-    if (y < l.boneEditTop || g.selBoneName.empty()) return;
+    if (y < l.boneEditTop) return;
     const int row = (y - l.boneEditTop) / kRowH;
+    if (row == kBoneEditRows - 1 && !right) {   // undo / redo / save / load
+        if (x < 58) UndoPose(false);
+        else if (x < 112) UndoPose(true);
+        else if (x < 188) SavePoseFile();
+        else if (x < 270) LoadPoseFile();
+        InvalidatePanel();
+        return;
+    }
+    if (g.selBoneName.empty()) return;
     if (row >= 1 && row <= kBoneEditCount) {
         const int id = kBoneEdit + row - 1;
         SliderRef r;
@@ -1665,7 +1847,7 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         SetCapture(g.hwnd);
         ApplyPoseLive();
         InvalidatePanel();
-    } else if (row == kBoneEditRows - 1 && !right) {
+    } else if (row == kBoneEditRows - 2 && !right) {
         if (x < 145) { g.boneEdits.erase(g.selBoneName); Log("reset " + g.selBoneName); }
         else { g.boneEdits.clear(); Log("reset every bone"); }
         ApplyPoseLive();
@@ -1693,6 +1875,61 @@ void ChooseLibrary() {
     else InvalidatePanel();
 }
 
+// What a scripted run needs to aim its mouse: the panel's tabs, the rows of the current tab with their centres, the bone list and editor,
+// where the overlay drew some bones in the view, and a few state flags. Written as JSON to CARDBRIDGE_TEST_LAYOUT.
+void DumpTestLayout() {
+    const char* path = std::getenv("CARDBRIDGE_TEST_LAYOUT");
+    if (!path) return;
+    RECT rc;
+    GetClientRect(g.hwnd, &rc);
+    const PanelLayout l = Lay(rc.bottom);
+    nlohmann::json j;
+    j["client"] = {rc.right, rc.bottom};
+    j["panel"] = kPanel;
+    j["track"] = {kTrackL, kTrackR};
+    j["rowH"] = kRowH;
+    j["tab"] = g.tab;
+    j["tabs"] = nlohmann::json::array();
+    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2});
+    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}};
+    std::shared_ptr<Loaded> L = Current();
+    j["rows"] = nlohmann::json::array();
+    if (L && g.tab != TabParts && g.tab != TabBones) {
+        const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const int y = l.partsTop + (static_cast<int>(i) - g.partScroll) * kRowH + kRowH / 2;
+            j["rows"].push_back({{"id", rows[i].id}, {"kind", rows[i].kind}, {"label", rows[i].label}, {"y", y >= l.partsTop && y < l.partsBottom ? y : -1}});
+        }
+    }
+    j["bones"] = nlohmann::json::object();
+    if (L && g.tab == TabBones) {
+        const std::vector<BoneRow> rows = BuildBoneRows(L->scene);
+        j["bones"]["list"] = nlohmann::json::array();
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const int y = l.boneListTop + (static_cast<int>(i) - g.boneScroll) * kRowH + kRowH / 2;
+            if (y >= l.boneListTop && y < l.boneListBottom) j["bones"]["list"].push_back({{"name", L->scene.bones[static_cast<size_t>(rows[i].bone)].name}, {"y", y}, {"arrowX", 12 + std::min(rows[i].depth, 12) * 10 + 4}});
+        }
+        j["bones"]["editTop"] = l.boneEditTop;
+        j["bones"]["fieldY"] = nlohmann::json::array();
+        for (int k = 0; k < kBoneEditCount; ++k) j["bones"]["fieldY"].push_back(l.boneEditTop + (1 + k) * kRowH + kRowH / 2);
+        j["bones"]["resetY"] = l.boneEditTop + 10 * kRowH + kRowH / 2;
+        j["bones"]["actionY"] = l.boneEditTop + 11 * kRowH + kRowH / 2;
+        j["bones"]["switchY"] = l.partsTop + kRowH / 2;
+    }
+    j["view"] = nlohmann::json::object();
+    if (L)
+        for (const char* name : {"cf_j_hand_L", "cf_j_hand_R", "cf_j_forearm01_L", "cf_j_arm00_L", "cf_j_head", "cf_j_hips", "cf_j_leg01_L"}) {
+            const int b = L->scene.boneIndex(name);
+            if (b >= 0 && static_cast<size_t>(b) < g.boneScreen.size() && g.boneScreen[static_cast<size_t>(b)].first >= 0)
+                j["view"][name] = {static_cast<int>(g.boneScreen[static_cast<size_t>(b)].first) + kPanel, static_cast<int>(g.boneScreen[static_cast<size_t>(b)].second)};
+        }
+    j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
+                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}};
+    if (L) j["state"]["bones"] = L->scene.bones.size();
+    const std::string text = j.dump(2);
+    fileio::WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size());
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_TIMER:
@@ -1707,6 +1944,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         KillTimer(hwnd, 1); g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_LOG: InvalidatePanel(); return 0;
+    case WM_TEST: {
+        static const bool hooks = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
+        if (!hooks) return 0;
+        if (wp == 1) UndoPose(false);
+        else if (wp == 2) UndoPose(true);
+        else if (wp == 3) SavePoseFile();
+        else if (wp == 4) LoadPoseFile();
+        else if (wp == 10) DumpTestLayout();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
@@ -1768,10 +2016,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
-        if (L && !g.applyKeep) { g.boneEdits.clear(); g.selBoneName.clear(); g.boneScroll = 0; SeedOpenBones(L->scene); }
+        if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
         if (g.physics) { g.physics = false; SetPhysics(true); }
         else ApplyPoseLive();
+        if (L && !g.wantPose.empty()) { const std::string pose = g.wantPose; g.wantPose.clear(); LoadPoseFile(pose); }
         g.dirty = true;
         if (L) SetWindowTextW(hwnd, Utf8ToWide("CardBridge viewer - " + (L->title.empty() ? g.cardPath : L->title)).c_str());
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1784,6 +2033,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONDOWN: {
+        g.undoBase = CapturePose();
+        g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         if (x < kPanel) {
             RECT rc;
@@ -1847,6 +2098,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_RBUTTONDOWN: {
+        g.undoBase = CapturePose();
+        g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         if (x < kPanel) {
             RECT rc;
@@ -1966,6 +2219,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        CommitPoseEdit();
         if (g.sliderDrag >= 0) {
             SliderRef r;
             const bool live = IsLiveId(g.sliderDrag);
@@ -2014,8 +2268,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         SliderRef r;
                         if (row >= 1 && row <= kBoneEditCount && SliderFor(kBoneEdit + row - 1, r)) {
                             const float step = r.step * ((GetKeyState(VK_SHIFT) & 0x8000) ? 10.0f : 1.0f);
+                            const PoseState before = CapturePose();
                             *r.v = std::clamp(*r.v + (d > 0 ? step : -step), r.lo, r.hi);
                             ApplyPoseLive();
+                            PoseChanged(before, true);
                         }
                     } else if (BuildBoneRows(L->scene).size() > 0) {
                         const int visible = std::max(1, (l.boneListBottom - l.boneListTop) / kRowH);
@@ -2065,6 +2321,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KEYDOWN: {
         std::shared_ptr<Loaded> L = Current();
+        if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save the pose, Ctrl+O load a pose
+            if (wp == 'Z') UndoPose((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            else if (wp == 'Y') UndoPose(true);
+            else if (wp == 'S') SavePoseFile();
+            else if (wp == 'O') LoadPoseFile();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (wp == 'T') { g.textured = !g.textured; g.dirty = true; }
         else if (wp == 'H') { g.shaded = !g.shaded; g.dirty = true; }
         else if (wp == 'V') {   // every shader layer on / off
@@ -2079,7 +2343,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'K') { g.showBones = !g.showBones; Log(g.showBones ? "skeleton: on (click a bone to select it)" : "skeleton: off"); g.dirty = true; }
         else if (wp == 'Y') { SetPhysics(!g.physics); InvalidatePanel(); }
         else if (wp == 'N') { if (g.physics) { g.sim.Nudge({0.004f, 0.0f, 0.002f}); g.physicsKick = g.physicsMoving = true; Log("physics: shake"); } else Log("physics is off (Y)", LogKind::Warn); }
-        else if (wp == 'P') { g.aPose = !g.aPose; Log(std::string("A-pose: ") + (g.aPose ? "on" : "off")); ApplyPoseLive(); }
+        else if (wp == 'P') { const PoseState before = CapturePose(); g.aPose = !g.aPose; Log(std::string("A-pose: ") + (g.aPose ? "on" : "off")); ApplyPoseLive(); PoseChanged(before); }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
         else if (wp == 'S') ResetView(90);
@@ -2115,6 +2379,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         std::string a = WideToUtf8(argvw[i]);
         if (a == "--library" && i + 1 < argc) g.settings.library = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--mods" && i + 1 < argc) g.settings.mods = Slashes(WideToUtf8(argvw[++i]));
+        else if (a == "--pose" && i + 1 < argc) g.wantPose = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--outfit" && i + 1 < argc) g.wantOutfit = std::atoi(WideToUtf8(argvw[++i]).c_str());
         else card = Slashes(a);
     }
