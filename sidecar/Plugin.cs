@@ -31,6 +31,10 @@ public class CardBridgeSidecar : BaseUnityPlugin
 
     string io, outDir;
     bool running;
+    // io/maker.flag: leave the Title scene for the character maker (CustomScene) first, so the dump and the screenshots see the maker's
+    // own light, ambient and camera effects instead of the Title scene's empty one.
+    bool makerMode, makerRequested;
+    float makerAt;
     int frame;
     readonly Dictionary<int, string> texFiles = new Dictionary<int, string>();
     StringBuilder log = new StringBuilder();
@@ -46,6 +50,25 @@ public class CardBridgeSidecar : BaseUnityPlugin
     void Update()
     {
         if (running || ++frame % 60 != 0) return;
+        if (File.Exists(Path.Combine(io, "maker.flag"))) {
+            makerMode = true;
+            if (!makerRequested) {
+                if (!Singleton<Character>.IsInstance() || Singleton<Character>.Instance.chaListCtrl == null) return;
+                if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != "Title") return;
+                makerRequested = true;
+                makerAt = Time.realtimeSinceStartup;
+                Manager.Scene.Data sd = new Manager.Scene.Data();
+                sd.levelName = "CustomScene";
+                sd.isAdd = false;
+                sd.isFade = false;
+                sd.isAsync = true;
+                Singleton<Manager.Scene>.Instance.LoadReserve(sd, false);
+                Logger.LogInfo("CardBridgeSidecar: loading CustomScene");
+                return;
+            }
+            // wait for the maker to settle before dumping
+            if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != "CustomScene" || Time.realtimeSinceStartup - makerAt < 25f) return;
+        }
         string req = Path.Combine(io, "request.txt");
         if (!File.Exists(req)) return;
         if (!Singleton<Character>.IsInstance() || Singleton<Character>.Instance.chaListCtrl == null) return;
@@ -94,6 +117,7 @@ public class CardBridgeSidecar : BaseUnityPlugin
         string dir = Path.Combine(outDir, name);
         Directory.CreateDirectory(dir);
         texFiles.Clear();
+        if (makerMode) foreach (ChaControl other in UnityEngine.Object.FindObjectsOfType<ChaControl>()) other.gameObject.SetActive(false);   // the maker's own character
         ChaFileControl cf = new ChaFileControl();
         if (!cf.LoadCharaFile(cardPath, 1, false, false)) { File.WriteAllText(Path.Combine(dir, "error.txt"), "LoadCharaFile failed"); yield break; }
         ChaControl chara = Singleton<Character>.Instance.CreateFemale(null, 0, cf);
@@ -168,6 +192,44 @@ public class CardBridgeSidecar : BaseUnityPlugin
         }
         sb.Append("}}");
         File.WriteAllText(Path.Combine(dir, "environment.json"), sb.ToString());
+        if (Camera.main != null) DumpEffects(Camera.main, dir);
+    }
+
+    // Every public field and property of the main camera's image effects (colour grading, bloom...), textures saved next to it.
+    void DumpEffects(Camera cam, string dir)
+    {
+        StringBuilder sb = new StringBuilder("{");
+        bool firstComp = true;
+        foreach (MonoBehaviour mb in cam.GetComponents<MonoBehaviour>()) {
+            if (mb == null) continue;
+            string tn = mb.GetType().FullName;
+            if (!(tn.Contains("Amplify") || tn.Contains("Bloom") || tn.Contains("Blur") || tn.Contains("Sepia") || tn.Contains("Effect") || tn.Contains("CustomRender"))) continue;
+            if (!firstComp) sb.Append(","); firstComp = false;
+            sb.Append(J(tn) + ":{\"enabled\":" + (mb.enabled ? "true" : "false"));
+            foreach (System.Reflection.FieldInfo f in mb.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)) {
+                object v = null;
+                try { v = f.GetValue(mb); } catch (Exception) { continue; }
+                string val;
+                if (v == null) val = "null";
+                else if (v is Texture) {
+                    Texture t = (Texture)v;
+                    string file = "";
+                    try { file = SaveTexture(t, dir); } catch (Exception) { }
+                    val = "{\"texture\":" + J(t.name) + ",\"w\":" + t.width + ",\"h\":" + t.height + ",\"file\":" + J(file) + "}";
+                }
+                else if (v is float) val = F((float)v);
+                else if (v is int || v is bool) val = v.ToString().ToLower();
+                else if (v is Color) { Color c = (Color)v; val = "[" + F(c.r) + "," + F(c.g) + "," + F(c.b) + "," + F(c.a) + "]"; }
+                else if (v is Vector4) { Vector4 c = (Vector4)v; val = "[" + F(c.x) + "," + F(c.y) + "," + F(c.z) + "," + F(c.w) + "]"; }
+                else if (v is Vector3) val = V3((Vector3)v);
+                else if (v is Enum || v is string) val = J(v.ToString());
+                else continue;
+                sb.Append("," + J(f.Name) + ":" + val);
+            }
+            sb.Append("}");
+        }
+        sb.Append("}");
+        File.WriteAllText(Path.Combine(dir, "effects.json"), sb.ToString());
     }
 
     // ---------------------------------------------------------------- dump
@@ -351,8 +413,27 @@ public class CardBridgeSidecar : BaseUnityPlugin
             if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
             if (!any) { b = r.bounds; any = true; } else b.Encapsulate(r.bounds);
         }
-        GameObject go = new GameObject("cbCam");
-        Camera cam = go.AddComponent<Camera>();
+        GameObject go;
+        Camera cam;
+        Camera main = makerMode ? Camera.main : null;
+        List<MonoBehaviour> effects = new List<MonoBehaviour>();
+        if (main != null) {
+            // the maker's own camera with its image effects; only its follow/control scripts are switched off
+            go = UnityEngine.Object.Instantiate(main.gameObject);
+            go.name = "cbCam";
+            cam = go.GetComponent<Camera>();
+            foreach (MonoBehaviour mb in go.GetComponentsInChildren<MonoBehaviour>(true)) {
+                string tn = mb.GetType().FullName;
+                bool effect = tn.Contains("Effect") || tn.Contains("Bloom") || tn.Contains("Color") || tn.Contains("Antialias") || tn.Contains("Occlusion") ||
+                              tn.Contains("Vignette") || tn.Contains("Blur") || tn.Contains("Tonemap") || tn.Contains("DepthOfField") || tn.Contains("Sun") || tn.Contains("Fog");
+                if (!effect) mb.enabled = false;
+                else effects.Add(mb);
+            }
+            foreach (AudioListener al in go.GetComponentsInChildren<AudioListener>(true)) UnityEngine.Object.Destroy(al);
+        } else {
+            go = new GameObject("cbCam");
+            cam = go.AddComponent<Camera>();
+        }
         cam.orthographic = true;
         cam.clearFlags = CameraClearFlags.SolidColor;
         cam.backgroundColor = new Color(226f / 255f, 228f / 255f, 232f / 255f);
@@ -373,6 +454,17 @@ public class CardBridgeSidecar : BaseUnityPlugin
             Texture2D tex = new Texture2D(640, 800, TextureFormat.RGB24, false);
             tex.ReadPixels(new Rect(0, 0, 640, 800), 0, 0);
             tex.Apply();
+            if (view == 0 && effects.Count > 0) {   // the same view with the image effects (colour grading, bloom) off
+                foreach (MonoBehaviour mb in effects) mb.enabled = false;
+                cam.Render();
+                RenderTexture.active = rt;
+                Texture2D tex2 = new Texture2D(640, 800, TextureFormat.RGB24, false);
+                tex2.ReadPixels(new Rect(0, 0, 640, 800), 0, 0);
+                tex2.Apply();
+                File.WriteAllBytes(Path.Combine(dir, "shot_noeffects_0.png"), tex2.EncodeToPNG());
+                UnityEngine.Object.Destroy(tex2);
+                foreach (MonoBehaviour mb in effects) mb.enabled = true;
+            }
             RenderTexture.active = prev;
             cam.targetTexture = null;
             RenderTexture.ReleaseTemporary(rt);
@@ -380,6 +472,40 @@ public class CardBridgeSidecar : BaseUnityPlugin
             UnityEngine.Object.Destroy(tex);
             yield return null;
         }
+        if (effects.Count > 0) ColourCube(cam, effects, dir);
         UnityEngine.Object.Destroy(go);
+    }
+
+    // What the camera's image effects do to every colour: an N^3 grid of flat colours rendered through the camera with the effects on
+    // and off (cube_on.bin / cube_off.bin, N*N*N RGB bytes, red fastest), so the viewer can apply the same grading.
+    void ColourCube(Camera cam, List<MonoBehaviour> effects, string dir)
+    {
+        const int N = 17;
+        cam.cullingMask = 0;
+        cam.clearFlags = CameraClearFlags.SolidColor;
+        RenderTexture rt = RenderTexture.GetTemporary(8, 8, 24, RenderTextureFormat.ARGB32);
+        cam.targetTexture = rt;
+        Texture2D tex = new Texture2D(8, 8, TextureFormat.RGB24, false);
+        for (int pass = 0; pass < 2; ++pass) {
+            foreach (MonoBehaviour mb in effects) mb.enabled = pass == 0 && mb.GetType().FullName.Contains("Amplify");
+            byte[] data = new byte[N * N * N * 3];
+            int at = 0;
+            for (int b = 0; b < N; ++b)
+                for (int g = 0; g < N; ++g)
+                    for (int r = 0; r < N; ++r) {
+                        cam.backgroundColor = new Color(r / (float)(N - 1), g / (float)(N - 1), b / (float)(N - 1));
+                        cam.Render();
+                        RenderTexture.active = rt;
+                        tex.ReadPixels(new Rect(0, 0, 8, 8), 0, 0);
+                        Color c = tex.GetPixel(4, 4);
+                        data[at++] = (byte)Mathf.RoundToInt(c.r * 255f); data[at++] = (byte)Mathf.RoundToInt(c.g * 255f); data[at++] = (byte)Mathf.RoundToInt(c.b * 255f);
+                    }
+            File.WriteAllBytes(Path.Combine(dir, pass == 0 ? "cube_on.bin" : "cube_off.bin"), data);
+        }
+        RenderTexture.active = null;
+        cam.targetTexture = null;
+        RenderTexture.ReleaseTemporary(rt);
+        UnityEngine.Object.Destroy(tex);
+        foreach (MonoBehaviour mb in effects) mb.enabled = true;
     }
 }

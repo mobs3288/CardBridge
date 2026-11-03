@@ -15,6 +15,7 @@
 #include "assemble/Assembler.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
+#include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include <stb_image_write.h>
 
@@ -370,6 +371,7 @@ int cmdConvert(const Args& a) {
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
+    exporter::LoadColourGrade(a.get("library"));   // the game's colour grading, when the library holds it
     std::vector<uint8_t> gpuRgba;   // written after the export, which with --overwrite clears the folder first
     if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
         exporter::GpuView gpu;

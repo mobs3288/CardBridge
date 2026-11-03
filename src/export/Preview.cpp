@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 
+#include "export/ColourGrade.h"
 #include "shader/Sm4.h"
 #include "shader/UnityShader.h"
 #include <vector>
@@ -468,7 +469,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
     // Scene lighting for the game's shaders: a directional light just above the camera axis (the camera looks at the model
     // from toCamera; the scene is in metres, the orthographic camera is placed a few metres away).
     const float toCam[3] = {-sn * cp, sp, cs * cp};
-    float L[3] = {toCam[0], toCam[1] + 0.45f, toCam[2]};
+    float L[3] = {toCam[0], toCam[1], toCam[2]};   // the character maker's light shines straight along the view (its Directional Light faces -Z)
     { float n = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]); for (float& c : L) c /= n; }
     const float camPos[3] = {cx + toCam[0] * 5.0f, cy + toCam[1] * 5.0f, cz + toCam[2] * 5.0f};
 
@@ -624,6 +625,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             }
         }
     }
+    if (opt.shaded) ApplyColourGrade(bgra, 0xFFE2E4E8u);   // the game's own colour grading, like the Direct3D view
 }
 
 namespace {
