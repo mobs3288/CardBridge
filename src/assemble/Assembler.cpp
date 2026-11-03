@@ -1157,10 +1157,18 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return nullptr;   // "none"
         std::string w;
         auto tb = resolver.openItemBundle(fi, ab, &w);
-        if (!tb) { scene.warn(partId, what + ": texture bundle not loaded: " + w); return nullptr; }
+        if (!tb) {   // a mod can ship the texture as a loose image instead of a bundle (Sideloader)
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            scene.warn(partId, what + ": texture bundle not loaded: " + w);
+            return nullptr;
+        }
         PPtr tp = tb->findAsset(texName);
         if (tp.isNull()) tp = tb->findTexture(texName);
-        if (tp.isNull()) { scene.warn(partId, what + ": texture '" + texName + "' not found in " + ab); return nullptr; }
+        if (tp.isNull()) {   // not in the bundle of that name: a mod may ship the image loose next to where the bundle would be
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            scene.warn(partId, what + ": texture '" + texName + "' not found in " + ab);
+            return nullptr;
+        }
         if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
         return b.decode(*tb, tp, partId);
     };
@@ -1479,11 +1487,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (!ab.empty() && ab != "0") {
                     std::string w;
                     tb = resolver.openItemBundle(item, ab, &w);
-                    if (!tb) { scene.warn(ref.partId, "texture bundle '" + ab + "' not loaded: " + w); return nullptr; }
+                    if (!tb) {
+                        if (auto loose = resolver.openLooseTexture(item, ab, name, nullptr)) { keyOut = "loose:" + ab + "/" + name; return loose; }
+                        scene.warn(ref.partId, "texture bundle '" + ab + "' not loaded: " + w);
+                        return nullptr;
+                    }
                 }
                 PPtr tp = tb->findAsset(name);
                 if (tp.isNull()) tp = tb->findTexture(name);
-                if (tp.isNull()) { scene.warn(ref.partId, "texture '" + name + "' not found in " + tb->name()); return nullptr; }
+                if (tp.isNull()) {
+                    if (auto loose = resolver.openLooseTexture(item, ab, name, nullptr)) { keyOut = "loose:" + ab + "/" + name; return loose; }
+                    scene.warn(ref.partId, "texture '" + name + "' not found in " + tb->name());
+                    return nullptr;
+                }
                 keyOut = tb->name() + "#" + std::to_string(tp.pathId);
                 if (std::getenv("CARDBRIDGE_DEBUG_CLOTHES")) std::fprintf(stderr, "clothes texture %s %s = %s\n", ref.partId.c_str(), name.c_str(), keyOut.c_str());
                 return b.decode(*tb, tp, ref.partId);
@@ -1654,11 +1670,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (!ab.empty() && ab != "0") {
                     std::string w;
                     tb = resolver.openItemBundle(item, ab, &w);
-                    if (!tb) { scene.warn(ref.partId, "face skin: texture bundle '" + ab + "' not loaded: " + w); return nullptr; }
+                    if (!tb) {
+                        if (auto loose = resolver.openLooseTexture(item, ab, name, nullptr)) { key = "loose:" + ab + "/" + name; return loose; }
+                        scene.warn(ref.partId, "face skin: texture bundle '" + ab + "' not loaded: " + w);
+                        return nullptr;
+                    }
                 }
                 PPtr tp = tb->findAsset(name);
                 if (tp.isNull()) tp = tb->findTexture(name);
-                if (tp.isNull()) { scene.warn(ref.partId, "face skin: texture '" + name + "' not found in " + tb->name()); return nullptr; }
+                if (tp.isNull()) {
+                    if (auto loose = resolver.openLooseTexture(item, ab, name, nullptr)) { key = "loose:" + ab + "/" + name; return loose; }
+                    scene.warn(ref.partId, "face skin: texture '" + name + "' not found in " + tb->name());
+                    return nullptr;
+                }
                 key = tb->name() + "#" + std::to_string(tp.pathId);
                 return b.decode(*tb, tp, ref.partId);
             };
@@ -1807,10 +1831,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (!mname.empty() && mname != "0" && !mab.empty() && mab != "0") {
                 std::string w;
                 auto mb = resolver.openItemBundle(item, mab, &w);
+                if (!mb) { if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back(loose); }
                 if (mb) {
                     PPtr mp = mb->findAsset(mname);
                     if (mp.isNull()) mp = mb->findTexture(mname);
                     if (!mp.isNull()) { if (auto mt = b.decode(*mb, mp, ref.partId)) bodyMasks.push_back(mt); }
+                    else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back(loose);
                     else scene.warn(ref.partId, "body mask '" + mname + "' not found in " + mab);
                 }
             }
@@ -1818,10 +1844,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (!bname.empty() && bname != "0" && !bab.empty() && bab != "0") {
                 std::string w;
                 auto bb = resolver.openItemBundle(item, bab, &w);
+                if (!bb) { if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back(loose); }
                 if (bb) {
                     PPtr bp = bb->findAsset(bname);
                     if (bp.isNull()) bp = bb->findTexture(bname);
                     if (!bp.isNull()) { if (auto bt = b.decode(*bb, bp, ref.partId)) braMasks.push_back(bt); }
+                    else if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back(loose);
                 }
             }
         }
