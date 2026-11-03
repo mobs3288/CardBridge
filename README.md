@@ -317,3 +317,5 @@ Milestone 1 acceptance tests (A1 to A10) are listed in the feasibility document.
 <p align="center">
   <sub>Built with C++, reverse engineering, AI assistance, and a questionable amount of spite.</sub>
 </p>
+
+**MikuMikuDance.** The PMX faces -Z, MikuMikuDance's front (`--unity-facing` on the CLI keeps the +Z the character is built facing). MMD keeps the number of morphs a display frame lists in one byte and corrupts its heap from 256 on, so the Exp frame lists the first 255 morphs (outfit toggles, then the game's brow / eye / mouth patterns, then the raw per-mesh shapes); morphs beyond that stay in the file, unlisted. A physics body meets only the colliders it does not already overlap in the rest pose (a body that starts inside one is thrown out of it), no link turns more than 35 degrees and the body's own jiggle chains (breast, hip) at most 9.

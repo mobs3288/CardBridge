@@ -111,7 +111,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     j["character"] = {{"name", scene.name}, {"outfit", opt.outfit}};
     j["game_adapter"] = "koikatsu";
     j["provenance"] = {{"asset_library", opt.assetLibrary}, {"mods_folder", opt.modsFolder}};
-    j["export"] = {{"format", "pmx"}, {"file", pmxFile}, {"scale", opt.scale}, {"axes", "y-up, left-handed (as Unity and PMX)"},
+    j["export"] = {{"format", "pmx"}, {"file", pmxFile}, {"scale", opt.scale}, {"axes", "y-up, left-handed"}, {"facing", opt.faceMinusZ ? "-z" : "+z"},
                    {"uv", "v flipped to top-left origin"}, {"texture_mode", "copy_required_textures"}, {"textures_dir", "textures"}};
 
     json parts = json::array();
@@ -384,12 +384,16 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     AddPhysics(scene, model, opt.scale);
     const std::vector<int> ikBones = AddIk(scene, model, opt.scale);
-    {   // display frames: Root, Exp (every morph), then the bones by group
+    {   // display frames: Root, Exp (the first 255 morphs), then the bones by group
         pmx::DisplayFrame root;
         root.name = "Root"; root.special = true;
         pmx::DisplayFrame exp;
         exp.name = "\xE8\xA1\xA8\xE6\x83\x85"; exp.nameEn = "Exp"; exp.special = true;   // 表情
-        for (size_t i = 0; i < model.morphs.size(); ++i) exp.morphs.push_back(static_cast<int>(i));
+        // MikuMikuDance keeps the number of listed morphs in a byte and fills tables sized by it: 256 or more corrupt its heap (a crash a few
+        // seconds after the file opens). The outfit morphs and the game's expressions come first, so what does not fit is the raw per-mesh
+        // shapes; they stay in the file (the engine and PMX Editor use them) but MMD's morph panel does not list them.
+        constexpr size_t kMmdMaxListedMorphs = 255;
+        for (size_t i = 0; i < model.morphs.size() && i < kMmdMaxListedMorphs; ++i) exp.morphs.push_back(static_cast<int>(i));
         std::vector<pmx::DisplayFrame> frames;
         for (auto& [group, list] : BoneFrames(scene)) {
             if (group == "Root") { root.bones = list; continue; }
@@ -410,6 +414,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
     log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
+    if (opt.faceMinusZ) pmx::TurnAboutY(model);
     log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
     Bytes pmxBytes = pmx::WritePmx(model);
     std::string pmxFile = stem + ".pmx";

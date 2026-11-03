@@ -75,6 +75,17 @@ int main(int argc, char** argv) {
     const size_t ikBones = j["counts"].value("ik_bones", 0);
     if (j["counts"].value("bones", 0) + ikBones != m.bones.size()) fail("manifest bone count (+ IK bones) != PMX bone count");
 
+    // facing: the manifest says which way the model looks; the toes must lie on that side of the ankle (a PMX faces -Z by default, MikuMikuDance's front)
+    if (j["export"].contains("facing")) {
+        const float want = j["export"]["facing"].get<std::string>() == "-z" ? -1.0f : 1.0f;
+        const engine::pmx::Bone* foot = nullptr; const engine::pmx::Bone* toe = nullptr;
+        for (const auto& b : m.bones) { if (b.nameLocal == "cf_j_foot_L") foot = &b; if (b.nameLocal == "cf_j_toes_L") toe = &b; }
+        if (foot && toe) {
+            if ((toe->position.z - foot->position.z) * want <= 0.0f) fail("the toes are not on the side the manifest says the model faces");
+            std::printf("engine reader: faces %sZ\n", want < 0 ? "-" : "+");
+        }
+    }
+
     // physics, as the engine's loader reads it (it parses rigid bodies and joints; the mask is the Bullet filter, bit n = collides with group n)
     if (j["counts"].contains("rigid_bodies") && j["counts"].value("rigid_bodies", 0) != m.rigidBodies.size()) fail("manifest rigid body count != PMX rigid body count");
     if (j["counts"].contains("joints") && j["counts"].value("joints", 0) != m.joints.size()) fail("manifest joint count != PMX joint count");
@@ -84,9 +95,10 @@ int main(int argc, char** argv) {
         (rb.physicsMode == 0 ? kinematic : moving)++;
         if (rb.physicsMode != 0 && rb.mass <= 0.0f) ++badBody;
         // chain bodies (group 1) meet colliders (group 0) only; colliders meet chains only; anchors meet nothing
-        if (rb.group == 1 && rb.physicsMode != 0 && rb.nonCollisionMask != 0x0001) ++badFilter;
+        // (chains may skip the colliders they overlap at rest, so any mask without the chain bit; colliders sit in groups 0 or 2..15)
+        if (rb.group == 1 && rb.physicsMode != 0 && (rb.nonCollisionMask & 0x0002) != 0) ++badFilter;
         if (rb.group == 1 && rb.physicsMode == 0 && rb.nonCollisionMask != 0) ++badFilter;
-        if (rb.group == 0 && rb.nonCollisionMask != 0x0002) ++badFilter;
+        if (rb.group != 1 && rb.nonCollisionMask != 0x0002) ++badFilter;
         if (rb.group == 1 && rb.physicsMode != 0) {
             const float reach = (rb.shape == 2 ? 0.5f * rb.size.y : 0.0f) + rb.size.x + 1e-3f;
             const auto d = rb.position - m.bones[static_cast<size_t>(rb.boneIndex)].position;

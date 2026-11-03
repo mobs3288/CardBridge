@@ -104,6 +104,7 @@ void usage() {
         "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
         "             [--apose [--apose-degrees N]]   arms down from the T-pose (40 degrees by default)\n"
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
+        "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -491,6 +492,7 @@ int cmdConvert(const Args& a) {
     exporter::ExportOptions eo;
     eo.outDir = out;
     eo.overwrite = a.has("overwrite");
+    eo.faceMinusZ = !a.has("unity-facing");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
     eo.assetLibrary = a.get("library");
@@ -520,7 +522,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude", "apose", "gpu-bones", "gpu-bones-helpers"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude", "apose", "unity-facing", "gpu-bones", "gpu-bones-helpers"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

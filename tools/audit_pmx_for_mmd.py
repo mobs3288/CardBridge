@@ -167,14 +167,20 @@ def audit(path):
     ndup = len(morph_names) - len(set(morph_names))
     if ndup: warn('%d duplicated morph names' % ndup)
     nf = r.i32()
+    # MMD (9.32) counts the display frames and the morphs they list in one BYTE each, then fills tables sized by that byte: 256 or more
+    # overflow the heap (exit -1073740940 a few seconds after the file is opened).
+    if nf > 254: err('%d display frames (MMD stores the count in a byte: at most 254)' % nf)
+    listed = 0
     for i in range(nf):
         fn = r.text(enc); r.text(enc); special = r.u8(); cnt = r.i32()
         for _ in range(cnt):
             t = r.u8()
+            listed += t == 1
             ref = r.idx(bs) if t == 0 else r.idx(mos)
             if t == 0 and not (0 <= ref < nb): err('display frame %d points at bone %d' % (i, ref))
             if t == 1 and not (0 <= ref < nmo): err('display frame %d points at morph %d' % (i, ref))
         if i == 0 and special and cnt == 0: err('the Root display frame is empty')
+    if listed > 255: err('display frames list %d morphs (MMD stores the count in a byte: at most 255, more corrupt its heap)' % listed)
     nr = r.i32()
     for i in range(nr):
         rn = r.text(enc); r.text(enc)

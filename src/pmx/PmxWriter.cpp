@@ -68,6 +68,27 @@ Bytes Utf8ToUtf16Le(const std::string& s) {
     return out;
 }
 
+void TurnAboutY(Model& m) {
+    auto turn = [](Vec3& v) { v.x = -v.x; v.z = -v.z; };
+    auto yawPi = [](float y) { return y > 0.0f ? y - 3.14159265f : y + 3.14159265f; };   // + half a turn, kept in (-pi, pi]
+    for (auto& v : m.vertices) { turn(v.position); turn(v.normal); }
+    for (auto& b : m.bones) {
+        turn(b.position);
+        turn(b.tailOffset);
+        for (auto& l : b.ikLinks) {
+            if (!l.limited) continue;
+            const float xl = l.lower.x, zl = l.lower.z;
+            l.lower.x = -l.upper.x; l.upper.x = -xl;
+            l.lower.z = -l.upper.z; l.upper.z = -zl;
+        }
+    }
+    for (auto& mo : m.morphs) for (auto& vo : mo.vertices) turn(vo.second);
+    // A body's or joint's rotation is its frame in the model: turned with everything, the yaw (the outer rotation of PMX's Y-X-Z Euler order)
+    // gains half a turn and the frame's own axes, the springs and limits in them, stay as they were.
+    for (auto& rb : m.rigidBodies) { turn(rb.position); rb.rotation.y = yawPi(rb.rotation.y); }
+    for (auto& j : m.joints) { turn(j.position); j.rotation.y = yawPi(j.rotation.y); }
+}
+
 Bytes WritePmx(const Model& m) {
     if (m.indices.size() % 3 != 0) throw FormatError("PMX: index count is not a multiple of 3");
     uint64_t sum = 0;
