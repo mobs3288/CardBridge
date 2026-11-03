@@ -279,9 +279,14 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     pm.ambient = {1.0f, 1.0f, 1.0f};
                     pm.specular = {0.0f, 0.0f, 0.0f};
                 }
-                pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f ? 0x10 : 0x00);
+                // MMD's broad white sheen (specular power 5) turns the game's skin gloss into a white face, and hair is lit by its texture.
+                if (mat.shader.find("skin") != std::string::npos || mat.shader.find("hair") != std::string::npos) pm.specular = {0.0f, 0.0f, 0.0f};
+                // MMD draws an edge as the model's back faces pushed outwards, which pokes through thin hair lying on the face: a dark line
+                // is fine, the game's light skin outline became a white rim round every strand. Only dark outlines are kept.
+                const float outlineLuma = 0.3f * mat.outlineColor.x + 0.59f * mat.outlineColor.y + 0.11f * mat.outlineColor.z;
+                pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f && outlineLuma < 0.3f ? 0x10 : 0x00);
                 pm.edgeColor = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
-                pm.edgeSize = std::min(2.0f, mat.outlineWidth * 20.0f);
+                pm.edgeSize = std::min(1.0f, mat.outlineWidth * 20.0f);
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
                     if (texMap[ti] < 0) {
