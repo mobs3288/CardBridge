@@ -20,8 +20,8 @@
     powershell -ExecutionPolicy Bypass -File cardbridge\tools\viewer_smoke.ps1 -Quick     (no as-exported bake, no export)
 #>
 param(
-    [string]$Card = 'E:/Game/[ScrewThisNoise] Koikatsu BetterRepack RX21/UserData/chara/female/KK_138747.png',
-    [string]$Mods = 'E:/Game/[ScrewThisNoise] Koikatsu BetterRepack RX21/mods',
+    [string]$Card = $env:CARDBRIDGE_TEST_CARD,      # a Koikatsu card .png
+    [string]$Mods = $env:CARDBRIDGE_TEST_MODS,      # the mods folder that card needs
     [string]$Library = '',
     [string]$Exe = '',
     [string]$Out = '',
@@ -32,6 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Card -or -not $Mods) { throw 'set CARDBRIDGE_TEST_CARD and CARDBRIDGE_TEST_MODS (or pass -Card and -Mods)' }
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # -File passes "a,b" as one string
 $repo = Split-Path (Split-Path (Split-Path $MyInvocation.MyCommand.Path -Parent) -Parent) -Parent
 if (-not $Library) { $Library = Join-Path $repo 'cardbridge/library_full' }
