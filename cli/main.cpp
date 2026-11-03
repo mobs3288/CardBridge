@@ -101,7 +101,7 @@ void usage() {
         "cardbridge " CARDBRIDGE_VERSION " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
-        "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
+        "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--no-toon-ramp] [--mod-cache <file>]\n"
         "             [--apose [--apose-degrees N]]   arms down from the T-pose (40 degrees by default)\n"
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
         "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
@@ -440,7 +440,7 @@ int cmdConvert(const Args& a) {
         std::string bakeNote;
         auto tb0 = std::chrono::steady_clock::now();
         exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
-                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); }, true);
+                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); }, true, !a.has("no-toon-ramp"));
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
@@ -524,7 +524,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude", "apose", "unity-facing", "no-physics", "gpu-bones", "gpu-bones-helpers"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "unity-facing", "no-physics", "gpu-bones", "gpu-bones-helpers"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
