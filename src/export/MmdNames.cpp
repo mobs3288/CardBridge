@@ -1,5 +1,7 @@
 #include "export/MmdNames.h"
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 namespace cardbridge::exporter {
@@ -63,11 +65,35 @@ void rename(pmx::Model& model, int bone, const std::string& mmd, const std::stri
     model.bones[static_cast<size_t>(bone)].nameEn = en;
 }
 
+// The centre of the sphere that best fits the points (least squares on |p|^2 = 2 c.p + k); false when they do not span a ball.
+bool fitSphere(const std::vector<Vec3>& pts, Vec3& centre) {
+    if (pts.size() < 20) return false;
+    double a[4][5] = {};
+    for (const Vec3& p : pts) {
+        const double row[5] = {p.x, p.y, p.z, 1.0, double(p.x) * p.x + double(p.y) * p.y + double(p.z) * p.z};
+        for (int i = 0; i < 4; ++i) for (int j = 0; j < 5; ++j) a[i][j] += row[i] * row[j];
+    }
+    for (int i = 0; i < 4; ++i) {   // Gauss with partial pivoting
+        int piv = i;
+        for (int r = i + 1; r < 4; ++r) if (std::fabs(a[r][i]) > std::fabs(a[piv][i])) piv = r;
+        if (std::fabs(a[piv][i]) < 1e-9) return false;
+        for (int j = 0; j < 5; ++j) std::swap(a[i][j], a[piv][j]);
+        for (int r = 0; r < 4; ++r) {
+            if (r == i) continue;
+            const double k = a[r][i] / a[i][i];
+            for (int j = i; j < 5; ++j) a[r][j] -= k * a[i][j];
+        }
+    }
+    centre = {static_cast<float>(a[0][4] / a[0][0] / 2.0), static_cast<float>(a[1][4] / a[1][1] / 2.0), static_cast<float>(a[2][4] / a[2][2] / 2.0)};
+    return std::isfinite(centre.x) && std::isfinite(centre.y) && std::isfinite(centre.z);
+}
+
 } // namespace
 
-std::vector<int> ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model) {
-    std::vector<int> added;
-    if (model.bones.size() < scene.bones.size() || scene.bones.empty()) return added;
+MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, float scale) {
+    MmdBones result;
+    std::vector<int>& added = result.ik;
+    if (model.bones.size() < scene.bones.size() || scene.bones.empty()) return result;
     const auto at = [&](const std::string& rigName) { return scene.boneIndex(rigName); };
 
     // Indices first: renaming changes what a rig name finds.
@@ -147,7 +173,49 @@ std::vector<int> ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& mod
         added.push_back(static_cast<int>(model.bones.size()));
         model.bones.push_back(std::move(t));
     }
-    return added;
+
+    // Eyes: a motion turns an eye about the eyeball's centre, but the rig's pupil bone sits on the pupil (turning there only tilts the iris
+    // disc), so the pivot moves back to the centre of a sphere fitted to the eye white. 両目 (under the head) turns both: the eyes follow it by
+    // append rotation, which needs them on a later layer.
+    const int head = find(model, "頭");
+    int eyeBone[2] = {-1, -1};
+    Vec3 eyeCentre[2];
+    bool eyeOk[2] = {false, false};
+    for (int side = 0; side < 2; ++side) {
+        eyeBone[side] = find(model, std::string(side == 0 ? "左" : "右") + "目");
+        const std::string meshName = std::string("cf_Ohitomi_") + (side == 0 ? "L" : "R");
+        for (const auto& mesh : scene.meshes) {
+            if (mesh.name != meshName) continue;
+            std::vector<Vec3> pts;
+            for (const auto& v : mesh.vertices) pts.push_back(v.pos * scale);
+            eyeOk[side] = fitSphere(pts, eyeCentre[side]);
+            break;
+        }
+    }
+    if (head >= 0 && eyeBone[0] >= 0 && eyeBone[1] >= 0 && find(model, "両目") < 0) {
+        Vec3 mid = model.bones[static_cast<size_t>(eyeBone[0])].position;
+        const Vec3 other = model.bones[static_cast<size_t>(eyeBone[1])].position;
+        mid = {(mid.x + other.x) * 0.5f, (mid.y + other.y) * 0.5f, (mid.z + other.z) * 0.5f};
+        pmx::Bone both;
+        both.name = "両目";
+        both.nameEn = "Eyes";
+        both.position = mid;
+        both.parent = head;
+        both.flags = 0x001E;
+        const int bothIndex = static_cast<int>(model.bones.size());
+        result.extra.push_back(bothIndex);
+        model.bones.push_back(std::move(both));
+        for (int side = 0; side < 2; ++side) {
+            pmx::Bone& e = model.bones[static_cast<size_t>(eyeBone[side])];
+            // Only the depth is taken from the fit (the pupil's own x and y are right): the pivot moves straight back, into the ball.
+            const float back = eyeOk[side] ? eyeCentre[side].z - e.position.z : 0.0f;
+            if (back < 0.0f && back > -1.5f) e.position.z += back;
+            e.layer = 1;
+            e.appendParent = bothIndex;
+            e.appendRatio = 1.0f;
+        }
+    }
+    return result;
 }
 
 std::vector<int> AddMmdMorphs(pmx::Model& model) {
@@ -161,6 +229,42 @@ std::vector<int> AddMmdMorphs(pmx::Model& model) {
         pmx::Morph m = model.morphs[static_cast<size_t>(src)];
         m.name = p.mmd;
         m.nameEn = p.en;
+        added.push_back(static_cast<int>(model.morphs.size()));
+        model.morphs.push_back(std::move(m));
+    }
+
+    // Vowels from the game's wide open mouth (pattern 0, open): あ as it is; the others scale its opening, spread or draw in the mouth's width
+    // about the face's middle (weighted by how far the vertex moves in the open mouth: lips and teeth, not the cheek) and push the lips forward.
+    int open = -1;
+    for (size_t i = 0; i < model.morphs.size(); ++i) {
+        if (model.morphs[i].name == "あ") return added;   // made already
+        if (model.morphs[i].name == "Mouth 0 open") open = static_cast<int>(i);
+    }
+    if (open < 0 || model.morphs[static_cast<size_t>(open)].vertices.empty()) return added;
+    const auto srcVerts = model.morphs[static_cast<size_t>(open)].vertices;   // a copy: push_back below moves the morphs
+    float maxLen = 0.0f;
+    for (const auto& [vi, d] : srcVerts) maxLen = std::max(maxLen, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+    if (maxLen < 1e-6f) return added;
+    double sumX = 0, sumW = 0;
+    for (const auto& [vi, d] : srcVerts) {
+        const double w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
+        sumX += w * model.vertices[static_cast<size_t>(vi)].position.x;
+        sumW += w;
+    }
+    const float centreX = sumW > 0 ? static_cast<float>(sumX / sumW) : 0.0f;
+    struct Vowel { const char* mmd; const char* en; float opening, spread, forward; };
+    const Vowel vowels[] = {{"あ", "A", 1.0f, 0.0f, 0.0f}, {"い", "I", 0.35f, 0.22f, 0.0f}, {"う", "U", 0.30f, -0.28f, 0.35f},
+                            {"え", "E", 0.55f, 0.12f, 0.0f}, {"お", "O", 0.70f, -0.20f, 0.30f}};
+    for (const Vowel& v : vowels) {
+        pmx::Morph m;
+        m.name = v.mmd;
+        m.nameEn = v.en;
+        m.panel = 3;
+        for (const auto& [vi, d] : srcVerts) {
+            const float w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
+            const float x = model.vertices[static_cast<size_t>(vi)].position.x - centreX;
+            m.vertices.emplace_back(vi, Vec3{d.x * v.opening + v.spread * x * w, d.y * v.opening, d.z * v.opening + v.forward * maxLen * w});
+        }
         added.push_back(static_cast<int>(model.morphs.size()));
         model.morphs.push_back(std::move(m));
     }

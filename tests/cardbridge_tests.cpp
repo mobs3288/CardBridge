@@ -680,10 +680,23 @@ void unitTests() {
         add("cf_n_height", 4);
         const int hips = add("cf_j_hips", 5, 12.5f), spine = add("cf_j_spine01", hips, 12.6f), arm = add("cf_j_arm00_L", spine, 15.0f);
         const int thumb = add("cf_j_thumb01_R", arm), foot = add("cf_j_foot_L", hips), toes = add("cf_j_toes_L", foot);
+        const int headB = add("cf_j_head", spine, 16.0f), eyeL = add("cf_J_hitomi_tx_L", headB, 16.5f), eyeR = add("cf_J_hitomi_tx_R", headB, 16.5f);
+        for (const char* nm : {"cf_Ohitomi_L", "cf_Ohitomi_R"}) {   // an eye white: points on a ball of radius 0.6 centred behind the pupil bone
+            assemble::SceneMesh em;
+            em.name = nm;
+            const float cx = nm[11] == 'L' ? 1.0f : -1.0f;
+            for (int i = 0; i < 60; ++i) {
+                const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 60.0f, r = std::sqrt(1.0f - z * z), a = 2.4f * static_cast<float>(i);
+                assemble::SceneVertex sv;
+                sv.pos = {cx + 0.6f * r * std::cos(a), 16.5f + 0.6f * r * std::sin(a), -0.5f + 0.6f * z};
+                em.vertices.push_back(sv);
+            }
+            s.meshes.push_back(std::move(em));
+        }
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.position = b.pos; pb.parent = b.parent; m.bones.push_back(pb); }
         pmx::Bone ik; ik.name = "cb_ik_foot_L"; ik.parent = 0; ik.ikTarget = foot; m.bones.push_back(ik);
-        const std::vector<int> added = ApplyMmdBoneNames(s, m);
+        const std::vector<int> added = ApplyMmdBoneNames(s, m, 1.0f).ik;
         auto find = [&](const char* n) { for (size_t i = 0; i < m.bones.size(); ++i) if (m.bones[i].name == n) return static_cast<int>(i); return -1; };
         CHECK(find("全ての親") == 0 && find("センター") == cRoot && find("グルーブ") == cHips && find("腰") == cWaist);
         CHECK(find("下半身") == hips && find("上半身") == spine && find("左腕") == arm && find("右親指０") == thumb && find("左足首") == foot && find("左つま先") == toes);
@@ -691,10 +704,23 @@ void unitTests() {
         CHECK(m.bones[static_cast<size_t>(spine)].parent < spine && m.bones[static_cast<size_t>(cWaist)].position.y == 12.5f);
         const int fik = find("左足ＩＫ");
         CHECK(fik >= 0 && m.bones[static_cast<size_t>(fik)].ikTarget == foot && added.size() == 1 && m.bones[static_cast<size_t>(added[0])].name == "左つま先ＩＫ");
+        const int both = find("両目");
+        CHECK(both >= 0 && m.bones[static_cast<size_t>(both)].parent == find("頭") && added.size() == 1);
+        CHECK(find("左目") == eyeL && find("右目") == eyeR && m.bones[static_cast<size_t>(eyeL)].appendParent == both && m.bones[static_cast<size_t>(eyeR)].layer > m.bones[static_cast<size_t>(both)].layer);
+        CHECK(std::fabs(m.bones[static_cast<size_t>(eyeL)].position.z + 0.5f) < 0.02f && m.bones[static_cast<size_t>(eyeL)].position.y == 16.5f);   // the pivot moved straight back to the ball's centre
         pmx::Model mo;   // morphs: the blink is a copy of the game's closed eyes, once
         pmx::Morph e; e.name = "Eyes 0 closed"; e.vertices = {{3, {0, 1, 0}}};
         mo.morphs.push_back(e);
         CHECK(AddMmdMorphs(mo).size() == 1 && mo.morphs[1].name == "まばたき" && mo.morphs[1].vertices.size() == 1 && AddMmdMorphs(mo).empty());
+        pmx::Morph op; op.name = "Mouth 0 open"; op.vertices = {{0, {0, -0.2f, 0}}, {1, {0, -0.1f, 0}}};   // the vowels are made from the open mouth
+        for (float x : {-1.0f, 1.0f}) { pmx::Vertex v; v.position = {x, 16.7f, 0}; mo.vertices.push_back(v); }
+        mo.morphs.push_back(op);
+        const std::vector<int> vowels = AddMmdMorphs(mo);
+        CHECK(vowels.size() == 5 && mo.morphs[static_cast<size_t>(vowels[0])].name == "あ" && mo.morphs[static_cast<size_t>(vowels[4])].name == "お");
+        const auto& morphU = mo.morphs[static_cast<size_t>(vowels[2])]; const auto& morphI = mo.morphs[static_cast<size_t>(vowels[1])];
+        CHECK(morphU.vertices.size() == 2 && morphU.vertices[0].second.z > 0 && morphU.vertices[0].second.x > 0);   // う: lips forward, the corner at x = -1 drawn inward
+        CHECK(morphI.vertices[0].second.x < 0 && morphI.vertices[1].second.x > 0);                                    // い: corners spread outward
+        CHECK(AddMmdMorphs(mo).empty());
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -1566,7 +1592,7 @@ void integrationTests() {
             CHECK(back.vertices.size() == res.vertices && back.indices.size() == res.triangles * 3 && back.materials.size() == res.materials && back.bones.size() == res.bones);
             size_t ikBack = 0;
             for (const auto& b : back.bones) if (b.isIk()) ++ikBack;
-            CHECK(ikBack >= exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack);   // the scene's bones, then one IK bone per limb (and a toe IK under each foot IK)
+            CHECK(ikBack >= exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack + 1);   // (+1: 両目) the scene's bones, then one IK bone per limb (and a toe IK under each foot IK)
             std::printf("  read back: %zu IK bones (%zu limbs in the rig)\n", ikBack, exporter::FindLimbs(scene).size());
             size_t expectBodies = 0, expectJoints = 0;
             for (const auto& col : scene.colliders)

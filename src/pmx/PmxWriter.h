@@ -48,6 +48,8 @@ struct Bone {
     uint16_t flags = 0x001E;        // rotatable, translatable, visible, enabled (bit 0, tail is a bone, and bit 5, IK, are set from the fields below)
     Vec3 tailOffset;                // the tail when tailBone is -1
     int tailBone = -1;              // the bone the tail points to
+    int appendParent = -1;          // >= 0: this bone also turns by appendRatio times that bone's rotation (MMD's 付与; the parent needs a lower `layer`)
+    float appendRatio = 1.0f;
     // IK: when `ikTarget` is a bone this is an IK bone. The solver turns the links until `ikTarget` reaches this bone's position, at most
     // `ikLoop` passes of at most `ikLimit` radians each.
     int ikTarget = -1;

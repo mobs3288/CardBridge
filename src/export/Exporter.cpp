@@ -424,7 +424,12 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     if (opt.physics) AddPhysics(scene, model, opt.scale);
     std::vector<int> ikBones = AddIk(scene, model, opt.scale);
-    if (opt.mmdNames) for (int b : ApplyMmdBoneNames(scene, model)) ikBones.push_back(b);
+    std::vector<int> mmdExtraBones;
+    if (opt.mmdNames) {
+        const MmdBones mb = ApplyMmdBoneNames(scene, model, opt.scale);
+        ikBones.insert(ikBones.end(), mb.ik.begin(), mb.ik.end());
+        mmdExtraBones = mb.extra;
+    }
     {   // display frames: Root, Exp (the first 255 morphs), then the bones by group
         pmx::DisplayFrame root;
         root.name = "Root"; root.special = true;
@@ -452,6 +457,12 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             pmx::DisplayFrame f;
             f.name = "IK";
             f.bones = ikBones;
+            model.frames.push_back(std::move(f));
+        }
+        if (!mmdExtraBones.empty()) {
+            pmx::DisplayFrame f;
+            f.name = "MMD";
+            f.bones = mmdExtraBones;
             model.frames.push_back(std::move(f));
         }
     }
