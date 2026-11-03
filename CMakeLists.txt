@@ -75,6 +75,7 @@ add_library(cardbridge_core STATIC
     src/export/Exporter.cpp
     src/export/Preview.cpp
     src/export/GpuView.cpp
+    src/export/ShaderLayer.cpp
     src/export/ColourGrade.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp

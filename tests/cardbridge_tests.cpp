@@ -22,6 +22,7 @@
 #include "core/ZipArchive.h"
 #include "export/Exporter.h"
 #include "export/Preview.h"
+#include "export/ShaderLayer.h"
 #include "library/Library.h"
 #include "pmx/PmxWriter.h"
 #include "resolve/ListTable.h"
@@ -32,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -413,6 +415,23 @@ void unitTests() {
         hidden[body] = 1;
         eff = exporter::EffectiveHiddenParts(sc, hidden);
         CHECK(eff[pTop] == 1);   // no body, no skin pieces
+    });
+    test("shader layers: the header comments name, blend and default state; other files are found by name", [] {
+        const std::string dir = fileio::Join(std::filesystem::temp_directory_path().string(), "cardbridge_layers_test");
+        fileio::CreateDirectories(dir);
+        fileio::WriteTextFile(fileio::Join(dir, "b_glow.hlsl"), "// layer: Glow\n// blend: Multiply\n// default: on\nfloat4 ps(VO i) : SV_Target { return 1; }\n");
+        fileio::WriteTextFile(fileio::Join(dir, "a_plain.hlsl"), "float4 ps(VO i) : SV_Target { return 0; }\n");
+        fileio::WriteTextFile(fileio::Join(dir, "c_odd.hlsl"), "// blend: sideways\n// default: maybe\nfloat4 ps(VO i) : SV_Target { return 0; }\n");
+        auto layers = exporter::LoadShaderLayers({dir, fileio::Join(dir, "missing")});
+        CHECK(layers.size() == 3);
+        if (layers.size() == 3) {
+            CHECK(layers[0].file == "a_plain.hlsl" && layers[0].name == "a_plain" && layers[0].blend == "add" && !layers[0].defaultOn);
+            CHECK(layers[1].name == "Glow" && layers[1].blend == "multiply" && layers[1].defaultOn);
+            CHECK(layers[2].blend == "add" && !layers[2].defaultOn);   // unknown values fall back
+            CHECK(layers[1].source.find("SV_Target") != std::string::npos);
+        }
+        CHECK(std::string(exporter::ShaderLayerPrelude()).find("VO vs(VI i)") != std::string::npos);
+        for (const char* f : {"a_plain.hlsl", "b_glow.hlsl", "c_odd.hlsl"}) fileio::RemoveFile(fileio::Join(dir, f));
     });
     test("pmx writer: material and group morphs", [] {
         pmx::Model m;

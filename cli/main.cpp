@@ -409,6 +409,13 @@ int cmdConvert(const Args& a) {
         std::string why;
         if (!gpu.Init(&why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
         else {
+            if (a.opt.count("layers-dir")) {   // the extra shader layers in that folder, all switched on for the picture
+                std::string report;
+                auto defs = exporter::LoadShaderLayers({normalizeSlashes(a.get("layers-dir"))});
+                gpu.SetLayers(defs, &report);
+                for (size_t i = 0; i < gpu.layerCount(); ++i) gpu.SetLayerEnabled(i, true);
+                std::fprintf(stderr, "  gpu view: %zu layer(s)%s%s\n", defs.size(), report.empty() ? "" : ", problems: ", report.c_str());
+            }
             exporter::ViewCamera cam;
             cam.pitchDeg = 4;
             std::vector<uint32_t> px;
