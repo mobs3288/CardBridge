@@ -3,6 +3,7 @@
 #include "core/FileIo.h"
 #include "core/Version.h"
 #include "export/BoneLabels.h"
+#include "export/MmdNames.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
@@ -419,9 +420,11 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         }
     }
     const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale);
+    const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model) : std::vector<int>();
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     if (opt.physics) AddPhysics(scene, model, opt.scale);
-    const std::vector<int> ikBones = AddIk(scene, model, opt.scale);
+    std::vector<int> ikBones = AddIk(scene, model, opt.scale);
+    if (opt.mmdNames) for (int b : ApplyMmdBoneNames(scene, model)) ikBones.push_back(b);
     {   // display frames: Root, Exp (the first 255 morphs), then the bones by group
         pmx::DisplayFrame root;
         root.name = "Root"; root.special = true;
@@ -431,7 +434,9 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         // seconds after the file opens). The outfit morphs and the game's expressions come first, so what does not fit is the raw per-mesh
         // shapes; they stay in the file (the engine and PMX Editor use them) but MMD's morph panel does not list them.
         constexpr size_t kMmdMaxListedMorphs = 255;
-        for (size_t i = 0; i < model.morphs.size() && i < kMmdMaxListedMorphs; ++i) exp.morphs.push_back(static_cast<int>(i));
+        exp.morphs = mmdMorphs;   // the standard ones first
+        for (size_t i = 0; i < model.morphs.size() && exp.morphs.size() < kMmdMaxListedMorphs; ++i)
+            if (std::find(mmdMorphs.begin(), mmdMorphs.end(), static_cast<int>(i)) == mmdMorphs.end()) exp.morphs.push_back(static_cast<int>(i));
         std::vector<pmx::DisplayFrame> frames;
         for (auto& [group, list] : BoneFrames(scene)) {
             if (group == "Root") { root.bones = list; continue; }

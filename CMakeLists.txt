@@ -82,6 +82,7 @@ add_library(cardbridge_core STATIC
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
     src/export/PmxIk.cpp
+    src/export/MmdNames.cpp
     src/export/SkeletonOverlay.cpp
     src/export/Preview.cpp
     src/export/GpuView.cpp

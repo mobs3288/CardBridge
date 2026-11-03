@@ -24,6 +24,7 @@
 #include "core/ZipArchive.h"
 #include "export/BoneLabels.h"
 #include "export/Exporter.h"
+#include "export/MmdNames.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
@@ -667,6 +668,33 @@ void unitTests() {
         bool helpers = false;
         for (const auto& f : frames) if (f.first == "Helpers") helpers = std::find(f.second.begin(), f.second.end(), drv) != f.second.end();
         CHECK(helpers);
+    });
+
+    test("MMD names: the body bones answer to a motion's bone names, the hierarchy follows", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        auto add = [&](const char* name, int parent, float y = 0.0f) { s.bones.push_back({name, parent, {0, y, 0}, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        add("p_cf_body_bone", -1);
+        const int cRoot = add("cf_t_root", 0), cHips = add("cf_t_hips", cRoot), cWaist = add("cf_t_waist_L", cHips);
+        add("cf_j_root", 0);
+        add("cf_n_height", 4);
+        const int hips = add("cf_j_hips", 5, 12.5f), spine = add("cf_j_spine01", hips, 12.6f), arm = add("cf_j_arm00_L", spine, 15.0f);
+        const int thumb = add("cf_j_thumb01_R", arm), foot = add("cf_j_foot_L", hips), toes = add("cf_j_toes_L", foot);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.position = b.pos; pb.parent = b.parent; m.bones.push_back(pb); }
+        pmx::Bone ik; ik.name = "cb_ik_foot_L"; ik.parent = 0; ik.ikTarget = foot; m.bones.push_back(ik);
+        const std::vector<int> added = ApplyMmdBoneNames(s, m);
+        auto find = [&](const char* n) { for (size_t i = 0; i < m.bones.size(); ++i) if (m.bones[i].name == n) return static_cast<int>(i); return -1; };
+        CHECK(find("全ての親") == 0 && find("センター") == cRoot && find("グルーブ") == cHips && find("腰") == cWaist);
+        CHECK(find("下半身") == hips && find("上半身") == spine && find("左腕") == arm && find("右親指０") == thumb && find("左足首") == foot && find("左つま先") == toes);
+        CHECK(m.bones[static_cast<size_t>(hips)].parent == cWaist && m.bones[static_cast<size_t>(spine)].parent == cWaist);   // the halves turn apart
+        CHECK(m.bones[static_cast<size_t>(spine)].parent < spine && m.bones[static_cast<size_t>(cWaist)].position.y == 12.5f);
+        const int fik = find("左足ＩＫ");
+        CHECK(fik >= 0 && m.bones[static_cast<size_t>(fik)].ikTarget == foot && added.size() == 1 && m.bones[static_cast<size_t>(added[0])].name == "左つま先ＩＫ");
+        pmx::Model mo;   // morphs: the blink is a copy of the game's closed eyes, once
+        pmx::Morph e; e.name = "Eyes 0 closed"; e.vertices = {{3, {0, 1, 0}}};
+        mo.morphs.push_back(e);
+        CHECK(AddMmdMorphs(mo).size() == 1 && mo.morphs[1].name == "まばたき" && mo.morphs[1].vertices.size() == 1 && AddMmdMorphs(mo).empty());
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -1538,7 +1566,7 @@ void integrationTests() {
             CHECK(back.vertices.size() == res.vertices && back.indices.size() == res.triangles * 3 && back.materials.size() == res.materials && back.bones.size() == res.bones);
             size_t ikBack = 0;
             for (const auto& b : back.bones) if (b.isIk()) ++ikBack;
-            CHECK(ikBack == exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack);   // the scene's bones, then one IK bone per limb
+            CHECK(ikBack >= exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack);   // the scene's bones, then one IK bone per limb (and a toe IK under each foot IK)
             std::printf("  read back: %zu IK bones (%zu limbs in the rig)\n", ikBack, exporter::FindLimbs(scene).size());
             size_t expectBodies = 0, expectJoints = 0;
             for (const auto& col : scene.colliders)
@@ -1566,7 +1594,7 @@ void integrationTests() {
             }
             {   // facing -Z: the toes lie in front of the ankle, on the -Z side
                 const pmxread::Bone* foot = nullptr; const pmxread::Bone* toe = nullptr;
-                for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L") foot = &b; if (b.name == "cf_j_toes_L") toe = &b; }
+                for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L" || b.name == "左足首") foot = &b; if (b.name == "cf_j_toes_L" || b.name == "左つま先") toe = &b; }
                 CHECK(foot && toe && toe->pos.z < foot->pos.z);
             }
             std::printf("  read back: %zu rigid bodies (%zu kinematic, %zu moving), %zu joints, %zu morphs, %zu display frames\n", back.bodies.size(), kinematic, moving, back.joints.size(), back.morphs.size(), back.frames.size());
