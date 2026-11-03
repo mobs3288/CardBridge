@@ -34,7 +34,7 @@ struct MeshData {
     std::vector<std::vector<uint32_t>> subMeshTriangles;   // 3 indices per triangle
     // Blend shapes (m_Shapes): one frame per shape in these meshes, so a shape index is a channel's frameIndex.
     struct BlendVertex { uint32_t index = 0; Vec3 dPos, dNormal; };
-    struct BlendShape { uint32_t first = 0, count = 0; };
+    struct BlendShape { uint32_t first = 0, count = 0; std::string name; };
     std::vector<BlendVertex> blendVertices;
     std::vector<BlendShape> blendShapes;
     // Adds `weight` (0..100, Unity's SetBlendShapeWeight) of shape `shape` to positions and normals.

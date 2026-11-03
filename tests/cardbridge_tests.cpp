@@ -20,7 +20,9 @@
 #include "core/MsgPack.h"
 #include "core/Sha256.h"
 #include "core/ZipArchive.h"
+#include "export/BoneLabels.h"
 #include "export/Exporter.h"
+#include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 #include "library/Library.h"
@@ -32,12 +34,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <cstdlib>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -461,6 +466,155 @@ void unitTests() {
         try { pmx::WritePmx(m); } catch (const FormatError&) { threw = true; }
         CHECK(threw);
     });
+
+    test("pmx writer: vertex morphs, tail bones, rigid bodies, joints and display frames", [] {
+        pmx::Model m;
+        m.name = "t";
+        pmx::Bone a; a.name = "a"; a.tailBone = 1; m.bones.push_back(a);
+        pmx::Bone b; b.name = "b"; b.parent = 0; m.bones.push_back(b);
+        for (int i = 0; i < 3; ++i) { pmx::Vertex v; v.position = {float(i), 0, 0}; m.vertices.push_back(v); }
+        m.indices = {0, 1, 2};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        const size_t plain = pmx::WritePmx(m).size();
+        pmx::Morph vm; vm.name = "smile"; vm.vertices.emplace_back(1, Vec3{0, 0.1f, 0});
+        m.morphs.push_back(vm);
+        pmx::RigidBody rb; rb.name = "body"; rb.bone = 1; rb.shape = 2; m.rigidBodies.push_back(rb);
+        pmx::RigidBody anchor; anchor.name = "anchor"; anchor.bone = 0; m.rigidBodies.push_back(anchor);
+        pmx::Joint j; j.name = "j"; j.bodyA = 1; j.bodyB = 0; m.joints.push_back(j);
+        pmx::DisplayFrame root; root.name = "Root"; root.special = true; root.bones = {0};
+        pmx::DisplayFrame exp; exp.name = "Exp"; exp.special = true; exp.morphs = {0};
+        pmx::DisplayFrame grp; grp.name = "Face"; grp.bones = {1};
+        m.frames = {root, exp, grp};
+        const size_t full = pmx::WritePmx(m).size();
+        // rigid body: 2 names (4 + 2 chars each ...), bone, group, mask, shape, 3 vec3, 5 floats, mode -> more than 80 bytes each; joint 4 + 2*3 + 8 * 12 + ...
+        CHECK(full > plain + 2 * 80 + 100);
+        pmx::Model bad = m;
+        bad.joints[0].bodyB = 7;   // a body that does not exist
+        bool threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        bad = m;
+        bad.morphs[0].vertices[0].first = 3;   // a vertex that does not exist
+        threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        bad = m;
+        bad.frames[2].bones = {5};
+        threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    });
+
+    test("bone labels: English guesses, helper flags and display groups", [] {
+        using namespace exporter;
+        CHECK(BoneLabelEn("cf_J_Mayu_L") == "Left Brow");
+        CHECK(BoneLabelEn("cf_J_Eye01_s_R") == "Right Eye 01");
+        CHECK(BoneLabelEn("cf_d_arm01_L") == "Left Arm 01 (driven)");
+        CHECK(BoneLabelEn("outfit0.acc03/joint 4").rfind("outfit0.acc03: ", 0) == 0);
+        CHECK(IsHelperBone("cf_d_arm01_L") && IsHelperBone("cf_s_head") && IsHelperBone("a_n_hair_pony"));
+        CHECK(!IsHelperBone("cf_j_hips") && !IsHelperBone("cf_J_FaceBase"));
+        assemble::Scene s;
+        auto add = [&](const char* name, int parent, const char* source = "rig") { s.bones.push_back({name, parent, {}, source}); return static_cast<int>(s.bones.size()) - 1; };
+        int root = add("cf_n_height", -1);
+        int hips = add("cf_j_hips", root);
+        int arm = add("cf_j_arm00_L", hips);
+        int hand = add("cf_j_hand_L", arm);
+        int eye = add("cf_J_Eye01_s_L", hips);
+        int brow = add("cf_J_Mayu_R", hips);
+        int drv = add("cf_d_arm01_L", arm);
+        int strand = add("hair.back/strand 1", hips, "outfit0.acc01");
+        CHECK(BoneGroup(s, static_cast<size_t>(arm)) == "Arms");
+        CHECK(BoneGroup(s, static_cast<size_t>(hand)) == "Hands");
+        CHECK(BoneGroup(s, static_cast<size_t>(eye)) == "Face: Eyes");
+        CHECK(BoneGroup(s, static_cast<size_t>(brow)) == "Face: Brows");
+        CHECK(BoneGroup(s, static_cast<size_t>(strand)) == "Accessories");
+        (void)drv;
+        auto frames = BoneFrames(s);
+        CHECK(frames[0].first == "Root" && frames[0].second.size() == 1 && frames[0].second[0] == root);
+        size_t listed = 0;
+        std::set<int> seen;
+        for (const auto& f : frames) for (int b : f.second) { ++listed; seen.insert(b); }
+        CHECK(listed == s.bones.size() && seen.size() == s.bones.size());   // every bone in exactly one frame
+        bool helpers = false;
+        for (const auto& f : frames) if (f.first == "Helpers") helpers = std::find(f.second.begin(), f.second.end(), drv) != f.second.end();
+        CHECK(helpers);
+    });
+
+    test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
+        // R = Ry(y) Rx(x) Rz(z) applied to +Y must give the axis
+        auto apply = [](Vec3 e, Vec3 v) {
+            auto rz = [](Vec3 p, float a) { return Vec3{p.x * std::cos(a) - p.y * std::sin(a), p.x * std::sin(a) + p.y * std::cos(a), p.z}; };
+            auto rx = [](Vec3 p, float a) { return Vec3{p.x, p.y * std::cos(a) - p.z * std::sin(a), p.y * std::sin(a) + p.z * std::cos(a)}; };
+            auto ry = [](Vec3 p, float a) { return Vec3{p.x * std::cos(a) + p.z * std::sin(a), p.y, -p.x * std::sin(a) + p.z * std::cos(a)}; };
+            return ry(rx(rz(v, e.z), e.x), e.y);
+        };
+        for (Vec3 axis : {Vec3{1, 0, 0}, Vec3{0, -1, 0}, Vec3{0, 0, 1}, Vec3{0.3f, -0.8f, 0.5f}, Vec3{-0.6f, 0.1f, -0.7f}}) {
+            Vec3 want = normalize(axis);
+            Vec3 got = apply(exporter::PmxRotationFromYAxis(axis), {0, 1, 0});
+            CHECK(std::fabs(got.x - want.x) < 1e-4f && std::fabs(got.y - want.y) < 1e-4f && std::fabs(got.z - want.z) < 1e-4f);
+        }
+    });
+
+    test("physics: a chain becomes an anchor, capsules and joints; colliders become kinematic bodies", [] {
+        assemble::Scene s;
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i - 1, {0, 1.0f - 0.1f * float(i), 0}, "rig"});
+        assemble::SceneChain ch;
+        ch.name = "strand";
+        ch.bones = {0, 1, 2, 3};
+        ch.stiffness = 0.2f;
+        s.chains.push_back(ch);
+        assemble::SceneCollider col;
+        col.name = "head";
+        col.bone = 0;
+        col.radius = 0.1f;
+        col.height = 0.4f;
+        col.axis = {0, 1, 0};
+        s.colliders.push_back(col);
+        assemble::SceneCollider inside = col;
+        inside.inside = true;
+        s.colliders.push_back(inside);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        CHECK(m.rigidBodies.size() == 5);   // collider + anchor + 3 links (the inside collider is not exported)
+        CHECK(m.joints.size() == 3);
+        CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].group == 0 && m.rigidBodies[0].shape == 2);
+        CHECK(m.rigidBodies[1].mode == 0);      // the anchor follows its bone
+        CHECK(m.rigidBodies[2].mode == 1 && m.rigidBodies[2].group == 1);
+        CHECK(std::fabs(m.rigidBodies[2].position.y - 8.5f) < 1e-3f);   // halfway from bone 1 (y 0.9) to bone 2 (0.8), scaled by 10
+        for (const auto& j : m.joints) CHECK(j.bodyA >= 0 && j.bodyB >= 0 && j.bodyA != j.bodyB);
+        m.vertices.resize(1);
+        m.indices = {};
+        pmx::WritePmx(m);   // consistent enough to serialise
+    });
+
+    test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
+        assemble::Scene s;
+        assemble::SceneMesh mesh;
+        mesh.name = "face";
+        assemble::SceneBlendShape open, close;
+        open.name = "open"; open.rest = 100.0f; open.offsets = {{1, {0, 1, 0}}};
+        close.name = "close"; close.rest = 0.0f; close.offsets = {{1, {0, -2, 0}}, {2, {1, 0, 0}}};
+        mesh.shapes = {open, close};
+        s.meshes.push_back(mesh);
+        assemble::SceneExpression ex;
+        ex.name = "Eyes 0 closed";
+        ex.panel = 2;
+        ex.targets = {{0, 0, 0.0f}, {0, 1, 100.0f}};
+        s.expressions.push_back(ex);
+        pmx::Model m;
+        for (int i = 0; i < 10; ++i) m.vertices.push_back({});
+        size_t added = exporter::AddExpressionMorphs(s, m, {5}, 2.0f);
+        CHECK(added >= 1 && m.morphs[0].name == "Eyes 0 closed" && m.morphs[0].panel == 2);
+        // vertex 1 (PMX 6): open from 100 to 0 = -1 * (0,1,0), close from 0 to 100 = +1 * (0,-2,0), scaled by 2: (0,-6,0); vertex 2 (PMX 7): (2,0,0)
+        std::map<int, Vec3> got;
+        for (const auto& [v, d] : m.morphs[0].vertices) got[v] = d;
+        CHECK(got.size() == 2 && std::fabs(got[6].y + 6.0f) < 1e-4f && std::fabs(got[7].x - 2.0f) < 1e-4f);
+        // a mesh that was not exported contributes nothing
+        pmx::Model m2;
+        m2.vertices.resize(10);
+        CHECK(exporter::AddExpressionMorphs(s, m2, {-1}, 2.0f) == 0);
+    });
 }
 
 void integrationTests() {
@@ -510,6 +664,43 @@ void integrationTests() {
                 if (std::abs(s - 1.0f) > 1e-3f) ++badWeights;
             }
         CHECK(badWeights == 0);
+        {   // every transform of the body and head rig prefabs is a scene bone (by name; the face bones included)
+            std::string why;
+            auto base = resolver.openBaseBundle("chara/oo_base.unity3d", &why);
+            CHECK(base != nullptr);
+            if (base) {
+                std::set<std::string> rigNames;
+                for (const char* prefab : {"p_cf_body_bone", "p_cf_head_bone"}) {
+                    auto roots = base->findXformsByName(prefab);
+                    CHECK(!roots.empty());
+                    if (roots.empty()) continue;
+                    for (int64_t id : base->subtree(roots[0])) rigNames.insert(base->xform(id)->name);
+                }
+                size_t missing = 0;
+                for (const auto& n : rigNames) if (scene.boneIndex(n) < 0) { ++missing; std::printf("  rig bone missing from the scene: %s\n", n.c_str()); }
+                CHECK(missing == 0);
+                CHECK(rigNames.size() > 400);
+                std::printf("  rig has %zu distinct bones, scene has %zu\n", rigNames.size(), scene.bones.size());
+                for (const char* face : {"cf_J_Eye_tx_L", "cf_J_Mayu_L", "cf_J_MouthBase_ty", "cf_J_FaceLow_tz", "cf_J_Nose_tip", "cf_J_EarLow_L"})
+                    CHECK(scene.boneIndex(face) >= 0);
+            }
+            // the table is well formed for a PMX: unique names, a parent always before its child
+            std::set<std::string> names;
+            size_t disorder = 0;
+            for (size_t i = 0; i < scene.bones.size(); ++i) {
+                names.insert(scene.bones[i].name);
+                if (scene.bones[i].parent >= static_cast<int>(i)) ++disorder;
+            }
+            CHECK(names.size() == scene.bones.size());
+            CHECK(disorder == 0);
+            // the face's expressions, the body's jiggle chains and the colliders came through
+            bool headLoaded = false;
+            for (const auto& p : scene.parts) if (p.id == "head" && !p.meshes.empty()) headLoaded = true;
+            std::printf("  head loaded: %d\n", headLoaded ? 1 : 0);
+            if (headLoaded) CHECK(!scene.expressions.empty());
+            CHECK(!scene.colliders.empty());
+            std::printf("  %zu expressions, %zu physics chains, %zu colliders\n", scene.expressions.size(), scene.chains.size(), scene.colliders.size());
+        }
         {   // the nude body: what a garment's mask cuts from the body is kept as under pieces, nothing is lost
             const assemble::ScenePart* body0 = nullptr;
             bool nudeSwitch = false;

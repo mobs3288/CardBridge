@@ -364,7 +364,12 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
             m.blendVertices.push_back(b);
         }
         for (const auto& sh : bs.at("shapes").asArray())
-            m.blendShapes.push_back({static_cast<uint32_t>(sh.at("firstVertex").asInt()), static_cast<uint32_t>(sh.at("vertexCount").asInt())});
+            m.blendShapes.push_back({static_cast<uint32_t>(sh.at("firstVertex").asInt()), static_cast<uint32_t>(sh.at("vertexCount").asInt()), {}});
+        for (const auto& ch : bs.at("channels").asArray()) {   // a channel names its frames (one frame per shape in these meshes)
+            const int64_t first = ch.at("frameIndex").asInt(), frames = std::max<int64_t>(1, ch.at("frameCount").asInt(1));
+            for (int64_t f = first; f < first + frames; ++f)
+                if (f >= 0 && static_cast<size_t>(f) < m.blendShapes.size()) m.blendShapes[static_cast<size_t>(f)].name = ch.at("name").asStr();
+        }
     }
 
     const Bytes& ib = v.at("m_IndexBuffer").asBin();

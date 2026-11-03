@@ -1,6 +1,8 @@
 #include "export/Exporter.h"
 
 #include "core/FileIo.h"
+#include "export/BoneLabels.h"
+#include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "pmx/PmxWriter.h"
 
@@ -159,7 +161,8 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
                        {"pixel_fnv1a64", std::to_string(t.pixelHash)}});
     }
     j["textures"] = std::move(tex);
-    j["counts"] = {{"bones", scene.bones.size()}, {"materials", scene.materials.size()}, {"textures", scene.textures.size()}};
+    j["counts"] = {{"bones", scene.bones.size()}, {"materials", scene.materials.size()}, {"textures", scene.textures.size()},
+                   {"expressions", scene.expressions.size()}, {"physics_chains", scene.chains.size()}, {"colliders", scene.colliders.size()}};
 
     json issues = json::array();
     bool anyError = false;
@@ -201,14 +204,25 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     model.name = scene.name;
     model.comment = "Converted by CardBridge from " + fileio::FileName(card.path);
 
-    for (size_t i = 0; i < scene.bones.size(); ++i) {
-        const auto& b = scene.bones[i];
-        pmx::Bone pb;
-        pb.name = b.name;
-        pb.position = b.pos * opt.scale;
-        pb.parent = b.parent;
-        model.bones.push_back(pb);
+    {   // every scene bone, in scene order (a parent always comes before its children); the tail points at the first child
+        std::vector<int> firstChild(scene.bones.size(), -1);
+        for (size_t i = 0; i < scene.bones.size(); ++i) {
+            const int p = scene.bones[i].parent;
+            if (p >= 0 && static_cast<size_t>(p) < scene.bones.size() && firstChild[static_cast<size_t>(p)] < 0) firstChild[static_cast<size_t>(p)] = static_cast<int>(i);
+        }
+        for (size_t i = 0; i < scene.bones.size(); ++i) {
+            const auto& b = scene.bones[i];
+            pmx::Bone pb;
+            pb.name = b.name;
+            pb.nameEn = BoneLabelEn(b.name);
+            pb.position = b.pos * opt.scale;
+            pb.parent = b.parent;
+            pb.tailBone = firstChild[i];
+            if (IsHelperBone(b.name)) pb.flags = 0x0006;   // rotatable, translatable; not shown and not operable: a driven, shape or attach node
+            model.bones.push_back(pb);
+        }
     }
+    std::vector<int> meshBase(scene.meshes.size(), -1);   // PMX index of each exported mesh's first vertex
 
     std::vector<std::pair<int, int>> range(scene.parts.size(), {0, 0});
     std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
@@ -221,6 +235,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         for (int mi : part.meshes) {
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             uint32_t base = static_cast<uint32_t>(model.vertices.size());
+            meshBase[static_cast<size_t>(mi)] = static_cast<int>(base);
             for (const auto& v : mesh.vertices) {
                 pmx::Vertex pv;
                 pv.position = v.pos * opt.scale;
@@ -351,8 +366,29 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             if (nudeIndex >= 0) all.group.emplace_back(nudeIndex, 1.0f);
             if (!all.group.empty()) addMorph(std::move(all));
         }
-        for (const auto& m : model.morphs) morphNames.push_back(m.name);
     }
+    const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale);
+    for (const auto& m : model.morphs) morphNames.push_back(m.name);
+    AddPhysics(scene, model, opt.scale);
+    {   // display frames: Root, Exp (every morph), then the bones by group
+        pmx::DisplayFrame root;
+        root.name = "Root"; root.special = true;
+        pmx::DisplayFrame exp;
+        exp.name = "\xE8\xA1\xA8\xE6\x83\x85"; exp.nameEn = "Exp"; exp.special = true;   // 表情
+        for (size_t i = 0; i < model.morphs.size(); ++i) exp.morphs.push_back(static_cast<int>(i));
+        std::vector<pmx::DisplayFrame> frames;
+        for (auto& [group, list] : BoneFrames(scene)) {
+            if (group == "Root") { root.bones = list; continue; }
+            pmx::DisplayFrame f;
+            f.name = group;
+            f.bones = std::move(list);
+            frames.push_back(std::move(f));
+        }
+        model.frames.push_back(std::move(root));
+        model.frames.push_back(std::move(exp));
+        for (auto& f : frames) model.frames.push_back(std::move(f));
+    }
+    log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
     log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
     Bytes pmxBytes = pmx::WritePmx(model);
