@@ -92,11 +92,49 @@ struct SceneSubmesh {
     std::vector<uint32_t> indices;   // triangles, into SceneMesh::vertices
 };
 
+// A blend shape of a mesh (Unity's m_Shapes), as model-space offsets of the vertices at weight 100 (skinning applied to the delta).
+// `rest` is the weight (0..100) already built into SceneMesh::vertices, the resting expression the game plays.
+struct SceneBlendShape {
+    std::string name;
+    float rest = 0.0f;
+    std::vector<std::pair<uint32_t, Vec3>> offsets;   // vertex index, offset
+};
+
 struct SceneMesh {
     std::string name;
     int part = -1;
     std::vector<SceneVertex> vertices;
     std::vector<SceneSubmesh> submeshes;
+    std::vector<SceneBlendShape> shapes;
+};
+
+// An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the
+// blend shape weights it sets on the face meshes. Exported as a vertex morph (offsets relative to the resting expression).
+struct SceneExpression {
+    struct Target { int mesh = -1; int shape = -1; float weight = 0.0f; };
+    std::string name;
+    int panel = 4;                    // MMD panel: 1 brows, 2 eyes, 3 mouth, 4 other
+    std::vector<Target> targets;
+};
+
+// A DynamicBone chain (hair strand, skirt, ribbon, breast and hip jiggle): bones[0] is the anchor that follows the body, the
+// rest hang from it; each bone's parent in Scene::bones is its predecessor. Parameters are the component's, 0..1 as the game has them.
+struct SceneChain {
+    std::string name, part;
+    std::vector<int> bones;
+    float damping = 0.1f, elasticity = 0.1f, stiffness = 0.1f, inert = 0.0f;
+    float radius = 0.0f;              // collision radius in model units (0 = none given)
+    Vec3 gravity, force;
+};
+
+// A DynamicBoneCollider the chains collide with: a sphere or capsule fixed to a body bone.
+struct SceneCollider {
+    std::string name;
+    int bone = -1;
+    Vec3 center;                      // model space
+    Vec3 axis{0, 1, 0};               // capsule axis, model space (unit)
+    float radius = 0.0f, height = 0.0f;   // height 0 or <= 2 radius: a sphere
+    bool inside = false;              // keeps the chain inside (not exported as a body)
 };
 
 struct ScenePart {
@@ -144,6 +182,9 @@ struct Scene {
     std::vector<std::pair<std::string, Vec4>> globalProps;
     std::vector<SceneMesh> meshes;
     std::vector<ScenePart> parts;
+    std::vector<SceneExpression> expressions;
+    std::vector<SceneChain> chains;
+    std::vector<SceneCollider> colliders;
     std::vector<SceneIssue> issues;
 
     int boneIndex(const std::string& name) const {

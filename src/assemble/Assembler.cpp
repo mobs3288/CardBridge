@@ -484,6 +484,7 @@ struct Builder {
     Rig& rig;
     std::map<std::string, int> textureCache;   // "<bundle>#<pathId>" -> scene texture
     std::map<std::string, int> accessoryBones; // "<part>#<xformId>" -> scene bone (accessory-owned skeletons)
+    std::map<int64_t, int> goMesh;             // renderer GameObject id -> scene mesh, for the item being added
 
     // MaterialEditor texture replacements stored in the card, for the item being added (-1 type = none).
     // Colours the game's ChaControl writes into the item's materials at run time (ChangeAccessoryColor, ChangeSettingHairColor ...),
@@ -840,6 +841,7 @@ struct Builder {
         if (xformId != prefabRoot && x->parent) parent = accessoryBone(uf, x->parent, prefabRoot, placement, staticBone, partId);
         SceneBone nb;
         nb.name = partId + "/" + x->name;
+        for (int n = 2; scene.boneIndex(nb.name) >= 0; ++n) nb.name = partId + "/" + x->name + "#" + std::to_string(n);   // names stay unique
         nb.parent = parent;
         nb.pos = (placement * (inverse(W(uf, prefabRoot)) * Wp(uf, xformId))).translation();
         nb.source = partId;
@@ -847,6 +849,144 @@ struct Builder {
         int idx = static_cast<int>(scene.bones.size()) - 1;
         accessoryBones[key] = idx;
         return idx;
+    }
+
+    // The world matrix (model space) of a transform only this item has (a mod's necklace joint, a hair chain joint): its offset from
+    // the nearest ancestor the shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
+    Mat4 itemBoneWorld(UnityFile& uf, int64_t id, int64_t prefabRoot) {
+        const Mat4 rootInv = inverse(W(uf, prefabRoot));
+        Mat4 bw = rootInv * Wp(uf, id);
+        const unity::Xform* bx = uf.xform(id);
+        bool anchored = false;
+        for (const unity::Xform* a = bx ? uf.xform(bx->parent) : nullptr; a; a = uf.xform(a->parent)) {
+            auto ar = rig.world.find(a->name);
+            if (ar == rig.world.end()) continue;
+            bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * Wp(uf, id)));
+            anchored = true;
+            break;
+        }
+        // A hair item's prefab hangs under the head's hair parent (cf_J_FaceUp_ty) in the game.
+        if (!anchored && hairParent) bw = *hairParent * (rootInv * Wp(uf, id));
+        return bw;
+    }
+
+    // The scene bone of one of the item's own transforms: found by name, else added under the nearest ancestor the scene already has.
+    int itemBone(UnityFile& uf, int64_t id, int64_t prefabRoot, const std::string& partId) {
+        const unity::Xform* bx = uf.xform(id);
+        if (!bx) return -1;
+        int bi = scene.boneIndex(bx->name);
+        if (bi >= 0) return bi;
+        const Mat4 bw = itemBoneWorld(uf, id, prefabRoot);
+        int parent = 0;
+        for (const unity::Xform* a = uf.xform(bx->parent); a; a = uf.xform(a->parent)) {
+            int pi = scene.boneIndex(a->name);
+            if (pi >= 0) { parent = pi; break; }
+        }
+        SceneBone nb;
+        nb.name = bx->name;
+        nb.parent = parent;
+        nb.pos = bw.translation();
+        nb.source = partId;
+        scene.bones.push_back(nb);
+        rig.world[bx->name] = bw;
+        return static_cast<int>(scene.bones.size()) - 1;
+    }
+
+    // Every transform of an item that works as a bone becomes a scene bone, not only those a mesh is skinned to: the loose joints and
+    // end nodes of hair and accessory chains (the DynamicBone chains) and the helper nodes under skin bones. A transform that carries a
+    // renderer is geometry, not a bone.
+    void addItemBones(UnityFile& uf, int64_t prefabRoot, const std::string& partId, const Mat4& placement, int staticBone, bool accessoryMode) {
+        std::set<int64_t> geometry, seeds, bones;
+        for (const auto& r : uf.renderersUnder(prefabRoot)) {
+            geometry.insert(r.xformId);
+            for (int64_t id : r.boneXforms) seeds.insert(id);
+        }
+        for (const auto& mb : uf.monoBehavioursUnder(prefabRoot)) {
+            if (mb.className.rfind("DynamicBone", 0) != 0 || mb.className == "DynamicBoneCollider") continue;
+            for (const char* key : {"m_Root", "Root", "m_Roots", "Roots"}) {
+                const Value& v = mb.fields.at(key);
+                if (v.isMap()) { if (v.at("m_FileID").asInt() == 0 && v.at("m_PathID").asInt() != 0) seeds.insert(v.at("m_PathID").asInt()); continue; }
+                for (const auto& pp : v.asArray()) if (pp.at("m_FileID").asInt() == 0 && pp.at("m_PathID").asInt() != 0) seeds.insert(pp.at("m_PathID").asInt());
+            }
+        }
+        for (int64_t id : uf.subtree(prefabRoot)) {
+            const unity::Xform* x = uf.xform(id);
+            if (!x || geometry.count(id)) continue;
+            if (!seeds.count(id) && !bones.count(x->parent)) continue;
+            bones.insert(id);
+            if (accessoryMode) accessoryBone(uf, id, prefabRoot, placement, staticBone, partId);
+            else itemBone(uf, id, prefabRoot, partId);
+        }
+        addChains(uf, prefabRoot, partId, accessoryMode);
+    }
+
+    // The DynamicBone chains of an item (hair strands, skirt and ribbon joints, the body's breast and hip jiggle) as scene chains, for
+    // the PMX rigid bodies and joints. Handles the classic component (a root and everything under it) and the character's Ver02 one
+    // (a root, a list of bones, per-bone parameters in the selected pattern).
+    void addChains(UnityFile& uf, int64_t prefabRoot, const std::string& partId, bool accessoryMode) {
+        auto sceneBoneOf = [&](int64_t id) -> int {
+            const unity::Xform* x = uf.xform(id);
+            if (!x) return -1;
+            if (accessoryMode) {
+                auto it = accessoryBones.find(partId + "#" + std::to_string(id));
+                return it == accessoryBones.end() ? -1 : it->second;
+            }
+            return scene.boneIndex(x->name);
+        };
+        auto pathId = [](const Value& v) { return v.at("m_FileID").asInt() == 0 ? v.at("m_PathID").asInt() : 0; };
+        auto vec3Of = [](const Value& v) { return Vec3{static_cast<float>(v.at("x").asFloat()), static_cast<float>(v.at("y").asFloat()), static_cast<float>(v.at("z").asFloat())}; };
+        for (const auto& mb : uf.monoBehavioursUnder(prefabRoot)) {
+            const bool classic = mb.className == "DynamicBone", ver2 = mb.className == "DynamicBone_Ver02";
+            if (!classic && !ver2) continue;
+            if (mb.fields.at("m_Enabled").asInt(1) == 0) continue;
+            const int64_t rootId = pathId(mb.fields.at(classic ? "m_Root" : "Root"));
+            if (!uf.xform(rootId)) continue;
+            SceneChain ch;
+            ch.part = partId;
+            std::vector<int64_t> ids;
+            if (classic) {
+                std::set<int64_t> excluded;
+                for (const auto& e : mb.fields.at("m_Exclusions").asArray()) excluded.insert(pathId(e));
+                std::set<int64_t> geometry, inChain;
+                for (const auto& r : uf.renderersUnder(prefabRoot)) geometry.insert(r.xformId);
+                for (int64_t id : uf.subtree(rootId)) {
+                    const unity::Xform* x = uf.xform(id);
+                    if (!x || geometry.count(id) || excluded.count(id) || (id != rootId && !inChain.count(x->parent))) continue;
+                    inChain.insert(id);
+                    ids.push_back(id);
+                }
+                ch.damping = static_cast<float>(mb.fields.at("m_Damping").asFloat(0.1));
+                ch.elasticity = static_cast<float>(mb.fields.at("m_Elasticity").asFloat(0.1));
+                ch.stiffness = static_cast<float>(mb.fields.at("m_Stiffness").asFloat(0.1));
+                ch.inert = static_cast<float>(mb.fields.at("m_Inert").asFloat(0.0));
+                ch.radius = static_cast<float>(mb.fields.at("m_Radius").asFloat(0.0));
+                ch.gravity = vec3Of(mb.fields.at("m_Gravity"));
+                ch.force = vec3Of(mb.fields.at("m_Force"));
+            } else {
+                ids.push_back(rootId);
+                for (const auto& e : mb.fields.at("Bones").asArray())
+                    if (int64_t id = pathId(e); id && id != rootId && uf.xform(id)) ids.push_back(id);
+                const Value& ptns = mb.fields.at("Patterns");
+                const Value& ptn = ptns.at(static_cast<size_t>(std::max<int64_t>(0, mb.fields.at("PtnNo").asInt())));
+                const auto& params = ptn.at("Params").asArray();
+                for (const auto& p : params) {
+                    ch.damping += static_cast<float>(p.at("Damping").asFloat());
+                    ch.elasticity += static_cast<float>(p.at("Elasticity").asFloat());
+                    ch.stiffness += static_cast<float>(p.at("Stiffness").asFloat());
+                    ch.inert += static_cast<float>(p.at("Inert").asFloat());
+                    ch.radius += static_cast<float>(p.at("CollisionRadius").asFloat());
+                }
+                if (!params.empty()) { const float k = 1.0f / static_cast<float>(params.size()); ch.damping *= k; ch.elasticity *= k; ch.stiffness *= k; ch.inert *= k; ch.radius *= k; }
+                ch.gravity = vec3Of(ptn.at("Gravity"));
+                ch.force = vec3Of(mb.fields.at("Force"));
+            }
+            for (int64_t id : ids)
+                if (int bi = sceneBoneOf(id); bi >= 0 && std::find(ch.bones.begin(), ch.bones.end(), bi) == ch.bones.end()) ch.bones.push_back(bi);
+            if (ch.bones.size() < 2) continue;
+            const std::string comment = mb.fields.at("Comment").asStr();
+            ch.name = comment.empty() ? scene.bones[static_cast<size_t>(ch.bones[0])].name : comment;
+            scene.chains.push_back(std::move(ch));
+        }
     }
 
     int addRenderer(UnityFile& uf, const RendererInfo& r, int64_t prefabRoot, int part, const std::string& partId,
@@ -859,10 +999,21 @@ struct Builder {
             return -1;
         }
         if (mesh->positions.empty() || mesh->subMeshTriangles.empty()) return -1;
+        // The blend shapes themselves (mesh space), kept for the PMX morphs; the resting expression is applied to the vertices below.
+        std::vector<std::vector<std::pair<uint32_t, Vec3>>> shapeDeltas(mesh->blendShapes.size());
+        std::vector<float> shapeRest(mesh->blendShapes.size(), 0.0f);
+        for (size_t s = 0; s < mesh->blendShapes.size(); ++s) {
+            const auto& bsh = mesh->blendShapes[s];
+            for (size_t i = bsh.first; i < static_cast<size_t>(bsh.first) + bsh.count && i < mesh->blendVertices.size(); ++i)
+                if (mesh->blendVertices[i].index < mesh->positions.size()) shapeDeltas[s].emplace_back(mesh->blendVertices[i].index, mesh->blendVertices[i].dPos);
+        }
         if (blend) {
             auto bw = blend->find(r.goId);
             if (bw != blend->end())
-                for (const auto& [shapeIndex, weight] : bw->second) mesh->applyBlendShape(static_cast<size_t>(shapeIndex), weight);
+                for (const auto& [shapeIndex, weight] : bw->second) {
+                    mesh->applyBlendShape(static_cast<size_t>(shapeIndex), weight);
+                    if (shapeIndex >= 0 && static_cast<size_t>(shapeIndex) < shapeRest.size()) shapeRest[static_cast<size_t>(shapeIndex)] = weight;
+                }
         }
 
         SceneMesh sm;
@@ -892,42 +1043,12 @@ struct Builder {
                 const unity::Xform* bx = uf.xform(r.boneXforms[i]);
                 std::string bname = bx ? bx->name : std::string();
                 int bi = bname.empty() ? -1 : scene.boneIndex(bname);
-                Mat4 bw;
                 auto rw = rig.world.find(bname);
-                if (rw != rig.world.end()) {
-                    bw = rw->second;
-                } else {
-                    // A bone only this item has (a mod's necklace joint ...): keep its offset from the nearest ancestor the
-                    // shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
-                    bw = rootInv * Wp(uf, r.boneXforms[i]);
-                    bool anchored = false;
-                    for (const unity::Xform* a = bx ? uf.xform(bx->parent) : nullptr; a; a = uf.xform(a->parent)) {
-                        auto ar = rig.world.find(a->name);
-                        if (ar == rig.world.end()) continue;
-                        bw = ar->second * (inverse(rootInv * W(uf, a->id)) * (rootInv * Wp(uf, r.boneXforms[i])));
-                        anchored = true;
-                        break;
-                    }
-                    // A hair item's prefab hangs under the head's hair parent (cf_J_FaceUp_ty) in the game.
-                    if (!anchored && hairParent) bw = *hairParent * (rootInv * Wp(uf, r.boneXforms[i]));
-                    if (bx && bi < 0) {
-                        // A bone only this item has (a mod's necklace joint ...): add it, parented to the
-                        // nearest ancestor the scene already knows.
-                        int parent = 0;
-                        for (const unity::Xform* a = uf.xform(bx->parent); a; a = uf.xform(a->parent)) {
-                            int pi = scene.boneIndex(a->name);
-                            if (pi >= 0) { parent = pi; break; }
-                        }
-                        SceneBone nb;
-                        nb.name = bname;
-                        nb.parent = parent;
-                        nb.pos = bw.translation();
-                        nb.source = partId;
-                        scene.bones.push_back(nb);
-                        bi = static_cast<int>(scene.bones.size()) - 1;
-                        rig.world[bname] = bw;
-                    }
+                if (rw == rig.world.end() && bx && bi < 0) {   // a bone only this item has (a mod's necklace joint ...)
+                    bi = itemBone(uf, r.boneXforms[i], prefabRoot, partId);
+                    rw = rig.world.find(bname);
                 }
+                const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, r.boneXforms[i], prefabRoot);
                 if (bi < 0) bi = 0;
                 boneIdx.push_back(bi);
                 boneMat.push_back(bw * mesh->bindPoses[i]);
@@ -981,6 +1102,32 @@ struct Builder {
             }
         }
 
+        {   // blend shape offsets in model space: the mesh-space delta goes through the same skinning (rotation and scale part) as the vertex
+            auto modelDelta = [&](size_t v, Vec3 d) {
+                if (skinned) {
+                    const unity::BoneInfluence& bi = mesh->skin[v];
+                    Vec3 acc{};
+                    float wsum = 0;
+                    for (int k = 0; k < 4; ++k) {
+                        if (bi.w[k] <= 0.0f || bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) continue;
+                        acc = acc + boneMat[static_cast<size_t>(bi.idx[k])].dir(d) * bi.w[k];
+                        wsum += bi.w[k];
+                    }
+                    if (wsum > 1e-6f) return acc * (1.0f / wsum);
+                }
+                return staticM.dir(d);
+            };
+            for (size_t s = 0; s < shapeDeltas.size(); ++s) {
+                if (shapeDeltas[s].empty()) continue;
+                SceneBlendShape bsh;
+                bsh.name = mesh->blendShapes[s].name.empty() ? "shape" + std::to_string(s) : mesh->blendShapes[s].name;
+                bsh.rest = shapeRest[s];
+                for (const auto& [vi, d] : shapeDeltas[s]) bsh.offsets.emplace_back(vi, modelDelta(vi, d));
+                sm.shapes.resize(s + 1);   // keeps the unity shape index as the position
+                sm.shapes[s] = std::move(bsh);
+            }
+        }
+
         for (size_t s = 0; s < mesh->subMeshTriangles.size(); ++s) {
             if (mesh->subMeshTriangles[s].empty()) continue;
             SceneSubmesh ss;
@@ -998,6 +1145,7 @@ struct Builder {
             sm.submeshes.push_back(std::move(ss));
         }
         scene.meshes.push_back(std::move(sm));
+        goMesh[r.goId] = static_cast<int>(scene.meshes.size()) - 1;
         return static_cast<int>(scene.meshes.size()) - 1;
     }
 };
@@ -1122,6 +1270,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 c.inside = mb.fields.at("m_Bound").asInt() == 1;
                 c.world = w->second;
                 b.dbColliders.push_back(c);
+                if (mb.fields.at("m_Enabled").asInt(1) != 0) {   // the PMX carries it as a kinematic rigid body on its bone
+                    SceneCollider sc;
+                    sc.name = nm->second;
+                    sc.bone = scene.boneIndex(nm->second);
+                    sc.center = c.world.point(c.center);
+                    const Vec3 axisLocal{c.direction == 0 ? 1.0f : 0.0f, c.direction == 1 ? 1.0f : 0.0f, c.direction == 2 ? 1.0f : 0.0f};
+                    sc.axis = normalize(c.world.dir(axisLocal));
+                    const float wscale = std::sqrt(c.world.m[2] * c.world.m[2] + c.world.m[6] * c.world.m[6] + c.world.m[10] * c.world.m[10]);
+                    sc.radius = c.radius * wscale;
+                    sc.height = c.height * wscale;
+                    sc.inside = c.inside;
+                    if (sc.bone >= 0) scene.colliders.push_back(sc);
+                }
                 if (std::getenv("CARDBRIDGE_DEBUG_DB")) {
                     Vec3 cw = c.world.point(c.center);
                     float sc = std::sqrt(c.world.m[2] * c.world.m[2] + c.world.m[6] * c.world.m[6] + c.world.m[10] * c.world.m[10]);
@@ -1129,6 +1290,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
         if (std::getenv("CARDBRIDGE_DEBUG_DB")) std::fprintf(stderr, "dbcolliders %zu\n", b.dbColliders.size());
+        for (int64_t root : base->findXformsByName(opt.bodyRigPrefab)) b.addChains(*base, root, "rig", false);   // the body's own jiggle chains
     }
     int headAttach = scene.boneIndex(opt.headAttachBone);
     Mat4 headBase;
@@ -2142,6 +2304,39 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
             if (mi >= 0) part.meshes.push_back(mi);
         }
+        b.addItemBones(*uf, roots[0], ref.partId, placement, staticBone, accessoryMode);
+        if (ref.group == "Head") {   // the expressions the face component can play: every pattern of brows, eyes and mouth, closed and open
+            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                if (mb.className != "FaceBlendShape") continue;
+                static const struct { const char* field; const char* label; int panel; } ctrls[3] = {{"EyebrowCtrl", "Brow", 1}, {"EyesCtrl", "Eyes", 2}, {"MouthCtrl", "Mouth", 3}};
+                for (const auto& c : ctrls) {
+                    const Value& ctl = mb.fields.at(c.field);
+                    size_t patterns = 0;
+                    for (const auto& tg : ctl.at("FBSTarget").asArray()) patterns = std::max(patterns, tg.at("PtnSet").asArray().size());
+                    const double openMin = ctl.at("OpenMin").asFloat(0.0);
+                    for (size_t ptn = 0; ptn < patterns; ++ptn)
+                        for (int open = 0; open < 2; ++open) {
+                            const int num3 = static_cast<int>(std::min(100.0, std::max(0.0, (openMin + (1.0 - openMin) * open) * 100.0)));
+                            std::map<std::pair<int, int>, float> weights;
+                            for (const auto& tg : ctl.at("FBSTarget").asArray()) {
+                                const auto& ptns = tg.at("PtnSet").asArray();
+                                auto gm = b.goMesh.find(tg.at("ObjTarget").at("m_PathID").asInt());
+                                if (ptns.empty() || gm == b.goMesh.end()) continue;
+                                const Value& ps = ptns[ptn < ptns.size() ? ptn : 0];
+                                const int close = static_cast<int>(ps.at("Close").asInt()), opn = static_cast<int>(ps.at("Open").asInt());
+                                if (close >= 0) weights[{gm->second, close}] += static_cast<float>(100 - num3);
+                                if (opn >= 0) weights[{gm->second, opn}] += static_cast<float>(num3);
+                            }
+                            if (weights.empty()) continue;
+                            SceneExpression ex;
+                            ex.name = std::string(c.label) + " " + std::to_string(ptn) + (open ? " open" : " closed");
+                            ex.panel = c.panel;
+                            for (const auto& [key, w] : weights) ex.targets.push_back({key.first, key.second, std::min(100.0f, w)});
+                            scene.expressions.push_back(std::move(ex));
+                        }
+                }
+            }
+        }
         if (!skippedByEditor.empty()) {
             std::string list;
             for (const auto& n : skippedByEditor) list += (list.empty() ? "" : ", ") + n;
@@ -2158,6 +2353,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
         b.localOv = nullptr;
+        b.goMesh.clear();
         b.simW = nullptr;
         b.hairParent = nullptr;
         b.blushAlpha = -1;

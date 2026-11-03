@@ -37,8 +37,9 @@ struct Bone {
     Vec3 position;
     int parent = -1;
     int layer = 0;
-    uint16_t flags = 0x001E;        // rotatable, translatable, visible, enabled
-    Vec3 tailOffset;
+    uint16_t flags = 0x001E;        // rotatable, translatable, visible, enabled (bit 0, tail is a bone, is set from tailBone)
+    Vec3 tailOffset;                // the tail when tailBone is -1
+    int tailBone = -1;              // the bone the tail points to
 };
 
 // A morph. Only the two kinds the exporter needs: a material morph (type 8: per material an offset that multiplies or adds to its
@@ -60,6 +61,35 @@ struct Morph {
     int panel = 4;
     std::vector<MaterialOffset> materials;               // a material morph when non-empty
     std::vector<std::pair<int, float>> group;            // (morph index, rate): a group morph when non-empty
+    std::vector<std::pair<int, Vec3>> vertices;          // (vertex index, offset): a vertex morph when non-empty
+};
+
+// Physics. Shapes: 0 sphere, 1 box, 2 capsule. Modes: 0 follows its bone, 1 physics, 2 physics with the bone aligned.
+// `mask` is the groups it does not collide with (bit n = group n).
+struct RigidBody {
+    std::string name, nameEn;
+    int bone = -1;
+    uint8_t group = 0;
+    uint16_t mask = 0xFFFF;
+    uint8_t shape = 0;
+    Vec3 size, position, rotation;   // size: radius (sphere), half extents (box), radius and height (capsule); rotation in radians
+    float mass = 1.0f, moveDamping = 0.5f, rotDamping = 0.5f, restitution = 0.0f, friction = 0.5f;
+    uint8_t mode = 0;
+};
+
+// A 6-DOF spring joint between two rigid bodies.
+struct Joint {
+    std::string name, nameEn;
+    int bodyA = -1, bodyB = -1;
+    Vec3 position, rotation;
+    Vec3 moveLower, moveUpper, rotLower, rotUpper, springMove, springRot;
+};
+
+// A display frame; `special` frames (Root, Exp) cannot be deleted in an editor.
+struct DisplayFrame {
+    std::string name, nameEn;
+    bool special = false;
+    std::vector<int> bones, morphs;
 };
 
 struct Model {
@@ -69,7 +99,10 @@ struct Model {
     std::vector<std::string> textures;   // relative paths, forward slashes
     std::vector<Material> materials;
     std::vector<Bone> bones;
-    std::vector<Morph> morphs;      // listed in the "Exp" display frame
+    std::vector<Morph> morphs;      // listed in the "Exp" display frame unless `frames` is given
+    std::vector<RigidBody> rigidBodies;
+    std::vector<Joint> joints;
+    std::vector<DisplayFrame> frames;   // empty: Root, Exp (every morph) and one frame with every bone
 };
 
 // Serialises to PMX 2.0 (UTF-16LE text, material and group morphs, no rigid bodies or joints).
