@@ -5,3 +5,5 @@
 *.pmx
 out/
 /library*/
+/build/
+/dist/
