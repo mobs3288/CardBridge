@@ -134,6 +134,7 @@ struct SceneChain {
     std::vector<int> bones;
     float damping = 0.1f, elasticity = 0.1f, stiffness = 0.1f, inert = 0.0f;
     float radius = 0.0f;              // collision radius in model units (0 = none given)
+    bool characterOwn = false;        // the character's own Ver02 component (breast and hip jiggle: skin, not cloth or hair)
     Vec3 gravity, force;
 };
 

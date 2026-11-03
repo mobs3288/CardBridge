@@ -961,6 +961,7 @@ struct Builder {
             if (!uf.xform(rootId)) continue;
             SceneChain ch;
             ch.part = partId;
+            ch.characterOwn = ver2;
             std::vector<int64_t> ids;
             if (classic) {
                 std::set<int64_t> excluded;

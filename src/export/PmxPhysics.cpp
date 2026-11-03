@@ -35,7 +35,7 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 } // namespace
 
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
-constexpr float kMaxBodySwing = 30.0f;
+constexpr float kMaxBodySwing = 15.0f;
 
 // The least distance between the segments a-b and c-d (a segment may be a point).
 float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
@@ -113,8 +113,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         if (ch.bones.size() < 2) continue;
         // The body's own jiggle chains (breast, hip) are skin on the body, not cloth: whatever their limits, a light link carrying vertices of
         // the body shivers in MikuMikuDance (and at the loosest it threw the bust and the thigh about). They stay rigid in the PMX; the game's
-        // jiggle is not carried. (A chain whose part is "body".)
-        if (ch.part == "body") continue;
+        // jiggle is not carried. 
+        if (ch.characterOwn) continue;
         std::vector<int> bones;
         for (int b : ch.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
         if (bones.size() < 2) continue;
@@ -159,9 +159,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
         const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
         // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
-        // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees, and the body's own
-        // jiggle chains (breast, hip: skin that cannot leave the body) at most 3 degrees (a light link that rests on a wider stop shivers in MMD).
-        const float bend = std::min(ch.part == "body" ? 0.05f : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
+        // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
+        const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
         // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
         const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f));
 
@@ -209,12 +208,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             // sideways gives the least stiffness that keeps the droop small.
             std::vector<int> hanging;
             below(b, hanging);
-            float inertia = 0.0f, lever = 0.0f;
+            float inertia = 0.0f, lever = 0.0f, sideways = 0.0f;   // sideways: the weight's torque about the joint at rest (gravity pulls down)
             for (int d : hanging) {
                 const Link& l = links[d];
                 const float r = length(sub(l.centre, self.head));
                 inertia += l.mass * r * r + capsuleInertiaAcross(l.mass, l.radius, l.cylinder);
                 lever += l.mass * r;
+                const Vec3 arm = sub(l.centre, self.head);
+                sideways += l.mass * std::sqrt(arm.x * arm.x + arm.z * arm.z);
             }
             // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
             // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
@@ -226,8 +227,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             j.bodyB = bodyOf[b];
             j.position = self.head;
             j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
-            j.rotLower = {-bend, -0.1f * bend, -bend};
-            j.rotUpper = {bend, 0.1f * bend, bend};
+            // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
+            // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
+            const bool holds = sideways * gravity / stiffnessK < 0.12f * bend;
+            const float range = holds ? bend : 0.0f;
+            j.rotLower = {-range, -0.1f * range, -range};
+            j.rotUpper = {range, 0.1f * range, range};
             j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             model.joints.push_back(std::move(j));
         }

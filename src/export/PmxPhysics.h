@@ -20,7 +20,7 @@ constexpr uint8_t kPmxGroupChain = 1;
 //
 // The mapping from the game's parameters follows what the particle update does: damping becomes the bodies' damping rates (the same
 // decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2, never more than
-// 30 rad/s for the one link it acts on), stiffness the rotation limits (at most 35 degrees a link) and the least spring that keeps a strand
+// 15 rad/s for the one link it acts on), stiffness the rotation limits (at most 35 degrees a link) and the least spring that keeps a strand
 // standing out sideways from drooping; gravity and force are not carried (the PMX world has its own gravity, 9.8 m/s^2 is assumed for
 // the spring).
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale);
