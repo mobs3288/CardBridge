@@ -37,6 +37,14 @@ public:
 
     int skippedMaterials() const;
 
+    // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
+    // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
+    void SetSkin(const std::vector<Mat4>* skin);
+
+    // Where a model-space point lands in the picture of the last Render (pixels from the top left) and its depth (smaller = nearer the camera).
+    // False before the first Render.
+    bool Project(Vec3 world, float& sx, float& sy, float& depth) const;
+
     // Plain mode draws every material with its texture and diffuse colour under one headlight and no colour grading, the way a
     // PMX viewer shows the exported file when the scene's textures are baked (BakeShaderTextures, colour only). Off by default.
     void SetPlain(bool on);

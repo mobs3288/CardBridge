@@ -73,8 +73,10 @@ add_library(cardbridge_core STATIC
     src/assemble/DynamicBone.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
+    src/assemble/Pose.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
+    src/export/SkeletonOverlay.cpp
     src/export/Preview.cpp
     src/export/GpuView.cpp
     src/export/ShaderLayer.cpp

@@ -18,7 +18,7 @@ std::string core(const std::string& name, std::string* prefix = nullptr) {
     std::string s = name;
     if (size_t slash = s.find('/'); slash != std::string::npos) s = s.substr(slash + 1);
     const std::string l = lower(s);
-    for (const char* p : {"cf_j_", "cf_d_", "cf_s_", "cf_n_", "cf_hit_", "cf_a_", "a_n_", "ca_", "cm_"}) {
+    for (const char* p : {"cf_j_", "cf_d_", "cf_s_", "cf_n_", "cf_hit_", "cf_a_", "cf_t_", "cf_pv_", "cf_ik_", "p_cf_", "a_n_", "ca_", "cm_"}) {
         const std::string ps = p;
         if (l.compare(0, ps.size(), ps) == 0) {
             if (prefix) *prefix = ps;
@@ -88,7 +88,7 @@ std::string groupOfName(const std::string& name) {
 bool IsHelperBone(const std::string& name) {
     std::string prefix;
     core(name, &prefix);
-    return prefix == "cf_d_" || prefix == "cf_s_" || prefix == "cf_n_" || prefix == "cf_hit_" || prefix == "cf_a_" || prefix == "a_n_";
+    return prefix == "cf_d_" || prefix == "cf_s_" || prefix == "cf_n_" || prefix == "cf_hit_" || prefix == "cf_a_" || prefix == "cf_t_" || prefix == "cf_pv_" || prefix == "cf_ik_" || prefix == "a_n_";
 }
 
 std::string BoneLabelEn(const std::string& name) {
@@ -112,6 +112,9 @@ std::string BoneLabelEn(const std::string& name) {
     if (prefix == "cf_d_") label += " (driven)";
     else if (prefix == "cf_s_") label += " (shape)";
     else if (prefix == "cf_n_" || prefix == "a_n_") label += " (attach)";
+    else if (prefix == "cf_t_") label += " (IK target)";
+    else if (prefix == "cf_pv_") label += " (IK pole)";
+    else if (prefix == "cf_ik_") label += " (IK)";
     if (size_t slash = name.find('/'); slash != std::string::npos) label = name.substr(0, slash) + ": " + label;
     return label;
 }

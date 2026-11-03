@@ -36,7 +36,7 @@ template <class T> void Rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
 struct GVert { float pos[3], nrm[3], tan[4], uv[2], col[4], uv1[2]; };   // 72 bytes
 
 struct GpuSub { ID3D11Buffer* ib = nullptr; UINT count = 0; int material = 0; };
-struct GpuMesh { ID3D11Buffer* vb = nullptr; std::vector<GpuSub> subs; };
+struct GpuMesh { ID3D11Buffer* vb = nullptr; std::vector<GpuSub> subs; std::vector<GVert> rest; };   // rest: the vertices as loaded, for re-skinning
 
 struct GpuShader {
     std::vector<shader::UnityProgram> progs;
@@ -76,6 +76,8 @@ struct GpuView::Impl {
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
     int skipped = 0;
+    float lastM[16] = {};          // world -> clip of the last Render, for Project()
+    int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
     // A plain textured, toon-lit shader for materials whose game shader is not in the bundle; compiled at run time by the
     // system's d3dcompiler (absent: such materials are left out).
@@ -275,6 +277,57 @@ GpuView::~GpuView() = default;
 bool GpuView::ready() const { return impl_->dev != nullptr; }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
 void GpuView::SetPlain(bool on) { impl_->plain = on; }
+
+void GpuView::SetSkin(const std::vector<Mat4>* skin) {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return;
+    std::vector<GVert> posed;
+    for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
+        GpuMesh& g = I.meshes[mi];
+        if (!g.vb || g.rest.empty()) continue;
+        const auto& verts = I.scene->meshes[mi].vertices;
+        const std::vector<GVert>* src = &g.rest;
+        if (skin && !skin->empty()) {
+            posed = g.rest;
+            for (size_t v = 0; v < posed.size() && v < verts.size(); ++v) {
+                // the vertex's blended skin matrix, applied to its position, normal and tangent
+                Mat4 m;
+                for (float& x : m.m) x = 0;
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) {
+                    const float w = verts[v].weight[k];
+                    const int b = verts[v].bone[k];
+                    if (w <= 0 || b < 0 || static_cast<size_t>(b) >= skin->size()) continue;
+                    for (int e = 0; e < 16; ++e) m.m[e] += (*skin)[static_cast<size_t>(b)].m[e] * w;
+                    sum += w;
+                }
+                if (sum <= 1e-6f) continue;
+                for (float& x : m.m) x /= sum;
+                GVert& o = posed[v];
+                const Vec3 p = m.point({o.pos[0], o.pos[1], o.pos[2]});
+                const Vec3 n = normalize(m.dir({o.nrm[0], o.nrm[1], o.nrm[2]}));
+                const Vec3 t = normalize(m.dir({o.tan[0], o.tan[1], o.tan[2]}));
+                o.pos[0] = p.x; o.pos[1] = p.y; o.pos[2] = p.z;
+                o.nrm[0] = n.x; o.nrm[1] = n.y; o.nrm[2] = n.z;
+                o.tan[0] = t.x; o.tan[1] = t.y; o.tan[2] = t.z;
+            }
+            src = &posed;
+        }
+        I.ctx->UpdateSubresource(g.vb, 0, nullptr, src->data(), 0, 0);
+    }
+}
+
+bool GpuView::Project(Vec3 world, float& sx, float& sy, float& depth) const {
+    const Impl& I = *impl_;
+    if (I.lastW <= 0) return false;
+    const float* M = I.lastM;
+    const float cx = M[0] * world.x + M[1] * world.y + M[2] * world.z + M[3];
+    const float cy = M[4] * world.x + M[5] * world.y + M[6] * world.z + M[7];
+    depth = M[8] * world.x + M[9] * world.y + M[10] * world.z + M[11];
+    sx = (cx + 1.0f) * 0.5f * static_cast<float>(I.lastW);
+    sy = (1.0f - cy) * 0.5f * static_cast<float>(I.lastH);
+    return true;
+}
 bool GpuView::plain() const { return impl_->plain; }
 size_t GpuView::layerCount() const { return impl_->layers.size(); }
 bool GpuView::layerEnabled(size_t i) const { return i < impl_->layers.size() && impl_->layers[i].enabled; }
@@ -453,9 +506,10 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
             vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}};
         }
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = static_cast<UINT>(vb.size() * sizeof(GVert)); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.ByteWidth = static_cast<UINT>(vb.size() * sizeof(GVert)); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;   // default, not immutable: SetSkin rewrites it
         D3D11_SUBRESOURCE_DATA sr{vb.data(), 0, 0};
         if (FAILED(I.dev->CreateBuffer(&bd, &sr, &g.vb))) continue;
+        g.rest = std::move(vb);
         for (const auto& sub : m.submeshes) {
             GpuSub gs;
             gs.material = sub.material; gs.count = static_cast<UINT>(sub.indices.size());
@@ -516,6 +570,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         {0, 0, 0, 1}};
     for (int r = 0; r < 3; ++r) M[r][3] = -(M[r][0] * cx + M[r][1] * cy + M[r][2] * cz);
     M[0][3] += bx; M[1][3] += by; M[2][3] += 0.5f;
+    for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) I.lastM[r * 4 + col] = M[r][col];
+    I.lastW = W; I.lastH = H;
 
     ID3D11DeviceContext* ctx = I.ctx;
     float bg[4] = {0xE2 / 255.0f, 0xE4 / 255.0f, 0xE8 / 255.0f, 1.0f};

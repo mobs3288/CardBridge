@@ -11,6 +11,7 @@
 
 #include "assemble/Assembler.h"
 #include "assemble/DynamicBone.h"
+#include "assemble/Pose.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/MaterialEdits.h"
@@ -586,6 +587,82 @@ void unitTests() {
         m.vertices.resize(1);
         m.indices = {};
         pmx::WritePmx(m);   // consistent enough to serialise
+    });
+
+    test("pose: skin matrices, baking, automatic A-pose", [] {
+        using namespace assemble;
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int hips = add("cf_j_hips", -1, {0, 1, 0});
+        const int sh = add("cf_j_shoulder_L", hips, {0.1f, 1.4f, 0});
+        const int arm = add("cf_j_arm00_L", sh, {0.2f, 1.4f, 0});
+        const int fore = add("cf_j_forearm01_L", arm, {0.5f, 1.4f, 0});
+        const int shR = add("cf_j_shoulder_R", hips, {-0.1f, 1.4f, 0});
+        const int armR = add("cf_j_arm00_R", shR, {-0.2f, 1.4f, 0});
+        const int foreR = add("cf_j_forearm01_R", armR, {-0.5f, 1.4f, 0});
+        SceneMesh mesh;
+        SceneVertex v;
+        v.pos = {0.35f, 1.4f, 0}; v.normal = {0, 1, 0}; v.bone[0] = arm; v.weight[0] = 1;   // on the upper arm
+        mesh.vertices.push_back(v);
+        SceneVertex w = v;   // half arm, half forearm
+        w.bone[0] = arm; w.bone[1] = fore; w.weight[0] = 0.5f; w.weight[1] = 0.5f;
+        mesh.vertices.push_back(w);
+        SceneBlendShape bs; bs.name = "x"; bs.offsets = {{0, {0, 1, 0}}};
+        mesh.shapes.push_back(bs);
+        s.meshes.push_back(mesh);
+        SceneCollider col; col.bone = arm; col.center = {0.35f, 1.4f, 0}; col.axis = {1, 0, 0}; col.radius = 0.05f;
+        s.colliders.push_back(col);
+
+        Pose none;
+        for (const Mat4& m : SkinMatrices(s, none)) {   // rest pose: identity everywhere
+            for (int i = 0; i < 16; ++i) CHECK(std::fabs(m.m[i] - (i % 5 == 0 ? 1.0f : 0.0f)) < 1e-5f);
+        }
+        // a bone turned 90 degrees about z at its own position: the point 0.15 along +x from it ends 0.15 along +y
+        Pose p;
+        p.edit(static_cast<size_t>(arm)).rot = {0, 0, 90};
+        auto skin = SkinMatrices(s, p);
+        Vec3 moved = skin[static_cast<size_t>(arm)].point({0.35f, 1.4f, 0});
+        CHECK(std::fabs(moved.x - 0.2f) < 1e-4f && std::fabs(moved.y - 1.55f) < 1e-4f);
+        Vec3 child = BoneWorlds(s, p)[static_cast<size_t>(fore)].translation();   // the forearm bone swings with it
+        CHECK(std::fabs(child.x - 0.2f) < 1e-4f && std::fabs(child.y - 1.7f) < 1e-4f);
+        // a local move and a scale
+        Pose q;
+        q.edit(static_cast<size_t>(sh)).pos = {0, 0.05f, 0};
+        q.edit(static_cast<size_t>(arm)).scl = {2, 2, 2};
+        auto world = BoneWorlds(s, q);
+        CHECK(std::fabs(world[static_cast<size_t>(arm)].translation().y - 1.45f) < 1e-4f);   // the shoulder carries the arm up
+        CHECK(std::fabs(world[static_cast<size_t>(fore)].translation().x - 0.8f) < 1e-4f);   // the arm's scale doubles the offset of its child (0.3 -> 0.6)
+
+        // A-pose: the left and right arms come down, mirrored, and the forearm keeps its distance from the arm
+        std::vector<Quat> base;
+        CHECK(MakeAPose(s, 40.0f, base));
+        Pose a;
+        a.base = base;
+        auto aw = BoneWorlds(s, a);
+        Vec3 f = aw[static_cast<size_t>(fore)].translation(), a0 = aw[static_cast<size_t>(arm)].translation();
+        Vec3 fr = aw[static_cast<size_t>(foreR)].translation();
+        const float drop = std::atan2(a0.y - f.y, std::fabs(f.x - a0.x)) * 180.0f / 3.14159265f;   // below horizontal, from the arm joint
+        CHECK(std::fabs(drop - 40.0f) < 0.5f);   // clavicle 20 % and arm 80 % turn about the same axis: 40 degrees below the horizontal in all
+        CHECK(std::fabs(std::sqrt((f.x - a0.x) * (f.x - a0.x) + (f.y - a0.y) * (f.y - a0.y)) - 0.3f) < 1e-3f);
+        CHECK(std::fabs(fr.y - f.y) < 1e-4f && std::fabs(fr.x + f.x) < 1e-4f);   // mirrored
+        Scene noArms;
+        noArms.bones.push_back({"root", -1, {}, "rig"});
+        CHECK(!MakeAPose(noArms, 40.0f, base) && base.empty());
+
+        // baking: vertices, normals, bone positions, colliders and blend shape offsets follow
+        Scene b = s;
+        BakePose(b, p);
+        CHECK(std::fabs(b.meshes[0].vertices[0].pos.x - 0.2f) < 1e-4f && std::fabs(b.meshes[0].vertices[0].pos.y - 1.55f) < 1e-4f);
+        CHECK(std::fabs(b.meshes[0].vertices[0].normal.x + 1.0f) < 1e-4f);   // +y turned to -x
+        CHECK(std::fabs(b.meshes[0].shapes[0].offsets[0].second.x + 1.0f) < 1e-4f);
+        CHECK(std::fabs(b.bones[static_cast<size_t>(fore)].pos.y - 1.7f) < 1e-4f);
+        CHECK(std::fabs(b.colliders[0].center.y - 1.55f) < 1e-4f && std::fabs(b.colliders[0].axis.y - 1.0f) < 1e-4f);
+        CHECK(b.pose.size() == 1 && b.pose[0].bone == "cf_j_arm00_L" && !b.aposeApplied);
+        Scene c = s;
+        BakePose(c, none);   // nothing to bake
+        CHECK(c.pose.empty() && std::fabs(c.meshes[0].vertices[0].pos.y - 1.4f) < 1e-6f);
+        BakePose(c, a);
+        CHECK(c.aposeApplied);
     });
 
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {

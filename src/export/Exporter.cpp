@@ -163,6 +163,11 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     j["textures"] = std::move(tex);
     j["counts"] = {{"bones", scene.bones.size()}, {"materials", scene.materials.size()}, {"textures", scene.textures.size()},
                    {"expressions", scene.expressions.size()}, {"physics_chains", scene.chains.size()}, {"colliders", scene.colliders.size()}};
+    if (!scene.pose.empty() || scene.aposeApplied) {   // the pose is already in the vertices and bone positions; this says what it was
+        j["pose"] = {{"a_pose", scene.aposeApplied}, {"bones", nlohmann::json::array()}};
+        for (const auto& e : scene.pose)
+            j["pose"]["bones"].push_back({{"bone", e.bone}, {"position", {e.pos.x, e.pos.y, e.pos.z}}, {"rotation_euler_degrees", {e.rot.x, e.rot.y, e.rot.z}}, {"scale", {e.scl.x, e.scl.y, e.scl.z}}});
+    }
 
     json issues = json::array();
     bool anyError = false;
