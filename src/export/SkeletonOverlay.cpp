@@ -32,7 +32,7 @@ void dot(std::vector<uint32_t>& px, int w, int h, int x, int y, int r, uint32_t 
 } // namespace
 
 bool DrawSkeletonOverlay(const assemble::Scene& scene, const std::vector<Vec3>& boneWorld, const GpuView& view, std::vector<uint32_t>& bgra, int width, int height,
-                         int selectedBone, bool showHelpers, std::vector<std::pair<float, float>>* screen) {
+                         int selectedBone, int hoverBone, bool showHelpers, std::vector<std::pair<float, float>>* screen) {
     const size_t n = scene.bones.size();
     std::vector<std::pair<float, float>> pos(n, {-1.0f, -1.0f});
     if (bgra.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) { if (screen) *screen = pos; return false; }
@@ -43,7 +43,12 @@ bool DrawSkeletonOverlay(const assemble::Scene& scene, const std::vector<Vec3>& 
         float sx, sy, depth;
         if (view.Project(at, sx, sy, depth)) { pos[i] = {sx, sy}; any = true; }
     }
-    const uint32_t lineColour = 0xFF2F6FE0, hot = 0xFFFFC21E, white = 0xFFFFFFFF;
+    const uint32_t lineColour = 0xFF2F6FE0, hot = 0xFFFFC21E, warm = 0xFFF28A1E, white = 0xFFFFFFFF, ringColour = 0xFFFF3B6B;
+    std::vector<char> under(n, 0);   // the selected bone and everything below it
+    if (selectedBone >= 0 && static_cast<size_t>(selectedBone) < n)
+        for (size_t i = 0; i < n; ++i)
+            for (int a = static_cast<int>(i), guard = 0; a >= 0 && static_cast<size_t>(a) < n && guard < 512; a = scene.bones[static_cast<size_t>(a)].parent, ++guard)
+                if (a == selectedBone) { under[i] = 1; break; }
     for (size_t i = 0; i < n; ++i) {   // the line to the nearest drawn ancestor
         if (pos[i].first < 0) continue;
         int a = scene.bones[i].parent;
@@ -51,13 +56,14 @@ bool DrawSkeletonOverlay(const assemble::Scene& scene, const std::vector<Vec3>& 
             a = scene.bones[static_cast<size_t>(a)].parent == a ? -1 : scene.bones[static_cast<size_t>(a)].parent;
         if (a < 0 || static_cast<size_t>(a) >= n) continue;
         line(bgra, width, height, static_cast<int>(pos[static_cast<size_t>(a)].first), static_cast<int>(pos[static_cast<size_t>(a)].second),
-             static_cast<int>(pos[i].first), static_cast<int>(pos[i].second), lineColour);
+             static_cast<int>(pos[i].first), static_cast<int>(pos[i].second), under[i] ? warm : lineColour);
     }
     for (size_t i = 0; i < n; ++i) {
         if (pos[i].first < 0) continue;
         const bool sel = static_cast<int>(i) == selectedBone;
         const int x = static_cast<int>(pos[i].first), y = static_cast<int>(pos[i].second);
-        dot(bgra, width, height, x, y, sel ? 4 : 2, sel ? hot : lineColour);
+        if (static_cast<int>(i) == hoverBone) dot(bgra, width, height, x, y, 6, ringColour);
+        dot(bgra, width, height, x, y, sel ? 4 : 2, sel ? hot : under[i] ? warm : lineColour);
         dot(bgra, width, height, x, y, sel ? 2 : 1, white);
     }
     if (screen) *screen = std::move(pos);

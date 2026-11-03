@@ -17,6 +17,7 @@ Quat mul(Quat a, Quat b) {
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 Vec3 cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 float len(Vec3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
 } // namespace
 
@@ -117,10 +118,72 @@ bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base) {
     return any;
 }
 
+// Rodrigues' formula; half a turn about a perpendicular axis when the directions are opposite.
+Mat4 RotationBetween(Vec3 from, Vec3 to) {
+    const Vec3 a = normalize(from), b = normalize(to);
+    Mat4 r;
+    const Vec3 v = cross(a, b);
+    const float c = dot(a, b);
+    if (c < -0.99999f) {   // opposite: half a turn about any perpendicular axis
+        Vec3 axis = std::fabs(a.x) < 0.9f ? cross(a, Vec3{1, 0, 0}) : cross(a, Vec3{0, 1, 0});
+        axis = normalize(axis);
+        r.m[0] = 2 * axis.x * axis.x - 1; r.m[1] = 2 * axis.x * axis.y;     r.m[2] = 2 * axis.x * axis.z;
+        r.m[4] = 2 * axis.y * axis.x;     r.m[5] = 2 * axis.y * axis.y - 1; r.m[6] = 2 * axis.y * axis.z;
+        r.m[8] = 2 * axis.z * axis.x;     r.m[9] = 2 * axis.z * axis.y;     r.m[10] = 2 * axis.z * axis.z - 1;
+        return r;
+    }
+    const float k = 1.0f / (1.0f + c);
+    r.m[0] = c + v.x * v.x * k;  r.m[1] = v.x * v.y * k - v.z; r.m[2] = v.x * v.z * k + v.y;
+    r.m[4] = v.y * v.x * k + v.z; r.m[5] = c + v.y * v.y * k;  r.m[6] = v.y * v.z * k - v.x;
+    r.m[8] = v.z * v.x * k - v.y; r.m[9] = v.z * v.y * k + v.x; r.m[10] = c + v.z * v.z * k;
+    return r;
+}
+
+Vec3 EulerFromMatrix(const Mat4& r) {
+    const float rad = 180.0f / 3.14159265f;
+    const float x = std::asin(std::max(-1.0f, std::min(1.0f, -r.m[6])));
+    float y, z;
+    if (std::fabs(std::cos(x)) > 1e-4f) { y = std::atan2(r.m[2], r.m[10]); z = std::atan2(r.m[4], r.m[5]); }
+    else { y = std::atan2(-r.m[8], r.m[0]); z = 0.0f; }   // straight up or down: all the turn goes into y
+    return {x * rad, y * rad, z * rad};
+}
+
+namespace {
+Mat4 rotationOnly(const Mat4& m) {
+    Mat4 r = m;
+    r.m[3] = r.m[7] = r.m[11] = 0.0f;
+    return r;
+}
+} // namespace
+
+Vec3 TurnBone(const Scene& scene, const Pose& pose, size_t bone, const Mat4& worldTurn) {
+    if (bone >= scene.bones.size()) return {};
+    const std::vector<Mat4> w = BoneWorlds(scene, pose);
+    const int p = scene.bones[bone].parent;
+    Mat4 parentRot;
+    if (p >= 0 && static_cast<size_t>(p) < w.size() && p != static_cast<int>(bone)) parentRot = rotationOnly(w[static_cast<size_t>(p)]);
+    const Mat4 base = bone < pose.base.size() ? Mat4::TRS({0, 0, 0}, pose.base[bone], {1, 1, 1}) : Mat4();
+    const Mat4 frame = parentRot * base;   // what the edit's rotation is applied in
+    const Vec3 old = bone < pose.bones.size() ? pose.bones[bone].rot : Vec3{};
+    const Mat4 user = Mat4::TRS({0, 0, 0}, shape::EulerToQuat(old), {1, 1, 1});
+    return EulerFromMatrix(inverse(frame) * worldTurn * frame * user);
+}
+
+Vec3 MoveBone(const Scene& scene, const Pose& pose, size_t bone, Vec3 worldDelta) {
+    if (bone >= scene.bones.size()) return {};
+    const std::vector<Mat4> w = BoneWorlds(scene, pose);
+    const int p = scene.bones[bone].parent;
+    Mat4 parentRot;
+    if (p >= 0 && static_cast<size_t>(p) < w.size() && p != static_cast<int>(bone)) parentRot = rotationOnly(w[static_cast<size_t>(p)]);
+    const Vec3 old = bone < pose.bones.size() ? pose.bones[bone].pos : Vec3{};
+    return old + inverse(parentRot).dir(worldDelta);
+}
+
 void BakePose(Scene& scene, const Pose& pose) {
     if (pose.empty()) return;
     const std::vector<Mat4> skin = SkinMatrices(scene, pose);
     for (auto& mesh : scene.meshes) {
+        mesh.reshapable = false;   // the bone frames the vertices were stored in no longer match
         // blend shape offsets turn with the vertex they move (rotation and scale part of its skin)
         for (auto& sh : mesh.shapes)
             for (auto& [vi, d] : sh.offsets) {

@@ -449,7 +449,7 @@ int cmdConvert(const Args& a) {
             if (ok && a.has("gpu-bones")) {   // the skeleton over the picture (--gpu-bones-helpers: the driven, shape and attach nodes too)
                 std::vector<Vec3> posed;
                 if (!liveSkin.empty()) for (size_t i = 0; i < scene.bones.size(); ++i) posed.push_back(liveSkin[i].point(scene.bones[i].pos));
-                exporter::DrawSkeletonOverlay(scene, posed, gpu, px, 640, 800, -1, a.has("gpu-bones-helpers"), nullptr);
+                exporter::DrawSkeletonOverlay(scene, posed, gpu, px, 640, 800, -1, -1, a.has("gpu-bones-helpers"), nullptr);
             }
             std::fprintf(stderr, "  gpu view: %s, second frame %.1f ms, %d material(s) without a shader\n", ok ? "ok" : "failed",
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());

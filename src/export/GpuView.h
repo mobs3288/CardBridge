@@ -41,6 +41,10 @@ public:
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
     void SetSkin(const std::vector<Mat4>* skin);
 
+    // The scene's vertices changed in place (a re-shape): uploads the new positions and normals, keeping the current skin. Tangents (the normal
+    // map frame) are recomputed only when asked; leave them while a slider is being dragged and ask once it is released.
+    void Refresh(bool tangents);
+
     // Where a model-space point lands in the picture of the last Render (pixels from the top left) and its depth (smaller = nearer the camera).
     // False before the first Render.
     bool Project(Vec3 world, float& sx, float& sy, float& depth) const;

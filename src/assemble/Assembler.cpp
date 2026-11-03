@@ -121,6 +121,7 @@ bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& pref
         b.parent = parent;
         b.pos = w.translation();
         b.source = source;
+        b.world = w;
         scene.bones.push_back(b);
         idx[id] = static_cast<int>(scene.bones.size()) - 1;
         rig.world[x->name] = w;
@@ -843,7 +844,8 @@ struct Builder {
         nb.name = partId + "/" + x->name;
         for (int n = 2; scene.boneIndex(nb.name) >= 0; ++n) nb.name = partId + "/" + x->name + "#" + std::to_string(n);   // names stay unique
         nb.parent = parent;
-        nb.pos = (placement * (inverse(W(uf, prefabRoot)) * Wp(uf, xformId))).translation();
+        nb.world = placement * (inverse(W(uf, prefabRoot)) * Wp(uf, xformId));
+        nb.pos = nb.world.translation();
         nb.source = partId;
         scene.bones.push_back(nb);
         int idx = static_cast<int>(scene.bones.size()) - 1;
@@ -885,6 +887,7 @@ struct Builder {
         SceneBone nb;
         nb.name = bx->name;
         nb.parent = parent;
+        nb.world = bw;
         nb.pos = bw.translation();
         nb.source = partId;
         scene.bones.push_back(nb);
@@ -1060,12 +1063,19 @@ struct Builder {
             staticM = *hairParent * (rootInv * rendererW);
             if (int fi = scene.boneIndex("cf_J_FaceUp_ty"); fi >= 0) staticBone = fi;
         }
+        // Inverse rest worlds of the bones that move this mesh: a vertex is also stored in each bone's own frame (SceneVertex::local), so a
+        // re-shape that moves the bones moves the vertices too. Taking the frame from the scene's bone makes the identity re-shape exact.
+        std::vector<Mat4> invBone(boneIdx.size());
+        for (size_t i = 0; i < boneIdx.size(); ++i) invBone[i] = inverse(scene.bones[static_cast<size_t>(boneIdx[i])].world);
+        const Mat4 invStatic = inverse(scene.bones[static_cast<size_t>(staticBone)].world);
+        sm.reshapable = true;
         for (size_t v = 0; v < n; ++v) {
             SceneVertex& out = sm.vertices[v];
             Vec3 p = mesh->positions[v];
             Vec3 nrm = v < mesh->normals.size() ? mesh->normals[v] : Vec3{0, 1, 0};
             out.uv = v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{};
             out.uv1 = v < mesh->uv1.size() ? mesh->uv1[v] : out.uv;
+            bool placed = false;
             if (skinned) {
                 const unity::BoneInfluence& bi = mesh->skin[v];
                 Vec3 pos{}, nr{};
@@ -1073,32 +1083,35 @@ struct Builder {
                 int slot = 0;
                 int bones[4] = {0, 0, 0, 0};
                 float ws[4] = {0, 0, 0, 0};
+                Vec3 lp[4], ln[4];
                 for (int k = 0; k < 4; ++k) {
                     if (bi.w[k] <= 0.0f) continue;
                     if (bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) continue;
-                    const Mat4& m = boneMat[static_cast<size_t>(bi.idx[k])];
+                    const size_t bk = static_cast<size_t>(bi.idx[k]);
+                    const Mat4& m = boneMat[bk];
                     pos = pos + m.point(p) * bi.w[k];
                     nr = nr + m.dir(nrm) * bi.w[k];
                     wsum += bi.w[k];
-                    bones[slot] = boneIdx[static_cast<size_t>(bi.idx[k])];
+                    bones[slot] = boneIdx[bk];
                     ws[slot] = bi.w[k];
+                    lp[slot] = invBone[bk].point(m.point(p));
+                    ln[slot] = invBone[bk].dir(m.dir(nrm));
                     ++slot;
                 }
                 if (wsum > 1e-6f) {
                     out.pos = pos * (1.0f / wsum);
                     out.normal = normalize(nr);
-                    for (int k = 0; k < 4; ++k) { out.bone[k] = bones[k]; out.weight[k] = ws[k] / wsum; }
-                } else {
-                    out.pos = staticM.point(p);
-                    out.normal = normalize(staticM.dir(nrm));
-                    out.bone[0] = staticBone;
-                    out.weight[0] = 1.0f;
+                    for (int k = 0; k < 4; ++k) { out.bone[k] = bones[k]; out.weight[k] = ws[k] / wsum; out.local[k] = lp[k]; out.nlocal[k] = ln[k]; }
+                    placed = true;
                 }
-            } else {
+            }
+            if (!placed) {
                 out.pos = staticM.point(p);
                 out.normal = normalize(staticM.dir(nrm));
                 out.bone[0] = staticBone;
                 out.weight[0] = 1.0f;
+                out.local[0] = invStatic.point(out.pos);
+                out.nlocal[0] = invStatic.dir(out.normal);
             }
         }
 
@@ -2449,6 +2462,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     SceneMesh nm;
                     nm.name = src.name + ".under";
                     nm.part = pieceIdx;
+                    nm.reshapable = src.reshapable;
                     std::map<uint32_t, uint32_t> remap;
                     for (auto& [mat, idx] : byMat) {
                         SceneSubmesh sm;
@@ -2507,6 +2521,85 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "\n");
         }
     return scene;
+}
+
+
+bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
+    if (scene.bones.empty()) return false;
+    int outfit = opt.outfit;
+    if (outfit < 0) outfit = static_cast<int>(card.status.at("coordinateType").asInt());
+    if (outfit < 0 || static_cast<size_t>(outfit) >= card.outfits.size()) outfit = 0;
+    std::string why;
+    auto base = resolver.openBaseBundle("chara/oo_base.unity3d", &why);
+    if (!base) return false;
+
+    // The same skeleton the assembly builds - body sliders, KKABMX, the head hung on the shaped neck, face sliders - but only the bones.
+    Scene scratch;
+    Rig rig;
+    Overrides shapeOv;
+    if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scratch, opt);
+    const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
+    applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
+    if (!addRigPrefab(scratch, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) return false;
+    Mat4 headBase;
+    if (auto hw = rig.world.find(opt.headAttachBone); hw != rig.world.end()) headBase = hw->second;
+    const int headAttach = scratch.boneIndex(opt.headAttachBone);
+    Overrides headOv;
+    if (opt.applyShape) {
+        resolve::ItemRef hr;
+        for (const auto& it : resolve::ItemsFromCard(card, outfit))
+            if (it.group == "Head") hr = it;
+        if (hr.group == "Head") {
+            resolve::ResolvedItem hi = resolver.resolve(card, hr);
+            if (hi.ok()) {
+                std::string hwhy;
+                auto hb = resolver.openBundle(hi, &hwhy);
+                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scratch, opt);
+            }
+        }
+    }
+    applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
+    addRigPrefab(scratch, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv);
+
+    // New world of every scene bone: the rig's own, and a bone an item added keeps its place relative to its parent.
+    const size_t n = scene.bones.size();
+    std::vector<Mat4> nw(n), inv(n);
+    for (size_t i = 0; i < n; ++i) {
+        const SceneBone& b = scene.bones[i];
+        auto it = b.source == "rig" ? rig.world.find(b.name) : rig.world.end();
+        if (it != rig.world.end()) nw[i] = it->second;
+        else if (b.parent >= 0 && static_cast<size_t>(b.parent) < i) nw[i] = nw[static_cast<size_t>(b.parent)] * (inverse(scene.bones[static_cast<size_t>(b.parent)].world) * b.world);
+        else nw[i] = b.world;
+        inv[i] = inverse(b.world);
+    }
+    for (auto& mesh : scene.meshes) {
+        if (!mesh.reshapable) continue;
+        for (auto& v : mesh.vertices) {
+            Vec3 pos{}, nrm{};
+            float sum = 0;
+            for (int k = 0; k < 4; ++k) {
+                if (v.weight[k] <= 0 || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= n) continue;
+                const Mat4& m = nw[static_cast<size_t>(v.bone[k])];
+                pos = pos + m.point(v.local[k]) * v.weight[k];
+                nrm = nrm + m.dir(v.nlocal[k]) * v.weight[k];
+                sum += v.weight[k];
+            }
+            if (sum <= 1e-6f) continue;
+            v.pos = pos * (1.0f / sum);
+            v.normal = normalize(nrm);
+        }
+    }
+    for (auto& c : scene.colliders) {
+        if (c.bone < 0 || static_cast<size_t>(c.bone) >= n) continue;
+        const Mat4 delta = nw[static_cast<size_t>(c.bone)] * inv[static_cast<size_t>(c.bone)];
+        c.center = delta.point(c.center);
+        c.axis = normalize(delta.dir(c.axis));
+    }
+    for (size_t i = 0; i < n; ++i) {
+        scene.bones[i].world = nw[i];
+        scene.bones[i].pos = nw[i].translation();
+    }
+    return true;
 }
 
 } // namespace cardbridge::assemble

@@ -17,6 +17,7 @@ struct SceneBone {
     int parent = -1;
     Vec3 pos;                 // rest position, model space
     std::string source;       // "rig" (shared skeleton) or the part that added it
+    Mat4 world;               // rest world matrix (position, rotation and scale as the game had it); what a re-shape moves the vertices from
 };
 
 struct SceneVertex {
@@ -25,6 +26,9 @@ struct SceneVertex {
     Vec2 uv1;                 // the second UV set (TEXCOORD1: the body's nipple placement); equals uv when the mesh has none
     int bone[4] = {0, 0, 0, 0};
     float weight[4] = {1, 0, 0, 0};
+    // The vertex and its normal in the frame of each bone that moves it (pos = sum of weight * bone world * local), so new bone worlds
+    // from a changed body shape give the new vertex without assembling again (assemble::Reshape). Valid when SceneMesh::reshapable.
+    Vec3 local[4], nlocal[4];
 };
 
 struct SceneTexture {
@@ -106,6 +110,7 @@ struct SceneMesh {
     std::vector<SceneVertex> vertices;
     std::vector<SceneSubmesh> submeshes;
     std::vector<SceneBlendShape> shapes;
+    bool reshapable = false;          // the vertices carry local / nlocal
 };
 
 // An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the

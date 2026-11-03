@@ -12,6 +12,7 @@
 #include "assemble/Assembler.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/Pose.h"
+#include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/MaterialEdits.h"
@@ -36,6 +37,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <cstdio>
@@ -665,6 +667,91 @@ void unitTests() {
         CHECK(c.aposeApplied);
     });
 
+    test("dragging a bone: turns about world axes keep the parent and A-pose frames, Euler round trip", [] {
+        using namespace assemble;
+        // Euler -> matrix -> Euler comes back (away from the poles)
+        for (Vec3 e : {Vec3{10, 20, 30}, Vec3{-40, 70, -15}, Vec3{0, 0, 90}, Vec3{25, -120, 5}}) {
+            const Vec3 back = EulerFromMatrix(Mat4::TRS({0, 0, 0}, shape::EulerToQuat(e), {1, 1, 1}));
+            CHECK(std::fabs(back.x - e.x) < 1e-2f && std::fabs(back.y - e.y) < 1e-2f && std::fabs(back.z - e.z) < 1e-2f);
+        }
+        // RotationBetween turns one direction onto another, also when they are opposite
+        for (Vec3 to : {Vec3{0, 1, 0}, Vec3{0.3f, -0.4f, 0.8f}, Vec3{-1, 0, 0}}) {
+            const Vec3 got = normalize(RotationBetween({1, 0, 0}, to).dir({1, 0, 0}));
+            const Vec3 want = normalize(to);
+            CHECK(std::fabs(got.x - want.x) < 1e-4f && std::fabs(got.y - want.y) < 1e-4f && std::fabs(got.z - want.z) < 1e-4f);
+        }
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = add("root", -1, {0, 1, 0});
+        const int a = add("a", root, {0.2f, 1, 0});
+        const int b = add("b", a, {0.4f, 1, 0});
+        Pose pose;
+        pose.edit(static_cast<size_t>(root)).rot = {0, 0, 90};   // the whole chain turned up: a is at (0, 1.2), b at (0, 1.4)
+        // now drag a toward the world +x again: turn its tip from +y to +x about the world z axis
+        const Mat4 turn = RotationBetween({0, 1, 0}, {1, 0, 0});
+        pose.edit(static_cast<size_t>(a)).rot = TurnBone(s, pose, static_cast<size_t>(a), turn);
+        const auto w = BoneWorlds(s, pose);
+        CHECK(std::fabs(w[static_cast<size_t>(a)].translation().y - 1.2f) < 1e-4f);   // a did not move, it turned
+        CHECK(std::fabs(w[static_cast<size_t>(b)].translation().x - 0.2f) < 1e-3f && std::fabs(w[static_cast<size_t>(b)].translation().y - 1.2f) < 1e-3f);   // b swung to the right of a
+        // with an A-pose base on the bone the result is the same in the world
+        Pose posed;
+        posed.base.assign(s.bones.size(), Quat{});
+        posed.base[static_cast<size_t>(a)] = shape::EulerToQuat({0, 0, -30});
+        posed.edit(static_cast<size_t>(root)).rot = {0, 0, 90};
+        const Vec3 before = BoneWorlds(s, posed)[static_cast<size_t>(b)].translation();
+        const Vec3 tip0{before.x - 0, before.y - 1.2f, before.z};
+        (void)tip0;
+        posed.edit(static_cast<size_t>(a)).rot = TurnBone(s, posed, static_cast<size_t>(a), RotationBetween(normalize({before.x, before.y - 1.2f, before.z}), {1, 0, 0}));
+        const Vec3 after = BoneWorlds(s, posed)[static_cast<size_t>(b)].translation();
+        CHECK(std::fabs(after.y - 1.2f) < 1e-3f && after.x > 0.15f);
+        // MoveBone: the edit moves the bone by the asked world distance whatever the parent's turn
+        Pose moved;
+        moved.edit(static_cast<size_t>(root)).rot = {0, 0, 90};
+        moved.edit(static_cast<size_t>(a)).pos = MoveBone(s, moved, static_cast<size_t>(a), {0.1f, 0, 0});
+        CHECK(std::fabs(BoneWorlds(s, moved)[static_cast<size_t>(a)].translation().x - 0.1f) < 1e-4f);
+    });
+
+    test("physics sim: a chain lags behind a moving anchor, settles again, stays out of colliders", [] {
+        using namespace assemble;
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = add("anchor", -1, {0, 1.0f, 0});
+        add("p1", root, {0, 0.9f, 0});
+        add("p2", 1, {0, 0.8f, 0});
+        add("p3", 2, {0, 0.7f, 0});
+        SceneChain ch;
+        ch.name = "strand";
+        ch.bones = {0, 1, 2, 3};
+        ch.damping = 0.1f; ch.elasticity = 0.1f; ch.stiffness = 0.1f;
+        s.chains.push_back(ch);
+        Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        PhysicsSim sim;
+        sim.Reset(s, pw);
+        CHECK(sim.particleCount() == 4);
+        std::vector<Mat4> skin(s.bones.size());
+        // at rest nothing moves: the skin stays the identity
+        for (int i = 0; i < 60; ++i) sim.Step(s, pw, 1, skin);
+        CHECK(std::fabs(skin[3].point(s.bones[3].pos).x) < 1e-4f && std::fabs(skin[3].point(s.bones[3].pos).y - 0.7f) < 1e-4f);
+        // the anchor jumps 0.3 to the right: the tip does not follow at once, then catches up
+        rest.edit(0).pos = {0.3f, 0, 0};
+        pw = BoneWorlds(s, rest);
+        sim.Step(s, pw, 1, skin);
+        const float lag = 0.3f - skin[3].point(s.bones[3].pos).x;   // how far the tip has not yet followed
+        CHECK(lag > 0.05f);
+        bool moving = true;
+        for (int i = 0; i < 600 && moving; ++i) moving = sim.Step(s, pw, 1, skin);
+        CHECK(!moving);
+        CHECK(std::fabs(skin[3].point(s.bones[3].pos).x - 0.3f) < 0.02f);   // settled under the anchor again
+        // a sphere collider in the way keeps the tip out
+        s.colliders.push_back({"ball", 0, {0.02f, 0.7f, 0}, {0, 1, 0}, 0.05f, 0.0f, false});   // rides the anchor bone, which stands at x 0.3: the ball sits at x 0.32
+        sim.Reset(s, pw);
+        for (int i = 0; i < 300; ++i) sim.Step(s, pw, 1, skin);
+        const Vec3 tip = skin[3].point(s.bones[3].pos);
+        const float d = std::sqrt((tip.x - 0.32f) * (tip.x - 0.32f) + (tip.y - 0.7f) * (tip.y - 0.7f) + tip.z * tip.z);
+        CHECK(d > 0.04f);   // on the ball's surface, give or take the length the chain keeps
+    });
+
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
         assemble::Scene s;
         assemble::SceneMesh mesh;
@@ -777,6 +864,42 @@ void integrationTests() {
             if (headLoaded) CHECK(!scene.expressions.empty());
             CHECK(!scene.colliders.empty());
             std::printf("  %zu expressions, %zu physics chains, %zu colliders\n", scene.expressions.size(), scene.chains.size(), scene.colliders.size());
+        }
+        {   // re-shaping in place: the same sliders change nothing, other sliders give what a fresh assembly gives
+            auto deviation = [](const assemble::Scene& a, const assemble::Scene& b, size_t* count = nullptr) {
+                float worst = 0;
+                size_t counted = 0;
+                for (size_t mi = 0; mi < a.meshes.size() && mi < b.meshes.size(); ++mi) {
+                    if (a.meshes[mi].vertices.size() != b.meshes[mi].vertices.size()) return 1e9f;
+                    for (size_t v = 0; v < a.meshes[mi].vertices.size(); ++v) {
+                        const Vec3 d{a.meshes[mi].vertices[v].pos.x - b.meshes[mi].vertices[v].pos.x, a.meshes[mi].vertices[v].pos.y - b.meshes[mi].vertices[v].pos.y,
+                                     a.meshes[mi].vertices[v].pos.z - b.meshes[mi].vertices[v].pos.z};
+                        worst = std::max(worst, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+                        ++counted;
+                    }
+                }
+                if (count) *count = counted;
+                return worst;
+            };
+            assemble::Scene again = scene;
+            assemble::AssembleOptions same = ao;
+            for (size_t i = 0; i < c.body.at("shapeValueBody").size(); ++i) same.bodyShape.push_back(static_cast<float>(c.body.at("shapeValueBody").at(i).asFloat()));
+            for (size_t i = 0; i < c.face.at("shapeValueFace").size(); ++i) same.faceShape.push_back(static_cast<float>(c.face.at("shapeValueFace").at(i).asFloat()));
+            CHECK(assemble::Reshape(again, c, resolver, same));
+            CHECK(deviation(scene, again) < 1e-4f);   // the identity re-shape is exact
+            assemble::AssembleOptions other = same;
+            other.bodyShape[0] = std::min(1.0f, other.bodyShape[0] + 0.3f);   // height
+            other.bodyShape[4] = std::max(0.0f, other.bodyShape[4] - 0.3f);
+            other.faceShape[0] = std::min(1.0f, other.faceShape[0] + 0.3f);
+            auto t0 = std::chrono::steady_clock::now();
+            CHECK(assemble::Reshape(again, c, resolver, other));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            assemble::Scene fresh = assemble::Assemble(c, resolver, other);
+            size_t counted = 0;
+            const float worst = deviation(fresh, again, &counted);
+            std::printf("  re-shape %.0f ms; against a fresh assembly: worst vertex offset %.2f mm over %zu vertices\n", ms, worst * 1000.0f, counted);
+            CHECK(worst < 0.01f);   // within a centimetre everywhere (items hung on settled DynamicBones are the only difference allowed)
+            CHECK(ms < 2000.0);
         }
         {   // the nude body: what a garment's mask cuts from the body is kept as under pieces, nothing is lost
             const assemble::ScenePart* body0 = nullptr;

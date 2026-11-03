@@ -41,6 +41,18 @@ bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base);
 // where the skin matrices put them. The bone table keeps its names and order. Afterwards `scene.pose` says what was applied.
 void BakePose(Scene& scene, const Pose& pose);
 
+// Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
+// (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit
+// so that the bone moves by `worldDelta` in the world.
+Vec3 TurnBone(const Scene& scene, const Pose& pose, size_t bone, const Mat4& worldTurn);
+Vec3 MoveBone(const Scene& scene, const Pose& pose, size_t bone, Vec3 worldDelta);
+
+// The rotation matrix that turns direction `from` onto direction `to` the short way (both need not be unit length).
+Mat4 RotationBetween(Vec3 from, Vec3 to);
+
+// The Euler angles (degrees, Unity's order: z, then x, then y) of a rotation matrix; the inverse of shape::EulerToQuat on rotations.
+Vec3 EulerFromMatrix(const Mat4& rotation);
+
 // Applies the skin matrices to a point / a direction of one vertex (its weights and bones); the viewer's quick re-skin and BakePose share it.
 Vec3 SkinPoint(const SceneVertex& v, const std::vector<Mat4>& skin);
 Vec3 SkinDirection(const SceneVertex& v, const std::vector<Mat4>& skin);
