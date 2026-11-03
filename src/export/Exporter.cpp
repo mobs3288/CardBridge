@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <set>
 
@@ -42,6 +43,33 @@ Bytes encodePng(const assemble::SceneTexture& t) {
     if (!stbi_write_png_to_func(cb, &out, t.width, t.height, 4, t.rgba.data(), t.width * 4))
         throw FormatError("PNG encode failed for texture " + t.name);
     return out;
+}
+
+// Writes a material's shade ramp as a 32-wide PNG, one row per ramp row, next to the other textures (once per distinct ramp) and
+// returns its index in the model's texture list.
+int ToonTexture(const std::vector<Vec3>& ramp, pmx::Model& model, std::map<std::string, int>& done, const ExportOptions& opt) {
+    constexpr int kW = 32;
+    assemble::SceneTexture t;
+    t.width = kW;
+    t.height = static_cast<int>(ramp.size());
+    t.rgba.resize(static_cast<size_t>(kW) * ramp.size() * 4);
+    std::string key;
+    for (size_t y = 0; y < ramp.size(); ++y) {
+        const float c[3] = {ramp[y].x, ramp[y].y, ramp[y].z};
+        uint8_t px[4];
+        for (int ch = 0; ch < 3; ++ch) px[ch] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, c[ch] * 255.0f + 0.5f)));
+        px[3] = 255;
+        key.append(reinterpret_cast<const char*>(px), 3);
+        for (int x = 0; x < kW; ++x) std::memcpy(&t.rgba[(y * kW + static_cast<size_t>(x)) * 4], px, 4);
+    }
+    auto it = done.find(key);
+    if (it != done.end()) return it->second;
+    t.name = "toon" + std::to_string(done.size());
+    const std::string file = "textures/" + t.name + ".png";
+    Bytes png = encodePng(t);
+    fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
+    model.textures.push_back(file);
+    return done[key] = static_cast<int>(model.textures.size()) - 1;
 }
 
 } // namespace
@@ -239,6 +267,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::vector<std::pair<int, int>> range(scene.parts.size(), {0, 0});
     std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
     std::vector<std::string> textureFiles(scene.textures.size());
+    std::map<std::string, int> toonFiles;   // ramp bytes -> PMX texture index
     int meshOrdinal = 0;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         const auto& part = scene.parts[pi];
@@ -278,6 +307,10 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     pm.diffuse = {0.0f, 0.0f, 0.0f, pm.diffuse.w};
                     pm.ambient = {1.0f, 1.0f, 1.0f};
                     pm.specular = {0.0f, 0.0f, 0.0f};
+                }
+                if (!mat.toon.empty() && !mat.bakedLit) {   // the game shader's shade, as the material's own toon ramp (bright at the top, like MMD's)
+                    pm.toon = ToonTexture(mat.toon, model, toonFiles, opt);
+                    pm.ambient = {1.0f, 1.0f, 1.0f};   // MMD multiplies the lit colour by the ramp; the shade tint lives in the ramp now
                 }
                 // MMD's broad white sheen (specular power 5) turns the game's skin gloss into a white face, and hair is lit by its texture.
                 if (mat.shader.find("skin") != std::string::npos || mat.shader.find("hair") != std::string::npos) pm.specular = {0.0f, 0.0f, 0.0f};

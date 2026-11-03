@@ -48,6 +48,8 @@ struct SceneTexBinding {
     Vec4 st{1, 1, 0, 0};         // scale.xy, offset.xy
 };
 
+constexpr int kToonRows = 32;   // rows of SceneMaterial::toon
+
 struct SceneMaterial {
     std::string name;
     std::string shader;
@@ -66,6 +68,9 @@ struct SceneMaterial {
     std::vector<std::pair<std::string, Vec4>> props;
     std::vector<SceneTexBinding> texProps;
     int shaderIndex = -1;
+    // The game shader's shade as a function of N.L, measured by BakeShaderTextures: kToonRows rows from N.L = 1 (top, fully lit) to
+    // -1 (bottom), each the colour factor the shader gives that light angle relative to the baked front light. Empty = none.
+    std::vector<Vec3> toon;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
     bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
 };

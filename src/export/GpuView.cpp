@@ -151,15 +151,21 @@ float4 ps() : SV_Target { return color; }
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
         if (!compile) return false;
         static const char src[] = R"HLSL(
-cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; };
+cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
 struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; };
 VO vs(VI i) { VO o; float4 p = float4(i.p, 1); o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; return o; }
 float4 ps(VO i) : SV_Target {
     float4 c = t0.Sample(s0, i.uv) * diffuse;
-    float nl = saturate(dot(normalize(i.n), light.xyz));
-    float lit = saturate((nl - 0.1) / 0.3);
+    float d = dot(normalize(i.n), light.xyz);
+    if (shadow.w > 1.5) {
+        float f = saturate(0.5 - 0.5 * d) * 32.0 - 0.5;
+        int a = clamp((int)floor(f), 0, 31), b = min(a + 1, 31);
+        c.rgb *= lerp(ramp[a].rgb, ramp[b].rgb, saturate(f - a));
+        return c;
+    }
+    float lit = saturate((saturate(d) - 0.1) / 0.3);
     c.rgb *= lerp(shadow.rgb, float3(1, 1, 1), lit);
     return c;
 }
@@ -175,7 +181,7 @@ float4 ps(VO i) : SV_Target {
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
         ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 7 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = (7 + 32) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
         Rel(vb); Rel(pb); Rel(err);
         return ok;
@@ -626,7 +632,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
-                        float cbv[28];
+                        float cbv[(7 + 32) * 4] = {};
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
@@ -635,6 +641,12 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         const float sh4[4] = {lin(mat.shadow.x), lin(mat.shadow.y), lin(mat.shadow.z), 1.0f};
                         std::memcpy(cbv + 20, sh4, 16);
                         std::memcpy(cbv + 24, lit, 16);
+                        if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows)) {   // the game shader's shade ramp instead of the two-step shadow tint
+                            cbv[23] = 2.0f;
+                            for (size_t k = 0; k < mat.toon.size(); ++k) {
+                                cbv[28 + k * 4] = lin(mat.toon[k].x); cbv[29 + k * 4] = lin(mat.toon[k].y); cbv[30 + k * 4] = lin(mat.toon[k].z);
+                            }
+                        }
                         ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
                         ctx->IASetInputLayout(I.fbIl);
                         ctx->VSSetShader(I.fbVs, nullptr, 0);

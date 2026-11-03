@@ -1124,7 +1124,7 @@ void StartExport() {
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
-            exporter::BakeShaderTextures(scene, 1024, false, nullptr, [](const std::string& m) { Log("  " + m); }, true);
+            exporter::BakeShaderTextures(scene, 1024, false, nullptr, [](const std::string& m) { Log("  " + m); }, true, true);
             exporter::ExportOptions eo;
             eo.outDir = outDir;
             eo.baseName = stem;
@@ -1156,13 +1156,13 @@ void ToggleAsExported() {
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
-    Log(std::string("baking the export preview (colour only, ") + (grade ? "graded" : "not graded") + ")");
+    Log(std::string("baking the export preview (colour only, toon ramps, ") + (grade ? "graded" : "not graded") + ")");
     auto copy = std::make_shared<assemble::Scene>(L->scene);
     std::thread([L, grade, copy]() {
         std::shared_ptr<assemble::Scene> sc;
         try {
             sc = copy;
-            exporter::BakeShaderTextures(*sc, 1024, false, nullptr, {}, grade);
+            exporter::BakeShaderTextures(*sc, 1024, false, nullptr, {}, grade, true);
         } catch (const std::exception& e) {
             Log(std::string("export preview failed: ") + e.what(), LogKind::Error);
             sc.reset();

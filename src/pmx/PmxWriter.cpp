@@ -198,8 +198,8 @@ Bytes WritePmx(const Model& m) {
         o.sidx(mat.texture, tSize);
         o.sidx(-1, tSize);       // sphere texture
         o.u8(0);                 // sphere mode: none
-        o.u8(1);                 // shared toon
-        o.u8(0);                 // toon01
+        if (mat.toon >= 0) { o.u8(0); o.sidx(mat.toon, tSize); }   // the material's own ramp
+        else { o.u8(1); o.u8(0); }                                  // shared toon01
         o.text(mat.memo);
         o.i32(static_cast<int32_t>(mat.indexCount));
     }

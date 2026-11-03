@@ -622,10 +622,15 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             }
                             if (al < 0.5f) continue;
                             float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                            float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
-                            r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
-                            g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
-                            bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
+                                const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
+                                r *= rr.x; g *= rr.y; bl *= rr.z;
+                            } else {
+                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                                r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
+                                g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
+                                bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            }
                             if (highlight) highlightTint(r, g, bl);
                             zbuf[zi] = z;
                             auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
@@ -700,8 +705,9 @@ void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hi
 }
 
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
-                        const std::function<void(const std::string&)>& progress, bool grade) {
+                        const std::function<void(const std::string&)>& progress, bool grade, bool toon) {
     grade = grade && ColourGradeEnabled();
+    toon = toon && !lit;
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
@@ -757,15 +763,17 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
         for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
 
+        // The shader over the uses' UV layouts at W x H with the light Lv: img gets rgba, cov the texels a triangle reached.
+        auto render = [&](int W, int H, const float* Lv, std::vector<float>& img, std::vector<uint8_t>& cov) -> bool {
         CbSet psCb;
-        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
+        FillConstants(sr->programs[sr->pi], mat, Lv, camPos, psCb, &scene.globalProps);
         std::vector<std::vector<PsIn>> vsOut(flats.size());
         bool ok = true;
-        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], ComputeTangents(flats[f]), scene.globalProps, L, camPos, vsOut[f]);
-        if (!ok) continue;
+        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], ComputeTangents(flats[f]), scene.globalProps, Lv, camPos, vsOut[f]);
+        if (!ok) return false;
 
-        std::vector<float> img(static_cast<size_t>(W) * H * 4, 0.0f);
-        std::vector<uint8_t> cov(static_cast<size_t>(W) * H, 0);
+        img.assign(static_cast<size_t>(W) * H * 4, 0.0f);
+        cov.assign(static_cast<size_t>(W) * H, 0);
         auto worker = [&](unsigned wi) {
             MatTextures mt;
             mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
@@ -824,6 +832,44 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker, w);
         worker(0);
         for (auto& th : pool) th.join();
+        return true;
+        };
+        std::vector<float> img;
+        std::vector<uint8_t> cov;
+        if (!render(W, H, L, img, cov)) continue;
+
+        if (toon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
+            auto meanColour = [&](const float* Lv, float out[3]) {
+                std::vector<float> ti;
+                std::vector<uint8_t> tc;
+                out[0] = out[1] = out[2] = 0.0f;
+                if (!render(64, 64, Lv, ti, tc)) return false;
+                double sum[3] = {0, 0, 0};
+                size_t n = 0;
+                for (size_t i = 0; i < tc.size(); ++i)
+                    if (tc[i] && ti[i * 4 + 3] >= 0.5f) { for (int c = 0; c < 3; ++c) sum[c] += ti[i * 4 + static_cast<size_t>(c)]; ++n; }
+                if (!n) return false;
+                for (int c = 0; c < 3; ++c) out[c] = static_cast<float>(sum[c] / static_cast<double>(n));
+                return true;
+            };
+            float ref[3];
+            std::vector<Vec3> ramp;
+            if (meanColour(L, ref)) {
+                for (int k = 0; k < assemble::kToonRows; ++k) {
+                    const float c = 1.0f - 2.0f * (static_cast<float>(k) + 0.5f) / static_cast<float>(assemble::kToonRows);   // N.L of this row
+                    const float s = std::sqrt(std::max(0.0f, 1.0f - c * c));
+                    const float Lv[3] = {0.0f, s, c};
+                    float m[3];
+                    Vec3 row{1, 1, 1};
+                    if (meanColour(Lv, m)) {
+                        float* rc[3] = {&row.x, &row.y, &row.z};
+                        for (int ch = 0; ch < 3; ++ch) *rc[ch] = ref[ch] > 1e-3f ? std::min(1.0f, std::max(0.0f, m[ch] / ref[ch])) : 1.0f;
+                    }
+                    ramp.push_back(row);
+                }
+                mat.toon = std::move(ramp);
+            }
+        }
 
         if (std::getenv("CARDBRIDGE_DEBUG_MAT")) {
             size_t covered = 0, solid = 0;
@@ -873,7 +919,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
-    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders";
+    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
 void RunCreateJobs(assemble::Scene& scene) {

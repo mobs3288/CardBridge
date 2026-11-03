@@ -28,6 +28,7 @@ struct Material {
     Vec4 edgeColor{0, 0, 0, 1};
     float edgeSize = 1.0f;
     int texture = -1;               // index into Model::textures
+    int toon = -1;                  // index into Model::textures of this material's own toon ramp; -1 = the shared toon01
     uint32_t indexCount = 0;        // indices (3 per triangle) this material owns, in order
     std::string memo;
 };
