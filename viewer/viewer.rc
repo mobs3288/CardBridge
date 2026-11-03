@@ -1,3 +1,0 @@
-// Resources of cardbridge_viewer.exe: the icon (window, taskbar, Explorer) and the logo the panel header draws (a PNG).
-1 ICON "res/cardbridge.ico"
-2 RCDATA "res/logo.png"
