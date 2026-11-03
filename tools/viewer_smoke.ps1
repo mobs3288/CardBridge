@@ -5,7 +5,7 @@
   controls that do nothing.
 
 .DESCRIPTION
-  Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, apose, physics,
+  Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
   asexported, export. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
@@ -27,7 +27,8 @@ param(
     [string]$Out = '',
     [string[]]$Only = @(),
     [switch]$Quick,
-    [int]$LoadTimeoutSec = 150
+    [int]$LoadTimeoutSec = 150,
+    [int]$ChestPan = 450      # camera pan up for the areola step, in thousandths of the window height
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,9 +151,9 @@ function Drag([int]$x0, [int]$y0, [int]$x1, [int]$y1, [int]$steps = 10, [int]$st
     [void][V]::PostMessage($hwnd, $WM_LBUTTONUP, [IntPtr]0, [V]::L($x1, $y1)); Start-Sleep -Milliseconds 250
 }
 # Sends a test message and waits for the answer; false when the window does not answer (hung, or gone).
-function Hook([int]$cmd, [int]$timeoutMs = 8000) {
+function Hook([int]$cmd, [int]$timeoutMs = 8000, [int]$lp = 0) {
     $r = [IntPtr]::Zero
-    $ok = [V]::SendMessageTimeout($hwnd, $WM_TEST, [IntPtr]$cmd, [IntPtr]0, 2, $timeoutMs, [ref]$r)
+    $ok = [V]::SendMessageTimeout($hwnd, $WM_TEST, [IntPtr]$cmd, [IntPtr]$lp, 2, $timeoutMs, [ref]$r)
     return ($ok -ne [IntPtr]::Zero)
 }
 function Layout() {
@@ -306,6 +307,30 @@ try {
             [void][V]::PostMessage($hwnd, 0x204, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 80
             [void][V]::PostMessage($hwnd, 0x205, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 600
             Check 'slider: the window answers after the reset' (Hook 10)
+        }
+    }
+
+    # ---- the areola slider: the nipples show through the body material, so the nude chest changes with it ----
+    if (Want 'areola') {
+        Write-Host 'areola slider'
+        [void](Hook 11 8000 $ChestPan); Start-Sleep -Milliseconds 800
+        $lay = GoTab 3
+        $row = $lay.rows | Where-Object { $_.id -eq 201 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -eq $row) { Check 'areola: the slider row is visible' $false }
+        else {
+            $x0 = [int]$lay.track[0] + 1; $x1 = [int]$lay.track[1] - 1
+            Click $x0 ([int]$row.y) 900
+            $small = Shot 'areola_small'
+            Click $x1 ([int]$row.y) 900
+            $big = Shot 'areola_big'
+            Click $x0 ([int]$row.y) 900
+            $small2 = Shot 'areola_small_again'
+            $lay = Layout
+            Check 'areola: the window answers' ($null -ne $lay)
+            $d = [V]::DiffView($small.Path, $big.Path, 400)
+            Check 'areola: the nipples change with the slider' ($d -gt 0.0003) ("{0:P3} of the view" -f $d)
+            $d2 = [V]::DiffView($small.Path, $small2.Path, 400)
+            Check 'areola: back at the small end the picture is the same again' ($d2 -lt 0.0003) ("{0:P3} of the view" -f $d2)
         }
     }
 

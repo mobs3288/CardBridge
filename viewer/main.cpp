@@ -384,7 +384,7 @@ constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
 constexpr UINT WM_EXP_READY = WM_APP + 4;
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
-// wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT.
+// wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest.
 constexpr UINT WM_TEST = WM_APP + 40;
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 constexpr UINT_PTR kTimerPhysics = 3;
@@ -1952,6 +1952,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 3) SavePoseFile();
         else if (wp == 4) LoadPoseFile();
         else if (wp == 10) DumpTestLayout();
+        else if (wp == 11) {   // the nude body on, and the camera close on the chest (lp = pan up, in thousandths of the window height)
+            if (std::shared_ptr<Loaded> L = Current())
+                for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i) {
+                    const auto& p = L->scene.parts[i];
+                    if (p.nudeSwitch) g.hidden[i] = 0;
+                    else if (p.group == "Outfit" || p.group == "Accessories") g.hidden[i] = 1;
+                }
+            g.cam = {};
+            g.cam.zoom = 3.0f;
+            g.cam.panY = static_cast<float>(lp) / 1000.0f;
+            g.dirty = true;
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
