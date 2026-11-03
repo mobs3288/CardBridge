@@ -30,6 +30,8 @@
 #include "resolve/ModIndex.h"
 #include "resolve/Resolver.h"
 #include "shape/Shape.h"
+#include "Ui.h"
+#include "core/Version.h"
 
 #include <nlohmann/json.hpp>
 
@@ -76,6 +78,12 @@ std::wstring Utf8ToWide(const std::string& s) {
 std::string Slashes(std::string s) {
     for (char& c : s) if (c == '\\') c = '/';
     return s;
+}
+double NowMs() {
+    static const double perMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart) / 1000.0; }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) / perMs;
 }
 std::string SafeStem(std::string s) {
     for (char& c : s)
@@ -255,39 +263,52 @@ struct TweakRow {
 };
 
 struct PanelLayout {
-    RECT tabs[TabCount];
-    RECT open, exportPmx, issues, reset, all;
+    RECT logo{}, tabs[TabCount]{};
+    RECT open{}, exportPmx{}, issues{}, reset{}, all{};
     int outfitNameTop = 0, outfitChipsTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
     RECT clearLog{};
+    // Bones tab hit areas (the click code and the drawing use the same ones): the two switches, the reset row, the undo / redo / save / load row
+    RECT boneSkeleton{}, boneHelpers{}, boneResetOne{}, boneResetAll{}, boneUndo{}, boneRedo{}, boneSave{}, boneLoad{};
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
+constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
 
 PanelLayout LayoutFor(int H, bool boneTab = false) {
     PanelLayout l;
-    l.open = {10, 88, 68, 112};
-    l.exportPmx = {74, 88, 174, 112};
-    l.issues = {180, 88, 244, 112};
-    l.reset = {250, 88, 308, 112};
-    l.all = {314, 88, 370, 112};
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 62, 176, 68 + i * 62, 198};
+    l.logo = {12, 12, 68, 68};
+    const int by = 98, bh = 26;
+    l.open = {10, by, 66, by + bh};
+    l.exportPmx = {72, by, 172, by + bh};
+    l.issues = {178, by, 234, by + bh};
+    l.reset = {240, by, 308, by + bh};
+    l.all = {314, by, 370, by + bh};
+    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots.
+    l.outfitNameTop = 138;
+    l.outfitChipsTop = 160;
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 62, 192, 68 + i * 62, 216};
+    l.partsHeadingTop = 198;
+    l.partsTop = 224;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone editor needs the room
-    l.footerTop = H - 34;
+    l.footerTop = H - 36;
     l.logBottom = l.footerTop - 4;
-    l.logTop = std::max(170, l.logBottom - logH);
-    // The outfit picker sits between the header buttons and the part list:
-    // a name line, then a row of numbered slots.
-    l.outfitNameTop = 126;
-    l.outfitChipsTop = 146;
-    l.partsHeadingTop = 180;
-    l.partsTop = 202;
-    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 8);
+    l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
+    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
     l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - kBoneEditRows * kRowH - 4);
     l.boneListTop = l.partsTop + kRowH;
     l.boneListBottom = l.boneEditTop - 4;
-    l.clearLog = {kPanel - 58, l.logTop + 5, kPanel - 10, l.logTop + 21};
+    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
+    l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
+    l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
+    const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
+    l.boneResetOne = {10, ry, 145, ry + kRowH};
+    l.boneResetAll = {149, ry, 262, ry + kRowH};
+    l.boneUndo = {10, ay, 56, ay + kRowH};
+    l.boneRedo = {60, ay, 110, ay + kRowH};
+    l.boneSave = {114, ay, 190, ay + kRowH};
+    l.boneLoad = {194, ay, 268, ay + kRowH};
     return l;
 }
 
@@ -330,7 +351,15 @@ struct App {
     bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
     POINT last{};
     int drag = 0;   // 1 orbit, 2 pan
-    int partScroll = 0, logScroll = 0;
+    int partScroll = 0, logScroll = 0;        // list scroll targets, in rows
+    float partPos = 0, bonePos = 0;           // what the lists show now: the targets, eased (smooth scrolling)
+    ui::Surface panel;                        // the panel, drawn off screen and copied where it changed
+    // Mouse movement during a drag is only noted here; Frame() applies it once per picture, so a fast mouse cannot queue up work.
+    bool dragPending = false;
+    int dragX = 0;                            // slider drag: the pointer's x
+    float boneDragDx = 0, boneDragDy = 0;     // bone drag: movement since the last picture
+    ULONGLONG lastFrameTick = 0;
+    bool animating = false;                   // a list is still easing towards its scroll target
     int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
@@ -371,6 +400,9 @@ struct App {
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
 
+    // Frame timing (CARDBRIDGE_BENCH): milliseconds spent in the three parts of a paint, summed, and how many paints ran.
+    struct Prof { double render = 0, blit = 0, panel = 0, panelDraw = 0, panelCopy = 0, reshape = 0, refresh = 0, sec[8] = {}; long paints = 0, renders = 0; } prof;
+
     std::mutex logMu;
     std::vector<LogLine> logLines;
     HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr;
@@ -386,20 +418,51 @@ constexpr UINT WM_EXP_READY = WM_APP + 4;
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest.
 constexpr UINT WM_TEST = WM_APP + 40;
+constexpr UINT WM_BENCH = WM_APP + 41;   // CARDBRIDGE_BENCH: run the scripted timing session (see RunBench)
+void RunBench();
 constexpr UINT_PTR kTimerApplyTweaks = 2;
-constexpr UINT_PTR kTimerPhysics = 3;
 
 std::shared_ptr<Loaded> Current() {
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     return g.loaded;
 }
 
+// Invalidation is by area, so a hover or a slider drag repaints a few rows instead of the whole window.
 void InvalidatePanel() {
     if (!g.hwnd) return;
     RECT rc;
     GetClientRect(g.hwnd, &rc);
     rc.right = kPanel;
     InvalidateRect(g.hwnd, &rc, FALSE);
+}
+
+void InvalidateView() {
+    if (!g.hwnd) return;
+    RECT rc;
+    GetClientRect(g.hwnd, &rc);
+    rc.left = kPanel;
+    InvalidateRect(g.hwnd, &rc, FALSE);
+}
+
+void InvalidateAll() { if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE); }
+
+void InvalidatePanelBand(int top, int bottom) {
+    if (!g.hwnd) return;
+    RECT rc{0, top, kPanel, bottom};
+    InvalidateRect(g.hwnd, &rc, FALSE);
+}
+
+int ClientHeight() {
+    RECT rc;
+    GetClientRect(g.hwnd, &rc);
+    return rc.bottom;
+}
+void InvalidateHeader() { InvalidatePanelBand(0, kHeaderBottom); }
+void InvalidateLog() { InvalidatePanelBand(Lay(ClientHeight()).logTop, ClientHeight()); }
+void InvalidateFooter() { InvalidatePanelBand(Lay(ClientHeight()).footerTop, ClientHeight()); }
+void InvalidateList() {
+    const PanelLayout l = Lay(ClientHeight());
+    InvalidatePanelBand(l.partsHeadingTop - 4, l.partsBottom + 4);
 }
 
 void Log(const std::string& text, LogKind kind = LogKind::Info) {
@@ -433,7 +496,7 @@ void ClearLog() {
         g.logLines.clear();
         g.logScroll = 0;
     }
-    InvalidatePanel();
+    InvalidateLog();
 }
 
 size_t Triangles(const assemble::Scene& s) {
@@ -549,7 +612,7 @@ void ResetTweak(int id) {
 void ScheduleApplyTweaks() {
     g.tweakPending = true;
     SetTimer(g.hwnd, kTimerApplyTweaks, 800, nullptr);
-    InvalidatePanel();
+    InvalidateList();
 }
 
 // ---- posing ---------------------------------------------------------------------------------------------------------
@@ -589,7 +652,7 @@ void ApplyPoseLive(int simSteps = 0) {
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
     g.dirty = true;
-    if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidateView();
 }
 
 // The file a pose is saved to / loaded from: CARDBRIDGE_POSE_PATH when set (scripted runs, no dialog), else the usual file dialog.
@@ -719,18 +782,17 @@ void SetPhysics(bool on) {
         g.physicsLast = GetTickCount64();
         g.physicsAccum = 0.0;
         g.physicsKick = g.physicsMoving = true;
-        SetTimer(g.hwnd, kTimerPhysics, 16, nullptr);
         Log("physics: on (" + std::to_string(L->scene.chains.size()) + " chains; move a bone or press N)", LogKind::Good);
     } else {
-        KillTimer(g.hwnd, kTimerPhysics);
         Log("physics: off");
     }
     ApplyPoseLive();
 }
 
-// One timer tick of the physics preview: as many 1/60 s updates as the time asks for (at most four), drawn once.
+// One step of the physics preview (Frame calls it every picture while the switch is on): as many 1/60 s updates as the time asks for
+// (at most four), drawn once.
 void PhysicsTick() {
-    if (!g.physics) { KillTimer(g.hwnd, kTimerPhysics); return; }
+    if (!g.physics) return;
     const ULONGLONG now = GetTickCount64();
     g.physicsAccum = std::min(0.1, g.physicsAccum + static_cast<double>(now - g.physicsLast) / 1000.0);
     g.physicsLast = now;
@@ -820,8 +882,12 @@ bool ReshapeNow(bool final) {
         ao.nippleOffset = g.tw.nippleMm / 1000.0f;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
     }
+    const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
+    const double t1 = NowMs();
     if (g.gpuOk) g.gpu.Refresh(final);
+    g.prof.reshape += t1 - t0;
+    g.prof.refresh += NowMs() - t1;
     if (g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
         assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
         g.gpuExp.Refresh(final);
@@ -1085,7 +1151,7 @@ int VisibleRows(const PanelLayout& l) { return std::max(1, (l.partsBottom - l.pa
 
 int RowIndexAt(size_t count, const PanelLayout& l, int x, int y) {
     if (x < 0 || x >= kPanel || y < l.partsTop || y >= l.partsBottom) return -1;
-    int row = (y - l.partsTop) / kRowH + g.partScroll;
+    const int row = (y - l.partsTop + static_cast<int>(std::lround(g.partPos * kRowH))) / kRowH;   // the list as it is drawn now (it may be mid-scroll)
     return row >= 0 && static_cast<size_t>(row) < count ? row : -1;
 }
 int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) { return RowIndexAt(rows.size(), l, x, y); }
@@ -1247,450 +1313,488 @@ void Render(int w, int h) {
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
 }
 
-void DrawTextAt(HDC dc, HFONT font, COLORREF col, int x, int y, const std::string& s, const RECT* clip = nullptr) {
-    HGDIOBJ old = SelectObject(dc, font);
-    SetTextColor(dc, col);
-    SetBkMode(dc, TRANSPARENT);
-    std::wstring w = Utf8ToWide(s);
-    if (clip) ExtTextOutW(dc, x, y, ETO_CLIPPED, clip, w.c_str(), static_cast<UINT>(w.size()), nullptr);
-    else TextOutW(dc, x, y, w.c_str(), static_cast<int>(w.size()));
-    SelectObject(dc, old);
-}
-
-void DrawTextRight(HDC dc, HFONT font, COLORREF col, int right, int y, const std::string& s, const RECT* clip) {
-    HGDIOBJ old = SelectObject(dc, font);
-    SetTextColor(dc, col);
-    SetBkMode(dc, TRANSPARENT);
-    std::wstring w = Utf8ToWide(s);
-    SetTextAlign(dc, TA_RIGHT | TA_TOP);
-    if (clip) ExtTextOutW(dc, right, y, ETO_CLIPPED, clip, w.c_str(), static_cast<UINT>(w.size()), nullptr);
-    else TextOutW(dc, right, y, w.c_str(), static_cast<int>(w.size()));
-    SetTextAlign(dc, TA_LEFT | TA_TOP);
-    SelectObject(dc, old);
-}
-
 COLORREF KindColor(LogKind k) {
     switch (k) {
-    case LogKind::Good: return RGB(120, 210, 140);
-    case LogKind::Warn: return RGB(235, 190, 90);
-    case LogKind::Error: return RGB(240, 110, 110);
-    default: return RGB(170, 180, 196);
+    case LogKind::Good: return ui::kGood;
+    case LogKind::Warn: return ui::kAmber;
+    case LogKind::Error: return ui::kBad;
+    default: return ui::kSub;
     }
 }
 
-void Button(HDC dc, const RECT& r, const std::string& label, bool hot, bool on, bool enabled) {
-    HBRUSH fill = CreateSolidBrush(hot && enabled ? RGB(52, 66, 88) : on ? RGB(44, 56, 74) : RGB(36, 40, 50));
-    FillRect(dc, &r, fill);
-    DeleteObject(fill);
-    HBRUSH edge = CreateSolidBrush(on ? RGB(90, 160, 230) : RGB(58, 64, 78));
-    FrameRect(dc, &r, edge);
-    DeleteObject(edge);
-    RECT t = r;
-    HGDIOBJ old = SelectObject(dc, g.fontUi);
-    SetTextColor(dc, enabled ? (on ? RGB(210, 232, 255) : RGB(214, 220, 232)) : RGB(90, 95, 105));
-    SetBkMode(dc, TRANSPARENT);
-    DrawTextW(dc, Utf8ToWide(label).c_str(), -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, old);
+COLORREF Mix(COLORREF a, COLORREF b, float t) {
+    auto ch = [&](int (*get)(COLORREF)) { return static_cast<int>(std::lround(get(a) + (get(b) - get(a)) * t)); };
+    return RGB(ch([](COLORREF c) -> int { return GetRValue(c); }), ch([](COLORREF c) -> int { return GetGValue(c); }), ch([](COLORREF c) -> int { return GetBValue(c); }));
 }
 
-// One slider row: label, the track with the default marked, the thumb, the value. False when the id names no slider.
-bool DrawSliderRow(HDC dc, int id, const std::string& label, int y) {
+bool Touches(const RECT& clip, const RECT& r) { RECT t; return IntersectRect(&t, &clip, &r) != 0; }
+bool TouchesY(const RECT& clip, int top, int bottom) { return bottom > clip.top && top < clip.bottom; }
+
+// A scrolled list: which row is first, how far it is pushed up (pixels), and how many rows show.
+struct ListView {
+    int first = 0, offset = 0, count = 0;
+};
+int ScrollPx(float pos, int rowH = kRowH) { return static_cast<int>(std::lround(std::max(0.0f, pos) * static_cast<float>(rowH))); }
+ListView ViewOf(int top, int bottom, float pos, int rowH = kRowH) {
+    const int px = ScrollPx(pos, rowH);
+    ListView v;
+    v.first = px / rowH;
+    v.offset = px % rowH;
+    v.count = (bottom - top + v.offset + rowH - 1) / rowH;
+    return v;
+}
+
+void Button(ui::Surface& s, const RECT& r, const std::string& label, bool hot, bool on, bool enabled, bool primary = false) {
+    COLORREF text;
+    if (primary && enabled) {
+        s.FillGradient(r, 7, hot ? Mix(ui::kAccent, RGB(255, 255, 255), 0.18f) : ui::kAccent, hot ? Mix(ui::kAccent2, RGB(255, 255, 255), 0.18f) : ui::kAccent2);
+        text = RGB(12, 14, 24);
+    } else {
+        s.FillRound(r, 7, !enabled ? ui::kCard : hot ? ui::kLineHi : on ? RGB(34, 48, 76) : ui::kCardHi);
+        s.StrokeRound(r, 7, on ? ui::kAccent : ui::kLine);
+        text = !enabled ? ui::kFaint : on ? RGB(206, 230, 255) : ui::kText;
+    }
+    s.TextCentered(primary && enabled ? g.fontBold : g.fontUi, text, r, label);
+}
+
+// A check box: a rounded square, filled with a tick when on.
+void CheckBox(ui::Surface& s, int x, int y, bool on, COLORREF onColor, bool dimmed = false) {
+    const RECT r{x, y, x + 14, y + 14};
+    if (on) {
+        s.FillRound(r, 4, dimmed ? ui::kFaint : onColor);
+        s.Line(static_cast<float>(x) + 3.5f, static_cast<float>(y) + 7.5f, static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, RGB(14, 16, 24), 1.8f);
+        s.Line(static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, static_cast<float>(x) + 10.8f, static_cast<float>(y) + 4.2f, RGB(14, 16, 24), 1.8f);
+    } else {
+        s.StrokeRound(r, 4, ui::kLineHi);
+    }
+}
+
+// The open / closed arrow of a group or a tree node.
+void Expander(ui::Surface& s, int x, int cy, bool open, COLORREF c) {
+    const float fx = static_cast<float>(x), fy = static_cast<float>(cy);
+    if (open) s.FillTriangle(fx, fy - 2.0f, fx + 8.0f, fy - 2.0f, fx + 4.0f, fy + 3.0f, c);
+    else s.FillTriangle(fx + 1.0f, fy - 4.0f, fx + 1.0f, fy + 4.0f, fx + 6.0f, fy, c);
+}
+
+// One slider row: label, the track filled from the card's value to the current one, the thumb, the value. False when the id names no slider.
+bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y) {
     SliderRef r;
     if (!SliderFor(id, r)) return false;
-    bool changed = TweakChanged(id);
-    RECT labelClip{12, y, kTrackL - 6, y + kRowH};
-    DrawTextAt(dc, g.fontUi, changed ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 2, label, &labelClip);
+    const bool changed = TweakChanged(id);
+    const COLORREF mark = changed ? ui::kAmber : ui::kAccent;
+    const RECT labelClip{12, y, kTrackL - 8, y + kRowH};
+    s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, 12, y + 2, label, &labelClip);
     const int mid = y + kRowH / 2;
-    HBRUSH tr = CreateSolidBrush(RGB(48, 54, 68));
-    RECT track{kTrackL, mid - 1, kTrackR, mid + 2};
-    FillRect(dc, &track, tr);
-    DeleteObject(tr);
-    auto xOf = [&](float v) { return kTrackL + static_cast<int>(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (kTrackR - kTrackL)); };
-    HBRUSH dm = CreateSolidBrush(RGB(110, 120, 140));   // where the card has it
-    RECT dr{xOf(r.def) - 1, mid - 5, xOf(r.def) + 2, mid + 6};
-    FillRect(dc, &dr, dm);
-    DeleteObject(dm);
-    HBRUSH th = CreateSolidBrush(changed ? RGB(235, 190, 90) : RGB(90, 170, 240));
-    RECT tb{xOf(*r.v) - 3, mid - 6, xOf(*r.v) + 4, mid + 7};
-    FillRect(dc, &tb, th);
-    DeleteObject(th);
+    auto xOf = [&](float v) { return kTrackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (kTrackR - kTrackL))); };
+    s.FillRound(RECT{kTrackL, mid - 2, kTrackR, mid + 2}, 2, ui::kLine);
+    const int a = std::min(xOf(r.def), xOf(*r.v)), b = std::max(xOf(r.def), xOf(*r.v));
+    if (b > a) s.FillRound(RECT{a, mid - 2, b, mid + 2}, 2, mark);
+    s.Line(static_cast<float>(xOf(r.def)), static_cast<float>(mid - 5), static_cast<float>(xOf(r.def)), static_cast<float>(mid + 5), ui::kDim, 1.0f);   // where the card has it
+    s.FillDisc(static_cast<float>(xOf(*r.v)), static_cast<float>(mid), 6.5f, mark);
+    s.FillDisc(static_cast<float>(xOf(*r.v)), static_cast<float>(mid), 3.5f, ui::kBg);
     char val[24];
     if (r.fmt) std::snprintf(val, sizeof val, r.fmt, static_cast<double>(*r.v));
     else if (r.percent) std::snprintf(val, sizeof val, "%d", static_cast<int>(std::lround(*r.v * 100)));
     else std::snprintf(val, sizeof val, "%+d", static_cast<int>(std::lround(*r.v)));
-    DrawTextRight(dc, g.fontMono, changed ? RGB(235, 190, 90) : RGB(150, 160, 178), kPanel - 12, y + 3, val, nullptr);
+    s.TextRight(g.fontMono, changed ? ui::kAmber : ui::kSub, kPanel - 14, y + 3, val);
     return true;
 }
 
+// A thin scroll bar at the right edge of a list.
+void ScrollBar(ui::Surface& s, int top, int bottom, int rows, int visible, float pos) {
+    if (rows <= visible) return;
+    const int trackH = bottom - top;
+    const int thumbH = std::max(18, trackH * visible / rows);
+    const float span = static_cast<float>(std::max(1, rows - visible));
+    const int thumbY = top + static_cast<int>(static_cast<float>(trackH - thumbH) * std::clamp(pos / span, 0.0f, 1.0f));
+    s.FillRound(RECT{kPanel - 11, thumbY, kPanel - 7, thumbY + thumbH}, 2, ui::kLineHi);
+}
+
 // The Bones tab: the skeleton switch row, the bone tree, and under it the editor of the selected bone.
-void DrawBonesTab(HDC dc, const PanelLayout& l, const Loaded& L) {
+void DrawBonesTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const Loaded& L) {
     const assemble::Scene& scene = L.scene;
-    const COLORREF text = RGB(206, 218, 236), amber = RGB(235, 190, 90);
     {   // the two switches
         const int y = l.partsTop;
-        DrawTextAt(dc, g.fontMono, g.showBones ? amber : text, 12, y + 3, g.showBones ? "[x]" : "[ ]");
-        DrawTextAt(dc, g.fontUi, g.showBones ? amber : text, 46, y + 2, "skeleton in the view (K)");
-        DrawTextAt(dc, g.fontMono, g.showHelpers ? amber : text, 214, y + 3, g.showHelpers ? "[x]" : "[ ]");
-        DrawTextAt(dc, g.fontUi, g.showHelpers ? amber : text, 248, y + 2, "helper bones");
+        CheckBox(s, 12, y + 3, g.showBones, ui::kAmber);
+        s.Text(g.fontUi, g.showBones ? ui::kAmber : ui::kText, 32, y + 2, "skeleton in the view (K)");
+        CheckBox(s, 214, y + 3, g.showHelpers, ui::kAmber);
+        s.Text(g.fontUi, g.showHelpers ? ui::kAmber : ui::kText, 234, y + 2, "helper bones");
     }
-    const RECT listClip{10, l.boneListTop, kPanel - 10, l.boneListBottom};
+    const RECT listClip{6, l.boneListTop, kPanel - 6, l.boneListBottom};
     const std::vector<BoneRow> rows = BuildBoneRows(scene);
     const int visible = std::max(1, (l.boneListBottom - l.boneListTop) / kRowH);
     g.boneScroll = std::max(0, std::min(g.boneScroll, static_cast<int>(rows.size()) - visible));
-    for (int i = 0; i < visible; ++i) {
-        const int idx = g.boneScroll + i;
-        if (idx >= static_cast<int>(rows.size())) break;
-        const BoneRow& r = rows[static_cast<size_t>(idx)];
-        const std::string& name = scene.bones[static_cast<size_t>(r.bone)].name;
-        const int y = l.boneListTop + i * kRowH;
-        const bool sel = name == g.selBoneName;
-        auto edit = g.boneEdits.find(name);
-        const bool edited = edit != g.boneEdits.end() && !assemble::IsIdentity(edit->second);
-        if (sel || idx == g.hoverRow) {
-            HBRUSH hb = CreateSolidBrush(sel ? RGB(45, 58, 78) : RGB(32, 36, 45));
-            RECT hr{0, y, kPanel, y + kRowH};
-            FillRect(dc, &hr, hb);
-            DeleteObject(hb);
+    g.bonePos = std::clamp(g.bonePos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(rows.size()) - visible)));
+    RECT sub;
+    if (IntersectRect(&sub, &clip, &listClip)) {
+        s.Begin(sub);
+        const ListView v = ViewOf(l.boneListTop, l.boneListBottom, g.bonePos);
+        for (int i = 0; i < v.count; ++i) {
+            const int idx = v.first + i;
+            if (idx >= static_cast<int>(rows.size())) break;
+            const BoneRow& r = rows[static_cast<size_t>(idx)];
+            const std::string& name = scene.bones[static_cast<size_t>(r.bone)].name;
+            const int y = l.boneListTop - v.offset + i * kRowH;
+            const bool sel = name == g.selBoneName;
+            auto edit = g.boneEdits.find(name);
+            const bool edited = edit != g.boneEdits.end() && !assemble::IsIdentity(edit->second);
+            if (sel || idx == g.hoverRow) {
+                s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, sel ? RGB(36, 50, 78) : ui::kCardHi);
+                if (sel) s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
+            }
+            const int x0 = 16 + std::min(r.depth, 12) * 10;
+            if (r.kids) Expander(s, x0, y + kRowH / 2, r.open, ui::kAccent);
+            s.Text(g.fontUi, edited ? ui::kAmber : sel ? RGB(240, 246, 255) : ui::kText, x0 + 14, y + 2, exporter::BoneLabelEn(name), &listClip);
         }
-        const int x0 = 12 + std::min(r.depth, 12) * 10;
-        if (r.kids) DrawTextAt(dc, g.fontMono, RGB(120, 180, 240), x0, y + 3, r.open ? "-" : "+", &listClip);
-        DrawTextAt(dc, g.fontUi, edited ? amber : sel ? RGB(238, 244, 255) : text, x0 + 14, y + 2, exporter::BoneLabelEn(name), &listClip);
-    }
-    if (static_cast<int>(rows.size()) > visible) {
-        const int trackH = l.boneListBottom - l.boneListTop;
-        const int thumbH = std::max(18, trackH * visible / static_cast<int>(rows.size()));
-        const int span = std::max(1, static_cast<int>(rows.size()) - visible);
-        const int thumbY = l.boneListTop + (trackH - thumbH) * g.boneScroll / span;
-        HBRUSH th = CreateSolidBrush(RGB(90, 100, 120));
-        RECT rr{kPanel - 5, thumbY, kPanel - 2, thumbY + thumbH};
-        FillRect(dc, &rr, th);
-        DeleteObject(th);
+        ScrollBar(s, l.boneListTop, l.boneListBottom, static_cast<int>(rows.size()), visible, g.bonePos);
+        s.Begin(clip);
     }
     // the editor
-    HBRUSH edge = CreateSolidBrush(RGB(42, 46, 56));
-    RECT er{0, l.boneEditTop - 3, kPanel, l.boneEditTop - 2};
-    FillRect(dc, &er, edge);
-    DeleteObject(edge);
+    s.Fill(RECT{10, l.boneEditTop - 3, kPanel - 10, l.boneEditTop - 2}, ui::kLine);
     const RECT headClip{10, l.boneEditTop, kPanel - 10, l.boneEditTop + kRowH};
     const int sel = g.selBoneName.empty() ? -1 : scene.boneIndex(g.selBoneName);
     {   // undo, redo, save and load the pose: always there
-        const int ay = l.boneEditTop + 11 * kRowH;
-        DrawTextAt(dc, g.fontUi, g.undoStack.empty() ? RGB(90, 98, 112) : RGB(150, 160, 178), 12, ay + 2, "undo");
-        DrawTextAt(dc, g.fontUi, g.redoStack.empty() ? RGB(90, 98, 112) : RGB(150, 160, 178), 62, ay + 2, "redo");
-        DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 120, ay + 2, "save pose");
-        DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 195, ay + 2, "load pose");
-        DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 12, ay + 4, "Ctrl+Z / Y / S / O", nullptr);
+        auto ghost = [&](const RECT& r, const char* label, bool enabled) {
+            s.FillRound(r, 5, ui::kCardHi);
+            s.TextCentered(g.fontUi, enabled ? ui::kText : ui::kFaint, r, label);
+        };
+        ghost(l.boneUndo, "undo", !g.undoStack.empty());
+        ghost(l.boneRedo, "redo", !g.redoStack.empty());
+        ghost(l.boneSave, "save pose", true);
+        ghost(l.boneLoad, "load pose", true);
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.boneUndo.top + 4, "Ctrl+Z / Y / S / O");
     }
     if (sel < 0) {
-        DrawTextAt(dc, g.fontUi, RGB(140, 150, 168), 12, l.boneEditTop + 2, "click a bone in the list or in the view (turn on the skeleton)", &headClip);
+        s.Text(g.fontUi, ui::kSub, 12, l.boneEditTop + 2, "click a bone in the list or in the view (turn on the skeleton)", &headClip);
         return;
     }
-    DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, l.boneEditTop + 2, exporter::BoneLabelEn(g.selBoneName) + "   " + g.selBoneName, &headClip);
+    s.Text(g.fontBold, ui::kAccent, 12, l.boneEditTop + 2, exporter::BoneLabelEn(g.selBoneName) + "   " + g.selBoneName, &headClip);
     static const char* const labels[kBoneEditCount] = {"Move X", "Move Y", "Move Z", "Rotate X", "Rotate Y", "Rotate Z", "Scale X", "Scale Y", "Scale Z"};
-    for (int k = 0; k < kBoneEditCount; ++k) DrawSliderRow(dc, kBoneEdit + k, labels[k], l.boneEditTop + (1 + k) * kRowH);
-    const int y = l.boneEditTop + 10 * kRowH;
-    DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 12, y + 2, "reset this bone");
-    DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 150, y + 2, "reset every bone");
-    DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 12, y + 4, "wheel: fine step", nullptr);
+    for (int k = 0; k < kBoneEditCount; ++k)
+        if (TouchesY(clip, l.boneEditTop + (1 + k) * kRowH, l.boneEditTop + (2 + k) * kRowH)) DrawSliderRow(s, kBoneEdit + k, labels[k], l.boneEditTop + (1 + k) * kRowH);
+    s.FillRound(l.boneResetOne, 5, ui::kCardHi);
+    s.TextCentered(g.fontUi, ui::kSub, l.boneResetOne, "reset this bone");
+    s.FillRound(l.boneResetAll, 5, ui::kCardHi);
+    s.TextCentered(g.fontUi, ui::kSub, l.boneResetAll, "reset every bone");
+    s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.boneResetOne.top + 4, "wheel: fine step");
 }
 
-void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
+void DrawHeader(ui::Surface& s, const RECT& clip, const PanelLayout& l, const std::shared_ptr<Loaded>& L, const std::string& modsInfo) {
+    (void)modsInfo;
+    s.FillGradient(RECT{0, 0, kPanel - 1, kHeaderBottom - 2}, 0, RGB(18, 25, 44), RGB(30, 22, 52));
+    s.FillGradient(RECT{0, kHeaderBottom - 2, kPanel - 1, kHeaderBottom}, 0, ui::kAccent, ui::kAccent2);
+    s.Logo(l.logo, 12);
+    s.StrokeRound(l.logo, 12, ui::kLineHi);
+    const int tx = 80, right = kPanel - 12;
+    const RECT line{tx, 0, right, kHeaderBottom};
+    const int cardW = s.TextWidth(g.fontTitle, "Card");
+    s.Text(g.fontTitle, ui::kText, tx, 8, "Card");
+    s.Text(g.fontTitle, ui::kAccent, tx + cardW, 8, "Bridge");
+    s.TextRight(g.fontSmall, ui::kDim, right, 14, std::string("v") + CARDBRIDGE_VERSION);
+    std::string title = L ? L->title : std::string();
+    if (L && !L->scene.parts.empty()) {
+        if (title.empty()) title = "(unnamed card)";
+        s.Text(g.fontBold, ui::kText, tx, 35, title, &line);
+        size_t listed = 0;
+        for (const auto& p : L->scene.parts) listed += !p.underPiece;
+        s.Text(g.fontSmall, ui::kSub, tx, 52,
+               Count(Triangles(L->scene)) + " triangles  ·  " + std::to_string(L->scene.materials.size()) + " materials  ·  " + std::to_string(listed) + " parts", &line);
+        size_t warn = 0, err = 0;
+        for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
+        s.Text(g.fontSmall, warn + err ? ui::kAmber : ui::kGood, tx, 68, std::to_string(err) + " errors, " + std::to_string(warn) + " warnings  [I]", &line);
+        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported (graded)" : "as exported") : g.gpuOk ? "Direct3D 11" : "software";
+        mode += g.textured ? "" : "  ·  untextured";
+        s.TextRight(g.fontSmall, g.gpuOk ? ui::kAccent : ui::kSub, right, 68, mode);
+    } else if (L) {
+        // The assembly threw (unsupported card, broken container): show why instead of a row of zeros.
+        s.Text(g.fontBold, ui::kBad, tx, 33, "could not assemble this card", &line);
+        if (!L->notes.empty()) s.Text(g.fontSmall, RGB(226, 184, 184), tx, 52, ClipText(L->notes[0], 54), &line);
+        s.Text(g.fontSmall, ui::kSub, tx, 68, "details in the log below  ·  O opens another card", &line);
+    } else {
+        s.Text(g.fontBold, ui::kText, tx, 33, "Drop a card here, or press O", &line);
+        s.Text(g.fontSmall, g.busy ? ui::kAccent : ui::kSub, tx, 52, ClipText(g.status, 54), &line);
+        s.Text(g.fontSmall, ui::kDim, tx, 68, "library: " + (g.settings.library.empty() ? std::string("(not set)") : Shorten(g.settings.library, 42)), &line);
+    }
+    (void)clip;
+}
+
+void DrawPanel(ui::Surface& s, const RECT& clip) {
     std::shared_ptr<Loaded> L = Current();
     std::string modsInfo;
     { std::lock_guard<std::recursive_mutex> lk(g.mu); modsInfo = g.modsInfo; }
-    PanelLayout l = Lay(rc.bottom);
+    const int H = s.height();
+    const PanelLayout l = Lay(H);
+    double lapT = NowMs();
+    auto lap = [&](int i) { const double t = NowMs(); g.prof.sec[i] += t - lapT; lapT = t; };
+    s.Begin(clip);
+    s.Fill(clip, ui::kBg);
+    lap(0);
+    if (clip.top < kHeaderBottom) g.prof.sec[7] += 1.0;
 
-    HBRUSH bg = CreateSolidBrush(RGB(24, 26, 32));
-    RECT all{0, 0, kPanel, rc.bottom};
-    FillRect(dc, &all, bg);
-    DeleteObject(bg);
-    // Belt and braces: nothing the panel draws may cross into the viewport, whatever the path or name length.
-    int savedDc = SaveDC(dc);
-    if (savedDc) IntersectClipRect(dc, 0, 0, kPanel, rc.bottom);
-
-    // header -----------------------------------------------------------------------------------------------------------
-    std::string title = L ? L->title : std::string("CardBridge viewer");
-    if (title.empty()) title = "CardBridge viewer";
-    DrawTextAt(dc, g.fontTitle, RGB(238, 241, 248), 10, 7, ClipText(title, 38));
-    if (L && !L->scene.parts.empty()) {
-        size_t listed = 0;
-        for (const auto& p : L->scene.parts) listed += !p.underPiece;
-        std::string stats = Count(Triangles(L->scene)) + " triangles, " + std::to_string(L->scene.materials.size()) + " materials, " +
-                            std::to_string(listed) + " parts";
-        DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 10, 30, stats);
-        size_t warn = 0, err = 0;
-        for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
-        DrawTextAt(dc, g.fontUi, warn + err ? RGB(235, 190, 90) : RGB(120, 200, 120), 10, 48,
-                   std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I]");
-        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported (graded colours)" : "as exported") : g.gpuOk ? "Direct3D 11 shaders" : "software shaders";
-        mode += g.textured ? "  ·  textured" : "  ·  untextured";
-        DrawTextAt(dc, g.fontUi, g.gpuOk ? RGB(110, 180, 240) : RGB(150, 160, 178), 10, 66, mode);
-    } else if (L) {
-        // The assembly threw (unsupported card, broken container): show why instead of a row of zeros.
-        DrawTextAt(dc, g.fontBold, RGB(240, 110, 110), 10, 34, "could not assemble this card");
-        RECT noteClip{10, 54, kPanel - 10, 74};
-        if (!L->notes.empty()) DrawTextAt(dc, g.fontUi, RGB(220, 180, 180), 10, 54, ClipText(L->notes[0], 54), &noteClip);
-        DrawTextAt(dc, g.fontUi, RGB(140, 150, 168), 10, 76, "details in the log below  ·  O opens another card");
-    } else {
-        DrawTextAt(dc, g.fontUi, RGB(190, 200, 215), 10, 34, "drop a card .png onto this window, or press O");
-        DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(140, 150, 168), 10, 54, ClipText(g.status, 54));
-        DrawTextAt(dc, g.fontUi, RGB(120, 130, 150), 10, 72,
-                   "library: " + (g.settings.library.empty() ? std::string("(not set)") : Shorten(g.settings.library, 42)));
+    // header and toolbar ---------------------------------------------------------------------------------------------
+    if (TouchesY(clip, 0, kHeaderBottom)) DrawHeader(s, clip, l, L, modsInfo);
+    if (TouchesY(clip, l.open.top, l.open.bottom)) {
+        Button(s, l.open, "Open", g.hoverButton == 1, false, true);
+        Button(s, l.exportPmx, g.exporting ? "Exporting..." : "Export PMX", g.hoverButton == 2, false, L != nullptr && !g.busy && !g.exporting, true);
+        Button(s, l.issues, "Issues", g.hoverButton == 3, g.showIssues, L != nullptr);
+        Button(s, l.reset, "Reset view", g.hoverButton == 4, false, L != nullptr);
+        Button(s, l.all, "All", g.hoverButton == 5, false, L != nullptr);
     }
 
-    Button(dc, l.open, "Open", g.hoverButton == 1, false, true);
-    Button(dc, l.exportPmx, g.exporting ? "Exporting..." : "Export PMX", g.hoverButton == 2, false, L != nullptr && !g.busy && !g.exporting);
-    Button(dc, l.issues, "Issues", g.hoverButton == 3, g.showIssues, L != nullptr);
-    Button(dc, l.reset, "Reset", g.hoverButton == 4, false, L != nullptr);
-    Button(dc, l.all, "All", g.hoverButton == 5, false, L != nullptr);
-
-    HBRUSH div = CreateSolidBrush(RGB(42, 46, 56));
-    RECT d1{10, 120, kPanel - 10, 121};
-    FillRect(dc, &d1, div);
-    DeleteObject(div);
-
-    // outfit ------------------------------------------------------------------------------------------------------------
-    // The counter and the game's name for the coordinate, over a row of slots
-    // that can be clicked - Left/Right still steps through them.
-    {
+    lap(1);
+    // outfit: the counter and the game's name for the coordinate, over a row of slots that can be clicked (Left / Right still step) ----
+    if (TouchesY(clip, l.outfitNameTop - 4, l.outfitChipsTop + kOutfitChipH + 4)) {
         int shown = L ? L->outfit : -1;
         if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
         if (L && L->outfits > 0) shown = std::clamp(shown, 0, L->outfits - 1);
-        DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, l.outfitNameTop, "OUTFIT");
+        s.Text(g.fontBold, ui::kAccent, 12, l.outfitNameTop, "OUTFIT");
         if (L && L->outfits > 0) {
             // Hovering a slot previews that outfit's name without loading it.
             const int preview = g.hoverOutfit >= 0 && g.hoverOutfit < L->outfits ? g.hoverOutfit : shown;
-            const COLORREF nameColor = g.busy ? RGB(120, 200, 255)
-                                              : g.hoverOutfit >= 0 ? RGB(238, 244, 255) : RGB(206, 218, 236);
-            DrawTextAt(dc, g.fontBold, nameColor, 72, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30));
+            const COLORREF nameColor = g.busy ? ui::kAccent : g.hoverOutfit >= 0 ? RGB(246, 249, 255) : ui::kText;
+            s.Text(g.fontBold, nameColor, 74, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30));
             char count[32];
             std::snprintf(count, sizeof count, "%d / %d", shown + 1, L->outfits);
-            DrawTextRight(dc, g.fontBold, RGB(235, 190, 90), kPanel - 10, l.outfitNameTop, count, nullptr);
+            s.TextRight(g.fontBold, ui::kAmber, kPanel - 12, l.outfitNameTop, count);
         } else {
-            DrawTextAt(dc, g.fontUi, RGB(110, 120, 138), 72, l.outfitNameTop, g.busy ? "loading ..." : "no card");
+            s.Text(g.fontUi, ui::kDim, 74, l.outfitNameTop, g.busy ? "loading ..." : "no card");
         }
         const int chips = L ? std::min(L->outfits, OutfitChipsPerRow()) : 0;
-        for (int i = 0; i < chips; ++i) {
-            char number[8];
-            std::snprintf(number, sizeof number, "%d", i + 1);
-            Button(dc, OutfitChipRect(l, i), number, g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
+        for (int i = 0; i < chips; ++i) Button(s, OutfitChipRect(l, i), std::to_string(i + 1), g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
+    }
+
+    lap(2);
+    // tabs ----------------------------------------------------------------------------------------------------------------
+    if (TouchesY(clip, l.tabs[0].top - 2, l.tabs[0].bottom + 2)) {
+        for (int i = 0; i < TabCount; ++i) {
+            const RECT& t = l.tabs[i];
+            const bool act = !g.showIssues && g.tab == i, hot = g.hoverButton == 10 + i;
+            if (act) {
+                s.FillRound(t, 7, ui::kCardHi);
+                s.FillGradient(RECT{t.left + 10, t.bottom - 3, t.right - 10, t.bottom - 1}, 1, ui::kAccent, ui::kAccent2);
+            } else if (hot && L) {
+                s.FillRound(t, 7, ui::kCard);
+            }
+            s.TextCentered(act ? g.fontBold : g.fontUi, !L ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
+        }
+        if (L) {
+            std::string right;
+            if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " issues";
+            else if (g.busy && g.tab != TabParts) right = "shaping";
+            else if (g.tweakPending) right = "applying";
+            else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
+            else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
+            else right = AnyTweak() ? "tweaked" : "as card";
+            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, right);
         }
     }
 
-    // parts / issues ---------------------------------------------------------------------------------------------------
-    RECT clip{10, l.partsTop, kPanel - 10, l.partsBottom};
-    for (int i = 0; i < TabCount; ++i)
-        Button(dc, l.tabs[i], kTabNames[i], g.hoverButton == 10 + i, !g.showIssues && g.tab == i, L != nullptr);
-    if (L) {
-        std::string right;
-        if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " issues";
-        else if (g.busy && g.tab != TabParts) right = "shaping";
-        else if (g.tweakPending) right = "applying";
-        else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
-        else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
-        else right = AnyTweak() ? "tweaked" : "as card";
-        DrawTextRight(dc, g.fontSmall, g.busy || g.tweakPending ? RGB(120, 200, 255) : RGB(110, 120, 138), kPanel - 10, l.partsHeadingTop + 2, right, nullptr);
-    }
-    if (!L) {
-        DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(120, 130, 150), 10, l.partsTop + 4,
-                   g.busy ? "loading the card ..." : "no card loaded");
-    } else if (g.showIssues) {
-        std::vector<std::pair<std::string, LogKind>> lines;
-        for (const auto& i : L->scene.issues) {
-            std::string t = (i.part.empty() ? "" : "[" + i.part + "] ") + i.message;
-            LogKind k = i.severity == "error" ? LogKind::Error : LogKind::Warn;
-            while (t.size() > 50) {
-                size_t cut = t.rfind(' ', 50);
-                if (cut == std::string::npos || cut < 20) cut = 50;
-                lines.push_back({t.substr(0, cut), k});
-                t = t.substr(cut + (t[cut] == ' ' ? 1 : 0));
-            }
-            lines.push_back({t, k});
-        }
-        int visible = std::max(1, (l.partsBottom - l.partsTop) / 16);
-        g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(lines.size()) - visible));
-        for (int i = 0; i < visible; ++i) {
-            int idx = g.partScroll + i;
-            if (idx >= static_cast<int>(lines.size())) break;
-            DrawTextAt(dc, g.fontLog, KindColor(lines[static_cast<size_t>(idx)].second), 12, l.partsTop + i * 16,
-                       lines[static_cast<size_t>(idx)].first, &clip);
-        }
-    } else if (g.tab == TabBones) {
-        DrawBonesTab(dc, l, *L);
-    } else if (g.tab != TabParts) {
-        std::vector<TweakRow> rows = BuildTweakRows(g.tab);
-        int visible = VisibleRows(l);
-        g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
-        for (int i = 0; i < visible; ++i) {
-            int idx = g.partScroll + i;
-            if (idx >= static_cast<int>(rows.size())) break;
-            const TweakRow& row = rows[static_cast<size_t>(idx)];
-            int y = l.partsTop + i * kRowH;
-            if (idx == g.hoverRow) {
-                HBRUSH hb = CreateSolidBrush(row.kind == 0 ? RGB(32, 36, 45) : RGB(36, 44, 58));
-                RECT hr{0, y, kPanel, y + kRowH};
-                FillRect(dc, &hr, hb);
-                DeleteObject(hb);
-            }
-            if (row.kind == 0) {
-                std::string name = row.label;
-                for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, y + 3, name);
-                bool any = false;
-                for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
-                if (row.id >= 0) DrawTextRight(dc, g.fontSmall, any ? RGB(235, 190, 90) : RGB(80, 88, 104), kPanel - 12, y + 4, "reset", &clip);
-            } else if (row.kind == 4) {
-                DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 14, y + 4, row.label, &clip);
-            } else if (row.kind == 2) {
-                bool on = TweakChanged(row.id);
-                const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
-                DrawTextAt(dc, g.fontMono, failed ? RGB(235, 110, 110) : on ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 3, on ? "[x]" : "[ ]");
-                DrawTextAt(dc, g.fontUi, failed ? RGB(235, 110, 110) : on ? RGB(235, 190, 90) : RGB(206, 218, 236), 46, y + 2, failed ? row.label + "  (does not compile)" : row.label, &clip);
-            } else {
-                if (!DrawSliderRow(dc, row.id, row.label, y)) continue;
-            }
-        }
-        if (static_cast<int>(rows.size()) > visible) {
-            int trackTop = l.partsTop, trackH = l.partsBottom - l.partsTop;
-            int thumbH = std::max(18, trackH * visible / static_cast<int>(rows.size()));
-            int span = std::max(1, static_cast<int>(rows.size()) - visible);
-            int thumbY = trackTop + (trackH - thumbH) * g.partScroll / span;
-            HBRUSH th = CreateSolidBrush(RGB(90, 100, 120));
-            RECT rr{kPanel - 5, thumbY, kPanel - 2, thumbY + thumbH};
-            FillRect(dc, &rr, th);
-            DeleteObject(th);
-        }
-    } else {
-        std::vector<PartRow> rows = BuildRows(L->scene);
-        int visible = VisibleRows(l);
-        g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
-        for (int i = 0; i < visible; ++i) {
-            int idx = g.partScroll + i;
-            if (idx >= static_cast<int>(rows.size())) break;
-            const PartRow& row = rows[static_cast<size_t>(idx)];
-            int y = l.partsTop + i * kRowH;
-            bool hot = idx == g.hoverRow;
-            if (row.part < 0) {
-                if (hot) {
-                    HBRUSH hb = CreateSolidBrush(RGB(32, 36, 45));
-                    RECT hr{0, y, kPanel, y + kRowH};
-                    FillRect(dc, &hr, hb);
-                    DeleteObject(hb);
+    lap(3);
+    // the list: parts, issues, sliders or bones ---------------------------------------------------------------------------
+    const RECT listCard{6, l.partsTop - 4, kPanel - 6, l.partsBottom + 3};
+    if (Touches(clip, listCard)) {
+        s.FillRound(listCard, 8, ui::kCard);
+        const RECT listClip{6, l.partsTop, kPanel - 6, l.partsBottom};
+        RECT sub;
+        const bool inList = IntersectRect(&sub, &clip, &listClip) != 0;
+        const RECT clipText{10, l.partsTop, kPanel - 14, l.partsBottom};
+        if (!L) {
+            s.Text(g.fontUi, g.busy ? ui::kAccent : ui::kDim, 14, l.partsTop + 4, g.busy ? "loading the card ..." : "no card loaded");
+        } else if (g.showIssues) {
+            std::vector<std::pair<std::string, LogKind>> lines;
+            for (const auto& i : L->scene.issues) {
+                std::string t = (i.part.empty() ? "" : "[" + i.part + "] ") + i.message;
+                const LogKind k = i.severity == "error" ? LogKind::Error : LogKind::Warn;
+                while (t.size() > 50) {
+                    size_t cut = t.rfind(' ', 50);
+                    if (cut == std::string::npos || cut < 20) cut = 50;
+                    lines.push_back({t.substr(0, cut), k});
+                    t = t.substr(cut + (t[cut] == ' ' ? 1 : 0));
                 }
-                std::string name = row.group;
-                for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                bool collapsed = g.collapsedGroups.count(row.group) != 0;
-                int count = 0;
-                for (const auto& p : L->scene.parts) if (p.group == row.group && !p.underPiece) ++count;
-                DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, y + 3, (collapsed ? "+ " : "- ") + name);
-                DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 12, y + 4, std::to_string(count), &clip);
-            } else {
-                const auto& p = L->scene.parts[static_cast<size_t>(row.part)];
-                bool off = static_cast<size_t>(row.part) < g.hidden.size() && g.hidden[static_cast<size_t>(row.part)];
-                bool ok = p.status == "resolved-base" || p.status == "resolved-mod";
-                if (hot) {
-                    HBRUSH hb = CreateSolidBrush(RGB(45, 58, 78));
-                    RECT hr{0, y, kPanel, y + kRowH};
-                    FillRect(dc, &hr, hb);
-                    DeleteObject(hb);
-                    HBRUSH bar = CreateSolidBrush(RGB(90, 170, 240));
-                    RECT br{0, y, 3, y + kRowH};
-                    FillRect(dc, &br, bar);
-                    DeleteObject(bar);
-                }
-                COLORREF col = off ? RGB(95, 100, 112) : !ok ? RGB(235, 110, 110) : RGB(206, 218, 236);
-                DrawTextAt(dc, g.fontMono, col, 12, y + 3, off ? "[ ]" : "[x]");
-                std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
-                if (!ok) name += "  (" + p.status + ")";
-                DrawTextAt(dc, g.fontMono, col, 46, y + 3, name, &clip);
-                std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
-                DrawTextRight(dc, g.fontSmall, off ? RGB(85, 90, 100) : RGB(110, 120, 138), kPanel - 12, y + 4, tris, &clip);
+                lines.push_back({t, k});
             }
-        }
-        // a slim scrollbar, when there is more than fits
-        if (static_cast<int>(rows.size()) > visible) {
-            int trackTop = l.partsTop, trackH = l.partsBottom - l.partsTop;
-            int thumbH = std::max(18, trackH * visible / static_cast<int>(rows.size()));
-            int span = std::max(1, static_cast<int>(rows.size()) - visible);
-            int thumbY = trackTop + (trackH - thumbH) * g.partScroll / span;
-            HBRUSH tb = CreateSolidBrush(RGB(42, 46, 56));
-            RECT tr{kPanel - 5, trackTop, kPanel - 2, trackTop + trackH};
-            FillRect(dc, &tr, tb);
-            DeleteObject(tb);
-            HBRUSH th = CreateSolidBrush(RGB(90, 100, 120));
-            RECT rr{kPanel - 5, thumbY, kPanel - 2, thumbY + thumbH};
-            FillRect(dc, &rr, th);
-            DeleteObject(th);
+            const int visible = std::max(1, (l.partsBottom - l.partsTop) / 16);
+            g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(lines.size()) - visible));
+            g.partPos = std::clamp(g.partPos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(lines.size()) - visible)));
+            if (inList) {
+                s.Begin(sub);
+                const ListView v = ViewOf(l.partsTop, l.partsBottom, g.partPos, 16);
+                for (int i = 0; i < v.count; ++i) {
+                    const int idx = v.first + i;
+                    if (idx >= static_cast<int>(lines.size())) break;
+                    s.Text(g.fontLog, KindColor(lines[static_cast<size_t>(idx)].second), 14, l.partsTop - v.offset + i * 16, lines[static_cast<size_t>(idx)].first, &clipText);
+                }
+                ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(lines.size()), visible, g.partPos);
+                s.Begin(clip);
+            }
+        } else if (g.tab == TabBones) {
+            DrawBonesTab(s, clip, l, *L);
+        } else if (g.tab != TabParts) {
+            const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+            const int visible = VisibleRows(l);
+            g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
+            g.partPos = std::clamp(g.partPos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(rows.size()) - visible)));
+            if (inList) {
+                s.Begin(sub);
+                const ListView v = ViewOf(l.partsTop, l.partsBottom, g.partPos);
+                for (int i = 0; i < v.count; ++i) {
+                    const int idx = v.first + i;
+                    if (idx >= static_cast<int>(rows.size())) break;
+                    const TweakRow& row = rows[static_cast<size_t>(idx)];
+                    const int y = l.partsTop - v.offset + i * kRowH;
+                    if (!TouchesY(sub, y, y + kRowH)) continue;
+                    if (idx == g.hoverRow && row.kind != 4 && !(row.kind == 0 && row.id < 0)) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
+                    if (row.kind == 0) {
+                        std::string name = row.label;
+                        for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                        s.Text(g.fontBold, ui::kAccent, 14, y + 3, name, &clipText);
+                        bool any = false;
+                        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
+                        if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
+                    } else if (row.kind == 4) {
+                        s.Text(g.fontSmall, ui::kDim, 14, y + 4, row.label, &clipText);
+                    } else if (row.kind == 2) {
+                        const bool on = TweakChanged(row.id);
+                        const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
+                        CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAmber);
+                        s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, failed ? row.label + "  (does not compile)" : row.label, &clipText);
+                    } else {
+                        DrawSliderRow(s, row.id, row.label, y);
+                    }
+                }
+                ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(rows.size()), visible, g.partPos);
+                s.Begin(clip);
+            }
+        } else {
+            const std::vector<PartRow> rows = BuildRows(L->scene);
+            const int visible = VisibleRows(l);
+            g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
+            g.partPos = std::clamp(g.partPos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(rows.size()) - visible)));
+            if (inList) {
+                s.Begin(sub);
+                const ListView v = ViewOf(l.partsTop, l.partsBottom, g.partPos);
+                for (int i = 0; i < v.count; ++i) {
+                    const int idx = v.first + i;
+                    if (idx >= static_cast<int>(rows.size())) break;
+                    const PartRow& row = rows[static_cast<size_t>(idx)];
+                    const int y = l.partsTop - v.offset + i * kRowH;
+                    if (!TouchesY(sub, y, y + kRowH)) continue;
+                    const bool hot = idx == g.hoverRow;
+                    if (row.part < 0) {
+                        if (hot) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
+                        std::string name = row.group;
+                        for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                        const bool collapsed = g.collapsedGroups.count(row.group) != 0;
+                        int count = 0;
+                        for (const auto& p : L->scene.parts) if (p.group == row.group && !p.underPiece) ++count;
+                        Expander(s, 14, y + kRowH / 2, !collapsed, ui::kAccent);
+                        s.Text(g.fontBold, ui::kAccent, 30, y + 3, name);
+                        s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
+                    } else {
+                        const auto& p = L->scene.parts[static_cast<size_t>(row.part)];
+                        const bool off = static_cast<size_t>(row.part) < g.hidden.size() && g.hidden[static_cast<size_t>(row.part)];
+                        const bool ok = p.status == "resolved-base" || p.status == "resolved-mod";
+                        if (hot) {
+                            s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, RGB(34, 46, 70));
+                            s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
+                        }
+                        const COLORREF col = off ? ui::kDim : !ok ? ui::kBad : ui::kText;
+                        CheckBox(s, 16, y + 3, !off, ok ? ui::kAccent : ui::kBad);
+                        std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
+                        if (!ok) name += "  (" + p.status + ")";
+                        s.Text(g.fontMono, col, 38, y + 3, name, &clipText);
+                        const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
+                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, kPanel - 16, y + 4, tris);
+                    }
+                }
+                ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(rows.size()), visible, g.partPos);
+                s.Begin(clip);
+            }
         }
     }
 
+    lap(4);
     // log --------------------------------------------------------------------------------------------------------------
-    HBRUSH logBg = CreateSolidBrush(RGB(17, 19, 24));
-    RECT logRect{0, l.logTop, kPanel, l.logBottom};
-    FillRect(dc, &logRect, logBg);
-    DeleteObject(logBg);
-    HBRUSH logEdge = CreateSolidBrush(RGB(42, 46, 56));
-    RECT le{0, l.logTop, kPanel, l.logTop + 1};
-    FillRect(dc, &le, logEdge);
-    DeleteObject(logEdge);
-    DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, l.logTop + 5, "LOG");
-    DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 10, l.logTop + 6, "clear", nullptr);
-    {
+    if (TouchesY(clip, l.logTop, l.logBottom)) {
+        const RECT logCard{6, l.logTop, kPanel - 6, l.logBottom};
+        s.FillRound(logCard, 8, RGB(11, 13, 19));
+        s.StrokeRound(logCard, 8, ui::kLine);
+        s.Text(g.fontBold, ui::kAccent, 14, l.logTop + 5, "LOG");
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 14, l.logTop + 7, "clear");
         std::lock_guard<std::mutex> lk(g.logMu);
-        int lineH = 15;
-        int top = l.logTop + 24;
-        int visible = std::max(1, (l.logBottom - top) / lineH);
+        const int lineH = 15, top = l.logTop + 26;
+        const int visible = std::max(1, (l.logBottom - 4 - top) / lineH);
         g.logScroll = std::max(0, std::min(g.logScroll, static_cast<int>(g.logLines.size()) - visible));
-        int end = static_cast<int>(g.logLines.size()) - g.logScroll;
-        int start = std::max(0, end - visible);
-        RECT lc{8, top, kPanel - 8, l.logBottom};
-        if (g.logLines.empty()) DrawTextAt(dc, g.fontLog, RGB(90, 96, 110), 12, top, "no activity yet", &lc);
+        const int end = static_cast<int>(g.logLines.size()) - g.logScroll;
+        const int start = std::max(0, end - visible);
+        const RECT lc{10, top, kPanel - 10, l.logBottom - 3};
+        if (g.logLines.empty()) s.Text(g.fontLog, ui::kDim, 14, top, "no activity yet", &lc);
         for (int i = start; i < end; ++i) {
             const LogLine& line = g.logLines[static_cast<size_t>(i)];
-            int y = top + (i - start) * lineH;
-            DrawTextAt(dc, g.fontLog, RGB(90, 96, 110), 10, y, line.time, &lc);
-            DrawTextAt(dc, g.fontLog, KindColor(line.kind), 76, y, line.text, &lc);
+            const int y = top + (i - start) * lineH;
+            s.Text(g.fontLog, ui::kFaint, 14, y, line.time, &lc);
+            s.Text(g.fontLog, KindColor(line.kind), 78, y, line.text, &lc);
         }
     }
 
+    lap(5);
     // footer -----------------------------------------------------------------------------------------------------------
-    HBRUSH foot = CreateSolidBrush(RGB(21, 23, 29));
-    RECT fr{0, l.footerTop, kPanel, rc.bottom};
-    FillRect(dc, &fr, foot);
-    DeleteObject(foot);
-    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
-    std::string hint = "1-7 outfit · L lib · K bones · P A-pose · Y physics · N shake";
-    if (g.busy) hint = "working ...";
-    else if (g.exporting) hint = "exporting PMX ...";
-    if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
-        const auto& p = L->scene.parts[static_cast<size_t>(g.hoverPart)];
-        hint = p.id + "  ·  " + p.status;
-        if (static_cast<size_t>(g.hoverPart) < L->partTriangles.size()) hint += "  ·  " + Count(L->partTriangles[static_cast<size_t>(g.hoverPart)]) + " tris";
-        if (!p.modName.empty()) hint += "  ·  " + p.modName;
-        if (g.hidden[static_cast<size_t>(g.hoverPart)]) hint += "  ·  hidden";
-    } else if (!modsInfo.empty() && !L) {
-        hint = modsInfo;
+    if (TouchesY(clip, l.footerTop, H)) {
+        s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
+        std::string hint = "1-7 outfit · L lib · K bones · P pose · Y physics · N shake";
+        if (g.busy) hint = "working ...";
+        else if (g.exporting) hint = "exporting PMX ...";
+        if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
+            const auto& p = L->scene.parts[static_cast<size_t>(g.hoverPart)];
+            hint = p.id + "  ·  " + p.status;
+            if (static_cast<size_t>(g.hoverPart) < L->partTriangles.size()) hint += "  ·  " + Count(L->partTriangles[static_cast<size_t>(g.hoverPart)]) + " tris";
+            if (!p.modName.empty()) hint += "  ·  " + p.modName;
+            if (static_cast<size_t>(g.hoverPart) < g.hidden.size() && g.hidden[static_cast<size_t>(g.hoverPart)]) hint += "  ·  hidden";
+        } else if (!modsInfo.empty() && !L) {
+            hint = modsInfo;
+        }
+        s.Text(g.fontSmall, g.busy ? ui::kAccent : g.exporting ? ui::kAmber : ui::kSub, 12, l.footerTop + 17, ClipText(hint, 64));
     }
-    DrawTextAt(dc, g.fontSmall, g.busy ? RGB(120, 200, 255) : g.exporting ? RGB(240, 170, 90) : RGB(120, 130, 148), 10,
-               l.footerTop + 16, ClipText(hint, 64));
-    if (savedDc) RestoreDC(dc, savedDc);
-    (void)paint;
+    s.Fill(RECT{kPanel - 1, clip.top, kPanel, clip.bottom}, ui::kLine);
+    s.End();
+    lap(6);
 }
 
 void Paint(HWND hwnd) {
+    // The area to paint as separate rectangles (rcPaint is only their bounding box, which would redraw all the panel between a hovered
+    // row and the footer): read before BeginPaint, which clears it.
+    std::vector<RECT> parts;
+    if (HRGN rgn = CreateRectRgn(0, 0, 0, 0)) {
+        if (GetUpdateRgn(hwnd, rgn, FALSE) > NULLREGION) {
+            const DWORD bytes = GetRegionData(rgn, 0, nullptr);
+            std::vector<char> buf(bytes);
+            if (bytes && GetRegionData(rgn, bytes, reinterpret_cast<RGNDATA*>(buf.data()))) {
+                const RGNDATA* rd = reinterpret_cast<const RGNDATA*>(buf.data());
+                const RECT* r = reinterpret_cast<const RECT*>(rd->Buffer);
+                parts.assign(r, r + rd->rdh.nCount);
+            }
+        }
+        DeleteObject(rgn);
+    }
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
+    if (parts.empty() || parts.size() > 12) parts.assign(1, ps.rcPaint);   // a complex region: its bounding box will do
     RECT rc;
     GetClientRect(hwnd, &rc);
-    int W = std::max<int>(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
+    const int W = std::max<int>(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
+    const double tPaint = NowMs();
+    const RECT viewport{kPanel, 0, rc.right, rc.bottom};
+    const RECT panelRect{0, 0, kPanel, H};
+    bool viewDamaged = false;
+    for (const RECT& p : parts) { RECT t; viewDamaged = viewDamaged || IntersectRect(&t, &p, &viewport) != 0; }
     if (g.dirty || g.fw != W || g.fh != H) {
         Render(W, H);
         g.dirty = false;
+        g.prof.render += NowMs() - tPaint;
+        ++g.prof.renders;
     }
-    RECT viewport{kPanel, 0, rc.right, rc.bottom};
-    RECT both{};
-    bool viewportPainted = IntersectRect(&both, &ps.rcPaint, &viewport) != 0 || ps.rcPaint.right == 0;
-    if (viewportPainted && !g.frame.empty() && g.fw == W && g.fh == H && W > 0 && H > 0) {
+    const double tBlit = NowMs();
+    if (viewDamaged && !g.frame.empty() && g.fw == W && g.fh == H && W > 0 && H > 0) {
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = W;
@@ -1700,7 +1804,26 @@ void Paint(HWND hwnd) {
         bi.bmiHeader.biCompression = BI_RGB;
         StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
     }
-    DrawPanel(dc, rc, ps.rcPaint);
+    const double tPanel = NowMs();
+    g.prof.blit += tPanel - tBlit;
+    // The panel is drawn off screen, only where it changed, then copied.
+    if (g.panel.Resize(kPanel, H)) {   // new surface: blank, so all of it is drawn, though only the damaged part needs showing
+        DrawPanel(g.panel, panelRect);
+        for (const RECT& p : parts) { RECT t; if (IntersectRect(&t, &p, &panelRect)) g.panel.Present(dc, t, t.left, t.top); }
+    } else {
+        for (const RECT& p : parts) {
+            RECT t;
+            if (!IntersectRect(&t, &p, &panelRect)) continue;
+            const double tDraw = NowMs();
+            DrawPanel(g.panel, t);
+            const double tCopy = NowMs();
+            g.prof.panelDraw += tCopy - tDraw;
+            g.panel.Present(dc, t, t.left, t.top);
+            g.prof.panelCopy += NowMs() - tCopy;
+        }
+    }
+    g.prof.panel += NowMs() - tPanel;
+    ++g.prof.paints;
     EndPaint(hwnd, &ps);
 }
 
@@ -1717,6 +1840,7 @@ void ShowAll() {
 void ToggleIssues() {
     g.showIssues = !g.showIssues;
     g.partScroll = 0;
+    g.partPos = 0;
     g.hoverRow = g.hoverPart = -1;
     InvalidatePanel();
 }
@@ -1805,33 +1929,36 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
     const assemble::Scene& scene = L->scene;
+    const POINT pt{x, y};
     if (y >= l.partsTop && y < l.partsTop + kRowH) {
         if (right) return;
-        if (x < 205) { g.showBones = !g.showBones; Log(g.showBones ? "skeleton: on (click a bone to select it)" : "skeleton: off"); g.dirty = true; InvalidateRect(g.hwnd, nullptr, FALSE); }
-        else { g.showHelpers = !g.showHelpers; g.boneScroll = 0; g.dirty = true; InvalidateRect(g.hwnd, nullptr, FALSE); }
+        if (PtInRect(&l.boneSkeleton, pt)) { g.showBones = !g.showBones; Log(g.showBones ? "skeleton: on (click a bone to select it)" : "skeleton: off"); }
+        else { g.showHelpers = !g.showHelpers; g.boneScroll = 0; }
+        g.dirty = true;
+        InvalidateAll();
         return;
     }
     if (y >= l.boneListTop && y < l.boneListBottom) {
         const std::vector<BoneRow> rows = BuildBoneRows(scene);
-        const int idx = (y - l.boneListTop) / kRowH + g.boneScroll;
+        const int idx = (y - l.boneListTop + static_cast<int>(std::lround(g.bonePos * kRowH))) / kRowH;
         if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return;
         const BoneRow& r = rows[static_cast<size_t>(idx)];
         const std::string& name = scene.bones[static_cast<size_t>(r.bone)].name;
-        const int arrowX = 12 + std::min(r.depth, 12) * 10;
+        const int arrowX = 16 + std::min(r.depth, 12) * 10;
         if (right) { g.boneEdits.erase(name); Log("reset " + name); ApplyPoseLive(); }
-        else if (r.kids && x >= arrowX - 2 && x < arrowX + 12) { if (!g.openBones.erase(name)) g.openBones.insert(name); }
+        else if (r.kids && x >= arrowX - 3 && x < arrowX + 12) { if (!g.openBones.erase(name)) g.openBones.insert(name); }
         else g.selBoneName = name;
         g.dirty = true;
-        InvalidateRect(g.hwnd, nullptr, FALSE);
+        InvalidateAll();
         return;
     }
     if (y < l.boneEditTop) return;
     const int row = (y - l.boneEditTop) / kRowH;
     if (row == kBoneEditRows - 1 && !right) {   // undo / redo / save / load
-        if (x < 58) UndoPose(false);
-        else if (x < 112) UndoPose(true);
-        else if (x < 188) SavePoseFile();
-        else if (x < 270) LoadPoseFile();
+        if (PtInRect(&l.boneUndo, pt)) UndoPose(false);
+        else if (PtInRect(&l.boneRedo, pt)) UndoPose(true);
+        else if (PtInRect(&l.boneSave, pt)) SavePoseFile();
+        else if (PtInRect(&l.boneLoad, pt)) LoadPoseFile();
         InvalidatePanel();
         return;
     }
@@ -1848,8 +1975,9 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         ApplyPoseLive();
         InvalidatePanel();
     } else if (row == kBoneEditRows - 2 && !right) {
-        if (x < 145) { g.boneEdits.erase(g.selBoneName); Log("reset " + g.selBoneName); }
-        else { g.boneEdits.clear(); Log("reset every bone"); }
+        if (PtInRect(&l.boneResetOne, pt)) { g.boneEdits.erase(g.selBoneName); Log("reset " + g.selBoneName); }
+        else if (PtInRect(&l.boneResetAll, pt)) { g.boneEdits.clear(); Log("reset every bone"); }
+        else return;
         ApplyPoseLive();
         InvalidatePanel();
     }
@@ -1875,6 +2003,70 @@ void ChooseLibrary() {
     else InvalidatePanel();
 }
 
+// ---- one picture -------------------------------------------------------------------------------------------------------
+// A slider's row repaints while it is dragged (and the tab heading, whose "tweaked" label follows it); nothing else.
+void InvalidateSliderRow(int id) {
+    const PanelLayout l = Lay(ClientHeight());
+    if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {
+        const int y = l.boneEditTop + (1 + id - kBoneEdit) * kRowH;
+        InvalidatePanelBand(y, y + kRowH);
+        return;
+    }
+    const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+    for (size_t i = 0; i < rows.size(); ++i)
+        if (rows[i].kind == 1 && rows[i].id == id) {
+            const int y = l.partsTop + static_cast<int>(i) * kRowH - ScrollPx(g.partPos);
+            InvalidatePanelBand(std::max(l.partsTop, y), std::min(l.partsBottom, y + kRowH));
+            break;
+        }
+    RECT heading{kPanel - 80, l.partsHeadingTop - 2, kPanel, l.partsHeadingTop + 16};
+    InvalidateRect(g.hwnd, &heading, FALSE);
+}
+
+// Mouse movement during a drag is only noted by the window procedure (dragPending); this applies it, once per picture, so a fast mouse
+// cannot queue up work faster than it can be drawn.
+void ApplyPending() {
+    if (!g.dragPending) return;
+    g.dragPending = false;
+    if (g.sliderDrag >= 0) {
+        SliderRef r;
+        if (SliderFor(g.sliderDrag, r)) { std::lock_guard<std::recursive_mutex> lk(g.mu); *r.v = SliderValueAt(r, g.dragX); }
+        TweakEdited(g.sliderDrag, false);
+        InvalidateSliderRow(g.sliderDrag);
+    } else if (g.drag == 3 && (g.boneDragDx != 0.0f || g.boneDragDy != 0.0f)) {
+        const float dx = g.boneDragDx, dy = g.boneDragDy;
+        g.boneDragDx = g.boneDragDy = 0.0f;
+        DragBone(g.dragBone, dx, dy, g.dragMove);
+        InvalidateList();
+    }
+}
+
+// Moves a scroll position towards its target; false when it is there.
+bool EaseScroll(float& pos, int target, float dt) {
+    const float diff = static_cast<float>(target) - pos;
+    if (std::fabs(diff) < 0.02f) {
+        if (pos == static_cast<float>(target)) return false;
+        pos = static_cast<float>(target);
+        return true;
+    }
+    pos += diff * (1.0f - std::exp(-dt * 20.0f));
+    return true;
+}
+
+// Everything one picture needs: the drag movement, the physics, the scrolling, then the paint of whatever was invalidated.
+void Frame() {
+    const ULONGLONG now = GetTickCount64();
+    const float dt = g.lastFrameTick ? std::min(1.0f / 30.0f, static_cast<float>(now - g.lastFrameTick) / 1000.0f) : 1.0f / 60.0f;
+    g.lastFrameTick = now;
+    ApplyPending();
+    PhysicsTick();
+    const bool a = EaseScroll(g.partPos, g.partScroll, dt);
+    const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
+    g.animating = a || b;
+    if (g.animating) InvalidateList();
+    if (GetUpdateRect(g.hwnd, nullptr, FALSE)) UpdateWindow(g.hwnd);
+}
+
 // What a scripted run needs to aim its mouse: the panel's tabs, the rows of the current tab with their centres, the bone list and editor,
 // where the overlay drew some bones in the view, and a few state flags. Written as JSON to CARDBRIDGE_TEST_LAYOUT.
 void DumpTestLayout() {
@@ -1897,7 +2089,7 @@ void DumpTestLayout() {
     if (L && g.tab != TabParts && g.tab != TabBones) {
         const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
         for (size_t i = 0; i < rows.size(); ++i) {
-            const int y = l.partsTop + (static_cast<int>(i) - g.partScroll) * kRowH + kRowH / 2;
+            const int y = l.partsTop + static_cast<int>(i) * kRowH - static_cast<int>(std::lround(g.partPos * kRowH)) + kRowH / 2;
             j["rows"].push_back({{"id", rows[i].id}, {"kind", rows[i].kind}, {"label", rows[i].label}, {"y", y >= l.partsTop && y < l.partsBottom ? y : -1}});
         }
     }
@@ -1906,8 +2098,8 @@ void DumpTestLayout() {
         const std::vector<BoneRow> rows = BuildBoneRows(L->scene);
         j["bones"]["list"] = nlohmann::json::array();
         for (size_t i = 0; i < rows.size(); ++i) {
-            const int y = l.boneListTop + (static_cast<int>(i) - g.boneScroll) * kRowH + kRowH / 2;
-            if (y >= l.boneListTop && y < l.boneListBottom) j["bones"]["list"].push_back({{"name", L->scene.bones[static_cast<size_t>(rows[i].bone)].name}, {"y", y}, {"arrowX", 12 + std::min(rows[i].depth, 12) * 10 + 4}});
+            const int y = l.boneListTop + static_cast<int>(i) * kRowH - static_cast<int>(std::lround(g.bonePos * kRowH)) + kRowH / 2;
+            if (y >= l.boneListTop && y < l.boneListBottom) j["bones"]["list"].push_back({{"name", L->scene.bones[static_cast<size_t>(rows[i].bone)].name}, {"y", y}, {"arrowX", 16 + std::min(rows[i].depth, 12) * 10 + 4}});
         }
         j["bones"]["editTop"] = l.boneEditTop;
         j["bones"]["fieldY"] = nlohmann::json::array();
@@ -1933,7 +2125,6 @@ void DumpTestLayout() {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_TIMER:
-        if (wp == kTimerPhysics) { PhysicsTick(); return 0; }
         if (wp == kTimerApplyTweaks) {
             KillTimer(hwnd, kTimerApplyTweaks);
             if (g.sliderDrag >= 0) { ScheduleApplyTweaks(); return 0; }   // still dragging
@@ -1942,8 +2133,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (L && !g.cardPath.empty()) StartLoad(g.cardPath, L->outfit, true);
             return 0;
         }
-        KillTimer(hwnd, 1); g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
-    case WM_LOG: InvalidatePanel(); return 0;
+        KillTimer(hwnd, 1); g.dirty = true; InvalidateView(); return 0;
+    case WM_LOG: InvalidateLog(); return 0;
     case WM_TEST: {
         static const bool hooks = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
         if (!hooks) return 0;
@@ -1972,7 +2163,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE: g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        mmi->ptMinTrackSize = {kPanel + 380, 540};
+        mmi->ptMinTrackSize = {kPanel + 380, 620};
         return 0;
     }
     case WM_EXPORT_DONE: InvalidatePanel(); return 0;
@@ -2009,6 +2200,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (L->scene.parts[i].nudeSwitch && !(g.applyKeep && g.keepHidden.count(L->scene.parts[i].id))) g.hidden[i] = 1;   // starts unticked
         g.keepHidden.clear();
         g.partScroll = 0;
+        g.partPos = 0;
         g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
         g.loadingOutfit = -1;
         g.soloPart = -1;
@@ -2028,16 +2220,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
-        if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; SeedOpenBones(L->scene); }
+        if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
         if (g.physics) { g.physics = false; SetPhysics(true); }
         else ApplyPoseLive();
         if (L && !g.wantPose.empty()) { const std::string pose = g.wantPose; g.wantPose.clear(); LoadPoseFile(pose); }
         g.dirty = true;
-        if (L) SetWindowTextW(hwnd, Utf8ToWide("CardBridge viewer - " + (L->title.empty() ? g.cardPath : L->title)).c_str());
+        if (L) SetWindowTextW(hwnd, Utf8ToWide("CardBridge " CARDBRIDGE_VERSION " - " + (L->title.empty() ? g.cardPath : L->title)).c_str());
         InvalidateRect(hwnd, nullptr, FALSE);
+        static bool benchStarted = false;
+        if (L && !L->scene.parts.empty() && !benchStarted && std::getenv("CARDBRIDGE_BENCH")) { benchStarted = true; PostMessageW(hwnd, WM_BENCH, 0, 0); }
         return 0;
     }
+    case WM_BENCH: RunBench(); return 0;
     case WM_DROPFILES: {
         wchar_t buf[1024];
         if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) { g.cam = {}; StartLoad(Slashes(WideToUtf8(buf)), -1); }
@@ -2062,6 +2257,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.showIssues = false;
                 g.tab = button - 10;
                 g.partScroll = 0;
+                g.partPos = 0;
                 g.hoverRow = g.hoverPart = -1;
                 InvalidatePanel();
                 return 0;
@@ -2149,17 +2345,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        if (g.sliderDrag >= 0) {
-            SliderRef r;
-            if (SliderFor(g.sliderDrag, r)) { std::lock_guard<std::recursive_mutex> lk(g.mu); *r.v = SliderValueAt(r, x); }
-            TweakEdited(g.sliderDrag, false);
-            InvalidatePanel();
-            return 0;
-        }
+        if (g.sliderDrag >= 0) { g.dragX = x; g.dragPending = true; return 0; }   // applied by Frame, once per picture
         if (g.drag == 3) {
-            DragBone(g.dragBone, static_cast<float>(x - g.last.x), static_cast<float>(y - g.last.y), g.dragMove);
+            g.boneDragDx += static_cast<float>(x - g.last.x);
+            g.boneDragDy += static_cast<float>(y - g.last.y);
             g.last = {x, y};
-            InvalidatePanel();
+            g.dragPending = true;
             return 0;
         }
         if (g.drag) {
@@ -2169,7 +2360,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.last = {x, y};
             g.lastInput = GetTickCount64();
             g.dirty = true;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            InvalidateView();
             return 0;
         }
         TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, hwnd, 0};
@@ -2183,12 +2374,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (x < kPanel && g.tab == TabBones && y >= l.boneListTop && y < l.boneListBottom)
             if (std::shared_ptr<Loaded> LL = Current()) {
                 const std::vector<BoneRow> rows = BuildBoneRows(LL->scene);
-                const int ri = (y - l.boneListTop) / kRowH + g.boneScroll;
+                const int ri = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
                 if (ri >= 0 && static_cast<size_t>(ri) < rows.size()) hoverBone = rows[static_cast<size_t>(ri)].bone;
             }
         if (hoverBone != g.hoverBone) {
             g.hoverBone = hoverBone;
-            if (g.showBones) { g.dirty = true; RECT vp{kPanel, 0, rc.right, rc.bottom}; InvalidateRect(hwnd, &vp, FALSE); }
+            if (g.showBones) { g.dirty = true; InvalidateView(); }
         }
         g.hoverButton = x < kPanel ? ButtonAt(l, x, y) : 0;
         g.hoverOutfit = x < kPanel ? OutfitChipAt(l, x, y) : -1;
@@ -2197,7 +2388,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (x < kPanel) {
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) {
-                if (y >= l.boneListTop && y < l.boneListBottom) g.hoverRow = (y - l.boneListTop) / kRowH + g.boneScroll;
+                if (y >= l.boneListTop && y < l.boneListBottom) g.hoverRow = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
             } else if (L && !g.showIssues && g.tab != TabParts) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues) {
@@ -2209,28 +2400,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
         }
-        if (oldRow != g.hoverRow || oldPart != g.hoverPart || oldButton != g.hoverButton || oldOutfit != g.hoverOutfit) {
-            if (oldPart != g.hoverPart) {
-                g.lastInput = GetTickCount64();
-                g.dirty = true;
-                RECT vp{kPanel, 0, rc.right, rc.bottom};
-                InvalidateRect(hwnd, &vp, FALSE);
-            }
-            InvalidatePanel();
+        // Repaint only what changed: the old and new row, the buttons band, the footer's hint.
+        if (oldRow != g.hoverRow) {
+            const bool bones = g.tab == TabBones;
+            const int top = bones ? l.boneListTop : l.partsTop, bottom = bones ? l.boneListBottom : l.partsBottom;
+            const int px = ScrollPx(bones ? g.bonePos : g.partPos);
+            for (int idx : {oldRow, g.hoverRow})
+                if (idx >= 0) InvalidatePanelBand(std::max(top, top + idx * kRowH - px), std::min(bottom, top + (idx + 1) * kRowH - px));
+        }
+        if (oldButton != g.hoverButton || oldOutfit != g.hoverOutfit) InvalidatePanelBand(l.open.top - 2, l.tabs[0].bottom + 2);
+        if (oldPart != g.hoverPart) {
+            g.lastInput = GetTickCount64();
+            g.dirty = true;
+            InvalidateView();
+            InvalidateFooter();
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); }
+        if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
         if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0) {
             bool part = g.hoverPart >= 0;
             g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
             g.hoverButton = 0;
-            if (part) { g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); }
+            if (part) { g.dirty = true; InvalidateView(); }
             InvalidatePanel();
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        ApplyPending();   // the last movement of the drag counts
         CommitPoseEdit();
         if (g.sliderDrag >= 0) {
             SliderRef r;
@@ -2244,18 +2442,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.sliderDrag = -1;
             ReleaseCapture();
             TweakEdited(released, true);
+            InvalidateList();   // the group's "reset" mark follows the sliders
             return 0;
         }
         if (g.drag == 3) {
             if (std::shared_ptr<Loaded> LL = Current(); LL && g.dragBone >= 0 && static_cast<size_t>(g.dragBone) < LL->scene.bones.size()) Log((g.dragMove ? "moved " : "turned ") + LL->scene.bones[static_cast<size_t>(g.dragBone)].name);
             g.dragBone = -1; g.drag = 0; g.interacting = false; ReleaseCapture();
-            g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); InvalidatePanel();
+            g.dirty = true; InvalidateView();
             return 0;
         }
+        if (g.drag == 0) return 0;   // a click on the panel: nothing to finish, the picture stays as it is
         if (msg == WM_LBUTTONUP && g.drag == 1 && g.showBones && std::abs(GET_X_LPARAM(lp) - g.downAt.x) < 4 && std::abs(GET_Y_LPARAM(lp) - g.downAt.y) < 4)
             PickBoneAt(GET_X_LPARAM(lp) - kPanel, GET_Y_LPARAM(lp));   // a click, not a drag
         g.drag = 0; g.interacting = false; g.lastInput = GetTickCount64(); ReleaseCapture();
-        g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE);
+        g.dirty = true; InvalidateView();
         return 0;
     case WM_MOUSEWHEEL: {
         short d = GET_WHEEL_DELTA_WPARAM(wp);
@@ -2271,6 +2471,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int visible = std::max(1, (l.logBottom - (l.logTop + 24)) / 15);
                 int maxScroll = std::max(0, static_cast<int>(g.logLines.size()) - visible);
                 g.logScroll = std::max(0, std::min(maxScroll, g.logScroll + (d > 0 ? 3 : -3)));
+                InvalidateLog();
             } else if (L) {
                 if (g.showIssues) {
                     g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3));
@@ -2284,11 +2485,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             *r.v = std::clamp(*r.v + (d > 0 ? step : -step), r.lo, r.hi);
                             ApplyPoseLive();
                             PoseChanged(before, true);
+                            InvalidateList();
                         }
                     } else if (BuildBoneRows(L->scene).size() > 0) {
                         const int visible = std::max(1, (l.boneListBottom - l.boneListTop) / kRowH);
                         const int maxScroll = std::max(0, static_cast<int>(BuildBoneRows(L->scene).size()) - visible);
-                        g.boneScroll = std::max(0, std::min(maxScroll, g.boneScroll - (d > 0 ? 3 : -3)));
+                        g.boneScroll = std::max(0, std::min(maxScroll, g.boneScroll - (d > 0 ? 3 : -3)));   // Frame eases the list there
                     }
                 } else if (g.tab != TabParts) {
                     int maxScroll = std::max(0, static_cast<int>(BuildTweakRows(g.tab).size()) - VisibleRows(l));
@@ -2303,8 +2505,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.cam.zoom = std::max(0.2f, std::min(20.0f, g.cam.zoom * (d > 0 ? 1.12f : 1 / 1.12f)));
             g.lastInput = GetTickCount64();
         }
-        g.dirty = pt.x >= kPanel;
-        InvalidateRect(hwnd, nullptr, FALSE);
+        if (pt.x >= kPanel) { g.dirty = true; InvalidateView(); }
         return 0;
     }
     case WM_SETCURSOR: {
@@ -2380,6 +2581,134 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---- benchmark -------------------------------------------------------------------------------------------------------
+// CARDBRIDGE_BENCH=<file.json>: once the first card is up, plays a scripted session through the window procedure (orbit, hover over the
+// parts, tab switches, a slider drag, a flood of mouse moves, log lines, wheel scrolling), times every step from input to the finished
+// paint and writes the numbers, then closes the window.
+void FlushFrame() { Frame(); }
+
+// One round of the main loop: the queued messages, then a picture.
+void PumpOnce() {
+    MSG m;
+    while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+    Frame();
+}
+
+// Runs the main loop until a paint has finished (or a few seconds passed).
+void PumpUntilPaint() {
+    const long p0 = g.prof.paints;
+    const ULONGLONG t0 = GetTickCount64();
+    while (g.prof.paints == p0 && GetTickCount64() - t0 < 5000) {
+        PumpOnce();
+        if (g.prof.paints == p0) MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
+    }
+}
+
+void RunBench() {
+    const char* outPath = std::getenv("CARDBRIDGE_BENCH");
+    std::shared_ptr<Loaded> L = Current();
+    if (!outPath || !L || L->scene.parts.empty()) return;
+    RECT rc;
+    GetClientRect(g.hwnd, &rc);
+    struct Phase { std::vector<double> ms; double render = 0, blit = 0, panel = 0, panelDraw = 0, panelCopy = 0, reshape = 0, refresh = 0; std::vector<double> sec = std::vector<double>(8, 0.0); long paints = 0, renders = 0; };
+    std::map<std::string, Phase> phases;
+    auto run = [&](const char* name, int n, const std::function<void(int)>& step) {
+        Phase& ph = phases[name];
+        const App::Prof p0 = g.prof;
+        for (int i = 0; i < n; ++i) {
+            const double t = NowMs();
+            step(i);
+            ph.ms.push_back(NowMs() - t);
+        }
+        ph.render = g.prof.render - p0.render; ph.blit = g.prof.blit - p0.blit; ph.panel = g.prof.panel - p0.panel;
+        ph.reshape = g.prof.reshape - p0.reshape; ph.refresh = g.prof.refresh - p0.refresh;
+        for (int k = 0; k < 8; ++k) ph.sec[static_cast<size_t>(k)] = g.prof.sec[k] - p0.sec[k];
+        ph.panelDraw = g.prof.panelDraw - p0.panelDraw; ph.panelCopy = g.prof.panelCopy - p0.panelCopy;
+        ph.paints = g.prof.paints - p0.paints; ph.renders = g.prof.renders - p0.renders;
+    };
+    auto send = [&](UINT m, WPARAM w, int x, int y) { SendMessageW(g.hwnd, m, w, MAKELPARAM(x, y)); };
+    FlushFrame();
+    PanelLayout l = Lay(rc.bottom);
+    const int vx = kPanel + (rc.right - kPanel) / 2, vy = rc.bottom / 2;
+
+    run("orbit", 80, [&](int i) {
+        if (i == 0) send(WM_LBUTTONDOWN, MK_LBUTTON, vx, vy);
+        send(WM_MOUSEMOVE, MK_LBUTTON, vx + i * 4, vy + (i % 7));
+        FlushFrame();
+        if (i == 79) send(WM_LBUTTONUP, 0, vx + i * 4, vy);
+    });
+    FlushFrame();
+    g.tab = TabParts; g.showIssues = false;
+    run("hover_parts", 120, [&](int i) {
+        send(WM_MOUSEMOVE, 0, 100, l.partsTop + 4 + (i * 7) % std::max(40, l.partsBottom - l.partsTop - 8));
+        FlushFrame();
+    });
+    send(WM_MOUSEMOVE, 0, vx, vy);
+    run("tab_switch", 50, [&](int i) {
+        const RECT t = l.tabs[i % TabCount];
+        send(WM_LBUTTONDOWN, MK_LBUTTON, (t.left + t.right) / 2, (t.top + t.bottom) / 2);
+        send(WM_LBUTTONUP, 0, (t.left + t.right) / 2, (t.top + t.bottom) / 2);
+        FlushFrame();
+    });
+    // a body slider: press on its track, then drag back and forth
+    g.tab = TabBody; g.partScroll = 0; g.partPos = 0; g.showIssues = false;
+    FlushFrame();
+    {
+        const std::vector<TweakRow> rows = BuildTweakRows(TabBody);
+        int first = -1;
+        for (size_t i = 0; i < rows.size(); ++i) if (rows[i].kind == 1) { first = static_cast<int>(i); break; }
+        if (first >= 0) {
+            l = Lay(rc.bottom);
+            const int y = l.partsTop + first * kRowH + kRowH / 2;
+            const int a = kTrackL + (kTrackR - kTrackL) * 4 / 10, b = kTrackL + (kTrackR - kTrackL) * 9 / 10;
+            send(WM_LBUTTONDOWN, MK_LBUTTON, a, y);
+            run("slider_drag", 60, [&](int i) {
+                send(WM_MOUSEMOVE, MK_LBUTTON, a + (b - a) * (i % 20) / 20, y);
+                FlushFrame();
+            });
+            run("slider_flood", 8, [&](int) {   // 25 moves arrive at once, as from a fast mouse: time to the next finished paint
+                for (int k = 0; k < 25; ++k) PostMessageW(g.hwnd, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(a + (b - a) * k / 25, y));
+                PumpUntilPaint();
+            });
+            send(WM_LBUTTONUP, 0, b, y);
+            FlushFrame();
+            run("slider_reset", 1, [&](int) { send(WM_RBUTTONDOWN, MK_RBUTTON, 60, y); send(WM_RBUTTONUP, 0, 60, y); FlushFrame(); });
+        }
+    }
+    g.tab = TabParts; g.partScroll = 0; g.partPos = 0;
+    FlushFrame();
+    run("log_line", 60, [&](int i) {
+        Log("benchmark line " + std::to_string(i) + " - a message about as long as the ones the loader writes");
+        PumpUntilPaint();
+    });
+    {
+        POINT pt{100, l.partsTop + 40};
+        ClientToScreen(g.hwnd, &pt);
+        run("wheel", 60, [&](int i) {
+            SendMessageW(g.hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, (i / 15) % 2 ? WHEEL_DELTA : -WHEEL_DELTA), MAKELPARAM(pt.x, pt.y));
+            FlushFrame();
+        });
+    }
+    run("view_idle_repaint", 40, [&](int) { g.dirty = true; InvalidateRect(g.hwnd, nullptr, FALSE); FlushFrame(); });
+
+    nlohmann::json j;
+    j["client"] = {rc.right, rc.bottom};
+    j["gpu"] = g.gpuOk;
+    j["triangles"] = Triangles(L->scene);
+    for (auto& [name, ph] : phases) {
+        std::vector<double> v = ph.ms;
+        std::sort(v.begin(), v.end());
+        double sum = 0;
+        for (double x : v) sum += x;
+        auto pct = [&](double q) { return v.empty() ? 0.0 : v[std::min(v.size() - 1, static_cast<size_t>(q * static_cast<double>(v.size())))]; };
+        j["phases"][name] = {{"n", v.size()}, {"mean_ms", v.empty() ? 0.0 : sum / static_cast<double>(v.size())}, {"p50_ms", pct(0.5)}, {"p95_ms", pct(0.95)}, {"max_ms", v.empty() ? 0.0 : v.back()},
+                             {"paints", ph.paints}, {"renders", ph.renders}, {"render_ms_total", ph.render}, {"blit_ms_total", ph.blit}, {"panel_ms_total", ph.panel}, {"panel_draw_ms_total", ph.panelDraw}, {"secs", ph.sec}, {"panel_copy_ms_total", ph.panelCopy}, {"reshape_ms_total", ph.reshape}, {"refresh_ms_total", ph.refresh}};
+    }
+    const std::string text = j.dump(2);
+    fileio::WriteFile(outPath, reinterpret_cast<const uint8_t*>(text.data()), text.size());
+    PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
@@ -2398,16 +2727,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     LocalFree(argvw);
     SaveSettings(g.settings);
 
+    ui::Startup();
+    ui::LoadLogo(inst, 2);
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"CardBridgeViewer";
     RegisterClassW(&wc);
-    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
+    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge " L"viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
                              CW_USEDEFAULT, 1280, 820, nullptr, nullptr, inst, nullptr);
+    if (wc.hIcon) SendMessageW(g.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
     ShowWindow(g.hwnd, show);
-    g.fontTitle = CreateFontW(-18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g.fontTitle = CreateFontW(-21, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontBold = CreateFontW(-13, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontMono = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Consolas");
@@ -2443,12 +2776,27 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         }
     }
     if (!card.empty()) StartLoad(card, g.wantOutfit);
+    // The main loop: take every queued message (they only record what the user did), then draw one picture. Input can never starve the
+    // drawing, because a picture is made after each batch whatever else is still arriving.
     MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
+    bool quit = false;
+    while (!quit) {
+        const double t0 = NowMs();
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_QUIT) { quit = true; break; }
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+            if (NowMs() - t0 > 6.0) break;
+        }
+        if (quit) break;
+        Frame();
+        const bool again = g.physics || g.animating || g.dragPending;
+        if (!again) MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        else MsgWaitForMultipleObjectsEx(0, nullptr, 8, QS_ALLINPUT, 0);
     }
+    g.panel.Reset();   // GDI+ objects must go before GDI+ does
     for (HFONT* f : {&g.fontTitle, &g.fontUi, &g.fontBold, &g.fontMono, &g.fontLog, &g.fontSmall})
         if (*f) DeleteObject(*f);
+    ui::Shutdown();
     return 0;
 }
