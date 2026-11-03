@@ -686,7 +686,8 @@ void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hi
 }
 
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
-                        const std::function<void(const std::string&)>& progress) {
+                        const std::function<void(const std::string&)>& progress, bool grade) {
+    grade = grade && ColourGradeEnabled();
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
@@ -840,6 +841,13 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         bt.width = W; bt.height = H;
         bt.rgba.resize(static_cast<size_t>(W) * H * 4);
         for (size_t i = 0; i < bt.rgba.size(); ++i) bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, img[i] * 255.0f + 0.5f)));
+        if (grade) {   // the same look-up the preview applies to its frame; alpha stays
+            std::vector<uint32_t> px(static_cast<size_t>(W) * H);
+            for (size_t i = 0; i < px.size(); ++i)
+                px[i] = (uint32_t(bt.rgba[i * 4 + 3]) << 24) | (uint32_t(bt.rgba[i * 4]) << 16) | (uint32_t(bt.rgba[i * 4 + 1]) << 8) | bt.rgba[i * 4 + 2];
+            ApplyColourGrade(px, 0u);
+            for (size_t i = 0; i < px.size(); ++i) { bt.rgba[i * 4] = (px[i] >> 16) & 255; bt.rgba[i * 4 + 1] = (px[i] >> 8) & 255; bt.rgba[i * 4 + 2] = px[i] & 255; }
+        }
         scene.textures.push_back(std::move(bt));
         st.mips.push_back(Mips{});
         st.built.push_back(false);
@@ -851,7 +859,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
-    if (report) *report = std::string(lit ? "baked (shaded, front light) " : "baked (colour only) ") + std::to_string(baked) + " material texture(s) through the game's shaders";
+    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders";
 }
 
 void RunCreateJobs(assemble::Scene& scene) {

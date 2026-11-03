@@ -76,6 +76,7 @@ struct GpuView::Impl {
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
     int skipped = 0;
+    bool plain = false;                          // see GpuView::SetPlain
     // A plain textured, toon-lit shader for materials whose game shader is not in the bundle; compiled at run time by the
     // system's d3dcompiler (absent: such materials are left out).
     ID3D11VertexShader* fbVs = nullptr;
@@ -273,6 +274,8 @@ GpuView::GpuView() : impl_(new Impl()) {}
 GpuView::~GpuView() = default;
 bool GpuView::ready() const { return impl_->dev != nullptr; }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
+void GpuView::SetPlain(bool on) { impl_->plain = on; }
+bool GpuView::plain() const { return impl_->plain; }
 size_t GpuView::layerCount() const { return impl_->layers.size(); }
 bool GpuView::layerEnabled(size_t i) const { return i < impl_->layers.size() && impl_->layers[i].enabled; }
 bool GpuView::layerOk(size_t i) const { return i < impl_->layers.size() && impl_->layers[i].ok; }
@@ -541,7 +544,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
                     if ((mat.alpha ? 1 : 0) != pass) continue;
-                    const GpuShader* sh = (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
+                    const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
                         float cbv[28];
@@ -716,7 +719,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     for (int y = 0; y < H; ++y) std::memcpy(&bgra[static_cast<size_t>(y) * W], static_cast<const uint8_t*>(mp.pData) + static_cast<size_t>(y) * mp.RowPitch, static_cast<size_t>(W) * 4);
     ctx->Unmap(I.staging, 0);
     for (auto& px : bgra) px |= 0xFF000000u;
-    ApplyColourGrade(bgra, 0xFFE2E4E8u);
+    if (!I.plain) ApplyColourGrade(bgra, 0xFFE2E4E8u);
     return true;
 }
 
