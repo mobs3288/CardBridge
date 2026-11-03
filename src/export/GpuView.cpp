@@ -88,6 +88,21 @@ struct GpuView::Impl {
     ID3D11PixelShader* olPs = nullptr;
     ID3D11InputLayout* olIl = nullptr;
     ID3D11Buffer* olCb = nullptr;
+    // Extra shading layers (ShaderLayer.h).
+    struct Layer {
+        bool ok = false, enabled = false;
+        ID3D11VertexShader* vs = nullptr;
+        ID3D11PixelShader* ps = nullptr;
+        ID3D11InputLayout* il = nullptr;
+        ID3D11BlendState* blend = nullptr;
+        ID3D11Buffer* cb = nullptr;
+    };
+    std::vector<Layer> layers;
+
+    void ClearLayers() {
+        for (auto& l : layers) { Rel(l.vs); Rel(l.ps); Rel(l.il); Rel(l.blend); Rel(l.cb); }
+        layers.clear();
+    }
 
     bool MakeOutline() {
         typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
@@ -162,7 +177,7 @@ float4 ps(VO i) : SV_Target {
         return ok;
     }
 
-    ~Impl() { Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
+    ~Impl() { ClearLayers(); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
 
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
 
@@ -258,6 +273,76 @@ GpuView::GpuView() : impl_(new Impl()) {}
 GpuView::~GpuView() = default;
 bool GpuView::ready() const { return impl_->dev != nullptr; }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
+size_t GpuView::layerCount() const { return impl_->layers.size(); }
+bool GpuView::layerEnabled(size_t i) const { return i < impl_->layers.size() && impl_->layers[i].enabled; }
+bool GpuView::layerOk(size_t i) const { return i < impl_->layers.size() && impl_->layers[i].ok; }
+void GpuView::SetLayerEnabled(size_t i, bool on) { if (i < impl_->layers.size() && impl_->layers[i].ok) impl_->layers[i].enabled = on; }
+
+bool GpuView::SetLayers(const std::vector<ShaderLayer>& defs, std::string* report) {
+    Impl& I = *impl_;
+    I.ClearLayers();
+    if (!I.dev) return false;
+    typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
+    HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
+    auto compile = dll ? reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile"))) : nullptr;
+    bool any = false;
+    for (const ShaderLayer& d : defs) {
+        Impl::Layer L;
+        L.enabled = d.defaultOn;
+        std::string problem;
+        if (!compile) {
+            problem = "d3dcompiler_47.dll is not available";
+        } else {
+            const std::string src = std::string(ShaderLayerPrelude()) + "\n#line 1\n" + d.source;
+            ID3DBlob *vb = nullptr, *pb = nullptr, *err = nullptr;
+            auto message = [&](ID3DBlob* e) { return e ? std::string(static_cast<const char*>(e->GetBufferPointer()), e->GetBufferSize()) : std::string("compile failed"); };
+            if (FAILED(compile(src.data(), src.size(), d.file.c_str(), nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vb, &err)) || !vb) {
+                problem = message(err);
+            } else {
+                Rel(err);
+                if (FAILED(compile(src.data(), src.size(), d.file.c_str(), nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) problem = message(err);
+            }
+            Rel(err);
+            if (problem.empty()) {
+                const D3D11_INPUT_ELEMENT_DESC el[3] = {
+                    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0},
+                    {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, nrm), D3D11_INPUT_PER_VERTEX_DATA, 0},
+                    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
+                D3D11_BLEND_DESC bd{};
+                auto& rt = bd.RenderTarget[0];
+                rt.BlendEnable = TRUE;
+                rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D11_BLEND_ZERO;
+                rt.DestBlendAlpha = D3D11_BLEND_ONE;
+                rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+                if (d.blend == "multiply") { rt.SrcBlend = D3D11_BLEND_DEST_COLOR; rt.DestBlend = D3D11_BLEND_ZERO; }
+                else if (d.blend == "alpha") { rt.SrcBlend = D3D11_BLEND_SRC_ALPHA; rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA; }
+                else { rt.SrcBlend = D3D11_BLEND_ONE; rt.DestBlend = D3D11_BLEND_ONE; }
+                D3D11_BUFFER_DESC cbd{};
+                cbd.ByteWidth = 9 * 16;
+                cbd.Usage = D3D11_USAGE_DEFAULT;
+                cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                const bool made = SUCCEEDED(I.dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &L.vs)) &&
+                                  SUCCEEDED(I.dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &L.ps)) &&
+                                  SUCCEEDED(I.dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &L.il)) &&
+                                  SUCCEEDED(I.dev->CreateBlendState(&bd, &L.blend)) && SUCCEEDED(I.dev->CreateBuffer(&cbd, nullptr, &L.cb));
+                if (!made) problem = "Direct3D refused the shader";
+            }
+            Rel(vb);
+            Rel(pb);
+        }
+        L.ok = problem.empty();
+        if (!L.ok) {
+            Rel(L.vs); Rel(L.ps); Rel(L.il); Rel(L.blend); Rel(L.cb);
+            L.enabled = false;
+            if (report) *report += d.file + ": " + problem + "\n";
+        }
+        any = any || L.ok;
+        I.layers.push_back(L);
+    }
+    return any;
+}
+
 
 bool GpuView::Init(std::string* why) {
     auto fail = [&](const char* m) { if (why) *why = m; return false; };
@@ -543,6 +628,51 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 }
             }
         }
+
+    // Extra shading layers over what the game's shaders drew: the visible opaque submeshes again with the layer's pixel shader,
+    // blended, depth-tested against the finished frame and never written.
+    for (const auto& layer : I.layers) {
+        if (!layer.ok || !layer.enabled) continue;
+        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+        ctx->OMSetBlendState(layer.blend, bf, 0xFFFFFFFFu);
+        ctx->IASetInputLayout(layer.il);
+        ctx->VSSetShader(layer.vs, nullptr, 0);
+        ctx->PSSetShader(layer.ps, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &layer.cb);
+        ctx->PSSetConstantBuffers(0, 1, &layer.cb);
+        ID3D11SamplerState* ls = I.samplerWrap;
+        ctx->PSSetSamplers(0, 1, &ls);
+        const float seconds = static_cast<float>(GetTickCount64() % 1000000ull) / 1000.0f;
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+            if (!visible(pi)) continue;
+            for (int mi : scene.parts[pi].meshes) {
+                const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
+                if (!gm.vb) continue;
+                ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+                for (const auto& gs : gm.subs) {
+                    const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
+                    if (mat.alpha || !gs.ib || !gs.count) continue;
+                    float cbv[36];
+                    for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                    const float lit[4] = {L[0], L[1], L[2], 0.0f}, vw[4] = {toCam[0], toCam[1], toCam[2], 0.0f};
+                    const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
+                    const float dif4[4] = {lin(mat.diffuse.x), lin(mat.diffuse.y), lin(mat.diffuse.z), mat.diffuse.w};
+                    const float sh4[4] = {lin(mat.shadow.x), lin(mat.shadow.y), lin(mat.shadow.z), 1.0f};
+                    const float info[4] = {seconds, LinearLight() ? 1.0f : 0.0f, 0.0f, 0.0f};
+                    std::memcpy(cbv + 16, lit, 16);
+                    std::memcpy(cbv + 20, vw, 16);
+                    std::memcpy(cbv + 24, dif4, 16);
+                    std::memcpy(cbv + 28, sh4, 16);
+                    std::memcpy(cbv + 32, info, 16);
+                    ctx->UpdateSubresource(layer.cb, 0, nullptr, cbv, 0, 0);
+                    const GpuTex* lt = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
+                    ctx->PSSetShaderResources(0, 1, &lt->srv);
+                    ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                    ctx->DrawIndexed(gs.count, 0, 0);
+                }
+            }
+        }
+    }
 
     // Hovered component: tint its visible surface, then draw the same silhouette ring the game's outlines use in a warm
     // colour so the part pops out of the model. Depth-tested against the finished frame, never written.

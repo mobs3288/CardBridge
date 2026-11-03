@@ -7,7 +7,8 @@
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
-//   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, R reset view, F/S/B front/side/back,
+//   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
+//          R reset view, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
 
@@ -162,6 +163,24 @@ std::string FindLibrary() {
     return {};
 }
 
+// Where the extra shader layers live: CARDBRIDGE_LAYERS, a layers folder in the library, then the repository's cardbridge/layers
+// found from the exe upwards.
+std::vector<std::string> LayerFolders(const std::string& library) {
+    std::vector<std::string> out;
+    if (const char* env = std::getenv("CARDBRIDGE_LAYERS")) out.push_back(Slashes(env));
+    if (!library.empty()) out.push_back(library + "/layers");
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::string dir = Slashes(WideToUtf8(exe));
+    for (int up = 0; up < 5; ++up) {
+        dir = dir.substr(0, dir.find_last_of('/'));
+        for (const char* sub : {"/cardbridge/layers", "/layers"})
+            if (Exists(dir + sub)) out.push_back(dir + sub);
+        if (dir.find('/') == std::string::npos) break;
+    }
+    return out;
+}
+
 // ---- live log ---------------------------------------------------------------------------------------------------------
 enum class LogKind { Info, Good, Warn, Error };
 struct LogLine {
@@ -199,9 +218,9 @@ struct Tweaks {
 enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabCount };
 const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kNippleIn = 300;
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kNippleIn = 300, kLayerBase = 400;   // switches from 400: the shader layers
 struct TweakRow {
-    int kind = 0;        // 0 group header, 1 slider, 2 switch
+    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text
     int id = 0;
     std::string label, group;
 };
@@ -278,6 +297,7 @@ struct App {
     Tweaks tw;
     int tab = TabParts;
     int sliderDrag = -1;                      // slider id being dragged, or -1
+    std::vector<exporter::ShaderLayer> layerDefs;   // extra HLSL shading layers found in the layers folder (the GPU view runs them)
     std::map<std::string, char> keepHidden;   // part checkboxes to restore after a tweak reload
     bool applyKeep = false;
     bool tweakPending = false;                // a change is waiting for the pointer to be still
@@ -398,12 +418,17 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
         rows.push_back({1, kAreola, "Areola size", "Nipples"});
+        rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
+        if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
+        for (size_t i = 0; i < g.layerDefs.size(); ++i)
+            rows.push_back({2, kLayerBase + static_cast<int>(i), g.layerDefs[i].name, "Shader layers"});
     }
     return rows;
 }
 
 bool TweakChanged(int id) {
     SliderRef r;
+    if (id >= kLayerBase) return g.gpu.layerEnabled(static_cast<size_t>(id - kLayerBase));
     if (id == kNippleIn) return g.tw.nippleInside;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
@@ -891,11 +916,14 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
                 DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, y + 3, name);
                 bool any = false;
                 for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
-                DrawTextRight(dc, g.fontSmall, any ? RGB(235, 190, 90) : RGB(80, 88, 104), kPanel - 12, y + 4, "reset", &clip);
+                if (row.id >= 0) DrawTextRight(dc, g.fontSmall, any ? RGB(235, 190, 90) : RGB(80, 88, 104), kPanel - 12, y + 4, "reset", &clip);
+            } else if (row.kind == 4) {
+                DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 14, y + 4, row.label, &clip);
             } else if (row.kind == 2) {
                 bool on = TweakChanged(row.id);
-                DrawTextAt(dc, g.fontMono, on ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 3, on ? "[x]" : "[ ]");
-                DrawTextAt(dc, g.fontUi, on ? RGB(235, 190, 90) : RGB(206, 218, 236), 46, y + 2, row.label, &clip);
+                const bool failed = row.id >= kLayerBase && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
+                DrawTextAt(dc, g.fontMono, failed ? RGB(235, 110, 110) : on ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 3, on ? "[x]" : "[ ]");
+                DrawTextAt(dc, g.fontUi, failed ? RGB(235, 110, 110) : on ? RGB(235, 190, 90) : RGB(206, 218, 236), 46, y + 2, failed ? row.label + "  (does not compile)" : row.label, &clip);
             } else {
                 SliderRef r;
                 if (!SliderFor(row.id, r)) continue;
@@ -1030,7 +1058,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     RECT fr{0, l.footerTop, kPanel, rc.bottom};
     FillRect(dc, &fr, foot);
     DeleteObject(foot);
-    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  I issues  A all  T tex  H shader  R reset", 64));
+    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  V layers  R reset", 64));
     std::string hint = "1-7 outfit · L library · M mods · C clear log · drop a card";
     if (g.busy) hint = "working ...";
     else if (g.exporting) hint = "exporting PMX ...";
@@ -1118,6 +1146,16 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (idx < 0) return;
     const TweakRow& row = rows[static_cast<size_t>(idx)];
     std::lock_guard<std::mutex> lk(g.mu);
+    if (row.kind == 4 || (row.kind == 0 && row.id < 0)) return;
+    if (row.kind == 2 && row.id >= kLayerBase) {   // a shader layer: no re-assembly, just another frame
+        const size_t li = static_cast<size_t>(row.id - kLayerBase);
+        g.gpu.SetLayerEnabled(li, !g.gpu.layerEnabled(li));
+        Log("layer " + row.label + (g.gpu.layerEnabled(li) ? ": on" : g.gpu.layerOk(li) ? ": off" : ": does not compile"), g.gpu.layerOk(li) ? LogKind::Info : LogKind::Warn);
+        if (!g.gpuOk) Log("layers need the Direct3D 11 view", LogKind::Warn);
+        g.dirty = true;
+        InvalidateRect(g.hwnd, nullptr, FALSE);
+        return;
+    }
     if (row.kind == 0) {
         bool any = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) { any = any || TweakChanged(rows[k].id); ResetTweak(rows[k].id); }
@@ -1451,6 +1489,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::shared_ptr<Loaded> L = Current();
         if (wp == 'T') { g.textured = !g.textured; g.dirty = true; }
         else if (wp == 'H') { g.shaded = !g.shaded; g.dirty = true; }
+        else if (wp == 'V') {   // every shader layer on / off
+            bool any = false;
+            for (size_t i = 0; i < g.gpu.layerCount(); ++i) any = any || g.gpu.layerEnabled(i);
+            for (size_t i = 0; i < g.gpu.layerCount(); ++i) g.gpu.SetLayerEnabled(i, !any);
+            Log(g.gpu.layerCount() == 0 ? std::string("no shader layers (put .hlsl files in the layers folder)") : std::string(any ? "shader layers off" : "shader layers on"));
+            g.dirty = true;
+        }
         else if (wp == 'G') { exporter::SetColourGradeEnabled(!exporter::ColourGradeEnabled()); g.dirty = true; }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
@@ -1523,6 +1568,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     SaveSettings(g.settings);
     Log("library: " + (g.settings.library.empty() ? std::string("(not set)") : g.settings.library));
     Log("mods: " + (g.settings.mods.empty() ? std::string("(not set)") : g.settings.mods));
+    g.layerDefs = exporter::LoadShaderLayers(LayerFolders(g.settings.library));
+    if (!g.layerDefs.empty()) {
+        std::string report;
+        g.gpu.SetLayers(g.layerDefs, &report);
+        std::string names;
+        for (const auto& d : g.layerDefs) names += (names.empty() ? "" : ", ") + d.name;
+        Log(std::to_string(g.layerDefs.size()) + " shader layer(s): " + names + "  (V toggles, Look tab lists them)", LogKind::Good);
+        for (size_t at = 0; at < report.size();) {
+            size_t end = report.find('\n', at);
+            if (end == std::string::npos) end = report.size();
+            if (end > at) Log("layer failed: " + report.substr(at, end - at), LogKind::Warn);
+            at = end + 1;
+        }
+    }
     if (!card.empty()) StartLoad(card, g.wantOutfit);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {

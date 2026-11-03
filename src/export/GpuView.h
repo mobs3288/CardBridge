@@ -2,6 +2,7 @@
 
 #include "assemble/Scene.h"
 #include "export/Preview.h"
+#include "export/ShaderLayer.h"
 
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,14 @@ public:
                 int highlightPart = -1);
 
     int skippedMaterials() const;
+
+    // Extra HLSL shading layers (ShaderLayer.h) drawn over the game's shaders. SetLayers compiles them (replacing earlier ones) and
+    // returns false when none compiled; `report` gets one line per layer that did not. Layers start in their default state.
+    bool SetLayers(const std::vector<ShaderLayer>& layers, std::string* report = nullptr);
+    size_t layerCount() const;
+    bool layerEnabled(size_t i) const;
+    void SetLayerEnabled(size_t i, bool on);
+    bool layerOk(size_t i) const;   // false when it failed to compile
 
 private:
     struct Impl;
