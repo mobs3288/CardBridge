@@ -18,6 +18,7 @@ struct ExportOptions {
     int outfit = 0;                // recorded in the manifest
     std::string assetLibrary;      // recorded as provenance only
     std::string modsFolder;        // recorded as provenance only
+    std::string author;            // named in the model information; empty = CARDBRIDGE_AUTHOR (or the environment's CARDBRIDGE_AUTHOR)
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
 };

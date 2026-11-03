@@ -105,7 +105,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     using nlohmann::json;
     json j;
     j["schema_version"] = 1;
-    j["tool"] = {{"name", "cardbridge"}, {"version", CARDBRIDGE_VERSION}};
+    j["tool"] = {{"name", "cardbridge"}, {"version", CARDBRIDGE_VERSION}, {"author", CARDBRIDGE_AUTHOR}};
     j["input"] = {{"filename", fileio::FileName(card.path)}, {"kind", "koikatsu_character_card"}, {"sha256", card.sha256},
                   {"family", card::FamilyName(card.family)}, {"marker", card.marker}, {"format_version", card.formatVersion}};
     j["character"] = {{"name", scene.name}, {"outfit", opt.outfit}};
@@ -209,7 +209,12 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::vector<int> texMap(scene.textures.size(), -1);   // scene texture -> pmx texture
     pmx::Model model;
     model.name = scene.name;
-    model.comment = "Converted by CardBridge from " + fileio::FileName(card.path);
+    {   // the model information MikuMikuDance shows (it wants Windows line breaks): the tool, its author, where the model came from
+        const std::string author = !opt.author.empty() ? opt.author : std::getenv("CARDBRIDGE_AUTHOR") ? std::string(std::getenv("CARDBRIDGE_AUTHOR")) : std::string(CARDBRIDGE_AUTHOR);
+        model.nameEn = scene.name;
+        model.comment = "Converted by CardBridge " CARDBRIDGE_VERSION "\r\nCardBridge by " + author + "\r\nCharacter: " + scene.name + "\r\nSource card: " + fileio::FileName(card.path);
+        model.commentEn = model.comment;
+    }
 
     {   // every scene bone, in scene order (a parent always comes before its children); the tail points at the first child
         std::vector<int> firstChild(scene.bones.size(), -1);
@@ -370,7 +375,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             pmx::Morph all;
             all.name = "All clothes off";
             for (size_t pi : outfit) { auto h = hideMorph.find(pi); if (h != hideMorph.end()) all.group.emplace_back(h->second, 1.0f); }
-            if (nudeIndex >= 0) all.group.emplace_back(nudeIndex, 1.0f);
+            // The under pieces themselves, not the "Nude body" group morph: MikuMikuDance crashes on a group morph inside a group morph.
+            if (nudeIndex >= 0) for (auto& [ui, mi] : showMorph) if (scene.parts[ui].underPiece) all.group.emplace_back(mi, 1.0f);
             if (!all.group.empty()) addMorph(std::move(all));
         }
     }
