@@ -18,9 +18,9 @@ The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the con
 2. It asks for your Koikatsu **mods folder** (or Cancel for base-game items only). Mods are never shipped with CardBridge: each user points it at their own.
 3. Drop a card `.png` on the window. Press **E** (or *Export PMX*) to write the PMX.
 
-**Settings.** The **Setup** tab (last tab in the panel) changes everything chosen at first run, and each change is saved at once to `%LOCALAPPDATA%\CardBridge\viewer.json`: use another library folder or build a new one from a Koikatsu folder; choose the mods folder, rebuild the mod index after adding mods, or use no mods; the author name written into every exported PMX; one fixed export folder (or ask every time); an extra folder of shader layers; open the settings folder; forget all settings. Keys `M` (mods folder) and `L` (library) still work.
+**Settings.** The **Setup** tab (last tab in the panel) changes everything chosen at first run, and each change is saved at once to `%LOCALAPPDATA%\CardBridge\viewer.json`: use another library folder or build a new one from a Koikatsu folder; choose the mods folder, rebuild the mod index after adding mods, or use no mods; one fixed export folder (or ask every time); an extra folder of shader layers; open the settings folder; forget all settings. Keys `M` (mods folder) and `L` (library) still work.
 
-`CardBridge-CLI-<version>.exe` is the same converter as a command line tool (see Usage). Every exported PMX carries the model information (CardBridge, its version and author, the character, the source card) in the header comment, which MikuMikuDance shows in its model info.
+`CardBridge-CLI-<version>.exe` is the same converter as a command line tool (see Usage). Every exported PMX carries the model information (CardBridge, its version and its author, Ryan Oktaviandi Susilo Wibowo, which is fixed and cannot be changed by a setting; the character; the source card) in the header comment, which MikuMikuDance shows in its model info.
 
 ## What you need
 

@@ -114,7 +114,6 @@ std::string CachedModsRoot() {
 
 struct Settings {
     std::string library, mods;
-    std::string author;      // named in the PMX model information; empty = the default author
     std::string exportDir;   // where exports go without asking; empty = ask every time
     std::string layers;      // an extra folder of shader layers (.hlsl)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
@@ -125,7 +124,6 @@ Settings LoadSettings() {
         auto j = nlohmann::json::parse([] { Bytes b = fileio::ReadFile(SettingsPath()); return std::string(b.begin(), b.end()); }());
         s.library = j.value("library", "");
         s.mods = j.value("mods", "");
-        s.author = j.value("author", "");
         s.exportDir = j.value("exportDir", "");
         s.layers = j.value("layers", "");
         s.noMods = j.value("noMods", false);
@@ -138,7 +136,6 @@ void SaveSettings(const Settings& s) {
         nlohmann::json j;
         j["library"] = s.library;
         j["mods"] = s.mods;
-        j["author"] = s.author;
         j["exportDir"] = s.exportDir;
         j["layers"] = s.layers;
         j["noMods"] = s.noMods;
@@ -278,7 +275,7 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
-constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetAuthor = 20005, kSetExportDir = 20006,
+constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
@@ -628,8 +625,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({5, kSetModsReindex, "Rebuild the mod index (after adding mods)", "Mods"});
         rows.push_back({5, kSetModsClear, "Use no mods", "Mods"});
         rows.push_back({0, -1, "Export", "Export"});
-        rows.push_back({4, 0, "author in the PMX info: " + (g.settings.author.empty() ? std::string(CARDBRIDGE_AUTHOR) : g.settings.author), "Export"});
-        rows.push_back({5, kSetAuthor, "Change the author name ...", "Export"});
+        rows.push_back({4, 0, std::string("PMX info always names: ") + CARDBRIDGE_AUTHOR, "Export"});
         rows.push_back({4, 0, "exports go to: " + shown(g.settings.exportDir, "(asks every time)"), "Export"});
         rows.push_back({5, kSetExportDir, "Always export into one folder ...", "Export"});
         rows.push_back({5, kSetExportAsk, "Ask for the folder every time", "Export"});
@@ -1115,12 +1111,12 @@ void StartExport() {
     std::string stem = SafeStem(L->title.empty() ? std::string("character") : L->title);
     std::string outDir = parent + "/" + stem;
     for (int n = 2; Exists(outDir) && n < 1000; ++n) outDir = parent + "/" + stem + " (" + std::to_string(n) + ")";
-    const std::string library = g.settings.library, mods = g.settings.mods, author = g.settings.author;
+    const std::string library = g.settings.library, mods = g.settings.mods;
     const std::vector<char> hiddenNow = g.hidden;
     const assemble::Pose pose = BuildPose(*L);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, author, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
@@ -1135,7 +1131,6 @@ void StartExport() {
             eo.outfit = L->outfit;
             eo.assetLibrary = library;
             eo.modsFolder = mods;
-            eo.author = author;
             eo.log = [](const std::string& m) { Log("  " + m); };
             exporter::ExportResult r = exporter::ExportScene(scene, L->card, eo);
             double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -2139,55 +2134,6 @@ void SetupLibrary(bool offerExisting) {
 
 void ChooseLibrary() { SetupLibrary(true); }
 
-// A small modal box with one text field; empty when cancelled.
-std::string PromptText(HWND owner, const wchar_t* title, const wchar_t* label, const std::string& initial) {
-    struct State { std::wstring text; bool ok = false, done = false; HWND edit = nullptr; };
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSW wc{};
-        wc.lpfnWndProc = [](HWND h, UINT m, WPARAM w, LPARAM l) -> LRESULT {
-            State* st = reinterpret_cast<State*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-            switch (m) {
-            case WM_CREATE: SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams)); return 0;
-            case WM_COMMAND:
-                if (st && LOWORD(w) == IDOK) { wchar_t buf[512] = L""; GetWindowTextW(st->edit, buf, 512); st->text = buf; st->ok = true; st->done = true; DestroyWindow(h); }
-                else if (st && LOWORD(w) == IDCANCEL) { st->done = true; DestroyWindow(h); }
-                return 0;
-            case WM_CLOSE: if (st) st->done = true; DestroyWindow(h); return 0;
-            }
-            return DefWindowProcW(h, m, w, l);
-        };
-        wc.hInstance = GetModuleHandleW(nullptr);
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"CardBridgePrompt";
-        RegisterClassW(&wc);
-        registered = true;
-    }
-    State st;
-    RECT orc{};
-    GetWindowRect(owner, &orc);
-    const int W = 420, H = 130;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"CardBridgePrompt", title, WS_POPUP | WS_CAPTION | WS_SYSMENU, orc.left + (orc.right - orc.left - W) / 2, orc.top + (orc.bottom - orc.top - H) / 2, W, H, owner, nullptr, GetModuleHandleW(nullptr), &st);
-    if (!dlg) return {};
-    HWND lab = CreateWindowExW(0, L"STATIC", label, WS_CHILD | WS_VISIBLE, 12, 10, W - 36, 18, dlg, nullptr, nullptr, nullptr);
-    st.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", Utf8ToWide(initial).c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 32, W - 36, 24, dlg, nullptr, nullptr, nullptr);
-    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, W - 36 - 160, 66, 76, 26, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), nullptr, nullptr);
-    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, W - 36 - 78, 66, 76, 26, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), nullptr, nullptr);
-    for (HWND c : {lab, st.edit, ok, cancel}) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g.fontUi), TRUE);
-    SendMessageW(st.edit, EM_SETSEL, 0, -1);
-    EnableWindow(owner, FALSE);
-    ShowWindow(dlg, SW_SHOW);
-    SetFocus(st.edit);
-    MSG m;
-    while (!st.done && GetMessageW(&m, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dlg, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
-    return st.ok ? WideToUtf8(st.text) : std::string();
-}
-
 // (Re)loads the shader layers from the default places and the user's extra folder.
 void ReloadLayers(bool announce) {
     g.layerDefs = exporter::LoadShaderLayers(LayerFolders(g.settings.library, g.settings.layers));
@@ -2241,15 +2187,6 @@ void SettingsAction(int id) {
         Log("no mods folder: base-game items only", LogKind::Info);
         reloadCard();
         break;
-    case kSetAuthor: {
-        const std::string cur = g.settings.author.empty() ? std::string(CARDBRIDGE_AUTHOR) : g.settings.author;
-        const std::string a = PromptText(g.hwnd, L"CardBridge - author", L"Name written into the model information of every exported PMX:", cur);
-        if (a.empty()) break;
-        g.settings.author = a == CARDBRIDGE_AUTHOR ? std::string() : a;
-        SaveSettings(g.settings);
-        Log("author: " + a, LogKind::Good);
-        break;
-    }
     case kSetExportDir: {
         const std::string d = PickFolder(g.hwnd, L"Choose the folder exports go into");
         if (d.empty()) break;

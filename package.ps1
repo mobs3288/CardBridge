@@ -1,10 +1,10 @@
 <#
     Makes the release files. The release is ONE exe: CardBridge-<version>.exe is the viewer with everything in it: the icon, the logo, the
-    converter, the exporter and (with -Library) the base-game library, appended to the exe as a zip with a small footer. On first run it
-    unpacks the library into %LOCALAPPDATA%\CardBridge\library (about 20 s), asks for the user's mods folder, and needs nothing else.
+    converter and the exporter. With -Library the base-game library is appended to the exe as a zip with a small footer
+    (CardBridge-<version>-with-library.exe). On first run that one unpacks the library into %LOCALAPPDATA%\CardBridge\library (about 20 s), asks for the user's mods folder, and needs nothing else.
     Drop a card on its window, press E to export a PMX. Mods are never inside it: each user points it at their own.
 
-    Without -Library the exe has no game data and asks for the user's Koikatsu folder on first run instead (CardBridge-lean-<version>.exe).
+    Without -Library the exe has no game data and asks for the user's Koikatsu folder on first run instead.
 
     Also made: CardBridge-CLI-<version>.exe (the command line converter) and a .sha256 beside each file.
 
@@ -41,7 +41,7 @@ function Publish([string]$from, [string]$to) {
     Write-Host ("{0}  ({1:N1} MB)  sha256 {2}" -f $to, ((Get-Item $to).Length / 1MB), $hash)
 }
 $viewer = Join-Path $BinDir 'cardbridge_viewer.exe'
-Publish $viewer (Join-Path $OutDir "CardBridge-lean-$version.exe")
+Publish $viewer (Join-Path $OutDir "CardBridge-$version.exe")
 Publish (Join-Path $BinDir 'cardbridge.exe') (Join-Path $OutDir "CardBridge-CLI-$version.exe")
 
 if ($Library) {
@@ -56,7 +56,7 @@ if ($Library) {
     [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Fastest, $false)
     Remove-Item $stage -Recurse -Force
     # exe + zip + footer ("CBLIBPK1", zip offset, zip size)
-    $out = Join-Path $OutDir "CardBridge-$version.exe"
+    $out = Join-Path $OutDir "CardBridge-$version-with-library.exe"
     $exeLen = (Get-Item $viewer).Length
     $zipLen = (Get-Item $zip).Length
     $o = [System.IO.File]::Create($out)
