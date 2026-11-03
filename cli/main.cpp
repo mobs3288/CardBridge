@@ -102,6 +102,7 @@ void usage() {
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
         "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
         "             [--apose [--apose-degrees N]]   arms down from the T-pose (40 degrees by default)\n"
+        "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -387,17 +388,33 @@ int cmdConvert(const Args& a) {
 
     std::vector<Mat4> liveSkin;
     // --apose [--apose-degrees N] brings the arms down from the T-pose (clavicle and upper arm), 40 degrees by default; the PMX is written in that pose.
-    if (a.has("apose")) {
-        assemble::Pose pose;
-        const float deg = a.opt.count("apose-degrees") ? static_cast<float>(std::atof(a.get("apose-degrees").c_str())) : 40.0f;
-        if (assemble::MakeAPose(scene, deg, pose.base)) {
-            // Test aid: CARDBRIDGE_GPU_SKIN_TEST=1 leaves the scene at rest and poses the GPU view through its quick re-skin (what the viewer does live).
-            if (std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) liveSkin = assemble::SkinMatrices(scene, pose);
-            else assemble::BakePose(scene, pose);
-            std::fprintf(stderr, "  a-pose: arms down %.0f degrees\n", deg);
-        } else {
-            std::fprintf(stderr, "  a-pose: this rig has no arm bones to turn\n");
+    // --pose <file.json> bakes a pose saved by the viewer (bone edits and the A-pose switch); with --apose the arms come down as well.
+    assemble::PoseFile poseFile;
+    if (a.opt.count("pose")) {
+        std::string err;
+        try {
+            const Bytes raw = fileio::ReadFile(a.get("pose"));
+            if (!assemble::PoseFileFromJson(std::string(raw.begin(), raw.end()), poseFile, &err)) {
+                std::fprintf(stderr, "error: %s: %s\n", a.get("pose").c_str(), err.c_str());
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: cannot read the pose file %s: %s\n", a.get("pose").c_str(), e.what());
+            return 1;
         }
+    }
+    if (a.has("apose")) poseFile.aPose = true;
+    if (a.opt.count("apose-degrees")) poseFile.aPoseDegrees = static_cast<float>(std::atof(a.get("apose-degrees").c_str()));
+    if (poseFile.aPose || !poseFile.bones.empty()) {
+        std::vector<std::string> unknown;
+        const assemble::Pose pose = assemble::MakePose(scene, poseFile, &unknown);
+        for (const auto& name : unknown) std::fprintf(stderr, "  pose: this rig has no bone '%s'; skipped\n", name.c_str());
+        if (poseFile.aPose && pose.base.empty()) std::fprintf(stderr, "  a-pose: this rig has no arm bones to turn\n");
+        // Test aid: CARDBRIDGE_GPU_SKIN_TEST=1 leaves the scene at rest and poses the GPU view through its quick re-skin (what the viewer does live).
+        if (std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) liveSkin = assemble::SkinMatrices(scene, pose);
+        else assemble::BakePose(scene, pose);
+        if (!pose.base.empty()) std::fprintf(stderr, "  a-pose: arms down %.0f degrees\n", poseFile.aPoseDegrees);
+        if (!poseFile.bones.empty()) std::fprintf(stderr, "  pose: %zu bone edit(s) from %s\n", poseFile.bones.size() - unknown.size(), a.get("pose").c_str());
     }
 
     // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)

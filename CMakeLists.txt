@@ -77,6 +77,7 @@ add_library(cardbridge_core STATIC
     src/assemble/PhysicsSim.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
+    src/export/PmxIk.cpp
     src/export/SkeletonOverlay.cpp
     src/export/Preview.cpp
     src/export/GpuView.cpp

@@ -84,6 +84,10 @@ Bytes WritePmx(const Model& m) {
     for (const auto& b : m.bones) {
         if (b.parent >= static_cast<int>(m.bones.size())) throw FormatError("PMX: bone parent out of range");
         if (b.tailBone >= static_cast<int>(m.bones.size())) throw FormatError("PMX: bone tail out of range");
+        if (b.ikTarget >= static_cast<int>(m.bones.size())) throw FormatError("PMX: IK target out of range");
+        if (b.ikTarget >= 0 && b.ikLinks.empty()) throw FormatError("PMX: an IK bone without links");
+        for (const auto& l : b.ikLinks)
+            if (l.bone < 0 || l.bone >= static_cast<int>(m.bones.size())) throw FormatError("PMX: IK link out of range");
     }
     for (const auto& rb : m.rigidBodies)
         if (rb.bone >= static_cast<int>(m.bones.size())) throw FormatError("PMX: a rigid body points past the bone list");
@@ -186,9 +190,22 @@ Bytes WritePmx(const Model& m) {
         o.vec3(b.position);
         o.sidx(b.parent, bSize);
         o.i32(b.layer);
-        o.u16(static_cast<uint16_t>(b.tailBone >= 0 ? (b.flags | 0x0001) : (b.flags & ~0x0001)));   // bit 0: the tail is a bone, else an offset
+        uint16_t flags = static_cast<uint16_t>(b.tailBone >= 0 ? (b.flags | 0x0001) : (b.flags & ~0x0001));   // bit 0: the tail is a bone, else an offset
+        flags = static_cast<uint16_t>(b.ikTarget >= 0 ? (flags | 0x0020) : (flags & ~0x0020));              // bit 5: IK
+        o.u16(flags);
         if (b.tailBone >= 0) o.sidx(b.tailBone, bSize);
         else o.vec3(b.tailOffset);
+        if (b.ikTarget >= 0) {
+            o.sidx(b.ikTarget, bSize);
+            o.i32(b.ikLoop);
+            o.f32(b.ikLimit);
+            o.i32(static_cast<int32_t>(b.ikLinks.size()));
+            for (const auto& l : b.ikLinks) {
+                o.sidx(l.bone, bSize);
+                o.u8(l.limited ? 1 : 0);
+                if (l.limited) { o.vec3(l.lower); o.vec3(l.upper); }
+            }
+        }
     }
 
     o.i32(static_cast<int32_t>(m.morphs.size()));

@@ -24,6 +24,7 @@
 #include "core/ZipArchive.h"
 #include "export/BoneLabels.h"
 #include "export/Exporter.h"
+#include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
@@ -33,6 +34,9 @@
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
 #include "resolve/Resolver.h"
+
+#include "PmxReader.h"
+#include "SpringRef.h"
 
 #include <nlohmann/json.hpp>
 
@@ -89,6 +93,113 @@ std::string tempPath(const std::string& name) {
     for (char& c : base) if (c == '\\') c = '/';
     return base + "/cardbridge_" + name;
 }
+
+// ---- PMX read-back (tests/PmxReader.h reads the written bytes, independent of the writer) ----
+
+pmxread::V3 operator-(pmxread::V3 a, pmxread::V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+float lengthOf(pmxread::V3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+// A capsule's long axis in the world: +Y turned by a rigid body's rotation in PMX order (roll about z, then pitch about x, then yaw about y).
+pmxread::V3 capsuleAxis(pmxread::V3 e) {
+    pmxread::V3 v{0, 1, 0};
+    v = {v.x * std::cos(e.z) - v.y * std::sin(e.z), v.x * std::sin(e.z) + v.y * std::cos(e.z), v.z};
+    v = {v.x, v.y * std::cos(e.x) - v.z * std::sin(e.x), v.y * std::sin(e.x) + v.z * std::cos(e.x)};
+    v = {v.x * std::cos(e.y) + v.z * std::sin(e.y), v.y, -v.x * std::sin(e.y) + v.z * std::cos(e.y)};
+    return v;
+}
+
+// Everything that can be wrong with the physics of a written PMX, each finding one line: bodies on missing bones or far from them,
+// capsules not along their bone, joints on missing bodies, an anchor that is not kinematic, a chain body that is, collision filters that
+// let a chain hit anything but the colliders, vertex morphs and display frames pointing past their lists, and chains with no anchor.
+std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
+    std::vector<std::string> out;
+    const int nb = static_cast<int>(m.bodies.size());
+    auto bit = [](uint16_t mask, int group) { return (mask >> group & 1) != 0; };
+    for (size_t i = 0; i < m.bodies.size(); ++i) {
+        const auto& b = m.bodies[i];
+        const std::string who = "body " + std::to_string(i) + " '" + b.name + "'";
+        if (b.bone < 0 || b.bone >= static_cast<int>(m.bones.size())) { out.push_back(who + ": bone " + std::to_string(b.bone) + " does not exist"); continue; }
+        if (b.shape < 0 || b.shape > 2) out.push_back(who + ": unknown shape");
+        if (b.mode < 0 || b.mode > 2) out.push_back(who + ": unknown mode");
+        if (b.mode != 0 && !(b.mass > 0)) out.push_back(who + ": a moving body without mass");
+        if (b.mode != 0 && (b.moveDamping < 0 || b.moveDamping > 1 || b.rotDamping < 0 || b.rotDamping > 1)) out.push_back(who + ": damping outside 0..1");
+        if (!(b.size.x > 0)) out.push_back(who + ": no radius");
+        const pmxread::V3 head = m.bones[static_cast<size_t>(b.bone)].pos;
+        const float reach = b.shape == 2 ? 0.5f * b.size.y + b.size.x : b.size.x;
+        const float dist = lengthOf(b.pos - head);
+        if (b.group == exporter::kPmxGroupChain && b.mode != 0 && dist > reach + 1e-3f) out.push_back(who + ": its centre is " + std::to_string(dist) + " from its bone, further than its own half length " + std::to_string(reach));
+        if (b.group == exporter::kPmxGroupChain && b.mode != 0 && b.shape == 2) {
+            // a chain link runs from its bone's head: the axis points from the head to the centre
+            const pmxread::V3 axis = capsuleAxis(b.rot), want = b.pos - head;
+            const float l = lengthOf(want);
+            const float d = l > 1e-6f ? (axis.x * want.x + axis.y * want.y + axis.z * want.z) / l : 1.0f;
+            if (d < 0.999f) out.push_back(who + ": the capsule does not follow its bone (cos " + std::to_string(d) + ")");
+        }
+        if (b.group == exporter::kPmxGroupCollider) {
+            if (b.mode != 0) out.push_back(who + ": a collider that moves");
+            if (!bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a collider that does not meet chains");
+            if ((b.mask & ~(1u << exporter::kPmxGroupChain)) != 0) out.push_back(who + ": a collider that meets more than chains");
+        } else if (b.mode != 0) {
+            if (b.mask != (1u << exporter::kPmxGroupCollider)) out.push_back(who + ": a chain body that meets anything but colliders (mask " + std::to_string(b.mask) + ")");
+        } else if (b.mask != 0) {
+            out.push_back(who + ": an anchor that collides");
+        }
+    }
+    std::vector<std::vector<int>> linked(m.bodies.size());
+    for (size_t i = 0; i < m.joints.size(); ++i) {
+        const auto& j = m.joints[i];
+        if (j.a < 0 || j.a >= nb || j.b < 0 || j.b >= nb || j.a == j.b) { out.push_back("joint " + std::to_string(i) + ": does not join two bodies"); continue; }
+        linked[static_cast<size_t>(j.a)].push_back(j.b);
+        linked[static_cast<size_t>(j.b)].push_back(j.a);
+        if (j.type != 0) out.push_back("joint " + std::to_string(i) + ": not a spring 6-DOF joint");
+        for (float l : {j.rotLower.x, j.rotLower.y, j.rotLower.z}) if (!(l <= 0)) out.push_back("joint " + std::to_string(i) + ": a lower rotation limit above 0");
+        for (float u : {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z}) if (!(u >= 0)) out.push_back("joint " + std::to_string(i) + ": an upper rotation limit below 0");
+        if (!(j.springRot.x > 0 && j.springRot.y > 0 && j.springRot.z > 0)) out.push_back("joint " + std::to_string(i) + ": no rotation spring");
+        // the joint stands where the second body meets the first: on or near the second body
+        const auto& bb = m.bodies[static_cast<size_t>(j.b)];
+        const float reach = bb.shape == 2 ? 0.5f * bb.size.y + bb.size.x : bb.size.x;
+        if (lengthOf(j.pos - bb.pos) > reach + 1e-3f) out.push_back("joint " + std::to_string(i) + ": far from its second body");
+    }
+    // every moving body is tied to a kinematic one through joints
+    std::vector<char> reached(m.bodies.size(), 0);
+    std::vector<int> stack;
+    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode == 0 && m.bodies[static_cast<size_t>(i)].group == exporter::kPmxGroupChain) { reached[static_cast<size_t>(i)] = 1; stack.push_back(i); }
+    while (!stack.empty()) {
+        const int at = stack.back();
+        stack.pop_back();
+        for (int n : linked[static_cast<size_t>(at)]) if (!reached[static_cast<size_t>(n)]) { reached[static_cast<size_t>(n)] = 1; stack.push_back(n); }
+    }
+    for (int i = 0; i < nb; ++i)
+        if (m.bodies[static_cast<size_t>(i)].mode != 0 && !reached[static_cast<size_t>(i)]) out.push_back("body " + std::to_string(i) + " is not joined to an anchor");
+    for (size_t i = 0; i < m.bones.size(); ++i) {   // IK: the target and links exist, the links are the target's ancestors nearest first, the handle stands on the target
+        const auto& b = m.bones[i];
+        if (!b.isIk()) continue;
+        const int n = static_cast<int>(m.bones.size());
+        const std::string who = "IK bone " + std::to_string(i) + " '" + b.name + "'";
+        if (b.ikTarget < 0 || b.ikTarget >= n || b.ikTarget == static_cast<int>(i)) { out.push_back(who + ": no target"); continue; }
+        if (b.ikLinks.empty() || b.ikLoop <= 0 || !(b.ikLimit > 0)) out.push_back(who + ": no links, loops or angle limit");
+        int expect = m.bones[static_cast<size_t>(b.ikTarget)].parent;
+        for (const auto& l : b.ikLinks) {
+            if (l.bone < 0 || l.bone >= n || l.bone != expect) { out.push_back(who + ": a link that is not the next ancestor of the target"); break; }
+            if (l.limited && (l.lower.x > l.upper.x || l.lower.y > l.upper.y || l.lower.z > l.upper.z)) out.push_back(who + ": a limit with min above max");
+            expect = m.bones[static_cast<size_t>(l.bone)].parent;
+        }
+        if (lengthOf(b.pos - m.bones[static_cast<size_t>(b.ikTarget)].pos) > 1e-3f) out.push_back(who + ": its handle is not on the target");
+    }
+    for (size_t i = 0; i < m.morphs.size(); ++i)
+        for (const auto& vo : m.morphs[i].vertices)
+            if (vo.first < 0 || vo.first >= static_cast<int>(m.vertices.size())) { out.push_back("morph " + std::to_string(i) + ": a vertex index past the list"); break; }
+    for (size_t i = 0; i < m.frames.size(); ++i)
+        for (const auto& it : m.frames[i].items)
+            if (it.second < 0 || it.second >= static_cast<int>(it.first == 0 ? m.bones.size() : m.morphs.size())) { out.push_back("frame " + std::to_string(i) + ": an item past its list"); break; }
+    for (size_t i = 0; i < m.bones.size(); ++i) {
+        if (m.bones[i].parent >= static_cast<int>(m.bones.size())) out.push_back("bone " + std::to_string(i) + ": parent past the list");
+        if (m.bones[i].tailBone >= static_cast<int>(m.bones.size())) out.push_back("bone " + std::to_string(i) + ": tail past the list");
+    }
+    return out;
+}
+
+pmxread::Model readPmx(const Bytes& b) { return pmxread::Read(b.data(), b.size()); }
 
 void unitTests() {
     test("linear light: colour properties are decoded, floats and texture scales are left alone", [] {
@@ -558,17 +669,19 @@ void unitTests() {
         }
     });
 
-    test("physics: a chain becomes an anchor, capsules and joints; colliders become kinematic bodies", [] {
+    test("physics: a chain becomes an anchor, a capsule per bone and joints; colliders become kinematic bodies; read back from the bytes", [] {
         assemble::Scene s;
-        for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i - 1, {0, 1.0f - 0.1f * float(i), 0}, "rig"});
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0, 1.1f - 0.1f * float(i), 0}, "rig"});
         assemble::SceneChain ch;
         ch.name = "strand";
-        ch.bones = {0, 1, 2, 3};
+        ch.bones = {1, 2, 3, 4};
         ch.stiffness = 0.2f;
         s.chains.push_back(ch);
         assemble::SceneCollider col;
         col.name = "head";
         col.bone = 0;
+        col.center = {0, 1.2f, 0};
         col.radius = 0.1f;
         col.height = 0.4f;
         col.axis = {0, 1, 0};
@@ -577,18 +690,256 @@ void unitTests() {
         inside.inside = true;
         s.colliders.push_back(inside);
         pmx::Model m;
-        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; m.bones.push_back(pb); }
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.size() == 5);   // collider + anchor + 3 links (the inside collider is not exported)
-        CHECK(m.joints.size() == 3);
+        CHECK(m.rigidBodies.size() == 6);   // collider + anchor + one per chain bone (the inside collider is not exported)
+        CHECK(m.joints.size() == 4);        // anchor-root, root-1, 1-2, 2-3
         CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].group == 0 && m.rigidBodies[0].shape == 2);
-        CHECK(m.rigidBodies[1].mode == 0);      // the anchor follows its bone
-        CHECK(m.rigidBodies[2].mode == 1 && m.rigidBodies[2].group == 1);
-        CHECK(std::fabs(m.rigidBodies[2].position.y - 8.5f) < 1e-3f);   // halfway from bone 1 (y 0.9) to bone 2 (0.8), scaled by 10
+        CHECK(m.rigidBodies[1].mode == 0 && m.rigidBodies[1].bone == 0);   // the anchor follows the chain's parent bone
+        CHECK(m.rigidBodies[2].mode == 2 && m.rigidBodies[3].mode == 1 && m.rigidBodies[3].group == 1);   // the root only turns, the rest are free
+        CHECK(std::fabs(m.rigidBodies[3].position.y - 9.5f) < 1e-3f);   // halfway from bone 2 (y 1.0) to bone 3 (0.9), scaled by 10: 9.5
         for (const auto& j : m.joints) CHECK(j.bodyA >= 0 && j.bodyB >= 0 && j.bodyA != j.bodyB);
-        m.vertices.resize(1);
-        m.indices = {};
-        pmx::WritePmx(m);   // consistent enough to serialise
+        m.vertices.resize(3);
+        m.indices = {0, 1, 2};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        pmx::Morph vm; vm.name = "v"; vm.vertices.emplace_back(2, Vec3{0, 1, 0}); m.morphs.push_back(vm);
+        const pmxread::Model back = readPmx(pmx::WritePmx(m));   // consistent enough to serialise, and read again by a second reader
+        CHECK(back.bodies.size() == m.rigidBodies.size() && back.joints.size() == m.joints.size() && back.bones.size() == m.bones.size());
+        const auto findings = pmxPhysicsFindings(back);
+        for (const auto& f : findings) std::printf("  physics finding: %s\n", f.c_str());
+        CHECK(findings.empty());
+        for (size_t i = 0; i < m.rigidBodies.size(); ++i) {   // numbers come back as written
+            CHECK(back.bodies[i].group == m.rigidBodies[i].group && back.bodies[i].mask == m.rigidBodies[i].mask && back.bodies[i].mode == m.rigidBodies[i].mode);
+            CHECK(std::fabs(back.bodies[i].pos.y - m.rigidBodies[i].position.y) < 1e-5f && std::fabs(back.bodies[i].size.x - m.rigidBodies[i].size.x) < 1e-5f);
+        }
+        // the filter: chains meet colliders (bit 0), colliders meet chains (bit 1), the anchor meets nothing
+        CHECK(back.bodies[0].mask == 0x0002 && back.bodies[1].mask == 0 && back.bodies[3].mask == 0x0001);
+        // a broken file is found: a chain that meets chains, an anchor that moves, a joint on a missing body
+        pmxread::Model broken = back;
+        broken.bodies[3].mask = 0xFFFF;
+        broken.bodies[1].mode = 1;
+        broken.joints[0].b = 99;
+        CHECK(pmxPhysicsFindings(broken).size() >= 3);
+    });
+
+    test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
+        using namespace assemble;
+        struct Setup { const char* what; float damping, elasticity, stiffness; };
+        for (const Setup& su : {Setup{"default hair", 0.1f, 0.1f, 0.1f}, Setup{"loose", 0.06f, 0.03f, 0.0f}, Setup{"stiff", 0.2f, 0.3f, 0.6f}}) {
+            Scene s;
+            s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+            for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0, 1.1f - 0.1f * float(i), 0}, "rig"});
+            SceneChain ch;
+            ch.name = "strand";
+            ch.bones = {1, 2, 3, 4};
+            ch.damping = su.damping; ch.elasticity = su.elasticity; ch.stiffness = su.stiffness;
+            s.chains.push_back(ch);
+            const float scale = 12.5f;
+            pmx::Model m;
+            for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * scale; m.bones.push_back(pb); }
+            exporter::AddPhysics(s, m, scale);
+            m.vertices.resize(1);
+            const pmxread::Model back = readPmx(pmx::WritePmx(m));
+            CHECK(pmxPhysicsFindings(back).empty());
+
+            // the head moves 0.3 m to the side over a tenth of a second; both sims follow the tip's lag behind it
+            Pose pose;
+            std::vector<Mat4> pw = BoneWorlds(s, pose);
+            PhysicsSim sim;
+            sim.Reset(s, pw);
+            std::vector<Mat4> skin(s.bones.size());
+            springref::Chain ref(back, 9.8 * scale);
+            std::vector<double> lagSim, lagRef;
+            double peakSim = 0, peakRef = 0, maxAngle = 0;
+            for (int f = 0; f < 600; ++f) {
+                const float x = 0.3f * std::min(1.0f, float(f + 1) / 6.0f);
+                pose.edit(0).pos = {x, 0, 0};
+                pw = BoneWorlds(s, pose);
+                sim.Step(s, pw, 1, skin);
+                ref.moveAnchors({x * scale, 0});
+                ref.step();
+                lagSim.push_back(x - skin[4].point(s.bones[4].pos).x);
+                lagRef.push_back(x - ref.jointPoint(ref.pinCount() - 1).x / scale);
+                peakSim = std::max(peakSim, std::fabs(lagSim.back()));
+                peakRef = std::max(peakRef, std::fabs(lagRef.back()));
+                for (size_t k = 0; k < ref.pinCount(); ++k) maxAngle = std::max(maxAngle, std::fabs(ref.relativeAngle(k)));
+            }
+            auto settledAt = [](const std::vector<double>& lag, double band) {
+                int last = 0;
+                for (size_t i = 0; i < lag.size(); ++i) if (std::fabs(lag[i]) > band) last = static_cast<int>(i);
+                return last;
+            };
+            const int tSim = settledAt(lagSim, 0.015), tRef = settledAt(lagRef, 0.015);
+            std::printf("  %-12s peak lag sim %.3f m ref %.3f m; within 1.5 cm for good after %.2f s (sim) %.2f s (ref); final lag ref %.4f m; speed %.4f; largest joint angle %.2f rad\n", su.what, peakSim, peakRef, tSim / 60.0, tRef / 60.0, lagRef.back(), ref.speed(), maxAngle);
+            CHECK(peakRef < 0.45);                                  // never flung past the head's own move
+            CHECK(std::fabs(lagRef.back()) < 0.01 && ref.speed() < 0.5);   // hangs straight under the anchor again and is at rest
+            CHECK(tRef <= 420);                                     // and does so within 7 s
+            CHECK(tRef <= tSim * 3 + 60);                           // in the same time as the sim, give or take a factor
+            CHECK(maxAngle < 1.9);                                  // at most a little past the widest limit (1.5 rad; the reference stop is soft)
+        }
+
+        {   // a strand that stands out sideways droops under gravity, but only as far as its stiffness allows
+            Scene s;
+            s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+            for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f, 0}, "rig"});
+            SceneChain ch;
+            ch.name = "ribbon";
+            ch.bones = {1, 2, 3, 4};
+            ch.damping = 0.1f; ch.elasticity = 0.03f; ch.stiffness = 0.0f;   // as loose as it gets
+            s.chains.push_back(ch);
+            const float scale = 12.5f;
+            pmx::Model m;
+            for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * scale; m.bones.push_back(pb); }
+            exporter::AddPhysics(s, m, scale);
+            m.vertices.resize(1);
+            const pmxread::Model back = readPmx(pmx::WritePmx(m));
+            CHECK(pmxPhysicsFindings(back).empty());
+            springref::Chain ref(back, 9.8 * scale);
+            for (int f = 0; f < 900; ++f) ref.step();
+            const double tipDrop = (back.bodies[1].pos.y - ref.jointPoint(ref.pinCount() - 1).y) / scale;   // below where the anchor stands, metres
+            std::printf("  ribbon droop: tip %.3f m below its rest height over a strand of 0.3 m, speed %.4f\n", tipDrop, ref.speed());
+            CHECK(tipDrop > 0.0 && tipDrop < 0.15);
+            CHECK(ref.speed() < 0.05);
+        }
+
+        {   // the reference solver itself: one link on a spring rings at sqrt(K / I) and loses energy at the damping it was given
+            pmxread::Model one;
+            pmxread::RigidBody anchor, link;
+            anchor.mode = 0; anchor.size = {0.1f, 0, 0}; anchor.pos = {0, 0, 0};
+            link.mode = 1; link.shape = 2; link.mass = 2.0f; link.size = {0.1f, 1.8f, 0}; link.pos = {0, -1.0f, 0};
+            link.moveDamping = link.rotDamping = 0.0f;
+            one.bodies = {anchor, link};
+            pmxread::Joint j;
+            j.a = 0; j.b = 1; j.pos = {0, 0, 0}; j.springRot = {50, 50, 50}; j.rotLower = {-3, -3, -3}; j.rotUpper = {3, 3, 3};
+            one.joints = {j};
+            springref::Chain pend(one, 0.0);   // no gravity: a pure torsional pendulum
+            // inertia about the pivot: Bullet's box about the centre plus m r^2
+            const double lx = 0.2, ly = 2.0, inertia = 2.0 / 12.0 * (ly * ly + lx * lx) + 2.0 * 1.0;
+            const double period = 6.283185307 * std::sqrt(inertia / 50.0);
+            // give it a push: move the anchor sideways a little and back
+            pend.moveAnchors({0.2, 0});
+            pend.step();
+            pend.moveAnchors({0, 0});
+            double prev = pend.relativeAngle(0), t = 1.0 / 60.0;
+            std::vector<double> crossings;
+            for (int f = 0; f < 600; ++f) {
+                pend.step();
+                t += 1.0 / 60.0;
+                const double a = pend.relativeAngle(0);
+                if (prev < 0 && a >= 0) crossings.push_back(t);
+                prev = a;
+            }
+            CHECK(crossings.size() >= 3);
+            if (crossings.size() >= 3) {
+                const double measured = (crossings.back() - crossings.front()) / double(crossings.size() - 1);
+                std::printf("  reference pendulum: period %.3f s measured, %.3f s from sqrt(K / I)\n", measured, period);
+                CHECK(std::fabs(measured - period) < 0.06 * period);
+            }
+        }
+    });
+
+    test("pmx writer: IK bones come back through the independent reader", [] {
+        pmx::Model m;
+        m.name = "t";
+        for (int i = 0; i < 4; ++i) { pmx::Bone b; b.name = "b" + std::to_string(i); b.parent = i - 1; b.position = {0, float(3 - i), 0}; m.bones.push_back(b); }
+        pmx::Bone ik;
+        ik.name = "ik";
+        ik.parent = 0;
+        ik.position = {0, 0, 0};
+        ik.ikTarget = 3;
+        ik.ikLoop = 25;
+        ik.ikLimit = 0.75f;
+        pmx::IkLink knee; knee.bone = 2; knee.limited = true; knee.lower = {0.01f, 0, 0}; knee.upper = {2.5f, 0, 0};
+        pmx::IkLink hip; hip.bone = 1;
+        ik.ikLinks = {knee, hip};
+        m.bones.push_back(ik);
+        pmx::Bone after; after.name = "after"; after.parent = 4; m.bones.push_back(after);   // a bone after the IK one still reads right
+        for (int i = 0; i < 3; ++i) { pmx::Vertex v; v.position = {float(i), 0, 0}; m.vertices.push_back(v); }
+        m.indices = {0, 1, 2};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        const pmxread::Model back = readPmx(pmx::WritePmx(m));
+        CHECK(back.bones.size() == 6);
+        CHECK(!back.bones[3].isIk() && back.bones[4].isIk() && !back.bones[5].isIk());
+        CHECK((back.bones[4].flags & 0x0020) != 0 && (back.bones[4].flags & 0x001E) == 0x001E);
+        CHECK(back.bones[4].ikTarget == 3 && back.bones[4].ikLoop == 25 && std::fabs(back.bones[4].ikLimit - 0.75f) < 1e-6f && back.bones[4].ikLinks.size() == 2);
+        CHECK(back.bones[4].ikLinks[0].bone == 2 && back.bones[4].ikLinks[0].limited && std::fabs(back.bones[4].ikLinks[0].upper.x - 2.5f) < 1e-6f && std::fabs(back.bones[4].ikLinks[0].lower.x - 0.01f) < 1e-6f);
+        CHECK(back.bones[4].ikLinks[1].bone == 1 && !back.bones[4].ikLinks[1].limited);
+        CHECK(back.bones[5].parent == 4 && back.bones[5].name == "after");
+        pmx::Model bad = m;
+        bad.bones[4].ikLinks[0].bone = 9;
+        bool threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        bad = m;
+        bad.bones[4].ikLinks.clear();   // an IK bone has to have links to turn
+        threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    });
+
+    test("IK: limbs are found by role, the handle stands on the end bone, only a bent limb gets a bend limit", [] {
+        using namespace assemble;
+        Scene s;
+        auto add = [&](const std::string& name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = add("p_cf_body_bone", -1, {0, 0, 0});
+        // a leg bent a little at the knee, in the Y-Z plane, the way the knee bends: the lower leg goes back
+        const int thigh = add("cf_j_thigh00_L", root, {0.09f, 1.07f, -0.02f});
+        const int knee = add("cf_j_leg01_L", thigh, {0.09f, 0.57f, -0.03f});
+        const int ankle = add("cf_j_leg03_L", knee, {0.09f, 0.10f, -0.05f});
+        // an arm held straight along x: no bend direction, no limit
+        const int arm = add("cf_j_arm00_R", root, {-0.2f, 1.5f, 0});
+        const int fore = add("cf_j_forearm01_R", arm, {-0.5f, 1.5f, 0});
+        const int hand = add("cf_j_hand_R", fore, {-0.8f, 1.5f, 0});
+        // a left arm whose bones are not a parent chain: left out
+        add("cf_j_arm00_L", root, {0.2f, 1.5f, 0});
+        add("cf_j_forearm01_L", root, {0.5f, 1.5f, 0});
+        add("cf_j_hand_L", root, {0.8f, 1.5f, 0});
+        const auto limbs = exporter::FindLimbs(s);
+        CHECK(limbs.size() == 2);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        const size_t before = m.bones.size();
+        const std::vector<int> ik = exporter::AddIk(s, m, 10.0f);
+        CHECK(ik.size() == 2 && m.bones.size() == before + 2);
+        for (int i : ik) {
+            const pmx::Bone& b = m.bones[static_cast<size_t>(i)];
+            CHECK(b.parent == root && b.ikTarget >= 0 && b.ikLinks.size() == 2 && b.ikLoop > 0 && b.ikLimit > 0);
+            CHECK(b.ikLinks[0].bone == m.bones[static_cast<size_t>(b.ikTarget)].parent && b.ikLinks[1].bone == m.bones[static_cast<size_t>(b.ikLinks[0].bone)].parent);   // nearest the target first
+            const Vec3 d{b.position.x - m.bones[static_cast<size_t>(b.ikTarget)].position.x, b.position.y - m.bones[static_cast<size_t>(b.ikTarget)].position.y, b.position.z - m.bones[static_cast<size_t>(b.ikTarget)].position.z};
+            CHECK(std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z) < 1e-4f);   // the handle stands on the end bone
+        }
+        const pmx::Bone* legIk = nullptr;
+        const pmx::Bone* armIk = nullptr;
+        for (int i : ik) { if (m.bones[static_cast<size_t>(i)].ikTarget == ankle) legIk = &m.bones[static_cast<size_t>(i)]; if (m.bones[static_cast<size_t>(i)].ikTarget == hand) armIk = &m.bones[static_cast<size_t>(i)]; }
+        CHECK(legIk && armIk);
+        if (legIk && armIk) {
+            CHECK(legIk->ikLinks[0].bone == knee && legIk->ikLinks[1].bone == thigh);
+            CHECK(armIk->ikLinks[0].bone == fore && armIk->ikLinks[1].bone == arm);
+            // the leg bends about +x (the lower leg goes toward -z): the knee may flex between 0.5 and 150 degrees about x, the other axes are locked
+            CHECK(legIk->ikLinks[0].limited && std::fabs(legIk->ikLinks[0].lower.x - 0.0087f) < 1e-5f && std::fabs(legIk->ikLinks[0].upper.x - 2.62f) < 1e-5f);
+            CHECK(legIk->ikLinks[0].lower.y == 0 && legIk->ikLinks[0].upper.y == 0 && legIk->ikLinks[0].lower.z == 0 && legIk->ikLinks[0].upper.z == 0);
+            CHECK(!legIk->ikLinks[1].limited);
+            CHECK(!armIk->ikLinks[0].limited);   // straight: nothing says which way it bends
+        }
+        // the sign: flexing the knee by a positive angle about +x moves the ankle toward -z, the way the leg is already bent
+        {
+            const Vec3 u{0, 0.57f - 1.07f, -0.01f}, l{0, 0.10f - 0.57f, -0.02f};
+            const float c = 0.3f;   // 0.3 rad about +x
+            const Vec3 rl{l.x, l.y * std::cos(c) - l.z * std::sin(c), l.y * std::sin(c) + l.z * std::cos(c)};
+            CHECK(rl.z < l.z);
+            Vec3 lo, hi;
+            CHECK(exporter::BendLimits({0, 1.07f, -0.02f}, {0, 0.57f, -0.03f}, {0, 0.10f, -0.05f}, lo, hi) && lo.x > 0 && hi.x > lo.x);
+            (void)u;
+            // bent the other way (the lower leg goes toward +z) the limit is on the negative side of x
+            CHECK(exporter::BendLimits({0, 1.07f, -0.02f}, {0, 0.57f, 0.03f}, {0, 0.10f, 0.20f}, lo, hi) && hi.x < 0 && lo.x < hi.x);
+            // a bend about a diagonal axis cannot be written as a per-axis limit: left free
+            CHECK(!exporter::BendLimits({0, 0, 0}, {1, 0, 0}, {1.5f, 0.5f, 0.5f}, lo, hi));
+        }
+        Scene none;
+        none.bones.push_back({"root", -1, {}, "rig"});
+        pmx::Model nm;
+        nm.bones.push_back({});
+        CHECK(exporter::AddIk(none, nm, 10.0f).empty() && nm.bones.size() == 1);   // a rig without limbs gets none
     });
 
     test("pose: skin matrices, baking, automatic A-pose", [] {
@@ -665,6 +1016,119 @@ void unitTests() {
         CHECK(c.pose.empty() && std::fabs(c.meshes[0].vertices[0].pos.y - 1.4f) < 1e-6f);
         BakePose(c, a);
         CHECK(c.aposeApplied);
+    });
+
+    test("software renderer: the pose moves what is drawn, the framing stays", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        s.bones.push_back({"arm", 0, {0, 0, 0}, "rig"});
+        s.materials.push_back({});
+        s.materials[0].diffuse = {0.9f, 0.1f, 0.1f, 1};
+        SceneMesh mesh;
+        auto vert = [&](Vec3 p, int bone) { SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.bone[0] = bone; v.weight[0] = 1; mesh.vertices.push_back(v); };
+        vert({-1, -1, 0}, 0); vert({1, 1, 0}, 0);                               // two loose corners that fix the framing
+        vert({0.4f, -0.1f, 0}, 1); vert({0.9f, -0.1f, 0}, 1); vert({0.65f, 0.1f, 0}, 1);   // a triangle on the arm, out on +x
+        SceneSubmesh sm;
+        sm.material = 0;
+        sm.indices = {2, 3, 4};
+        mesh.submeshes.push_back(sm);
+        s.meshes.push_back(mesh);
+        ScenePart part;
+        part.id = "p";
+        part.meshes = {0};
+        s.parts.push_back(part);
+
+        const int W = 200, H = 200;
+        auto centroid = [&](const std::vector<uint32_t>& px, float& cx, float& cy) {
+            double sx = 0, sy = 0, n = 0;
+            for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) if (px[static_cast<size_t>(y) * W + x] != 0xFFE2E4E8u) { sx += x; sy += y; n += 1; }
+            cx = n > 0 ? static_cast<float>(sx / n) : -1.0f;
+            cy = n > 0 ? static_cast<float>(sy / n) : -1.0f;
+            return n;
+        };
+        exporter::ViewCamera cam;
+        exporter::ViewOptions vo;
+        exporter::ViewStatePtr st = exporter::NewViewState();
+        std::vector<uint32_t> px;
+        exporter::RenderView(s, cam, W, H, vo, *st, px);
+        float rx, ry;
+        const double restPixels = centroid(px, rx, ry);
+        CHECK(restPixels > 100);
+        // the arm turned 90 degrees about z at the origin: the triangle goes from +x to +y
+        Pose pose;
+        pose.edit(1).rot = {0, 0, 90};
+        const std::vector<Mat4> skin = SkinMatrices(s, pose);
+        vo.skin = &skin;
+        exporter::RenderView(s, cam, W, H, vo, *st, px);
+        float px2, py2;
+        const double posedPixels = centroid(px, px2, py2);
+        CHECK(posedPixels > 100 && std::fabs(posedPixels - restPixels) < 0.1 * restPixels);   // the same triangle
+        CHECK(std::fabs(px2 - W * 0.5f) < 8.0f && py2 < ry - 20.0f);                            // now about the centre line (the triangle is 0.1 thick), higher up
+        CHECK(std::fabs(ry - H * 0.5f) < 6.0f && std::fabs(rx - W * 0.5f) > 20.0f);             // it was off to the side
+        // an empty skin or none is the rest pose
+        vo.skin = nullptr;
+        exporter::RenderView(s, cam, W, H, vo, *st, px);
+        float rx2, ry2;
+        centroid(px, rx2, ry2);
+        CHECK(std::fabs(rx2 - rx) < 0.01f && std::fabs(ry2 - ry) < 0.01f);
+    });
+
+    test("pose file: JSON round trip, malformed files are refused with a reason, MakePose by bone name", [] {
+        using namespace assemble;
+        PoseFile f;
+        f.aPose = true;
+        f.aPoseDegrees = 35.0f;
+        BonePose e;
+        e.pos = {0.01f, -0.02f, 0.03f};
+        e.rot = {10, 20, -30};
+        e.scl = {1, 1.5f, 1};
+        f.bones.emplace_back("cf_j_arm00_L", e);
+        BonePose z;
+        z.rot = {0, 0, 90};
+        f.bones.emplace_back("cf_j_hips", z);
+        PoseFile back;
+        std::string err;
+        CHECK(PoseFileFromJson(PoseFileToJson(f), back, &err));
+        CHECK(back.aPose && std::fabs(back.aPoseDegrees - 35.0f) < 1e-6f && back.bones.size() == 2);
+        CHECK(back.bones.size() == 2 && back.bones[0].first == "cf_j_arm00_L" && std::fabs(back.bones[0].second.rot.z + 30.0f) < 1e-5f && std::fabs(back.bones[0].second.scl.y - 1.5f) < 1e-6f && std::fabs(back.bones[0].second.pos.y + 0.02f) < 1e-6f);
+        // a bone with only some of the fields keeps the others at rest
+        CHECK(PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"bones":{"b":{"rotation_euler_degrees":[1,2,3]}}})", back, &err));
+        CHECK(!back.aPose && back.bones.size() == 1 && back.bones[0].second.scl.x == 1.0f && back.bones[0].second.pos.x == 0.0f && back.bones[0].second.rot.y == 2.0f);
+        for (const char* bad : {"", "not json", "[]", R"({"format":"other","version":1})", R"({"format":"cardbridge-pose"})", R"({"format":"cardbridge-pose","version":2})",
+                                R"({"format":"cardbridge-pose","version":1,"bones":[]})", R"({"format":"cardbridge-pose","version":1,"bones":{"b":{"position":[1,2]}}})",
+                                R"({"format":"cardbridge-pose","version":1,"bones":{"b":{"position":[1,2,"x"]}}})", R"({"format":"cardbridge-pose","version":1,"a_pose":"yes"})"}) {
+            err.clear();
+            CHECK(!PoseFileFromJson(bad, back, &err) && !err.empty());
+        }
+        // MakePose: edits by name, unknown names listed, the A-pose made for a rig that has arms
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int hips = add("cf_j_hips", -1, {0, 1, 0});
+        const int sh = add("cf_j_shoulder_L", hips, {0.1f, 1.4f, 0});
+        const int arm = add("cf_j_arm00_L", sh, {0.2f, 1.4f, 0});
+        add("cf_j_forearm01_L", arm, {0.5f, 1.4f, 0});
+        PoseFile g;
+        g.bones.emplace_back("cf_j_hips", z);
+        g.bones.emplace_back("no_such_bone", z);
+        std::vector<std::string> unknown;
+        Pose p = MakePose(s, g, &unknown);
+        CHECK(unknown.size() == 1 && unknown[0] == "no_such_bone" && p.bones.size() > static_cast<size_t>(hips) && p.bones[static_cast<size_t>(hips)].rot.z == 90.0f && p.base.empty());
+        g.aPose = true;
+        g.aPoseDegrees = 40.0f;
+        p = MakePose(s, g);
+        CHECK(p.base.size() == s.bones.size());
+        Scene noArms;
+        noArms.bones.push_back({"root", -1, {}, "rig"});
+        CHECK(MakePose(noArms, g).base.empty());
+        // a saved pose and the same edits made by hand give the same skin
+        Pose manual;
+        manual.edit(static_cast<size_t>(hips)).rot = {0, 0, 90};
+        const auto a1 = SkinMatrices(s, MakePose(s, PoseFile{false, 40.0f, {{"cf_j_hips", z}}}));
+        const auto a2 = SkinMatrices(s, manual);
+        bool same = a1.size() == a2.size();
+        for (size_t i = 0; same && i < a1.size(); ++i) for (int k = 0; k < 16; ++k) same = same && std::fabs(a1[i].m[k] - a2[i].m[k]) < 1e-6f;
+        CHECK(same);
     });
 
     test("dragging a bone: turns about world axes keep the parent and A-pose frames, Euler round trip", [] {
@@ -881,16 +1345,45 @@ void integrationTests() {
                 if (count) *count = counted;
                 return worst;
             };
+            // the blend shape offsets: the largest difference in any offset of any shape
+            auto shapeDeviation = [](const assemble::Scene& a, const assemble::Scene& b, size_t* count = nullptr) {
+                float worst = 0;
+                size_t counted = 0;
+                for (size_t mi = 0; mi < a.meshes.size() && mi < b.meshes.size(); ++mi) {
+                    if (a.meshes[mi].shapes.size() != b.meshes[mi].shapes.size()) return 1e9f;
+                    for (size_t si = 0; si < a.meshes[mi].shapes.size(); ++si) {
+                        const auto& x = a.meshes[mi].shapes[si].offsets;
+                        const auto& y = b.meshes[mi].shapes[si].offsets;
+                        if (x.size() != y.size()) return 1e9f;
+                        for (size_t i = 0; i < x.size(); ++i) {
+                            const Vec3 d{x[i].second.x - y[i].second.x, x[i].second.y - y[i].second.y, x[i].second.z - y[i].second.z};
+                            worst = std::max(worst, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+                            ++counted;
+                        }
+                    }
+                }
+                if (count) *count = counted;
+                return worst;
+            };
+            auto areolaOf = [](const assemble::Scene& sc) {   // the areola size on the materials that carry the card's value
+                std::vector<float> out;
+                for (const auto& m : sc.materials) if (m.cardAreola) for (const auto& pr : m.props) if (pr.first == "_nipsize") out.push_back(pr.second.x);
+                return out;
+            };
             assemble::Scene again = scene;
             assemble::AssembleOptions same = ao;
             for (size_t i = 0; i < c.body.at("shapeValueBody").size(); ++i) same.bodyShape.push_back(static_cast<float>(c.body.at("shapeValueBody").at(i).asFloat()));
             for (size_t i = 0; i < c.face.at("shapeValueFace").size(); ++i) same.faceShape.push_back(static_cast<float>(c.face.at("shapeValueFace").at(i).asFloat()));
             CHECK(assemble::Reshape(again, c, resolver, same));
             CHECK(deviation(scene, again) < 1e-4f);   // the identity re-shape is exact
+            size_t shapeOffsets = 0;
+            CHECK(shapeDeviation(scene, again, &shapeOffsets) < 1e-5f);   // and so are the blend shape offsets
+            CHECK(areolaOf(scene) == areolaOf(again));   // (a library without the body's create shader has no areola property)
             assemble::AssembleOptions other = same;
             other.bodyShape[0] = std::min(1.0f, other.bodyShape[0] + 0.3f);   // height
             other.bodyShape[4] = std::max(0.0f, other.bodyShape[4] - 0.3f);
             other.faceShape[0] = std::min(1.0f, other.faceShape[0] + 0.3f);
+            other.areolaSize = 0.93f;
             auto t0 = std::chrono::steady_clock::now();
             CHECK(assemble::Reshape(again, c, resolver, other));
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -898,7 +1391,14 @@ void integrationTests() {
             size_t counted = 0;
             const float worst = deviation(fresh, again, &counted);
             std::printf("  re-shape %.0f ms; against a fresh assembly: worst vertex offset %.2f mm over %zu vertices\n", ms, worst * 1000.0f, counted);
-            CHECK(worst < 0.01f);   // within a centimetre everywhere (items hung on settled DynamicBones are the only difference allowed)
+            CHECK(worst < 0.01f);   // within a centimetre everywhere
+            size_t offsetsCounted = 0;
+            const float shapeWorst = shapeDeviation(fresh, again, &offsetsCounted);
+            std::printf("  blend shape offsets after the re-shape: worst %.3f mm over %zu offsets; the identity re-shape moved %zu offsets by less than 0.01 mm\n", shapeWorst * 1000.0f, offsetsCounted, shapeOffsets);
+            CHECK(shapeWorst < 1e-3f);   // (offsetsCounted is 0 in a library without the head)
+            CHECK(areolaOf(again) == areolaOf(fresh));
+            for (float a : areolaOf(again)) CHECK(std::fabs(a - 0.93f) < 1e-6f);
+            CHECK(!again.chainsSettled);
             CHECK(ms < 2000.0);
         }
         {   // the nude body: what a garment's mask cuts from the body is kept as under pieces, nothing is lost
@@ -991,6 +1491,31 @@ void integrationTests() {
         CHECK(fileio::Exists(res.manifestPath));
         std::printf("  exported %s: %zu verts, %zu tris, %zu materials, %zu bones, %zu textures\n", res.pmxPath.c_str(), res.vertices,
                     res.triangles, res.materials, res.bones, res.textures);
+        {   // read the file back with the independent reader: counts, physics, morphs and frames all hold together
+            const pmxread::Model back = readPmx(fileio::ReadFile(res.pmxPath));
+            CHECK(back.vertices.size() == res.vertices && back.indices.size() == res.triangles * 3 && back.materials.size() == res.materials && back.bones.size() == res.bones);
+            size_t ikBack = 0;
+            for (const auto& b : back.bones) if (b.isIk()) ++ikBack;
+            CHECK(ikBack == exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack);   // the scene's bones, then one IK bone per limb
+            std::printf("  read back: %zu IK bones (%zu limbs in the rig)\n", ikBack, exporter::FindLimbs(scene).size());
+            size_t expectBodies = 0, expectJoints = 0;
+            for (const auto& col : scene.colliders)
+                if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;
+            for (const auto& chain : scene.chains) {
+                size_t valid = 0;
+                for (int b : chain.bones) if (b >= 0 && b < static_cast<int>(scene.bones.size())) ++valid;
+                if (valid < 2) continue;
+                expectBodies += 1 + valid;
+                expectJoints += valid;
+            }
+            CHECK(back.bodies.size() == expectBodies && back.joints.size() == expectJoints);
+            const auto findings = pmxPhysicsFindings(back);
+            for (size_t i = 0; i < findings.size() && i < 10; ++i) std::printf("  physics finding: %s\n", findings[i].c_str());
+            CHECK(findings.empty());
+            size_t kinematic = 0, moving = 0;
+            for (const auto& b : back.bodies) (b.mode == 0 ? kinematic : moving)++;
+            std::printf("  read back: %zu rigid bodies (%zu kinematic, %zu moving), %zu joints, %zu morphs, %zu display frames\n", back.bodies.size(), kinematic, moving, back.joints.size(), back.morphs.size(), back.frames.size());
+        }
     });
 }
 

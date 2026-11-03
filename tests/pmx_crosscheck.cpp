@@ -72,7 +72,63 @@ int main(int argc, char** argv) {
     }
     (void)partTris;
     if (partMats != m.materials.size()) fail("manifest part material ranges (" + std::to_string(partMats) + ") != PMX materials (" + std::to_string(m.materials.size()) + ")");
-    if (j["counts"].value("bones", 0) != m.bones.size()) fail("manifest bone count != PMX bone count");
+    const size_t ikBones = j["counts"].value("ik_bones", 0);
+    if (j["counts"].value("bones", 0) + ikBones != m.bones.size()) fail("manifest bone count (+ IK bones) != PMX bone count");
+
+    // physics, as the engine's loader reads it (it parses rigid bodies and joints; the mask is the Bullet filter, bit n = collides with group n)
+    if (j["counts"].contains("rigid_bodies") && j["counts"].value("rigid_bodies", 0) != m.rigidBodies.size()) fail("manifest rigid body count != PMX rigid body count");
+    if (j["counts"].contains("joints") && j["counts"].value("joints", 0) != m.joints.size()) fail("manifest joint count != PMX joint count");
+    size_t kinematic = 0, moving = 0, badBody = 0, badJoint = 0, badFilter = 0, farBody = 0;
+    for (const auto& rb : m.rigidBodies) {
+        if (rb.boneIndex < 0 || rb.boneIndex >= static_cast<int>(m.bones.size()) || rb.shape > 2 || rb.physicsMode > 2 || !(rb.size.x > 0.0f)) { ++badBody; continue; }
+        (rb.physicsMode == 0 ? kinematic : moving)++;
+        if (rb.physicsMode != 0 && rb.mass <= 0.0f) ++badBody;
+        // chain bodies (group 1) meet colliders (group 0) only; colliders meet chains only; anchors meet nothing
+        if (rb.group == 1 && rb.physicsMode != 0 && rb.nonCollisionMask != 0x0001) ++badFilter;
+        if (rb.group == 1 && rb.physicsMode == 0 && rb.nonCollisionMask != 0) ++badFilter;
+        if (rb.group == 0 && rb.nonCollisionMask != 0x0002) ++badFilter;
+        if (rb.group == 1 && rb.physicsMode != 0) {
+            const float reach = (rb.shape == 2 ? 0.5f * rb.size.y : 0.0f) + rb.size.x + 1e-3f;
+            const auto d = rb.position - m.bones[static_cast<size_t>(rb.boneIndex)].position;
+            if (std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > reach) ++farBody;
+        }
+    }
+    for (const auto& jt : m.joints) {
+        const int n = static_cast<int>(m.rigidBodies.size());
+        if (jt.rigidBodyA < 0 || jt.rigidBodyA >= n || jt.rigidBodyB < 0 || jt.rigidBodyB >= n || jt.rigidBodyA == jt.rigidBodyB) { ++badJoint; continue; }
+        if (m.rigidBodies[static_cast<size_t>(jt.rigidBodyB)].physicsMode == 0) ++badJoint;   // the second body of a chain joint is the moving one
+        if (jt.rotationSpring.x <= 0.0f) ++badJoint;
+    }
+    // IK bones: the target and links exist, the links are the target's ancestors nearest first, the handle stands on the target at rest, limits are ordered
+    size_t ikCount = 0, badIk = 0, ikLimited = 0;
+    for (size_t i = 0; i < m.bones.size(); ++i) {
+        const auto& b = m.bones[i];
+        if (!b.IsIk()) continue;
+        ++ikCount;
+        const int n = static_cast<int>(m.bones.size());
+        bool ok = b.ikTargetIndex >= 0 && b.ikTargetIndex < n && b.ikTargetIndex != static_cast<int>(i) && !b.ikLinks.empty() && b.ikLoopCount > 0 && b.ikLimitRadian > 0.0f;
+        int expect = ok ? m.bones[static_cast<size_t>(b.ikTargetIndex)].parentIndex : -1;
+        for (const auto& l : b.ikLinks) {
+            if (!ok) break;
+            if (l.boneIndex < 0 || l.boneIndex >= n || l.boneIndex != expect) { ok = false; break; }
+            if (l.hasLimits && (l.limitMin.x > l.limitMax.x || l.limitMin.y > l.limitMax.y || l.limitMin.z > l.limitMax.z)) ok = false;
+            expect = m.bones[static_cast<size_t>(l.boneIndex)].parentIndex;
+        }
+        for (const auto& l : b.ikLinks) if (l.hasLimits) ++ikLimited;
+        if (ok) {
+            const auto d = b.position - m.bones[static_cast<size_t>(b.ikTargetIndex)].position;
+            if (std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > 1e-3f) ok = false;
+        }
+        if (!ok) ++badIk;
+    }
+    if (j["counts"].contains("ik_bones") && j["counts"].value("ik_bones", 0) != ikCount) fail("manifest IK bone count != the IK bones the engine reader sees");
+    if (badIk) fail(std::to_string(badIk) + " IK bones with a bad target, links that are not the target's ancestors, or a handle off its target");
+    std::printf("engine reader: %zu IK bones, %zu limited links\n", ikCount, ikLimited);
+    if (badBody) fail(std::to_string(badBody) + " rigid bodies on a missing bone, with a bad shape / mode / size or a moving body without mass");
+    if (badJoint) fail(std::to_string(badJoint) + " joints that do not join two existing bodies, or spring-less ones");
+    if (badFilter) fail(std::to_string(badFilter) + " rigid bodies whose collision filter lets chains hit anything but colliders");
+    if (farBody) fail(std::to_string(farBody) + " chain bodies further from their bone than their own half length");
+    std::printf("engine reader: %zu rigid bodies (%zu kinematic, %zu moving), %zu joints\n", m.rigidBodies.size(), kinematic, moving, m.joints.size());
 
     if (bad) { std::printf("%d problem(s)\n", bad); return 3; }
     std::puts("OK: the engine's PMX loader reads the file and every check passes");

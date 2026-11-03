@@ -2,6 +2,7 @@
 
 #include "core/FileIo.h"
 #include "export/BoneLabels.h"
+#include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "pmx/PmxWriter.h"
@@ -375,6 +376,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale);
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     AddPhysics(scene, model, opt.scale);
+    const std::vector<int> ikBones = AddIk(scene, model, opt.scale);
     {   // display frames: Root, Exp (every morph), then the bones by group
         pmx::DisplayFrame root;
         root.name = "Root"; root.special = true;
@@ -392,6 +394,12 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         model.frames.push_back(std::move(root));
         model.frames.push_back(std::move(exp));
         for (auto& f : frames) model.frames.push_back(std::move(f));
+        if (!ikBones.empty()) {
+            pmx::DisplayFrame f;
+            f.name = "IK";
+            f.bones = ikBones;
+            model.frames.push_back(std::move(f));
+        }
     }
     log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
@@ -456,6 +464,9 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range, morphNames);
+    manifest["counts"]["rigid_bodies"] = model.rigidBodies.size();
+    manifest["counts"]["ik_bones"] = ikBones.size();   // added after the scene's bones, so the PMX has "bones" + "ik_bones"
+    manifest["counts"]["joints"] = model.joints.size();
     log("writing manifest");
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");
     fileio::WriteTextFile(res.manifestPath, manifest.dump(2) + "\n");

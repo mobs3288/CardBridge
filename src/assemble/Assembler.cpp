@@ -705,10 +705,15 @@ struct Builder {
                 bool found = false;
                 for (auto& pr : sm.props) if (pr.first == rp.first) { pr.second = rp.second; found = true; }
                 if (!found) sm.props.push_back(rp);
+                if (rp.first == "_nipsize") sm.cardAreola = true;
             }
             if (blushAlpha >= 0)
                 for (auto& pr : sm.props) if (pr.first == "_overcolor2") pr.second.w = blushAlpha;
-            for (const auto& f : m->floats) sm.props.emplace_back(f.first, Vec4{f.second, 0, 0, 0});
+            for (const auto& f : m->floats) {   // the material's own floats; a run-time value of the same name (the card's _nipsize) is not overridden by it
+                bool set = false;
+                for (const auto& rp : runtime) set = set || rp.first == f.first;
+                if (!set) sm.props.emplace_back(f.first, Vec4{f.second, 0, 0, 0});
+            }
             for (const auto& tb : m->textures) {
                 SceneTexBinding b;
                 b.name = tb.first;
@@ -1116,26 +1121,38 @@ struct Builder {
         }
 
         {   // blend shape offsets in model space: the mesh-space delta goes through the same skinning (rotation and scale part) as the vertex
-            auto modelDelta = [&](size_t v, Vec3 d) {
+            auto modelDelta = [&](size_t v, Vec3 d, std::array<Vec3, 4>& local) {
+                local = {};
                 if (skinned) {
                     const unity::BoneInfluence& bi = mesh->skin[v];
                     Vec3 acc{};
                     float wsum = 0;
+                    int slot = 0;
                     for (int k = 0; k < 4; ++k) {
                         if (bi.w[k] <= 0.0f || bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) continue;
-                        acc = acc + boneMat[static_cast<size_t>(bi.idx[k])].dir(d) * bi.w[k];
+                        const size_t bk = static_cast<size_t>(bi.idx[k]);
+                        const Vec3 md = boneMat[bk].dir(d);
+                        acc = acc + md * bi.w[k];
                         wsum += bi.w[k];
+                        local[static_cast<size_t>(slot++)] = invBone[bk].dir(md);   // the same slots the vertex keeps
                     }
                     if (wsum > 1e-6f) return acc * (1.0f / wsum);
+                    local = {};
                 }
-                return staticM.dir(d);
+                const Vec3 md = staticM.dir(d);
+                local[0] = invStatic.dir(md);
+                return md;
             };
             for (size_t s = 0; s < shapeDeltas.size(); ++s) {
                 if (shapeDeltas[s].empty()) continue;
                 SceneBlendShape bsh;
                 bsh.name = mesh->blendShapes[s].name.empty() ? "shape" + std::to_string(s) : mesh->blendShapes[s].name;
                 bsh.rest = shapeRest[s];
-                for (const auto& [vi, d] : shapeDeltas[s]) bsh.offsets.emplace_back(vi, modelDelta(vi, d));
+                for (const auto& [vi, d] : shapeDeltas[s]) {
+                    std::array<Vec3, 4> local;
+                    bsh.offsets.emplace_back(vi, modelDelta(vi, d, local));
+                    bsh.local.push_back(local);
+                }
                 sm.shapes.resize(s + 1);   // keeps the unity shape index as the position
                 sm.shapes[s] = std::move(bsh);
             }
@@ -2122,7 +2139,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 auto sw = b.rigDefault->world.find(ref.group == "Hair" ? std::string("cf_J_FaceUp_ty") : ref.attachNode);
                 if (sw != b.rigDefault->world.end()) { start = sw->second; startPtr = &start; }
             }
-            if (settleItem(*uf, roots[0], anchor, startPtr, b.dbColliders, b.localOv, simW)) b.simW = &simW;
+            if (settleItem(*uf, roots[0], anchor, startPtr, b.dbColliders, b.localOv, simW)) { b.simW = &simW; scene.chainsSettled = true; }
         }
         b.meCoordinate = outfit;
         b.meType = -1;
@@ -2525,7 +2542,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 
 
 bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
-    if (scene.bones.empty()) return false;
+    if (scene.bones.empty() || scene.chainsSettled) return false;   // settled chains (CARDBRIDGE_DYNBONE) were run for the old shape: assemble again
     int outfit = opt.outfit;
     if (outfit < 0) outfit = static_cast<int>(card.status.at("coordinateType").asInt());
     if (outfit < 0 || static_cast<size_t>(outfit) >= card.outfits.size()) outfit = 0;
@@ -2588,6 +2605,27 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
             v.pos = pos * (1.0f / sum);
             v.normal = normalize(nrm);
         }
+        for (auto& sh : mesh.shapes) {   // the blend shape offsets turn with the bones that carry their vertices
+            if (sh.local.size() != sh.offsets.size()) continue;
+            for (size_t i = 0; i < sh.offsets.size(); ++i) {
+                const SceneVertex& v = mesh.vertices[sh.offsets[i].first];
+                Vec3 d{};
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) {
+                    if (v.weight[k] <= 0 || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= n) continue;
+                    d = d + nw[static_cast<size_t>(v.bone[k])].dir(sh.local[i][static_cast<size_t>(k)]) * v.weight[k];
+                    sum += v.weight[k];
+                }
+                if (sum > 1e-6f) sh.offsets[i].second = d * (1.0f / sum);
+            }
+        }
+    }
+    {   // the areola size is a colour property of the body's material (the game's shader draws the nipple texture at that size)
+        const float areola = opt.areolaSize >= 0.0f ? opt.areolaSize : static_cast<float>(card.body.at("areolaSize").asFloat());
+        for (auto& mat : scene.materials)
+            if (mat.cardAreola)
+                for (auto& pr : mat.props)
+                    if (pr.first == "_nipsize") pr.second.x = areola;
     }
     for (auto& c : scene.colliders) {
         if (c.bone < 0 || static_cast<size_t>(c.bone) >= n) continue;

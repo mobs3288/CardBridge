@@ -47,6 +47,23 @@ void BakePose(Scene& scene, const Pose& pose);
 Vec3 TurnBone(const Scene& scene, const Pose& pose, size_t bone, const Mat4& worldTurn);
 Vec3 MoveBone(const Scene& scene, const Pose& pose, size_t bone, Vec3 worldDelta);
 
+// A pose as a small JSON file: per edited bone (by name) the local translation, Euler degrees and scale, plus the A-pose switch. The
+// viewer saves and loads it, `cardbridge convert --pose <file>` bakes it into the PMX like --apose does.
+//   { "format": "cardbridge-pose", "version": 1, "a_pose": true, "a_pose_degrees": 40,
+//     "bones": { "cf_j_arm00_L": { "position": [0, 0, 0], "rotation_euler_degrees": [0, 0, 20], "scale": [1, 1, 1] } } }
+struct PoseFile {
+    bool aPose = false;
+    float aPoseDegrees = 40.0f;
+    std::vector<std::pair<std::string, BonePose>> bones;   // edited bones only, in file order
+};
+std::string PoseFileToJson(const PoseFile& file);
+// False with `error` for text that is not a pose file (not JSON, another format or a newer version, a field of the wrong shape). A bone with
+// only some of its three fields keeps the others at rest.
+bool PoseFileFromJson(const std::string& text, PoseFile& out, std::string* error = nullptr);
+// The Pose a file describes for this scene: bones the scene does not have are skipped and listed in `unknown`; the A-pose is made when the
+// file asks for it and the rig has arms (otherwise `base` stays empty).
+Pose MakePose(const Scene& scene, const PoseFile& file, std::vector<std::string>* unknown = nullptr);
+
 // The rotation matrix that turns direction `from` onto direction `to` the short way (both need not be unit length).
 Mat4 RotationBetween(Vec3 from, Vec3 to);
 

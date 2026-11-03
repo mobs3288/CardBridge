@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -13,6 +14,20 @@ Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float length(Vec3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
 Vec3 cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 float clamp01(float v) { return std::min(1.0f, std::max(0.0f, v)); }
+
+// What one link of a chain is, in PMX units (the model scale already applied).
+struct Link {
+    int bone = -1;
+    Vec3 head, centre, unit;
+    float len = 0.0f, radius = 0.0f, cylinder = 0.0f, mass = 1.0f;
+};
+
+// Bullet's capsule inertia (btCapsuleShape::calculateLocalInertia): the box that bounds the capsule, about the centre; the axis is Y.
+// Returns the inertia about an axis across the capsule.
+float capsuleInertiaAcross(float mass, float radius, float cylinder) {
+    const float lx = 2.0f * radius, ly = cylinder + 2.0f * radius;
+    return mass * (1.0f / 12.0f) * (ly * ly + lx * lx);
+}
 
 } // namespace
 
@@ -32,14 +47,14 @@ Vec3 PmxRotationFromYAxis(Vec3 axis) {
 
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
     const int boneCount = static_cast<int>(scene.bones.size());
-    const uint16_t kColliderMask = 0xFFFD, kChainMask = 0xFFFE;   // colliders (group 0) meet chains (group 1) and nothing else
+    const float gravity = 9.8f * scale;   // model units a second squared
     for (const auto& c : scene.colliders) {
         if (c.bone < 0 || c.bone >= boneCount || c.inside || c.radius <= 0.0f) continue;
         pmx::RigidBody rb;
         rb.name = "collider " + c.name;
         rb.bone = c.bone;
-        rb.group = 0;
-        rb.mask = kColliderMask;
+        rb.group = kPmxGroupCollider;
+        rb.mask = 1u << kPmxGroupChain;   // colliders meet chains and nothing else
         rb.mode = 0;
         rb.position = c.center * scale;
         const float cyl = c.height - 2.0f * c.radius;
@@ -56,80 +71,126 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
-        std::map<int, int> bodyOf;   // scene bone -> rigid body
+        std::vector<int> bones;
+        for (int b : ch.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
+        if (bones.size() < 2) continue;
+        const std::set<int> inChain(bones.begin(), bones.end());
         std::map<int, std::vector<int>> next;   // chain bone -> its chain children
-        std::set<int> inChain(ch.bones.begin(), ch.bones.end());
-        for (int b : ch.bones) {
-            if (b < 0 || b >= boneCount) continue;
+        for (int b : bones) {
             const int p = scene.bones[static_cast<size_t>(b)].parent;
             if (inChain.count(p) && p != b) next[p].push_back(b);
         }
-        const float damp = clamp01(0.5f + 0.5f * ch.damping);
-        for (size_t k = 0; k < ch.bones.size(); ++k) {
-            const int b = ch.bones[k];
-            if (b < 0 || b >= boneCount) continue;
-            const Vec3 head = scene.bones[static_cast<size_t>(b)].pos;
-            pmx::RigidBody rb;
-            rb.name = ch.name + " " + std::to_string(k);
-            rb.bone = b;
-            rb.group = 1;
-            if (k == 0) {   // the anchor follows the body and collides with nothing
-                rb.mask = 0xFFFF;
-                rb.mode = 0;
-                rb.shape = 0;
-                rb.size = {0.01f * scale, 0, 0};
-                rb.position = head * scale;
-                bodyOf[b] = static_cast<int>(model.rigidBodies.size());
-                model.rigidBodies.push_back(std::move(rb));
-                continue;
-            }
-            // The body spans from this bone to its first chain child; a leaf continues in the direction it came from.
+
+        // One link per bone, as the component moves them: the root turns to point at its first child too, so the whole chain swings,
+        // each bone's body spanning from its head to its first chain child (a leaf goes on in the direction it came from).
+        std::map<int, Link> links;
+        for (int b : bones) {
+            const Vec3 head = scene.bones[static_cast<size_t>(b)].pos * scale;
+            Link l;
+            l.bone = b;
+            l.head = head;
             Vec3 dir;
-            float len;
             auto nx = next.find(b);
             if (nx != next.end() && !nx->second.empty()) {
-                dir = sub(scene.bones[static_cast<size_t>(nx->second[0])].pos, head);
-                len = length(dir);
+                dir = sub(scene.bones[static_cast<size_t>(nx->second[0])].pos * scale, head);
+                l.len = length(dir);
             } else {
                 const int p = scene.bones[static_cast<size_t>(b)].parent;
-                dir = p >= 0 ? sub(head, scene.bones[static_cast<size_t>(p)].pos) : Vec3{0, -1, 0};
-                len = length(dir) * 0.5f;
+                dir = p >= 0 ? sub(head, scene.bones[static_cast<size_t>(p)].pos * scale) : Vec3{0, -1, 0};
+                l.len = length(dir) * 0.5f;
             }
-            if (len < 1e-5f) { dir = {0, -1, 0}; len = 0.02f; }
-            const Vec3 unit = normalize(dir);
-            float radius = ch.radius > 0.0f ? ch.radius : std::min(0.03f, std::max(0.005f, len * 0.15f));
-            const float cyl = std::max(0.0f, len - 2.0f * radius);
-            rb.shape = cyl > 1e-4f ? 2 : 0;
-            rb.size = {radius * scale, cyl * scale, 0};
-            rb.position = (head + unit * (len * 0.5f)) * scale;
-            if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(unit);
-            rb.mass = 1.0f;
+            if (l.len < 1e-5f * scale) { dir = {0, -1, 0}; l.len = 0.02f * scale; }
+            l.unit = normalize(dir);
+            l.radius = (ch.radius > 0.0f ? ch.radius : std::min(0.03f, std::max(0.005f, l.len / scale * 0.15f))) * scale;
+            l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
+            l.centre = head + l.unit * (l.len * 0.5f);
+            l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
+            links[b] = l;
+        }
+
+        // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
+        // 60 * damping is the same decay in both, so the swing dies away at the same pace.
+        const float decay = std::max(0.6f, 60.0f * ch.damping);
+        const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
+        // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
+        const float omega = std::min(35.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
+        // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly.
+        const float droop = 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f);
+        // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
+        const float bend = std::min(1.5f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
+
+        std::map<int, int> bodyOf;   // chain bone -> rigid body
+        const int anchorBone = scene.bones[static_cast<size_t>(bones[0])].parent >= 0 ? scene.bones[static_cast<size_t>(bones[0])].parent : bones[0];
+        int anchorBody = -1;
+        {   // the anchor follows the body the chain hangs from and collides with nothing
+            pmx::RigidBody rb;
+            rb.name = ch.name + " anchor";
+            rb.bone = anchorBone;
+            rb.group = kPmxGroupChain;
+            rb.mask = 0;
+            rb.mode = 0;
+            rb.shape = 0;
+            rb.size = {0.01f * scale, 0, 0};
+            rb.position = links[bones[0]].head;
+            anchorBody = static_cast<int>(model.rigidBodies.size());
+            model.rigidBodies.push_back(std::move(rb));
+        }
+        for (size_t k = 0; k < bones.size(); ++k) {
+            const Link& l = links[bones[k]];
+            pmx::RigidBody rb;
+            rb.name = ch.name + " " + std::to_string(k);
+            rb.bone = l.bone;
+            rb.group = kPmxGroupChain;
+            rb.mask = 1u << kPmxGroupCollider;   // chains hit colliders only, not each other
+            rb.shape = l.cylinder > 1e-4f ? 2 : 0;
+            rb.size = {l.radius, l.cylinder, 0};
+            rb.position = l.centre;
+            if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(l.unit);
+            rb.mass = l.mass;
             rb.moveDamping = damp;
             rb.rotDamping = damp;
             rb.friction = 0.5f;
-            rb.mask = kChainMask;
-            rb.mode = 1;
-            bodyOf[b] = static_cast<int>(model.rigidBodies.size());
+            rb.mode = k == 0 ? 2 : 1;   // the root keeps its place and only turns
+            bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
             model.rigidBodies.push_back(std::move(rb));
         }
-        for (size_t k = 1; k < ch.bones.size(); ++k) {
-            const int b = ch.bones[k];
-            auto self = bodyOf.find(b);
-            if (self == bodyOf.end()) continue;
-            int parent = scene.bones[static_cast<size_t>(b)].parent;
-            auto pb = bodyOf.find(parent);
-            if (pb == bodyOf.end()) pb = bodyOf.find(ch.bones[0]);   // a bone whose parent is outside the chain hangs from the anchor
-            if (pb == bodyOf.end()) continue;
+
+        // Everything hanging from a bone, itself included.
+        std::function<void(int, std::vector<int>&)> below = [&](int b, std::vector<int>& out) {
+            out.push_back(b);
+            auto nx = next.find(b);
+            if (nx != next.end()) for (int c : nx->second) below(c, out);
+        };
+        for (size_t k = 0; k < bones.size(); ++k) {
+            const int b = bones[k];
+            const Link& self = links[b];
+            const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
+            int bodyA = anchorBody;
+            if (k > 0) {
+                auto pb = bodyOf.find(parentBone);
+                bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
+            }
+            // The spring at this joint carries everything below it: its inertia gives the swing rate, its weight when it stands out
+            // sideways gives the least stiffness that keeps the droop small.
+            std::vector<int> hanging;
+            below(b, hanging);
+            float inertia = 0.0f, lever = 0.0f;
+            for (int d : hanging) {
+                const Link& l = links[d];
+                const float r = length(sub(l.centre, self.head));
+                inertia += l.mass * r * r + capsuleInertiaAcross(l.mass, l.radius, l.cylinder);
+                lever += l.mass * r;
+            }
+            const float stiffnessK = std::max(inertia * omega * omega, lever * gravity / droop);
             pmx::Joint j;
-            j.name = model.rigidBodies[static_cast<size_t>(self->second)].name;
-            j.bodyA = pb->second;
-            j.bodyB = self->second;
-            j.position = scene.bones[static_cast<size_t>(b)].pos * scale;
-            j.rotation = model.rigidBodies[static_cast<size_t>(self->second)].rotation;
-            const float limit = (0.2f + 0.8f * (1.0f - clamp01(ch.stiffness))) * 1.2f;   // radians: a stiff chain barely turns
-            j.rotLower = {-limit, -limit * 0.5f, -limit};
-            j.rotUpper = {limit, limit * 0.5f, limit};
-            j.springRot = {50.0f + 150.0f * ch.elasticity, 50.0f + 150.0f * ch.elasticity, 50.0f + 150.0f * ch.elasticity};
+            j.name = ch.name + " " + std::to_string(k);
+            j.bodyA = bodyA;
+            j.bodyB = bodyOf[b];
+            j.position = self.head;
+            j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
+            j.rotLower = {-bend, -0.3f * bend, -bend};
+            j.rotUpper = {bend, 0.3f * bend, bend};
+            j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             model.joints.push_back(std::move(j));
         }
     }

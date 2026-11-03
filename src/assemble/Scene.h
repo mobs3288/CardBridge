@@ -2,6 +2,7 @@
 
 #include "core/Math.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -66,6 +67,7 @@ struct SceneMaterial {
     std::vector<SceneTexBinding> texProps;
     int shaderIndex = -1;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
+    bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
 };
 
 // A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and
@@ -102,6 +104,9 @@ struct SceneBlendShape {
     std::string name;
     float rest = 0.0f;
     std::vector<std::pair<uint32_t, Vec3>> offsets;   // vertex index, offset
+    // Each offset in the frame of the bones that move its vertex (as SceneVertex::local does for positions), so a re-shape that moves
+    // the bones moves the offsets too (assemble::Reshape). Same length as `offsets` when the mesh is reshapable, else empty.
+    std::vector<std::array<Vec3, 4>> local;
 };
 
 struct SceneMesh {
@@ -198,6 +203,7 @@ struct Scene {
     std::vector<SceneCollider> colliders;
     std::vector<ScenePoseEntry> pose;   // the bone edits baked into this scene (see BakePose), empty for the rest pose
     bool aposeApplied = false;          // BakePose included the automatic A-pose
+    bool chainsSettled = false;         // an item's DynamicBone chains were run to rest (CARDBRIDGE_DYNBONE): they depend on the body's shape, so Reshape cannot redo them
     std::vector<SceneIssue> issues;
 
     int boneIndex(const std::string& name) const {

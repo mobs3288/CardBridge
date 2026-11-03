@@ -32,14 +32,27 @@ struct Material {
     std::string memo;
 };
 
+// One bone an IK solver may turn, nearest the target first; angle limits (radians, about the bone's own axes at rest) are optional.
+struct IkLink {
+    int bone = -1;
+    bool limited = false;
+    Vec3 lower, upper;
+};
+
 struct Bone {
     std::string name, nameEn;
     Vec3 position;
     int parent = -1;
     int layer = 0;
-    uint16_t flags = 0x001E;        // rotatable, translatable, visible, enabled (bit 0, tail is a bone, is set from tailBone)
+    uint16_t flags = 0x001E;        // rotatable, translatable, visible, enabled (bit 0, tail is a bone, and bit 5, IK, are set from the fields below)
     Vec3 tailOffset;                // the tail when tailBone is -1
     int tailBone = -1;              // the bone the tail points to
+    // IK: when `ikTarget` is a bone this is an IK bone. The solver turns the links until `ikTarget` reaches this bone's position, at most
+    // `ikLoop` passes of at most `ikLimit` radians each.
+    int ikTarget = -1;
+    int ikLoop = 40;
+    float ikLimit = 1.0f;
+    std::vector<IkLink> ikLinks;
 };
 
 // A morph. Only the two kinds the exporter needs: a material morph (type 8: per material an offset that multiplies or adds to its
@@ -65,7 +78,7 @@ struct Morph {
 };
 
 // Physics. Shapes: 0 sphere, 1 box, 2 capsule. Modes: 0 follows its bone, 1 physics, 2 physics with the bone aligned.
-// `mask` is the groups it does not collide with (bit n = group n).
+// `mask` is the groups it collides with (bit n = group n; 0xFFFF = all), the Bullet collision filter.
 struct RigidBody {
     std::string name, nameEn;
     int bone = -1;
@@ -105,7 +118,7 @@ struct Model {
     std::vector<DisplayFrame> frames;   // empty: Root, Exp (every morph) and one frame with every bone
 };
 
-// Serialises to PMX 2.0 (UTF-16LE text, material and group morphs, no rigid bodies or joints).
+// Serialises to PMX 2.0 (UTF-16LE text, vertex / material / group morphs, bones with IK, rigid bodies and joints).
 // Throws FormatError if the model is inconsistent (index out of range, material
 // index counts not matching the index buffer).
 Bytes WritePmx(const Model& m);
