@@ -20,7 +20,12 @@ namespace detail {   // Preview.cpp: the constant-buffer filler and tangents the
 void FillShaderConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3],
                          std::vector<std::vector<float>>& data, const std::vector<std::pair<std::string, Vec4>>* globals);
 std::vector<Vec3> ComputeMeshTangents(const assemble::SceneMesh& m);
+bool LinearLight();
+float ToLinear(float c);
+assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat);
 }
+using detail::LinearLight;
+using detail::ToLinear;
 
 namespace {
 
@@ -171,13 +176,17 @@ float4 ps(VO i) : SV_Target {
         skipped = 0;
     }
 
-    bool MakeTexture(int w, int h, const uint8_t* rgbaTopFirst, GpuTex& out, bool flip) {
+    // srgb: the texels are sRGB-encoded colour data, so the sampler hands the shader linear values (and mips average in linear light).
+    bool MakeTexture(int w, int h, const uint8_t* rgbaTopFirst, GpuTex& out, bool flip, bool srgb = false) {
         D3D11_TEXTURE2D_DESC d{};
         d.Width = static_cast<UINT>(w); d.Height = static_cast<UINT>(h); d.MipLevels = 0; d.ArraySize = 1;
-        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
+        d.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         if (FAILED(dev->CreateTexture2D(&d, nullptr, &out.tex))) return false;
-        if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv))) return false;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MostDetailedMip = 0; sv.Texture2D.MipLevels = static_cast<UINT>(-1);
+        if (FAILED(dev->CreateShaderResourceView(out.tex, &sv, &out.srv))) return false;
         if (flip) {   // Unity's v runs up: the shaders expect the bottom row first
             std::vector<uint8_t> rows(static_cast<size_t>(w) * h * 4);
             for (int y = 0; y < h; ++y) std::memcpy(&rows[static_cast<size_t>(y) * w * 4], rgbaTopFirst + static_cast<size_t>(h - 1 - y) * w * 4, static_cast<size_t>(w) * 4);
@@ -194,7 +203,7 @@ float4 ps(VO i) : SV_Target {
         ReleaseTargets();
         D3D11_TEXTURE2D_DESC d{};
         d.Width = static_cast<UINT>(w); d.Height = static_cast<UINT>(h); d.MipLevels = 1; d.ArraySize = 1;
-        d.Format = DXGI_FORMAT_B8G8R8A8_UNORM; d.SampleDesc.Count = 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        d.Format = LinearLight() ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM; d.SampleDesc.Count = 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET;
         if (FAILED(dev->CreateTexture2D(&d, nullptr, &msaa))) return false;
         if (FAILED(dev->CreateRenderTargetView(msaa, nullptr, &rtv))) return false;
         D3D11_TEXTURE2D_DESC dd = d;
@@ -336,7 +345,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
     auto upload = [&](int ti) {
         if (ti < 0 || static_cast<size_t>(ti) >= scene.textures.size() || I.textures[static_cast<size_t>(ti)].srv) return;
         const auto& t = scene.textures[static_cast<size_t>(ti)];
-        if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * t.height * 4) I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true);
+        if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * t.height * 4) I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true, LinearLight() && t.srgb);
     };
     for (const auto& m : scene.materials) { for (const auto& tb : m.texProps) upload(tb.texture); upload(m.texture); }
     for (const auto& tb : scene.globalTextures) upload(tb.texture);
@@ -402,6 +411,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const float toCam[3] = {-sn * cp, sp, cs * cp};
     float L[3] = {toCam[0], toCam[1] + 0.45f, toCam[2]};
+    if (const char* ld = std::getenv("CARDBRIDGE_LIGHTDIR")) std::sscanf(ld, "%f,%f,%f", &L[0], &L[1], &L[2]);   // test aid: world-space direction towards the light
     { float n = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]); for (float& c : L) c /= n; }
     const float camPos[3] = {cx + toCam[0] * 5.0f, cy + toCam[1] * 5.0f, cz + toCam[2] * 5.0f};
 
@@ -416,7 +426,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     M[0][3] += bx; M[1][3] += by; M[2][3] += 0.5f;
 
     ID3D11DeviceContext* ctx = I.ctx;
-    const float bg[4] = {0xE2 / 255.0f, 0xE4 / 255.0f, 0xE8 / 255.0f, 1.0f};
+    float bg[4] = {0xE2 / 255.0f, 0xE4 / 255.0f, 0xE8 / 255.0f, 1.0f};
+    if (LinearLight()) for (int i = 0; i < 3; ++i) bg[i] = ToLinear(bg[i]);   // the target encodes what is written
     ctx->OMSetRenderTargets(1, &I.rtv, I.dsv);
     ctx->ClearRenderTargetView(I.rtv, bg);
     ctx->ClearDepthStencilView(I.dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -447,8 +458,10 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         float cbv[28];
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
-                        std::memcpy(cbv + 16, &mat.diffuse, 16);
-                        const float sh4[4] = {mat.shadow.x, mat.shadow.y, mat.shadow.z, 1.0f};
+                        const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
+                        const float dif4[4] = {lin(mat.diffuse.x), lin(mat.diffuse.y), lin(mat.diffuse.z), mat.diffuse.w};
+                        std::memcpy(cbv + 16, dif4, 16);
+                        const float sh4[4] = {lin(mat.shadow.x), lin(mat.shadow.y), lin(mat.shadow.z), 1.0f};
                         std::memcpy(cbv + 20, sh4, 16);
                         std::memcpy(cbv + 24, lit, 16);
                         ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
@@ -472,7 +485,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         for (int stage = 0; stage < 2; ++stage) {
                             const auto& prog = sh->progs[stage == 0 ? sh->vi : sh->pi];
                             auto& data = stage == 0 ? matVs[m] : matPs[m];
-                            detail::FillShaderConstants(prog, mat, L, camPos, data, &scene.globalProps);
+                            detail::FillShaderConstants(prog, LinearLight() ? detail::LinearColours(mat) : mat, L, camPos, data, &scene.globalProps);
                             for (const auto& cb : prog.cbuffers) {
                                 if (cb.slot < 0 || cb.slot >= 8 || data[static_cast<size_t>(cb.slot)].empty()) continue;
                                 auto& d = data[static_cast<size_t>(cb.slot)];
@@ -509,7 +522,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE")) {
                         float cbv[24];
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-                        const float colr[4] = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
+                        const float colr[4] = {LinearLight() ? ToLinear(mat.outlineColor.x) : mat.outlineColor.x, LinearLight() ? ToLinear(mat.outlineColor.y) : mat.outlineColor.y,
+                                               LinearLight() ? ToLinear(mat.outlineColor.z) : mat.outlineColor.z, 1.0f};
                         const float px = 1.2f * std::min(2.0f, mat.outlineWidth) * H / 800.0f;   // ring width in pixels
                         const float prm[4] = {px * 2.0f / W, px * 2.0f / H, 0.004f, 0.0f};
                         std::memcpy(cbv + 16, colr, 16);
@@ -541,7 +555,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
             float cbv[24];
             for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-            const float colr[4] = {1.0f, 0.62f, 0.16f, pass == 0 ? 0.38f : 0.95f};
+            const float colr[4] = {1.0f, LinearLight() ? ToLinear(0.62f) : 0.62f, LinearLight() ? ToLinear(0.16f) : 0.16f, pass == 0 ? 0.38f : 0.95f};
             const float px = 2.2f * H / 800.0f;
             const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
                                   pass == 0 ? 0.0f : 0.004f, 0.0f};
@@ -561,7 +575,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         }
     }
 
-    ctx->ResolveSubresource(I.resolve, 0, I.msaa, 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+    ctx->ResolveSubresource(I.resolve, 0, I.msaa, 0, LinearLight() ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM);
     ctx->CopyResource(I.staging, I.resolve);
     D3D11_MAPPED_SUBRESOURCE mp{};
     if (FAILED(ctx->Map(I.staging, 0, D3D11_MAP_READ, 0, &mp))) return false;

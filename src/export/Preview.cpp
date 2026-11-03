@@ -18,6 +18,30 @@
 
 namespace cardbridge::exporter {
 
+namespace detail {   // shared with GpuView.cpp
+// The game runs in linear light: sRGB textures are decoded when sampled, colour properties reach the shader as linear values and
+// the frame is encoded when it is written. CARDBRIDGE_GAMMA=1 combines everything as stored instead (the old look, for comparing).
+bool LinearLight() { static const bool on = !std::getenv("CARDBRIDGE_GAMMA"); return on; }
+
+float ToLinear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+float ToSrgb(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f; }
+
+// Colour-typed material properties (Unity converts these, and only these, to linear): _Color.., _ShadowColor, _LineColor, _overcolorN, ...
+static bool IsColourProp(const std::string& n) {
+    if (n.size() > 3 && n.compare(n.size() - 3, 3, "_ST") == 0) return false;
+    return n.rfind("_Color", 0) == 0 || n.rfind("_overcolor", 0) == 0 || n == "_ShadowColor" || n == "_LineColor" || n == "_SpecularColor" ||
+           n == "_EmissionColor" || n == "_ambientshadow";
+}
+
+// The material as the shader sees it in linear light.
+assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat) {
+    assemble::SceneMaterial m = mat;
+    for (auto& pr : m.props)
+        if (IsColourProp(pr.first)) { pr.second.x = ToLinear(pr.second.x); pr.second.y = ToLinear(pr.second.y); pr.second.z = ToLinear(pr.second.z); }
+    return m;
+}
+} // namespace detail
+
 namespace {
 
 struct Pt { float x, y, z; };
@@ -262,7 +286,11 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
                 for (uint32_t i = 0; i < 4; ++i) f[i * 4 + i] = 1.0f;
                 continue;
             }
-            if (pm.name == "_LightColor0") { f[0] = f[1] = f[2] = f[3] = 1.0f; continue; }
+            if (pm.name == "_LightColor0") {
+                static const float lightColour = std::getenv("CARDBRIDGE_LIGHT") ? static_cast<float>(std::atof(std::getenv("CARDBRIDGE_LIGHT"))) : 1.0f;
+                f[0] = f[1] = f[2] = f[3] = lightColour;
+                continue;
+            }
             if (pm.name == "_WorldSpaceLightPos0") { f[0] = lightDir[0]; f[1] = lightDir[1]; f[2] = lightDir[2]; f[3] = 0.0f; continue; }
             if (pm.name == "_WorldSpaceCameraPos") { f[0] = camPos[0]; f[1] = camPos[1]; f[2] = camPos[2]; continue; }
             bool found = false;
@@ -282,7 +310,7 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
     if (std::getenv("CARDBRIDGE_DEBUG_CBV") && mat.name == std::getenv("CARDBRIDGE_DEBUG_CBV") && prog.isPixel())
         for (const auto& cb : prog.cbuffers) {
             if (cb.slot < 0 || cb.slot >= 8) continue;
-            for (const auto& pm : cb.params) { const float* f = &out.data[static_cast<size_t>(cb.slot)][pm.offset / 4]; std::fprintf(stderr, "cbv %s = %.3f %.3f %.3f %.3f\n", pm.name.c_str(), f[0], f[1], f[2], f[3]); }
+            for (const auto& pm : cb.params) { const float* f = &out.data[static_cast<size_t>(cb.slot)][pm.offset / 4]; std::fprintf(stderr, "cbv cb%d[%u] %s = %.3f %.3f %.3f %.3f\n", cb.slot, pm.offset / 16, pm.name.c_str(), f[0], f[1], f[2], f[3]); }
         }
     out.ptr.assign(8, nullptr);
     for (size_t i = 0; i < 8; ++i) if (!out.data[i].empty()) out.ptr[i] = out.data[i].data();
@@ -475,12 +503,15 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 std::vector<PsIn> vsOut;
                 CbSet psCb;
                 MatTextures mt;
+                const bool linear = detail::LinearLight();
+                const assemble::SceneMaterial linearMat = (sr && linear) ? detail::LinearColours(mat) : assemble::SceneMaterial{};
                 if (sr) {
                     if (tangents.empty()) tangents = ComputeTangents(mesh);
                     if (!RunVertexStage(*sr, mat, mesh, tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                     else {
-                        FillConstants(sr->programs[sr->pi], mat, L, camPos, psCb, &scene.globalProps);
+                        FillConstants(sr->programs[sr->pi], linear ? linearMat : mat, L, camPos, psCb, &scene.globalProps);
                         mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat;
+                        mt.decodeSrgb = linear;
                     }
                 }
                 for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
@@ -554,7 +585,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                 if (al < 0.5f) continue;
                                 if (highlight) highlightTint(r, g, bl);
                                 zbuf[zi] = z;
-                                auto q2 = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
+                                auto q2 = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return static_cast<uint32_t>(f * 255.0f + 0.5f); };
                                 uint32_t shadedPx = 0xFF000000u | (q2(r) << 16) | (q2(g) << 8) | q2(bl);
                                 for (int dy = 0; dy < step && y + dy < H; ++dy)
                                     for (int dx = 0; dx < step && x + dx < W; ++dx) {

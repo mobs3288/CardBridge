@@ -40,6 +40,12 @@
 
 using namespace cardbridge;
 
+namespace cardbridge::exporter::detail {   // Preview.cpp: the linear-light helpers both renderers share
+float ToLinear(float c);
+float ToSrgb(float c);
+assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat);
+}
+
 namespace {
 
 int g_failed = 0, g_run = 0, g_skipped = 0;
@@ -74,6 +80,20 @@ std::string tempPath(const std::string& name) {
 }
 
 void unitTests() {
+    test("linear light: colour properties are decoded, floats and texture scales are left alone", [] {
+        using namespace cardbridge;
+        for (float c : {0.0f, 0.02f, 0.2f, 0.5f, 1.0f}) CHECK(std::fabs(exporter::detail::ToSrgb(exporter::detail::ToLinear(c)) - c) < 1e-4f);
+        CHECK(std::fabs(exporter::detail::ToLinear(0.5f) - 0.2140f) < 1e-3f);
+        assemble::SceneMaterial m;
+        m.props.emplace_back("_Color2", Vec4{0.5f, 0.5f, 0.5f, 0.5f});
+        m.props.emplace_back("_ShadowColor", Vec4{1, 0, 0.5f, 1});
+        m.props.emplace_back("_MainTex_ST", Vec4{0.5f, 0.5f, 0.5f, 0.5f});
+        m.props.emplace_back("_rimpower", Vec4{0.5f, 0, 0, 0});
+        const auto lin = exporter::detail::LinearColours(m);
+        CHECK(std::fabs(lin.props[0].second.x - 0.2140f) < 1e-3f && lin.props[0].second.w == 0.5f);   // alpha is not converted
+        CHECK(std::fabs(lin.props[1].second.z - 0.2140f) < 1e-3f && lin.props[1].second.x == 1.0f);
+        CHECK(lin.props[2].second.x == 0.5f && lin.props[3].second.x == 0.5f);
+    });
     test("shape sliders: key frames interpolate inside 0..1, extrapolate beyond it (SliderUnlocker)", [] {
         Bytes d;
         auto i32 = [&](int32_t v) { for (int k = 0; k < 4; ++k) d.push_back(static_cast<uint8_t>(v >> (8 * k))); };

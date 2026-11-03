@@ -120,9 +120,54 @@ public class CardBridgeSidecar : BaseUnityPlugin
         yield return new WaitForEndOfFrame();
 
         Dump(chara, dir);
+        try { DumpEnvironment(dir); } catch (Exception e) { File.WriteAllText(Path.Combine(dir, "environment_error.txt"), e.ToString()); }
         yield return StartCoroutine(Screenshot(chara, dir));
         File.WriteAllText(Path.Combine(dir, "ok.txt"), "ok");
         Singleton<Character>.Instance.DeleteChara(chara, false);
+    }
+
+    // The lighting the game renders this character under: colour space, ambient, every active light, the camera effects and the
+    // shader globals the character code sets. CardBridge's viewer needs these to match the game's look (environment.json).
+    void DumpEnvironment(string dir)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.Append("{\"colorSpace\":" + J(QualitySettings.activeColorSpace.ToString()));
+        sb.Append(",\"ambientMode\":" + J(RenderSettings.ambientMode.ToString()));
+        Color al = RenderSettings.ambientLight;
+        sb.Append(",\"ambientLight\":[" + F(al.r) + "," + F(al.g) + "," + F(al.b) + "],\"ambientIntensity\":" + F(RenderSettings.ambientIntensity));
+        Color sk = RenderSettings.ambientSkyColor, eq = RenderSettings.ambientEquatorColor, gr = RenderSettings.ambientGroundColor;
+        sb.Append(",\"ambientSky\":[" + F(sk.r) + "," + F(sk.g) + "," + F(sk.b) + "],\"ambientEquator\":[" + F(eq.r) + "," + F(eq.g) + "," + F(eq.b) + "],\"ambientGround\":[" + F(gr.r) + "," + F(gr.g) + "," + F(gr.b) + "]");
+        sb.Append(",\"scene\":" + J(UnityEngine.SceneManagement.SceneManager.GetActiveScene().name));
+        sb.Append(",\"lights\":[");
+        bool first = true;
+        foreach (Light l in UnityEngine.Object.FindObjectsOfType<Light>()) {
+            if (!first) sb.Append(","); first = false;
+            Color c = l.color;
+            sb.Append("{\"name\":" + J(l.name) + ",\"enabled\":" + (l.enabled && l.gameObject.activeInHierarchy ? "true" : "false") + ",\"type\":" + J(l.type.ToString()) +
+                      ",\"color\":[" + F(c.r) + "," + F(c.g) + "," + F(c.b) + "],\"intensity\":" + F(l.intensity) + ",\"range\":" + F(l.range) + ",\"shadows\":" + J(l.shadows.ToString()) +
+                      ",\"cullingMask\":" + l.cullingMask + ",\"position\":" + V3(l.transform.position) + ",\"forward\":" + V3(l.transform.forward) + "}");
+        }
+        sb.Append("],\"cameras\":[");
+        first = true;
+        foreach (Camera cam in Camera.allCameras) {
+            if (!first) sb.Append(","); first = false;
+            sb.Append("{\"name\":" + J(cam.name) + ",\"hdr\":" + (cam.allowHDR ? "true" : "false") + ",\"renderingPath\":" + J(cam.actualRenderingPath.ToString()) + ",\"components\":[");
+            bool f2 = true;
+            foreach (Component comp in cam.GetComponents<Component>()) {
+                if (comp == null) continue;
+                if (!f2) sb.Append(","); f2 = false;
+                sb.Append(J(comp.GetType().FullName));
+            }
+            sb.Append("]}");
+        }
+        sb.Append("],\"globals\":{");
+        string[] vecs = { "_ambientshadowG", "_LineColorG", "_linewidthG", "_FaceShadowG", "_FaceNormalG", "_RampG_ST" };
+        for (int i = 0; i < vecs.Length; ++i) {
+            Vector4 v = Shader.GetGlobalVector(vecs[i]);
+            sb.Append((i > 0 ? "," : "") + J(vecs[i]) + ":[" + F(v.x) + "," + F(v.y) + "," + F(v.z) + "," + F(v.w) + "]");
+        }
+        sb.Append("}}");
+        File.WriteAllText(Path.Combine(dir, "environment.json"), sb.ToString());
     }
 
     // ---------------------------------------------------------------- dump
