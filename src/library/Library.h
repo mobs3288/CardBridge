@@ -46,6 +46,13 @@ struct ImportResult {
 // calls it, so a library made by `library import` has it). False, with the reason, when no bundle holds the table.
 bool ExtractColourGrade(const std::string& gameRoot, const std::string& libraryRoot, std::string* why = nullptr);
 
+// The all-in-one release carries the library inside the exe: a zip (entries "library/...") appended to it, then a 24-byte footer
+// ("CBLIBPK1", the zip's offset and size as little-endian 64-bit numbers). True when `exePath` has one.
+bool HasEmbeddedLibrary(const std::string& exePath);
+// Unpacks it into `destParent` (the entries start with "library/", so the library ends up in destParent/library). Files already there with
+// the right size are left alone, so an interrupted unpack resumes. False, with the reason, on failure.
+bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why = nullptr);
+
 ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(size_t, size_t)>& progress = {});
 
 struct CheckResult {

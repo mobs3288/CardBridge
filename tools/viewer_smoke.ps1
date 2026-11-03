@@ -218,6 +218,14 @@ try {
         $sliders = @($lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
         Check "$($t[0]): sliders are listed" ($sliders -gt 0) "$sliders visible"
     }
+    if (Want 'setup') {
+        Write-Host 'setup tab'
+        $lay = GoTab 5
+        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 5)
+        $s = Shot 'setup'
+        $actions = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
+        Check 'setup: the settings actions are listed' ($actions -gt 3) "$actions visible"
+    }
     if (Want 'bones') {
         Write-Host 'bones tab'
         $lay = GoTab 4

@@ -18,7 +18,32 @@ The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the con
 2. It asks for your Koikatsu **mods folder** (or Cancel for base-game items only). Mods are never shipped with CardBridge: each user points it at their own.
 3. Drop a card `.png` on the window. Press **E** (or *Export PMX*) to write the PMX.
 
+**Settings.** The **Setup** tab (last tab in the panel) changes everything chosen at first run, and each change is saved at once to `%LOCALAPPDATA%\CardBridge\viewer.json`: use another library folder or build a new one from a Koikatsu folder; choose the mods folder, rebuild the mod index after adding mods, or use no mods; the author name written into every exported PMX; one fixed export folder (or ask every time); an extra folder of shader layers; open the settings folder; forget all settings. Keys `M` (mods folder) and `L` (library) still work.
+
 `CardBridge-CLI-<version>.exe` is the same converter as a command line tool (see Usage). Every exported PMX carries the model information (CardBridge, its version and author, the character, the source card) in the header comment, which MikuMikuDance shows in its model info.
+
+## What you need
+
+| Thing | What it is | Where it comes from |
+|---|---|---|
+| Windows 10 or 11, 64-bit | CardBridge is a Windows program | A graphics card with Direct3D 11 draws the viewer with the game's shaders; without it the viewer falls back to a slow software renderer |
+| **Koikatsu or Koikatsu Party install** | The game's own data files, read **once** by the first-run setup and never again | Your own copy of the game (this is the game folder that contains `abdata`) |
+| **Your mods folder** (optional) | The `.zipmod` files (Sideloader mods: hair, clothes, accessories, textures) your cards use | Your Koikatsu `mods` folder (or any folder holding the `.zipmod` files). CardBridge reads it in place and never changes it |
+| **A card** | A Koikatsu character card, `.png` | Made in the Koikatsu character maker |
+
+**What the setup copies from the game** into the CardBridge library (`%LOCALAPPDATA%\CardBridge\library`, about 0.9 GB):
+
+- `abdata/chara/oo_base.unity3d`: the shared skeleton and the body.
+- `abdata/chara/etc.unity3d`: the dummy items some mods point their empty slots at.
+- `abdata/chara/*.unity3d`: every base-game hair, clothing and accessory bundle, which also hold the game's shaders (the bulk of the 0.9 GB).
+- `abdata/list/characustom/*.unity3d` and `abdata/list/customshape.unity3d`: the item tables (which item id is which file) and the body and face slider shapes.
+- The colour-grading table (`Lut_Amount`) from the `abdata/map/scene` bundles, so the viewer and the export use the character maker's colours.
+
+`cardbridge library import --game <game folder> --library <folder> --minimal` copies only the first, second, fourth and fifth items (about 5 MB): base-game clothes and hair are then missing and every item has to come from mods.
+
+**What the mods folder is for.** A card stores a mod item as the mod author's slot id plus the mod's GUID. CardBridge finds the `.zipmod` with that GUID in your mods folder and reads its meshes, textures and item list from there. If the mod is not in the folder, that item is listed as missing (by mod GUID) in the issues and the manifest, and the rest of the character still converts. The first run over a mods folder builds an index (about 15 minutes for 4,000 mods; cached in `%LOCALAPPDATA%\CardBridge\modindex.json`, so later runs are fast). Mods packed as `.rar` or `.7z` must be unpacked first.
+
+**Not needed:** the game running, BepInEx or any plugin, Blender, MikuMikuDance (only to open the PMX afterwards). Game files and mods are never uploaded anywhere and never stay inside CardBridge's exe.
 
 ## Why this project exists
 
