@@ -717,9 +717,9 @@ void unitTests() {
         mo.morphs.push_back(op);
         const std::vector<int> vowels = AddMmdMorphs(mo);
         CHECK(vowels.size() == 5 && mo.morphs[static_cast<size_t>(vowels[0])].name == "あ" && mo.morphs[static_cast<size_t>(vowels[4])].name == "お");
-        const auto& morphU = mo.morphs[static_cast<size_t>(vowels[2])]; const auto& morphI = mo.morphs[static_cast<size_t>(vowels[1])];
-        CHECK(morphU.vertices.size() == 2 && morphU.vertices[0].second.z > 0 && morphU.vertices[0].second.x > 0);   // う: lips forward, the corner at x = -1 drawn inward
-        CHECK(morphI.vertices[0].second.x < 0 && morphI.vertices[1].second.x > 0);                                    // い: corners spread outward
+        const auto& morphU = mo.morphs[static_cast<size_t>(vowels[2])]; const auto& morphE = mo.morphs[static_cast<size_t>(vowels[3])];
+        CHECK(morphU.vertices.size() == 2 && std::fabs(morphU.vertices[0].second.y) > std::fabs(morphE.vertices[0].second.y) * 0.0f);   // う: made from the open mouth, scaled only
+        CHECK(std::fabs(morphE.vertices[0].second.y) > std::fabs(morphU.vertices[0].second.y) && morphE.vertices[0].second.x == 0.0f);   // え opens wider than う (2 x the open mouth vs 0.3 x), nothing reshaped sideways
         CHECK(AddMmdMorphs(mo).empty());
     });
 

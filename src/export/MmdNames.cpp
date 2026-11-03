@@ -233,29 +233,34 @@ std::vector<int> AddMmdMorphs(pmx::Model& model) {
         model.morphs.push_back(std::move(m));
     }
 
-    // Vowels from the game's wide open mouth (pattern 0, open): あ as it is; the others scale its opening, spread or draw in the mouth's width
-    // about the face's middle (weighted by how far the vertex moves in the open mouth: lips and teeth, not the cheek) and push the lips forward.
-    int open = -1;
-    for (size_t i = 0; i < model.morphs.size(); ++i) {
-        if (model.morphs[i].name == "あ") return added;   // made already
-        if (model.morphs[i].name == "Mouth 0 open") open = static_cast<int>(i);
-    }
-    if (open < 0 || model.morphs[static_cast<size_t>(open)].vertices.empty()) return added;
-    const auto srcVerts = model.morphs[static_cast<size_t>(open)].vertices;   // a copy: push_back below moves the morphs
-    float maxLen = 0.0f;
-    for (const auto& [vi, d] : srcVerts) maxLen = std::max(maxLen, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
-    if (maxLen < 1e-6f) return added;
-    double sumX = 0, sumW = 0;
-    for (const auto& [vi, d] : srcVerts) {
-        const double w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
-        sumX += w * model.vertices[static_cast<size_t>(vi)].position.x;
-        sumW += w;
-    }
-    const float centreX = sumW > 0 ? static_cast<float>(sumX / sumW) : 0.0f;
-    struct Vowel { const char* mmd; const char* en; float opening, spread, forward; };
-    const Vowel vowels[] = {{"あ", "A", 1.0f, 0.0f, 0.0f}, {"い", "I", 0.35f, 0.22f, 0.0f}, {"う", "U", 0.30f, -0.28f, 0.35f},
-                            {"え", "E", 0.55f, 0.12f, 0.0f}, {"お", "O", 0.70f, -0.20f, 0.30f}};
+    // Vowels, made from the game's own mouth patterns (the face's blend shapes, each a mouth shape with its teeth and cavity): pattern 2 open
+    // is the open mouth with both rows of teeth (あ; い at 0.3 and え at 0.6), pattern 22 the tall round open mouth (お at 0.7, う at 0.3).
+    // Only scaled, never reshaped: lips, teeth and cavity move together in a game pattern, and pushing the lips about on their own left the
+    // teeth showing under the lower lip. (The spread and forward columns are for a vowel that needs them; none does now.)
+    // Without those patterns (another head) the plain open mouth (pattern 0) stands in for all of them at twice its opening, so the vowels
+    // still exist, only without teeth. Which pattern is which was read off renders of each one.
+    for (const auto& m : model.morphs) if (m.name == "あ") return added;   // made already
+    auto find = [&](const char* n) { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == n) return static_cast<int>(i); return -1; };
+    struct Vowel { const char* mmd; const char* en; const char* source; float opening, spread, forward; };
+    const Vowel vowels[] = {{"あ", "A", "Mouth 2 open", 1.0f, 0.0f, 0.0f}, {"い", "I", "Mouth 2 open", 0.3f, 0.0f, 0.0f}, {"う", "U", "Mouth 22 open", 0.3f, 0.0f, 0.0f},
+                            {"え", "E", "Mouth 2 open", 0.6f, 0.0f, 0.0f}, {"お", "O", "Mouth 22 open", 0.7f, 0.0f, 0.0f}};
+    const int plain = find("Mouth 0 open");
     for (const Vowel& v : vowels) {
+        int src = find(v.source);
+        float gain = 1.0f;
+        if (src < 0 || model.morphs[static_cast<size_t>(src)].vertices.empty()) { src = plain; gain = 2.0f; }
+        if (src < 0 || model.morphs[static_cast<size_t>(src)].vertices.empty()) continue;
+        const auto srcVerts = model.morphs[static_cast<size_t>(src)].vertices;   // a copy: push_back below moves the morphs
+        float maxLen = 0.0f;
+        for (const auto& [vi, d] : srcVerts) maxLen = std::max(maxLen, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+        if (maxLen < 1e-6f) continue;
+        double sumX = 0, sumW = 0;
+        for (const auto& [vi, d] : srcVerts) {
+            const double w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
+            sumX += w * model.vertices[static_cast<size_t>(vi)].position.x;
+            sumW += w;
+        }
+        const float centreX = sumW > 0 ? static_cast<float>(sumX / sumW) : 0.0f;
         pmx::Morph m;
         m.name = v.mmd;
         m.nameEn = v.en;
@@ -263,7 +268,8 @@ std::vector<int> AddMmdMorphs(pmx::Model& model) {
         for (const auto& [vi, d] : srcVerts) {
             const float w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
             const float x = model.vertices[static_cast<size_t>(vi)].position.x - centreX;
-            m.vertices.emplace_back(vi, Vec3{d.x * v.opening + v.spread * x * w, d.y * v.opening, d.z * v.opening + v.forward * maxLen * w});
+            const float k = v.opening * gain;
+            m.vertices.emplace_back(vi, Vec3{d.x * k + v.spread * x * w, d.y * k, d.z * k + v.forward * maxLen * w});
         }
         added.push_back(static_cast<int>(model.morphs.size()));
         model.morphs.push_back(std::move(m));

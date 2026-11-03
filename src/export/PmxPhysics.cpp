@@ -112,8 +112,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
         // The body's own jiggle chains (breast, hip) are skin on the body, not cloth: whatever their limits, a light link carrying vertices of
-        // the body shivers in MikuMikuDance (and at the loosest it threw the bust and the thigh about). They stay rigid in the PMX; the game's
-        // jiggle is not carried. 
+        // the body shivers in MikuMikuDance (tried again with a 7 degree swing: the bust shook visibly at rest). They stay rigid in the PMX; the
+        // game's jiggle is not carried.
         if (ch.characterOwn) continue;
         std::vector<int> bones;
         for (int b : ch.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
@@ -229,7 +229,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
             // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
             // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
-            const bool holds = sideways * gravity / stiffnessK < 0.12f * bend;
+            const bool holds = sideways * gravity / stiffnessK < 0.6f * bend;
             const float range = holds ? bend : 0.0f;
             j.rotLower = {-range, -0.1f * range, -range};
             j.rotUpper = {range, 0.1f * range, range};
