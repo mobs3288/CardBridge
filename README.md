@@ -10,6 +10,16 @@ It is a standalone C++ Windows application built in the same style as the Projec
 
 > **Version 0.5.0-alpha. It is usable today, but it is not finished.** It works **100% only for the base game**: cards made with the stock Koikatsu items convert and look right. **Several modded cards also work**, but not all of them, and a mod can still break a conversion or a material. It is **still in development**: expect rough edges, wrong colours on some mod items, and missing pieces (see Known limitations). Every export also writes a `_preview.png` (front, side, back) so a result can be judged without a PMX viewer, and the viewer shows exactly what the game's shaders draw. The checklist at the bottom of this file is the source of truth for what is done. The version is in the [`VERSION`](VERSION) file; `cardbridge --version` and the viewer's header show it.
 
+## Get it and run it
+
+The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the converter and exporter inside). No installer, no scripts, no extra files.
+
+1. Run it. The first time it asks for **your own Koikatsu folder** (the one that contains `abdata`) and copies the base-game data it needs into `%LOCALAPPDATA%\CardBridge\library` (about 0.9 GB, about 20 seconds, once). The game is never needed again.
+2. It asks for your Koikatsu **mods folder** (or Cancel for base-game items only). Mods are never shipped with CardBridge: each user points it at their own.
+3. Drop a card `.png` on the window. Press **E** (or *Export PMX*) to write the PMX.
+
+`CardBridge-CLI-<version>.exe` is the same converter as a command line tool (see Usage). Every exported PMX carries the model information (CardBridge, its version and author, the character, the source card) in the header comment, which MikuMikuDance shows in its model info.
+
 ## Why this project exists
 
 CardBridge is a tool for making anime characters for my own game, Project K, using the established Koikatsu character engine instead of Blender. I am not good at 3D modelling or texturing, and Koikatsu's character maker already does that part very well; what was missing was a reliable way to get a finished character out of it, rigged and textured, into my own engine.
@@ -134,6 +144,10 @@ scripts\cardbridge.ps1
 ```
 
 `scripts\cardbridge.ps1 -Test` also runs the unit tests. The build runs at idle priority. Output goes to `build-cardbridge\bin\cardbridge.exe`.
+
+On its own (this folder as its own repository): install CMake, Ninja and a Windows C++20 compiler (MinGW-w64 or MSVC), then `build.ps1` (`-Test` runs the unit tests); output goes to `build\bin`. `package.ps1` makes the release files (`CardBridge-<version>.exe`, `CardBridge-CLI-<version>.exe`, their SHA-256) in `dist\`; the version comes from the `VERSION` file.
+
+To check a PMX for what MikuMikuDance chokes on (nested group morphs, IK limits, NaN, bad indices): `python tools/audit_pmx_for_mmd.py model.pmx`.
 
 ## Usage
 

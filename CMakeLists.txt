@@ -116,18 +116,20 @@ endif()
 # The viewer: a Win32 window over the same core (GDI blit of a frame drawn by the software renderer or by Direct3D 11).
 if(WIN32)
     enable_language(RC)   # the icon and the logo are resources of the exe
-    set(VIEWER_RC_DEPS viewer/viewer.rc viewer/res/cardbridge.ico viewer/res/logo.png)
+    # the .rc is generated (version, absolute resource paths) and compiled with windres by hand: the generated rule passes absolute include
+    # paths, which windres cannot hand to its preprocessor when the checkout path has a space in it.
+    string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" _v "${CARDBRIDGE_VERSION}")
+    set(CARDBRIDGE_VERSION_RC "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+    configure_file(viewer/viewer.rc.in ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc @ONLY)
     if(MSVC)
-        set(VIEWER_RES viewer/viewer.rc)
+        set(VIEWER_RES ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc)
     else()
-        # windres is run by hand from the viewer folder (the .rc names its files relative to it): the generated rule passes
-        # absolute include paths, which windres cannot hand to its preprocessor when the checkout path has a space in it.
         set(VIEWER_RES ${CMAKE_CURRENT_BINARY_DIR}/viewer_res.o)
         add_custom_command(
             OUTPUT ${VIEWER_RES}
-            COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc ${VIEWER_RES}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/viewer
-            DEPENDS ${VIEWER_RC_DEPS}
+            COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc viewer_res.o
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png
             VERBATIM)
     endif()
     add_executable(cardbridge_viewer WIN32 viewer/main.cpp viewer/Ui.cpp ${VIEWER_RES})

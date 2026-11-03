@@ -164,7 +164,14 @@ std::string PickCard(HWND owner) {
 
 bool Exists(const std::string& p) { return GetFileAttributesW(Utf8ToWide(p).c_str()) != INVALID_FILE_ATTRIBUTES; }
 
-// The asset library normally sits in the CardBridge folder (library_full, else library): look from the exe upwards.
+// Where a library the viewer builds itself goes (beside its settings), so the single exe needs no folder of its own.
+std::string DefaultLibraryDir() {
+    const char* base = std::getenv("LOCALAPPDATA");
+    return std::string(base ? Slashes(base) : ".") + "/CardBridge/library";
+}
+
+// The asset library normally sits in the CardBridge folder (library_full, else library): look from the exe upwards, then in the
+// viewer's own folder under %LOCALAPPDATA%.
 std::string FindLibrary() {
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -175,6 +182,8 @@ std::string FindLibrary() {
             if (Exists(dir + sub + "/abdata") || Exists(dir + sub + "/library.json")) return dir + sub;
         if (dir.find('/') == std::string::npos) break;
     }
+    const std::string own = DefaultLibraryDir();
+    if (Exists(own + "/abdata")) return own;
     return {};
 }
 
@@ -318,6 +327,8 @@ struct App {
     std::string cardPath;
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
+    std::string pendingCard;                  // a card to open once the library has been set up
+    int pendingOutfit = -1;
     // library state, built once
     resolve::ModIndex mods;
     resolve::ListTable lists;
@@ -415,6 +426,8 @@ constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
 constexpr UINT WM_EXP_READY = WM_APP + 4;
+constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok)
+constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest.
 constexpr UINT WM_TEST = WM_APP + 40;
@@ -1993,15 +2006,58 @@ void ChooseMods() {
     else InvalidatePanel();
 }
 
-void ChooseLibrary() {
-    std::string d = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder");
-    if (d.empty()) return;
-    g.settings.library = d;
-    SaveSettings(g.settings);
-    Log("asset library: " + d, LogKind::Good);
-    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
-    else InvalidatePanel();
+// Builds the asset library from the user's own Koikatsu folder (the only thing that ever reads the game), on a thread, with the progress in
+// the log. When it is done WM_LIBRARY_DONE opens the card that was waiting.
+void StartLibraryImport(const std::string& game) {
+    if (g.busy.exchange(true)) { Log("still busy; wait for it to finish", LogKind::Warn); return; }
+    const std::string dest = DefaultLibraryDir();
+    g.status = "copying the game data into the library ...";
+    Log("building the asset library from " + game, LogKind::Info);
+    InvalidatePanel();
+    std::thread([game, dest]() {
+        bool ok = false;
+        try {
+            library::ImportOptions o;
+            o.gameRoot = game;
+            o.libraryRoot = dest;
+            o.profile = library::Profile::Full;
+            auto r = library::ImportLibrary(o, [](size_t done, size_t total) { if (done % 25 == 0 || done == total) Log("  copying game data " + std::to_string(done) + " / " + std::to_string(total)); });
+            for (const auto& issue : r.issues) Log("  " + issue, LogKind::Warn);
+            ok = r.files > 0 && library::CheckLibrary(dest, false).ok;
+            Log(ok ? "asset library ready: " + dest : std::string("the library import failed: is that the Koikatsu folder (it has abdata inside)?"), ok ? LogKind::Good : LogKind::Error);
+        } catch (const std::exception& e) {
+            Log(std::string("the library import failed: ") + e.what(), LogKind::Error);
+        }
+        g.busy = false;
+        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, ok ? 1 : 0);
+    }).detach();
 }
+
+// No library yet (first run) or the user asked for one (L): build it from the game folder, or point at one that exists.
+void SetupLibrary(bool offerExisting) {
+    if (std::getenv("CARDBRIDGE_TEST_HOOKS") && std::getenv("CARDBRIDGE_SETUP_GAME")) { StartLibraryImport(Slashes(std::getenv("CARDBRIDGE_SETUP_GAME"))); return; }   // scripted runs: no dialogs
+    if (offerExisting) {
+        const int a = MessageBoxW(g.hwnd, L"Yes: build the library from your Koikatsu folder (about 0.9 GB, copied once).\nNo: use a library folder that already exists.", L"CardBridge - asset library", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (a == IDCANCEL) return;
+        if (a == IDNO) {
+            const std::string d = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder");
+            if (d.empty()) return;
+            g.settings.library = d;
+            SaveSettings(g.settings);
+            Log("asset library: " + d, LogKind::Good);
+            if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
+            else InvalidatePanel();
+            return;
+        }
+    } else {
+        MessageBoxW(g.hwnd, L"CardBridge needs a copy of the base-game data (skeleton, body, shaders, hair and clothes: about 0.9 GB).\nIt is copied once from your own Koikatsu install and never needs the game again.\n\nNext: choose your Koikatsu folder (the one that contains \"abdata\").", L"CardBridge - first run", MB_OK | MB_ICONINFORMATION);
+    }
+    const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu folder (it contains abdata)");
+    if (game.empty()) { g.status = "no asset library: press L to set one up"; InvalidatePanel(); return; }
+    StartLibraryImport(game);
+}
+
+void ChooseLibrary() { SetupLibrary(true); }
 
 // ---- one picture -------------------------------------------------------------------------------------------------------
 // A slider's row repaints while it is dragged (and the tab heading, whose "tweaked" label follows it); nothing else.
@@ -2233,6 +2289,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_BENCH: RunBench(); return 0;
+    case WM_SETUP_LIBRARY: SetupLibrary(false); return 0;
+    case WM_LIBRARY_DONE:
+        if (lp) {
+            g.settings.library = DefaultLibraryDir();
+            SaveSettings(g.settings);
+            g.resolver.reset();   // the next load builds its resolver over the new library
+            if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
+            g.status = "drop a Koikatsu card on this window";
+            if (!g.pendingCard.empty()) { const std::string card = g.pendingCard; g.pendingCard.clear(); StartLoad(card, g.pendingOutfit); }
+        } else {
+            g.status = "library setup failed: press L to try again";
+        }
+        InvalidatePanel();
+        return 0;
     case WM_DROPFILES: {
         wchar_t buf[1024];
         if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) { g.cam = {}; StartLoad(Slashes(WideToUtf8(buf)), -1); }
@@ -2751,7 +2821,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     else Log("Direct3D 11 unavailable (" + gpuWhy + "); software renderer", LogKind::Warn);
     CoInitialize(nullptr);
     if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
-    if (g.settings.library.empty()) g.settings.library = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (made by 'cardbridge library import')");
     if (g.settings.mods.empty() || !Exists(g.settings.mods)) g.settings.mods = Exists(CachedModsRoot()) ? CachedModsRoot() : std::string();
     if (g.settings.mods.empty()) {
         // Optional: without mods only base-game items resolve.
@@ -2775,7 +2844,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
             at = end + 1;
         }
     }
-    if (!card.empty()) StartLoad(card, g.wantOutfit);
+    if (g.settings.library.empty()) {   // first run: build the library from the user's game, then open the card
+        g.pendingCard = card;
+        g.pendingOutfit = g.wantOutfit;
+        PostMessageW(g.hwnd, WM_SETUP_LIBRARY, 0, 0);
+    } else if (!card.empty()) {
+        StartLoad(card, g.wantOutfit);
+    }
     // The main loop: take every queued message (they only record what the user did), then draw one picture. Input can never starve the
     // drawing, because a picture is made after each batch whatever else is still arriving.
     MSG m;

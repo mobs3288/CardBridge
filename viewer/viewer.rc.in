@@ -1,0 +1,29 @@
+// Resources of the viewer exe (CMake fills in the version and the paths): the icon (window, taskbar, Explorer), the logo the panel
+// header draws (a PNG) and the version information Explorer shows.
+1 ICON "@CMAKE_CURRENT_SOURCE_DIR@/viewer/res/cardbridge.ico"
+2 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/viewer/res/logo.png"
+
+1 VERSIONINFO
+FILEVERSION @CARDBRIDGE_VERSION_RC@
+PRODUCTVERSION @CARDBRIDGE_VERSION_RC@
+FILEOS 0x4
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Ryan Oktaviandi Susilo Wibowo"
+      VALUE "LegalCopyright", "CardBridge by Ryan Oktaviandi Susilo Wibowo"
+      VALUE "ProductName", "CardBridge"
+      VALUE "FileDescription", "CardBridge: Koikatsu card to 3D workbench"
+      VALUE "ProductVersion", "@CARDBRIDGE_VERSION@"
+      VALUE "FileVersion", "@CARDBRIDGE_VERSION@"
+      VALUE "OriginalFilename", "CardBridge.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
