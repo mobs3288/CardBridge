@@ -682,10 +682,20 @@ struct Builder {
     }
 
     // `look` (may be null) says how this item's materials are coloured; `matIndex` is the material's slot on its renderer.
-    int materialFor(UnityFile& uf, const PPtr& p, const std::string& partId, const Vec4* fallbackColor, const ItemLook* look,
+    int materialFor(UnityFile& uf0, const PPtr& p0, const std::string& partId, const Vec4* fallbackColor, const ItemLook* look,
                     const RendererInfo& r, size_t matIndex) {
         SceneMaterial sm;
         std::string why;
+        // A material the prefab's bundle only points at (the body's cf_m_body in mm_base) is read from the library bundle that holds it;
+        // its textures and shader then resolve against that bundle.
+        UnityFile* ufp = &uf0;
+        PPtr p = p0;
+        std::shared_ptr<UnityFile> external;
+        if (!p0.isNull() && !p0.isLocal() && openCab) {
+            external = openCab(uf0.externalNameOf(p0));
+            if (external) { ufp = external.get(); p.fileId = 0; }
+        }
+        UnityFile& uf = *ufp;
         auto m = uf.readMaterial(p, &why);
         if (!m) {
             sm.name = "material";
@@ -1535,7 +1545,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const char* prop, const char* key, const char* what, Vec4 col) {
                                 auto t = rowTextureFor("body", category, id, prop, key, what);
                                 int idx = -1;
-                                if (t) { auto copy = t->rgba; idx = b.addSceneTexture(t->name, "body overlay", t->width, t->height, std::move(copy)); }
+                                if (t) {
+                                    auto copy = t->rgba;
+                                    idx = b.addSceneTexture(t->name, "body overlay", t->width, t->height, std::move(copy));
+                                    scene.textures[static_cast<size_t>(idx)].clamp = t->wrapMode == 1;   // the overlay is placed by _nipsize: outside its square it must not repeat
+                                    scene.textures[static_cast<size_t>(idx)].srgb = t->colorSpace == 1;
+                                }
                                 bodyOverlayTex.emplace_back(texName, idx);
                                 bodyOverlayColors.emplace_back(colName, col);
                             };

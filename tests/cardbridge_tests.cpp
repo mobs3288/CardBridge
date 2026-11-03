@@ -1378,7 +1378,8 @@ void integrationTests() {
             CHECK(deviation(scene, again) < 1e-4f);   // the identity re-shape is exact
             size_t shapeOffsets = 0;
             CHECK(shapeDeviation(scene, again, &shapeOffsets) < 1e-5f);   // and so are the blend shape offsets
-            CHECK(areolaOf(scene) == areolaOf(again));   // (a library without the body's create shader has no areola property)
+            CHECK(areolaOf(scene) == areolaOf(again));
+            CHECK(!areolaOf(scene).empty());   // the body's cf_m_body (mm_base) is followed from the prefab, so _nipsize has a consumer
             assemble::AssembleOptions other = same;
             other.bodyShape[0] = std::min(1.0f, other.bodyShape[0] + 0.3f);   // height
             other.bodyShape[4] = std::max(0.0f, other.bodyShape[4] - 0.3f);
