@@ -135,12 +135,27 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
             const float d = l > 1e-6f ? (axis.x * want.x + axis.y * want.y + axis.z * want.z) / l : 1.0f;
             if (d < 0.999f) out.push_back(who + ": the capsule does not follow its bone (cos " + std::to_string(d) + ")");
         }
-        if (b.group == exporter::kPmxGroupCollider) {
+        if (b.group != exporter::kPmxGroupChain) {
             if (b.mode != 0) out.push_back(who + ": a collider that moves");
             if (!bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a collider that does not meet chains");
             if ((b.mask & ~(1u << exporter::kPmxGroupChain)) != 0) out.push_back(who + ": a collider that meets more than chains");
         } else if (b.mode != 0) {
-            if (b.mask != (1u << exporter::kPmxGroupCollider)) out.push_back(who + ": a chain body that meets anything but colliders (mask " + std::to_string(b.mask) + ")");
+            if (bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
+            // it meets only colliders it does not already overlap: a body that starts inside one is thrown out of it, and the model with it
+            for (size_t k = 0; k < m.bodies.size(); ++k) {
+                const auto& c = m.bodies[k];
+                if (c.group == exporter::kPmxGroupChain || !bit(b.mask, c.group)) continue;
+                auto core = [](const pmxread::RigidBody& x, Vec3& p, Vec3& q) {
+                    const pmxread::V3 ax = capsuleAxis(x.rot);
+                    const float h = x.shape == 2 ? 0.5f * x.size.y : 0.0f;
+                    p = {x.pos.x - ax.x * h, x.pos.y - ax.y * h, x.pos.z - ax.z * h};
+                    q = {x.pos.x + ax.x * h, x.pos.y + ax.y * h, x.pos.z + ax.z * h};
+                };
+                Vec3 a0, a1, c0, c1;
+                core(b, a0, a1);
+                core(c, c0, c1);
+                if (exporter::SegmentDistance(a0, a1, c0, c1) < b.size.x + c.size.x) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts inside it");
+            }
         } else if (b.mask != 0) {
             out.push_back(who + ": an anchor that collides");
         }
@@ -683,6 +698,29 @@ void unitTests() {
         col.bone = 0;
         col.center = {0, 1.2f, 0};
         col.radius = 0.1f;
+    test("pmx: a half turn about Y faces the model -Z, turns bodies and joints with it, mirrors IK limits and undoes itself", [] {
+        pmx::Model m;
+        pmx::Vertex v; v.position = {1, 2, 3}; v.normal = {0, 0, 1}; m.vertices.push_back(v);
+        pmx::Bone b0; b0.name = "root"; b0.position = {0.5f, 0, -2}; m.bones.push_back(b0);
+        pmx::Bone b1; b1.name = "knee"; b1.parent = 0; b1.position = {1, 1, 1}; b1.tailOffset = {0, 0, 4}; m.bones.push_back(b1);
+        pmx::Bone ik; ik.name = "ik"; ik.ikTarget = 1; ik.ikLinks.push_back({1, true, {0.1f, -0.2f, -0.3f}, {2.0f, 0.4f, 0.5f}}); m.bones.push_back(ik);
+        pmx::Morph mo; mo.name = "v"; mo.vertices.emplace_back(0, Vec3{1, 1, 1}); m.morphs.push_back(mo);
+        pmx::RigidBody rb; rb.position = {3, 4, 5}; rb.rotation = {0.3f, 0.5f, -0.2f}; m.rigidBodies.push_back(rb);
+        pmx::Joint j; j.position = {1, 1, 1}; j.rotation = {0, -1.0f, 0}; m.joints.push_back(j);
+        const pmx::Model orig = m;
+        pmx::TurnAboutY(m);
+        CHECK(m.vertices[0].position.x == -1 && m.vertices[0].position.y == 2 && m.vertices[0].position.z == -3 && m.vertices[0].normal.z == -1);
+        CHECK(m.bones[1].position.x == -1 && m.bones[1].position.z == -1 && m.bones[1].tailOffset.z == -4);
+        const auto& lk = m.bones[2].ikLinks[0];   // about x and z the limits mirror, about y they stay
+        CHECK(lk.lower.x == -2.0f && lk.upper.x == -0.1f && lk.lower.y == -0.2f && lk.upper.y == 0.4f && lk.lower.z == -0.5f && lk.upper.z == 0.3f);
+        CHECK(m.morphs[0].vertices[0].second.x == -1 && m.morphs[0].vertices[0].second.y == 1 && m.morphs[0].vertices[0].second.z == -1);
+        CHECK(m.rigidBodies[0].position.x == -3 && m.rigidBodies[0].position.z == -5 && std::fabs(m.rigidBodies[0].rotation.y - (0.5f - 3.14159265f)) < 1e-5f && m.rigidBodies[0].rotation.x == 0.3f);
+        CHECK(std::fabs(m.joints[0].rotation.y - (-1.0f + 3.14159265f)) < 1e-5f);
+        pmx::TurnAboutY(m);
+        CHECK(std::fabs(m.vertices[0].position.x - 1) < 1e-6f && std::fabs(m.bones[1].position.z - 1) < 1e-6f && std::fabs(m.rigidBodies[0].rotation.y - 0.5f) < 1e-5f && std::fabs(m.joints[0].rotation.y - (-1.0f)) < 1e-5f);
+        CHECK(m.bones[2].ikLinks[0].lower.x == orig.bones[2].ikLinks[0].lower.x && m.bones[2].ikLinks[0].upper.z == orig.bones[2].ikLinks[0].upper.z);
+    });
+
         col.height = 0.4f;
         col.axis = {0, 1, 0};
         s.colliders.push_back(col);
@@ -694,7 +732,7 @@ void unitTests() {
         exporter::AddPhysics(s, m, 10.0f);
         CHECK(m.rigidBodies.size() == 6);   // collider + anchor + one per chain bone (the inside collider is not exported)
         CHECK(m.joints.size() == 4);        // anchor-root, root-1, 1-2, 2-3
-        CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].group == 0 && m.rigidBodies[0].shape == 2);
+        CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].group != exporter::kPmxGroupChain && m.rigidBodies[0].shape == 2);
         CHECK(m.rigidBodies[1].mode == 0 && m.rigidBodies[1].bone == 0);   // the anchor follows the chain's parent bone
         CHECK(m.rigidBodies[2].mode == 2 && m.rigidBodies[3].mode == 1 && m.rigidBodies[3].group == 1);   // the root only turns, the rest are free
         CHECK(std::fabs(m.rigidBodies[3].position.y - 9.5f) < 1e-3f);   // halfway from bone 2 (y 1.0) to bone 3 (0.9), scaled by 10: 9.5
@@ -713,7 +751,7 @@ void unitTests() {
             CHECK(std::fabs(back.bodies[i].pos.y - m.rigidBodies[i].position.y) < 1e-5f && std::fabs(back.bodies[i].size.x - m.rigidBodies[i].size.x) < 1e-5f);
         }
         // the filter: chains meet colliders (bit 0), colliders meet chains (bit 1), the anchor meets nothing
-        CHECK(back.bodies[0].mask == 0x0002 && back.bodies[1].mask == 0 && back.bodies[3].mask == 0x0001);
+        CHECK(back.bodies[0].mask == 0x0002 && back.bodies[1].mask == 0 && (back.bodies[3].mask & 0x0002) == 0);
         // a broken file is found: a chain that meets chains, an anchor that moves, a joint on a missing body
         pmxread::Model broken = back;
         broken.bodies[3].mask = 0xFFFF;
@@ -1528,3 +1566,15 @@ int main() {
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;
 }
+            {   // MikuMikuDance keeps the number of listed morphs and of frames in a byte: more corrupt its heap
+                size_t listed = 0;
+                for (const auto& f : back.frames) for (const auto& it : f.items) listed += it.first == 1;
+                CHECK(listed <= 255 && back.frames.size() <= 254);
+                CHECK(back.morphs.size() >= listed);   // what does not fit stays in the file, unlisted
+                std::printf("  read back: %zu morphs listed in the display frames of %zu\n", listed, back.morphs.size());
+            }
+            {   // facing -Z: the toes lie in front of the ankle, on the -Z side
+                const pmxread::Bone* foot = nullptr; const pmxread::Bone* toe = nullptr;
+                for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L") foot = &b; if (b.name == "cf_j_toes_L") toe = &b; }
+                CHECK(foot && toe && toe->pos.z < foot->pos.z);
+            }

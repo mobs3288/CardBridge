@@ -2,7 +2,8 @@
 
 // A small reference for what a Bullet-like engine does with the exported rigid bodies and joints: planar rigid bodies (x, y, angle) with
 // gravity, linear and angular damping as btRigidBody applies them, pin joints solved by sequential impulses and the 6-DOF joint's angular
-// spring about its Z axis (torque = stiffness * angle, the Bullet spring) with the joint's rotation limits as a stiff stop. It reads the
+// spring about its Z axis (torque = stiffness * angle, the Bullet spring) with the joint's rotation limits as a hard stop (the relative
+// angular velocity into the limit is removed, as a limit constraint does; a stiff spring-like stop goes unstable when it is hit often). It reads the
 // bodies and joints through the independent PMX reader, so what it settles is what a PMX viewer would be handed. Planar only: the chain
 // must swing in the X-Y plane (the joint frames' Z axis along the world Z). Not Bullet: no contacts, no 3D, an approximation of its solver.
 
@@ -112,13 +113,17 @@ private:
         for (auto& b : bodies_) if (b.dynamic) b.v.y -= g_ * dt;
         for (const auto& p : pins_) {   // spring torque and the stop, equal and opposite
             const double th = bodies_[static_cast<size_t>(p.b)].angle - bodies_[static_cast<size_t>(p.a)].angle - p.angle0;
-            double torque = -p.stiffness * th;
-            if (th > p.upper) torque -= 40.0 * p.stiffness * (th - p.upper);
-            if (th < p.lower) torque -= 40.0 * p.stiffness * (th - p.lower);
+            const double torque = -p.stiffness * th;
             Body& A = bodies_[static_cast<size_t>(p.a)];
             Body& B = bodies_[static_cast<size_t>(p.b)];
             B.w += torque * B.invInertia * dt;
             A.w -= torque * A.invInertia * dt;
+            const double rel = B.w - A.w;
+            if ((th > p.upper && rel > 0) || (th < p.lower && rel < 0)) {   // the stop
+                const double imp = -rel / (A.invInertia + B.invInertia);
+                B.w += imp * B.invInertia;
+                A.w -= imp * A.invInertia;
+            }
         }
         for (auto& b : bodies_) if (b.dynamic) {   // btRigidBody::applyDamping
             b.v = b.v * std::pow(1.0 - b.linearDamping, dt);

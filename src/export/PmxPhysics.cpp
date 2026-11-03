@@ -29,7 +29,30 @@ float capsuleInertiaAcross(float mass, float radius, float cylinder) {
     return mass * (1.0f / 12.0f) * (ly * ly + lx * lx);
 }
 
+// A rigid body's core as a segment (a point for a sphere) and its radius, for the rest-pose overlap test.
+struct Core { Vec3 a, b; float r = 0.0f; };
+
 } // namespace
+
+// The least distance between the segments a-b and c-d (a segment may be a point).
+float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
+    auto dot = [](Vec3 u, Vec3 v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
+    const Vec3 u = sub(b, a), v = sub(d, c), w = sub(a, c);
+    const float uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), uw = dot(u, w), vw = dot(v, w);
+    float s = 0.0f, t = 0.0f;
+    const float den = uu * vv - uv * uv;
+    if (uu < 1e-12f && vv < 1e-12f) return length(w);
+    if (uu < 1e-12f) t = clamp01(vw / vv);
+    else if (vv < 1e-12f) s = clamp01(-uw / uu);
+    else {
+        s = den > 1e-12f ? clamp01((uv * vw - vv * uw) / den) : 0.0f;
+        t = (uv * s + vw) / vv;
+        if (t < 0.0f) { t = 0.0f; s = clamp01(-uw / uu); }
+        else if (t > 1.0f) { t = 1.0f; s = clamp01((uv - uw) / uu); }
+    }
+    const Vec3 p = {w.x + u.x * s - v.x * t, w.y + u.y * s - v.y * t, w.z + u.z * s - v.z * t};
+    return length(p);
+}
 
 Vec3 PmxRotationFromYAxis(Vec3 axis) {
     Vec3 y = normalize(axis);
@@ -48,12 +71,14 @@ Vec3 PmxRotationFromYAxis(Vec3 axis) {
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
+    std::vector<Core> colliderCore;       // per collider body, in the order they were added
+    std::vector<int> colliderBody;        // its rigid body index
     for (const auto& c : scene.colliders) {
         if (c.bone < 0 || c.bone >= boneCount || c.inside || c.radius <= 0.0f) continue;
         pmx::RigidBody rb;
         rb.name = "collider " + c.name;
         rb.bone = c.bone;
-        rb.group = kPmxGroupCollider;
+        rb.group = 0;   // the collider groups are assigned below
         rb.mask = 1u << kPmxGroupChain;   // colliders meet chains and nothing else
         rb.mode = 0;
         rb.position = c.center * scale;
@@ -66,8 +91,20 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.shape = 0;
             rb.size = {c.radius * scale, 0, 0};
         }
+        Core core;
+        core.r = c.radius * scale;
+        core.a = core.b = c.center * scale;
+        if (cyl > 1e-4f) {
+            const Vec3 half = normalize(c.axis) * (0.5f * cyl * scale);
+            core.a = sub(c.center * scale, half);
+            core.b = c.center * scale + half;
+        }
+        colliderCore.push_back(core);
+        colliderBody.push_back(static_cast<int>(model.rigidBodies.size()));
         model.rigidBodies.push_back(std::move(rb));
     }
+    std::vector<Core> chainCore;   // per moving chain body
+    std::vector<int> chainBody;
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -113,11 +150,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         const float decay = std::max(0.6f, 60.0f * ch.damping);
         const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
         // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
-        const float omega = std::min(35.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
-        // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly.
-        const float droop = 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f);
+        const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
         // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
-        const float bend = std::min(1.5f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
+        // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees, and the body's own
+        // jiggle chains (breast, hip: skin that cannot leave the body) at most 9 degrees, twisting hardly at all.
+        const float bend = std::min(ch.part == "body" ? 0.15f : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
+        // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
+        const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f));
 
         std::map<int, int> bodyOf;   // chain bone -> rigid body
         const int anchorBone = scene.bones[static_cast<size_t>(bones[0])].parent >= 0 ? scene.bones[static_cast<size_t>(bones[0])].parent : bones[0];
@@ -141,7 +180,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.name = ch.name + " " + std::to_string(k);
             rb.bone = l.bone;
             rb.group = kPmxGroupChain;
-            rb.mask = 1u << kPmxGroupCollider;   // chains hit colliders only, not each other
+            rb.mask = 0;   // set below: the colliders it does not already overlap
             rb.shape = l.cylinder > 1e-4f ? 2 : 0;
             rb.size = {l.radius, l.cylinder, 0};
             rb.position = l.centre;
@@ -152,6 +191,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.friction = 0.5f;
             rb.mode = k == 0 ? 2 : 1;   // the root keeps its place and only turns
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
+            chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
+            chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             model.rigidBodies.push_back(std::move(rb));
         }
 
@@ -188,11 +229,44 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             j.bodyB = bodyOf[b];
             j.position = self.head;
             j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
-            j.rotLower = {-bend, -0.3f * bend, -bend};
-            j.rotUpper = {bend, 0.3f * bend, bend};
+            j.rotLower = {-bend, -0.1f * bend, -bend};
+            j.rotUpper = {bend, 0.1f * bend, bend};
             j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             model.joints.push_back(std::move(j));
         }
+    }
+
+    // Who collides with whom. A body that starts inside a collider (a skirt over the thigh, a breast bone in the bust sphere, a strand
+    // in the head) is thrown out of it the moment the simulation starts, and the whole model with it. So a body meets only the colliders
+    // it does not overlap in the rest pose: colliders that overlap the same bodies share a group, and a body's mask lists the groups none
+    // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
+    // takes any signature beyond them (so it excludes the union).
+    const float margin = 0.02f * scale;
+    std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
+    std::vector<std::set<int>> overlapped(16);
+    for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
+        std::vector<int> sig;
+        for (size_t bi = 0; bi < chainCore.size(); ++bi)
+            if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin) sig.push_back(static_cast<int>(bi));
+        int group = 0;
+        if (!sig.empty()) {
+            auto it = groupOf.find(sig);
+            if (it != groupOf.end()) group = it->second;
+            else {
+                group = std::min(15, 2 + static_cast<int>(groupOf.size()));
+                groupOf[sig] = group;
+            }
+        }
+        model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
+        overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
+    }
+    std::set<int> usedGroups = {0};
+    for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
+    for (size_t bi = 0; bi < chainBody.size(); ++bi) {
+        uint16_t mask = 0;
+        for (int g : usedGroups)
+            if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
+        model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
 }
 

@@ -118,6 +118,11 @@ struct Model {
     std::vector<DisplayFrame> frames;   // empty: Root, Exp (every morph) and one frame with every bone
 };
 
+// Turns the whole model half a turn about the vertical axis (x and z negated): a character built facing +Z (Unity) then faces -Z, where
+// MikuMikuDance and PMX put a model's front. Positions, normals, bone and morph offsets, rigid bodies and joints turn with it; IK angle limits
+// are about the world axes, so the x and z limits mirror (a bend of +a about x is a bend of -a once the model is turned).
+void TurnAboutY(Model& m);
+
 // Serialises to PMX 2.0 (UTF-16LE text, vertex / material / group morphs, bones with IK, rigid bodies and joints).
 // Throws FormatError if the model is inconsistent (index out of range, material
 // index counts not matching the index buffer).

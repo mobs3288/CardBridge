@@ -9,8 +9,10 @@
 namespace cardbridge::exporter {
 
 // Collision groups of the exported bodies. In the PMX a rigid body's mask has bit n set for every group it collides with (the
-// Bullet filter; saba and babylon-mmd pass it on as is), so colliders (group 0) list only the chains and chains list only the colliders.
-constexpr uint8_t kPmxGroupCollider = 0, kPmxGroupChain = 1;
+// Bullet filter; saba, babylon-mmd and MikuMikuDance itself take it as is), so colliders list only the chains and chains list only
+// colliders. Chains are group 1. Colliders are group 0, or 2..15 when they overlap some chain body in the rest pose (see AddPhysics):
+// a chain body's mask lists the collider groups it may meet.
+constexpr uint8_t kPmxGroupChain = 1;
 
 // Physics for the PMX: every DynamicBone chain of the scene (hair, skirts, ribbons, the body's jiggle chains) becomes a kinematic anchor
 // body on the bone the chain hangs from plus one capsule body per chain bone (the root included: the component turns it to point at its
@@ -27,6 +29,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale);
 // expression built into the vertices) and one per raw blend shape. `meshBase[i]` is the PMX index of scene mesh i's first vertex,
 // -1 for a mesh that was not exported. Returns the number of morphs added.
 size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, const std::vector<int>& meshBase, float scale);
+
+// The least distance between the segments a-b and c-d (a segment may be a point).
+float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d);
 
 // Euler angles (radians, x y z) of the rotation that turns +Y onto `axis`, in the order PMX rigid bodies use (yaw, then pitch, then roll).
 Vec3 PmxRotationFromYAxis(Vec3 axis);
