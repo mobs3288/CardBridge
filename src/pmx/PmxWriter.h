@@ -28,6 +28,8 @@ struct Material {
     Vec4 edgeColor{0, 0, 0, 1};
     float edgeSize = 1.0f;
     int texture = -1;               // index into Model::textures
+    int sphere = -1;                // index into Model::textures of a sphere map (shades by the normal as seen from the camera); -1 = none
+    uint8_t sphereMode = 1;         // 1 multiply, 2 add
     int toon = -1;                  // index into Model::textures of this material's own toon ramp; -1 = the shared toon01
     uint32_t indexCount = 0;        // indices (3 per triangle) this material owns, in order
     std::string memo;

@@ -73,6 +73,33 @@ int ToonTexture(const std::vector<Vec3>& ramp, pmx::Model& model, std::map<std::
     return done[key] = static_cast<int>(model.textures.size()) - 1;
 }
 
+// A sphere map that shades by the normal as the camera sees it (MMD multiplies the colour by it): the game's teeth are one flat colour and
+// get their roundness from the shader's lighting, which a PMX does not carry, so they would read as a flat white strip. Bright toward the
+// upper left front, 0.62 at the grazing edge.
+int ToothSphere(pmx::Model& model, int& done, const ExportOptions& opt) {
+    if (done >= 0) return done;
+    constexpr int kS = 64;
+    assemble::SceneTexture t;
+    t.name = "sphere_tooth";
+    t.width = t.height = kS;
+    t.rgba.resize(static_cast<size_t>(kS) * kS * 4);
+    const float lx = -0.35f, ly = 0.45f, lz = 0.82f, ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+    for (int y = 0; y < kS; ++y)
+        for (int x = 0; x < kS; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / kS * 2.0f - 1.0f, v = 1.0f - (static_cast<float>(y) + 0.5f) / kS * 2.0f;
+            const float r2 = std::min(1.0f, u * u + v * v), z = std::sqrt(1.0f - r2);
+            const float d = std::max(0.0f, (u * lx + v * ly + z * lz) / ln);
+            const uint8_t g = static_cast<uint8_t>(255.0f * (0.62f + 0.38f * d) + 0.5f);
+            uint8_t* px = &t.rgba[(static_cast<size_t>(y) * kS + static_cast<size_t>(x)) * 4];
+            px[0] = px[1] = px[2] = g;
+            px[3] = 255;
+        }
+    Bytes png = encodePng(t);
+    fileio::WriteFile(fileio::Join(opt.outDir, "textures/sphere_tooth.png"), png.data(), png.size());
+    model.textures.push_back("textures/sphere_tooth.png");
+    return done = static_cast<int>(model.textures.size()) - 1;
+}
+
 } // namespace
 
 std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
@@ -269,6 +296,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
     std::vector<std::string> textureFiles(scene.textures.size());
     std::map<std::string, int> toonFiles;   // ramp bytes -> PMX texture index
+    int toothSphere = -1;                   // PMX texture index of the tooth sphere map, once made
     int meshOrdinal = 0;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         const auto& part = scene.parts[pi];
@@ -313,12 +341,14 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     pm.toon = ToonTexture(mat.toon, model, toonFiles, opt);
                     pm.ambient = {1.0f, 1.0f, 1.0f};   // MMD multiplies the lit colour by the ramp; the shade tint lives in the ramp now
                 }
+                if (mat.name.find("tooth") != std::string::npos || mat.name.find("canine") != std::string::npos) { pm.sphere = ToothSphere(model, toothSphere, opt); }
                 // MMD's broad white sheen (specular power 5) turns the game's skin gloss into a white face, and hair is lit by its texture.
                 if (mat.shader.find("skin") != std::string::npos || mat.shader.find("hair") != std::string::npos) pm.specular = {0.0f, 0.0f, 0.0f};
                 // MMD draws an edge as the model's back faces pushed outwards, which pokes through thin hair lying on the face: a dark line
                 // is fine, the game's light skin outline became a white rim round every strand. Only dark outlines are kept.
                 const float outlineLuma = 0.3f * mat.outlineColor.x + 0.59f * mat.outlineColor.y + 0.11f * mat.outlineColor.z;
                 pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f && outlineLuma < 0.3f ? 0x10 : 0x00);
+                if (pm.sphere >= 0) pm.drawFlags |= 0x01;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
                 pm.edgeColor = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
                 pm.edgeSize = std::min(1.0f, mat.outlineWidth * 20.0f);
                 if (mat.texture >= 0) {
