@@ -131,7 +131,7 @@ bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& pref
 // The card's body sliders as local transforms for the skeleton's driven bones (ChaControl.UpdateShapeBodyValueFromCustomInfo
 // followed by ShapeBodyInfoFemale.Update/UpdateAlways, copied as generated code in shape/).
 Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver, UnityFile& base, UnityFile& rigFile,
-                            const std::string& rigPrefab, Scene& scene) {
+                            const std::string& rigPrefab, Scene& scene, const AssembleOptions& opt) {
     Overrides out;
     std::string why;
     shape::AnimKeys anm;
@@ -183,9 +183,12 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     const Value& vals = card.body.at("shapeValueBody");
     std::vector<float> v;
     for (size_t i = 0; i < vals.size(); ++i) v.push_back(static_cast<float>(vals.at(i).asFloat()));
+    // Viewer sliders: a value the user set replaces the card's own.
+    for (size_t i = 0; i < v.size() && i < opt.bodyShape.size(); ++i) v[i] = opt.bodyShape[i];
     if (v.size() > 13) {
-        float nip = static_cast<float>(card.status.at("nipStandRate").asFloat());
+        float nip = opt.nippleInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
+        if (opt.nippleInside) v[13] = std::min(v[13], 0.0f);
     }
     for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
@@ -194,6 +197,16 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) { std::fprintf(stderr, "body values:"); for (size_t i = 0; i < v.size(); ++i) std::fprintf(stderr, " %zu=%.3f", i, v[i]); std::fprintf(stderr, "\n"); }
     shape::RunBodyUpdate(S, 7);
     shape::RunBodyUpdateAlways(S);
+    // Nipple placement along the chest normal (the nipple bones' local z): the sliders only reach the shape the maker allows, which still
+    // stands out of the skin and shows through thin clothes; this moves the tip below or above it.
+    {
+        const float off = opt.nippleInside ? std::min(opt.nippleOffset, opt.nippleInsideOffset) : opt.nippleOffset;
+        if (off != 0.0f)
+            for (const char* nm : {"cf_s_bnip02_L", "cf_s_bnip02_R", "cf_s_bnipacc_L", "cf_s_bnipacc_R", "cf_s_bnip015_L", "cf_s_bnip015_R"}) {
+                auto it = bones.find(nm);
+                if (it != bones.end()) it->second.pos.z += off;
+            }
+    }
 
     for (const auto& [name, sb] : bones) {
         LocalOverride o;
@@ -210,7 +223,7 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
 
 Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver, const resolve::ResolvedItem& headItem,
                              UnityFile& headBundle, UnityFile& rigFile, const std::string& rigPrefab, const Mat4& headParentWorld,
-                             Scene& scene) {
+                             Scene& scene, const AssembleOptions& opt) {
     Overrides out;
     std::string why;
     shape::AnimKeys anm;
@@ -274,7 +287,10 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     };
     const Value& vals = card.face.at("shapeValueFace");
     const bool neutral = std::getenv("CARDBRIDGE_FACE_NEUTRAL") != nullptr;   // debug: every slider at 0.5
-    for (size_t i = 0; i < vals.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), neutral ? 0.5f : static_cast<float>(vals.at(i).asFloat()));
+    for (size_t i = 0; i < vals.size(); ++i) {
+        float fv = i < opt.faceShape.size() ? opt.faceShape[i] : static_cast<float>(vals.at(i).asFloat());
+        shape::ChangeValue(S, anm, cats, static_cast<int>(i), neutral ? 0.5f : fv);
+    }
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) {
         std::fprintf(stderr, "face values:");
         for (size_t i = 0; i < vals.size(); ++i) std::fprintf(stderr, " %zu=%.3f", i, vals.at(i).asFloat());
@@ -1079,7 +1095,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         return scene;
     }
     Overrides shapeOv;
-    if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene);
+    if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene, opt);
     const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
     applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
     if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) {
@@ -1130,7 +1146,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (hi.ok()) {
                 std::string hwhy;
                 auto hb = resolver.openBundle(hi, &hwhy);
-                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene);
+                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene, opt);
             }
         }
     }
@@ -1331,7 +1347,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             };
                             addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", vec4Of(bd.at("nipColor")));
                             addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
-                            bodyOverlayColors.emplace_back("_nipsize", Vec4{static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
+                            bodyOverlayColors.emplace_back("_nipsize", Vec4{opt.areolaSize >= 0 ? opt.areolaSize : static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
                         } else {
                             bodyLook.tex1 = b.bake(b.decode(*base, bt, "body"), "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
                             card::MaterialEdits::Image ov;

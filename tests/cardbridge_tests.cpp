@@ -119,6 +119,11 @@ void unitTests() {
         anm.get("cf_s_Mouth_x", 1.5f, v, all);   // the plugin leaves these rotations clamped
         CHECK(near(v[0].x, 1.5f) && near(v[1].x, 90.0f));
     });
+    test("slider tables name every body and face slider the card format has", [] {
+        CHECK(shape::BodySliders().size() == 44 && shape::FaceSliders().size() == 52);
+        for (const auto& si : shape::BodySliders()) CHECK(si.group[0] && si.label[0]);
+        for (const auto& si : shape::FaceSliders()) CHECK(si.group[0] && si.label[0]);
+    });
     test("scene validation: finds out-of-range indices, bad weights and a part floating above the head", [] {
         using namespace assemble;
         Scene s;

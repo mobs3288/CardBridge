@@ -158,6 +158,40 @@ void ChangeValue(ShapeState& S, const AnimKeys& anm, const CategoryTable& cats, 
 const std::vector<std::string>& BodyDstNames() { static auto v = toVec(kBodyDst, sizeof kBodyDst / sizeof *kBodyDst); return v; }
 const std::vector<std::string>& BodySrcNames() { static auto v = toVec(kBodySrc, sizeof kBodySrc / sizeof *kBodySrc); return v; }
 const std::vector<std::string>& HeadDstNames() { static auto v = toVec(kHeadDst, sizeof kHeadDst / sizeof *kHeadDst); return v; }
+const std::vector<SliderInfo>& BodySliders() {
+    static const std::vector<SliderInfo> v = {
+        {"Overall", "Height"}, {"Overall", "Head size"}, {"Neck", "Width"}, {"Neck", "Thickness"},
+        {"Bust", "Size"}, {"Bust", "Vertical position"}, {"Bust", "Angle (left-right)"}, {"Bust", "Spacing"}, {"Bust", "Angle (up-down)"},
+        {"Bust", "Depth"}, {"Bust", "Roundness"}, {"Bust", "Areola puffiness"}, {"Bust", "Nipple thickness"}, {"Bust", "Nipple depth"},
+        {"Upper body", "Shoulder-chest width"}, {"Upper body", "Shoulder-chest depth"}, {"Upper body", "Chest width"}, {"Upper body", "Chest depth"},
+        {"Upper body", "Ribs width"}, {"Upper body", "Ribs depth"}, {"Upper body", "Torso height"},
+        {"Waist", "Belly"}, {"Waist", "Waist width"}, {"Waist", "Waist depth"},
+        {"Hips", "Hip width"}, {"Hips", "Hip depth"}, {"Hips", "Butt size"}, {"Hips", "Butt angle"},
+        {"Legs", "Thigh width"}, {"Legs", "Thigh depth"}, {"Legs", "Lower thigh width"}, {"Legs", "Lower thigh depth"},
+        {"Legs", "Calf width"}, {"Legs", "Calf depth"}, {"Legs", "Shin"}, {"Legs", "Ankle width"}, {"Legs", "Ankle depth"},
+        {"Arms", "Shoulder width"}, {"Arms", "Shoulder thickness"}, {"Arms", "Upper arm width"}, {"Arms", "Upper arm thickness"},
+        {"Arms", "Forearm width"}, {"Arms", "Forearm thickness"}, {"Arms", "Wrist"},
+    };
+    return v;
+}
+
+const std::vector<SliderInfo>& FaceSliders() {
+    static const std::vector<SliderInfo> v = {
+        {"Face", "Overall width"}, {"Face", "Upper depth"}, {"Face", "Upper height"}, {"Face", "Forehead height"}, {"Face", "Lower depth"},
+        {"Face", "Lower width"}, {"Face", "Jaw height"}, {"Face", "Jaw width"},
+        {"Chin", "Height"}, {"Chin", "Depth"}, {"Chin", "Width"}, {"Chin", "Tip height"}, {"Chin", "Tip depth"}, {"Chin", "Tip width"},
+        {"Cheeks", "Cheekbone height"}, {"Cheeks", "Cheekbone depth"}, {"Cheeks", "Cheek width"}, {"Cheeks", "Cheek height"}, {"Cheeks", "Cheek base"},
+        {"Eyebrows", "Vertical position"}, {"Eyebrows", "Spacing"}, {"Eyebrows", "Angle"}, {"Eyebrows", "Middle"}, {"Eyebrows", "Tip"},
+        {"Eyes", "Outline 1"}, {"Eyes", "Outline 2"}, {"Eyes", "Outline 3"}, {"Eyes", "Outline 4"}, {"Eyes", "Outline 5"}, {"Eyes", "Outline 6"},
+        {"Eyes", "Spacing"}, {"Eyes", "Angle"}, {"Eyes", "Depth"}, {"Eyes", "Horizontal position"}, {"Eyes", "Tilt"}, {"Eyes", "Tilt 2"},
+        {"Eyes", "Height"}, {"Eyes", "Width"},
+        {"Nose", "Tip"}, {"Nose", "Base angle"}, {"Nose", "Bridge angle"},
+        {"Mouth", "Vertical position"}, {"Mouth", "Width"}, {"Mouth", "Angle"}, {"Mouth", "Upper lip"}, {"Mouth", "Lower lip"}, {"Mouth", "Corners"},
+        {"Ears", "Angle"}, {"Ears", "Angle 2"}, {"Ears", "Angle 3"}, {"Ears", "Upper"}, {"Ears", "Lower"},
+    };
+    return v;
+}
+
 const std::vector<std::string>& HeadSrcNames() { static auto v = toVec(kHeadSrc, sizeof kHeadSrc / sizeof *kHeadSrc); return v; }
 
 void RunBodyUpdate(ShapeState& S, unsigned updateMask) { BodyUpdate(S, updateMask); }
