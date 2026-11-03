@@ -150,6 +150,10 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
 # name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game
 # shaders, G colour grading, X as exported (the PMX's baked textures on plain materials), F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.
+# Posing: K shows the skeleton over the model (click a bone to select it), the Bones tab lists the bones as a tree (helper nodes behind a switch)
+# and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
+# P (or Look tab > Pose) is the automatic A-pose: clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
+# pose as the model's rest pose and lists it in the manifest's "pose". CLI: --apose [--apose-degrees N]; --gpu-view --gpu-bones draws the skeleton on the picture.
 # Drop a card .png on the window to open it.
 cardbridge_viewer "<card.png>" --library "<library folder>" --mods "<mods folder>"      # the folders are remembered
 ```

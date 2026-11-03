@@ -13,6 +13,7 @@
 #include "shader/Sm4.h"
 #include <cstring>
 #include "assemble/Assembler.h"
+#include "assemble/Pose.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
 #include "export/ColourGrade.h"
@@ -20,6 +21,7 @@
 #include <stb_image_write.h>
 
 #include "export/GpuView.h"
+#include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
@@ -99,6 +101,7 @@ void usage() {
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
         "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
+        "             [--apose [--apose-degrees N]]   arms down from the T-pose (40 degrees by default)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -382,6 +385,21 @@ int cmdConvert(const Args& a) {
     for (const auto& is : scene.issues)
         if (is.severity == "error") { std::fprintf(stderr, "conversion failed.\n"); return 3; }
 
+    std::vector<Mat4> liveSkin;
+    // --apose [--apose-degrees N] brings the arms down from the T-pose (clavicle and upper arm), 40 degrees by default; the PMX is written in that pose.
+    if (a.has("apose")) {
+        assemble::Pose pose;
+        const float deg = a.opt.count("apose-degrees") ? static_cast<float>(std::atof(a.get("apose-degrees").c_str())) : 40.0f;
+        if (assemble::MakeAPose(scene, deg, pose.base)) {
+            // Test aid: CARDBRIDGE_GPU_SKIN_TEST=1 leaves the scene at rest and poses the GPU view through its quick re-skin (what the viewer does live).
+            if (std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) liveSkin = assemble::SkinMatrices(scene, pose);
+            else assemble::BakePose(scene, pose);
+            std::fprintf(stderr, "  a-pose: arms down %.0f degrees\n", deg);
+        } else {
+            std::fprintf(stderr, "  a-pose: this rig has no arm bones to turn\n");
+        }
+    }
+
     // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)
     std::vector<char> hiddenParts(scene.parts.size(), 0);
     {
@@ -412,6 +430,7 @@ int cmdConvert(const Args& a) {
         std::string why;
         if (!gpu.Init(&why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
         else {
+            if (!liveSkin.empty()) gpu.SetSkin(&liveSkin);
             if (a.opt.count("layers-dir")) {   // the extra shader layers in that folder, all switched on for the picture
                 std::string report;
                 auto defs = exporter::LoadShaderLayers({normalizeSlashes(a.get("layers-dir"))});
@@ -427,6 +446,11 @@ int cmdConvert(const Args& a) {
             auto g0 = std::chrono::steady_clock::now();
             bool ok = gpu.Render(cam, 640, 800, &effHidden, px);
             ok = ok && gpu.Render(cam, 640, 800, &effHidden, px);
+            if (ok && a.has("gpu-bones")) {   // the skeleton over the picture (--gpu-bones-helpers: the driven, shape and attach nodes too)
+                std::vector<Vec3> posed;
+                if (!liveSkin.empty()) for (size_t i = 0; i < scene.bones.size(); ++i) posed.push_back(liveSkin[i].point(scene.bones[i].pos));
+                exporter::DrawSkeletonOverlay(scene, posed, gpu, px, 640, 800, -1, a.has("gpu-bones-helpers"), nullptr);
+            }
             std::fprintf(stderr, "  gpu view: %s, second frame %.1f ms, %d material(s) without a shader\n", ok ? "ok" : "failed",
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());
             for (const auto& m : scene.materials) if (m.shaderIndex < 0) std::fprintf(stderr, "    no shader: %s (%s)\n", m.name.c_str(), m.shader.c_str());
@@ -478,7 +502,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude", "apose", "gpu-bones", "gpu-bones-helpers"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

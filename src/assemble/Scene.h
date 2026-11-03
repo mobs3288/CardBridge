@@ -163,6 +163,12 @@ struct ScenePart {
     bool startHidden = false;
 };
 
+// What BakePose wrote into the scene as its new rest pose, for the manifest.
+struct ScenePoseEntry {
+    std::string bone;
+    Vec3 pos, rot, scl;      // local edit: translation, Euler degrees, scale
+};
+
 struct SceneIssue {
     std::string severity;     // "warning" or "error"
     std::string part;         // part id or "" for the whole scene
@@ -185,6 +191,8 @@ struct Scene {
     std::vector<SceneExpression> expressions;
     std::vector<SceneChain> chains;
     std::vector<SceneCollider> colliders;
+    std::vector<ScenePoseEntry> pose;   // the bone edits baked into this scene (see BakePose), empty for the rest pose
+    bool aposeApplied = false;          // BakePose included the automatic A-pose
     std::vector<SceneIssue> issues;
 
     int boneIndex(const std::string& name) const {
