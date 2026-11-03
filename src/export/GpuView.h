@@ -29,7 +29,7 @@ public:
     // the next Render calls.
     bool Load(const assemble::Scene& scene, std::string* why = nullptr);
 
-    // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions.
+    // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions (1 hides, 2 forces a default-hidden part on).
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                 int highlightPart = -1);

@@ -43,6 +43,7 @@ std::vector<std::string> ValidateScene(const assemble::Scene& scene);
 // The manifest as JSON (exposed for tests).
 nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,
                              const std::string& pmxFile, const std::vector<std::string>& textureFiles,
-                             const std::vector<std::pair<int, int>>& partMaterialRange);
+                             const std::vector<std::pair<int, int>>& partMaterialRange,
+                             const std::vector<std::string>& morphNames = {});
 
 } // namespace cardbridge::exporter

@@ -87,7 +87,7 @@ std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
                     if (ix >= mesh.vertices.size()) { add("part " + part.id + " mesh '" + mesh.name + "' has a triangle index outside its vertices"); break; }
             }
         }
-        if (headTop > 0 && lo <= hi && part.id != "body") {
+        if (headTop > 0 && lo <= hi && part.id != "body" && !part.underPiece) {
             if (hi > headTop * 1.25f) add("part " + part.id + " reaches " + std::to_string(hi) + " above the floor, the head ends at " + std::to_string(headTop) + " (transform applied twice?)");
             if (lo < -0.15f * headTop) add("part " + part.id + " reaches " + std::to_string(lo) + " below the floor");
         }
@@ -97,7 +97,7 @@ std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
 
 nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,
                              const std::string& pmxFile, const std::vector<std::string>& textureFiles,
-                             const std::vector<std::pair<int, int>>& range) {
+                             const std::vector<std::pair<int, int>>& range, const std::vector<std::string>& morphNames) {
     using nlohmann::json;
     json j;
     j["schema_version"] = 1;
@@ -123,6 +123,9 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
         jp["property"] = p.property;
         jp["visible_in_preview"] = p.visibleInPreview;
         jp["include_in_export"] = p.includeInExport;
+        if (p.underPiece) { jp["under_piece_of"] = p.underOf; jp["covered_by"] = p.coveredBy; }
+        if (p.startHidden) jp["start_hidden"] = true;
+        if (p.nudeSwitch) jp["nude_switch"] = true;
         jp["asset_status"] = p.status;
         if (!p.detail.empty()) jp["detail"] = p.detail;
         if (!p.bundle.empty()) jp["bundle"] = p.bundle;
@@ -146,6 +149,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
         }
     }
     j["parts"] = std::move(parts);
+    j["morphs"] = morphNames;
 
     json tex = json::array();
     for (size_t i = 0; i < scene.textures.size(); ++i) {
@@ -207,6 +211,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
 
     std::vector<std::pair<int, int>> range(scene.parts.size(), {0, 0});
+    std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
     std::vector<std::string> textureFiles(scene.textures.size());
     int meshOrdinal = 0;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
@@ -264,6 +269,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     }
                     pm.texture = texMap[ti];
                 }
+                baseAlpha.push_back(pm.diffuse.w);
+                if (part.startHidden) { pm.diffuse.w = 0.0f; pm.edgeColor.w = 0.0f; }   // the morphs bring it back
                 pm.indexCount = static_cast<uint32_t>(sm.indices.size());
                 for (uint32_t idx : sm.indices) model.indices.push_back(base + idx);
                 model.materials.push_back(std::move(pm));
@@ -271,6 +278,80 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             ++meshOrdinal;
         }
         range[pi].second = static_cast<int>(model.materials.size()) - range[pi].first;
+    }
+
+    // Morphs: switch outfit parts off and the nude body on, so one PMX serves every state (the game's own clothes-off needs no second model).
+    //   "Hide <part>" / "Show <part>"  one part (transparent / opaque again, by how it starts)
+    //   "Under <piece>"                 the skin a set of garments covers
+    //   "Take off <part>"               hide a garment and show the skin only it covers
+    //   "Nude body"                     every covered skin piece (clothes stay as they are)
+    //   "All clothes off"               every outfit part hidden and the whole body shown
+    std::vector<std::string> morphNames;
+    {
+        auto offsets = [&](size_t pi, bool hide, std::vector<pmx::MaterialOffset>& out) {
+            for (int k = 0; k < range[pi].second; ++k) {
+                pmx::MaterialOffset off;
+                off.material = range[pi].first + k;
+                if (hide) {   // multiply: alpha 0, everything else unchanged
+                    off.add = false;
+                    off.diffuse = {1, 1, 1, 0}; off.specular = {1, 1, 1}; off.specularPower = 1; off.ambient = {1, 1, 1};
+                    off.edgeColor = {1, 1, 1, 0}; off.edgeSize = 1;
+                    off.texture = {1, 1, 1, 1}; off.sphere = {1, 1, 1, 1}; off.toon = {1, 1, 1, 1};
+                } else {      // add: the alpha it had before it was made transparent
+                    off.add = true;
+                    off.diffuse = {0, 0, 0, baseAlpha[static_cast<size_t>(off.material)]};
+                    off.edgeColor = {0, 0, 0, 1};
+                }
+                out.push_back(off);
+            }
+        };
+        std::map<size_t, int> showMorph, hideMorph;   // part -> morph index
+        auto addMorph = [&](pmx::Morph m) { model.morphs.push_back(std::move(m)); return static_cast<int>(model.morphs.size()) - 1; };
+        std::vector<size_t> outfit, others, under;   // outfit: the garments; others: every part but the body and head (they get Hide / Show)
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+            const auto& p = scene.parts[pi];
+            if (!p.includeInExport || range[pi].second == 0) continue;
+            if (p.underPiece) under.push_back(pi);
+            else if (p.id != "body" && p.id != "head") { others.push_back(pi); if (p.group == "Outfit") outfit.push_back(pi); }
+        }
+        for (size_t pi : under) {
+            if (!scene.parts[pi].startHidden) continue;
+            pmx::Morph m;
+            m.name = "Under " + scene.parts[pi].id;
+            offsets(pi, false, m.materials);
+            showMorph[pi] = addMorph(std::move(m));
+        }
+        for (size_t pi : others) {
+            pmx::Morph m;
+            m.name = std::string(scene.parts[pi].startHidden ? "Show " : "Hide ") + scene.parts[pi].id;
+            offsets(pi, !scene.parts[pi].startHidden, m.materials);
+            (scene.parts[pi].startHidden ? showMorph : hideMorph)[pi] = addMorph(std::move(m));
+        }
+        if (!under.empty()) {
+            pmx::Morph nude;
+            nude.name = "Nude body";
+            for (auto& [pi, mi] : showMorph) if (scene.parts[pi].underPiece) nude.group.emplace_back(mi, 1.0f);
+            if (!nude.group.empty()) addMorph(std::move(nude));
+        }
+        const int nudeIndex = [&] { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == "Nude body") return static_cast<int>(i); return -1; }();
+        for (size_t pi : outfit) {
+            auto h = hideMorph.find(pi);
+            if (h == hideMorph.end()) continue;
+            pmx::Morph m;
+            m.name = "Take off " + scene.parts[pi].id;
+            m.group.emplace_back(h->second, 1.0f);
+            for (auto& [ui, mi] : showMorph)
+                if (scene.parts[ui].underPiece && scene.parts[ui].coveredBy.size() == 1 && scene.parts[ui].coveredBy[0] == scene.parts[pi].id) m.group.emplace_back(mi, 1.0f);
+            if (m.group.size() > 1) addMorph(std::move(m));   // without skin under it, "Hide" says the same
+        }
+        if (!outfit.empty()) {
+            pmx::Morph all;
+            all.name = "All clothes off";
+            for (size_t pi : outfit) { auto h = hideMorph.find(pi); if (h != hideMorph.end()) all.group.emplace_back(h->second, 1.0f); }
+            if (nudeIndex >= 0) all.group.emplace_back(nudeIndex, 1.0f);
+            if (!all.group.empty()) addMorph(std::move(all));
+        }
+        for (const auto& m : model.morphs) morphNames.push_back(m.name);
     }
 
     log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
@@ -333,7 +414,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_feet.png"), fp.data(), fp.size());
     }
 
-    nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range);
+    nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range, morphNames);
     log("writing manifest");
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");
     fileio::WriteTextFile(res.manifestPath, manifest.dump(2) + "\n");

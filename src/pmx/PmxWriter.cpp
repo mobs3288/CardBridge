@@ -88,6 +88,14 @@ Bytes WritePmx(const Model& m) {
     int tSize = signedSize(m.textures.size());
     int mSize = signedSize(m.materials.size());
     int bSize = signedSize(m.bones.size());
+    int morphSize = signedSize(m.morphs.size());
+    for (const auto& mo : m.morphs) {
+        if (!mo.materials.empty() && !mo.group.empty()) throw FormatError("PMX: a morph is both a material and a group morph");
+        for (const auto& off : mo.materials)
+            if (off.material >= static_cast<int>(m.materials.size())) throw FormatError("PMX: a material morph points past the material list");
+        for (const auto& gr : mo.group)
+            if (gr.first < 0 || gr.first >= static_cast<int>(m.morphs.size())) throw FormatError("PMX: a group morph points past the morph list");
+    }
 
     Out o;
     o.b.insert(o.b.end(), {'P', 'M', 'X', ' '});
@@ -99,7 +107,7 @@ Bytes WritePmx(const Model& m) {
     o.u8(static_cast<uint8_t>(tSize));
     o.u8(static_cast<uint8_t>(mSize));
     o.u8(static_cast<uint8_t>(bSize));
-    o.u8(1);                                  // morph index size (no morphs)
+    o.u8(static_cast<uint8_t>(morphSize));
     o.u8(1);                                  // rigid body index size (none)
     o.text(m.name);
     o.text(m.nameEn.empty() ? m.name : m.nameEn);
@@ -172,7 +180,33 @@ Bytes WritePmx(const Model& m) {
         o.vec3(b.tailOffset);
     }
 
-    o.i32(0);                    // morphs
+    o.i32(static_cast<int32_t>(m.morphs.size()));
+    for (const auto& mo : m.morphs) {
+        o.text(mo.name);
+        o.text(mo.nameEn.empty() ? mo.name : mo.nameEn);
+        o.u8(static_cast<uint8_t>(mo.panel));
+        if (!mo.group.empty()) {
+            o.u8(0);
+            o.i32(static_cast<int32_t>(mo.group.size()));
+            for (const auto& gr : mo.group) { o.sidx(gr.first, morphSize); o.f32(gr.second); }
+        } else {
+            o.u8(8);
+            o.i32(static_cast<int32_t>(mo.materials.size()));
+            for (const auto& off : mo.materials) {
+                o.sidx(off.material, mSize);
+                o.u8(off.add ? 1 : 0);
+                o.vec4(off.diffuse);
+                o.vec3(off.specular);
+                o.f32(off.specularPower);
+                o.vec3(off.ambient);
+                o.vec4(off.edgeColor);
+                o.f32(off.edgeSize);
+                o.vec4(off.texture);
+                o.vec4(off.sphere);
+                o.vec4(off.toon);
+            }
+        }
+    }
 
     // Display frames: the two MMD requires (Root, Exp) plus one listing every bone.
     o.i32(3);
@@ -180,7 +214,8 @@ Bytes WritePmx(const Model& m) {
     o.i32(m.bones.empty() ? 0 : 1);
     if (!m.bones.empty()) { o.u8(0); o.sidx(0, bSize); }
     o.text("\xE8\xA1\xA8\xE6\x83\x85"); o.text("Exp"); o.u8(1);   // 表情
-    o.i32(0);
+    o.i32(static_cast<int32_t>(m.morphs.size()));
+    for (size_t i = 0; i < m.morphs.size(); ++i) { o.u8(1); o.sidx(static_cast<int>(i), morphSize); }
     o.text("Bones"); o.text("Bones"); o.u8(0);
     o.i32(static_cast<int32_t>(m.bones.size()));
     for (size_t i = 0; i < m.bones.size(); ++i) { o.u8(0); o.sidx(static_cast<int>(i), bSize); }
