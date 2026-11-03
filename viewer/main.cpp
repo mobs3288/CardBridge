@@ -22,6 +22,7 @@
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "resolve/Resolver.h"
+#include "shape/Shape.h"
 
 #include <nlohmann/json.hpp>
 
@@ -34,9 +35,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -184,7 +187,27 @@ struct PartRow {
     std::string group;    // header text
 };
 
+// ---- tweaks: the sliders and switches on top of what the card says --------------------------------------------------------
+// Changing one re-assembles the character (a few seconds, after the pointer has been still for a moment); the exported PMX is
+// the re-assembled scene, so it carries the tweaked shape.
+struct Tweaks {
+    std::vector<float> body, face, bodyCard, faceCard;   // current slider values and the card's own (the defaults)
+    bool nippleInside = false;
+    float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
+    float areola = 0.0f, areolaCard = 0.0f;              // areola texture size
+};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look"};
+// Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kNippleIn = 300;
+struct TweakRow {
+    int kind = 0;        // 0 group header, 1 slider, 2 switch
+    int id = 0;
+    std::string label, group;
+};
+
 struct PanelLayout {
+    RECT tabs[TabCount];
     RECT open, exportPmx, issues, reset, all;
     int outfitNameTop = 0, outfitChipsTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
@@ -198,6 +221,7 @@ PanelLayout LayoutFor(int H) {
     l.issues = {180, 88, 244, 112};
     l.reset = {250, 88, 308, 112};
     l.all = {314, 88, 370, 112};
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 62, 176, 68 + i * 62, 198};
     const int logH = std::clamp(H / 3, 130, 330);
     l.footerTop = H - 34;
     l.logBottom = l.footerTop - 4;
@@ -207,7 +231,7 @@ PanelLayout LayoutFor(int H) {
     l.outfitNameTop = 126;
     l.outfitChipsTop = 146;
     l.partsHeadingTop = 180;
-    l.partsTop = 200;
+    l.partsTop = 202;
     l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 8);
     l.clearLog = {kPanel - 58, l.logTop + 5, kPanel - 10, l.logTop + 21};
     return l;
@@ -250,6 +274,12 @@ struct App {
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
     std::set<std::string> collapsedGroups;
+    Tweaks tw;
+    int tab = TabParts;
+    int sliderDrag = -1;                      // slider id being dragged, or -1
+    std::map<std::string, char> keepHidden;   // part checkboxes to restore after a tweak reload
+    bool applyKeep = false;
+    bool tweakPending = false;                // a change is waiting for the pointer to be still
 
     std::mutex logMu;
     std::vector<LogLine> logLines;
@@ -260,6 +290,7 @@ App g;
 constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
+constexpr UINT_PTR kTimerApplyTweaks = 2;
 
 std::shared_ptr<Loaded> Current() {
     std::lock_guard<std::mutex> lk(g.mu);
@@ -322,6 +353,78 @@ std::string Count(size_t n) {
     return b;
 }
 
+// ---- tweak access ----------------------------------------------------------------------------------------------------
+struct SliderRef {
+    float* v = nullptr;
+    float def = 0, lo = 0, hi = 1, step = 0.01f;
+    bool percent = true;   // shown as 0..100 %, otherwise as plain millimetres
+};
+
+bool SliderFor(int id, SliderRef& r) {
+    if (id >= 0 && id < kFaceBase) {
+        if (static_cast<size_t>(id) >= g.tw.body.size()) return false;
+        r.v = &g.tw.body[static_cast<size_t>(id)];
+        r.def = g.tw.bodyCard[static_cast<size_t>(id)];
+        r.lo = std::min(-1.0f, r.def); r.hi = std::max(2.0f, r.def);
+        return true;
+    }
+    if (id >= kFaceBase && id < kNippleMm) {
+        size_t i = static_cast<size_t>(id - kFaceBase);
+        if (i >= g.tw.face.size()) return false;
+        r.v = &g.tw.face[i];
+        r.def = g.tw.faceCard[i];
+        r.lo = std::min(-1.0f, r.def); r.hi = std::max(2.0f, r.def);
+        return true;
+    }
+    if (id == kNippleMm) { r.v = &g.tw.nippleMm; r.def = 0; r.lo = -15; r.hi = 15; r.step = 1; r.percent = false; return true; }
+    if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
+    return false;
+}
+
+std::vector<TweakRow> BuildTweakRows(int tab) {
+    std::vector<TweakRow> rows;
+    auto addSliders = [&](const std::vector<shape::SliderInfo>& list, int base, size_t have) {
+        std::string cur;
+        for (size_t i = 0; i < list.size() && i < have; ++i) {
+            if (cur != list[i].group) { cur = list[i].group; rows.push_back({0, base + static_cast<int>(i), cur, cur}); }
+            rows.push_back({1, base + static_cast<int>(i), list[i].label, cur});
+        }
+    };
+    if (tab == TabBody) addSliders(shape::BodySliders(), 0, g.tw.body.size());
+    else if (tab == TabFace) addSliders(shape::FaceSliders(), kFaceBase, g.tw.face.size());
+    else if (tab == TabLook) {
+        rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
+        rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
+        rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
+        rows.push_back({1, kAreola, "Areola size", "Nipples"});
+    }
+    return rows;
+}
+
+bool TweakChanged(int id) {
+    SliderRef r;
+    if (id == kNippleIn) return g.tw.nippleInside;
+    return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
+}
+
+bool AnyTweak() {
+    for (int i = 0; i < kFaceBase; ++i) if (TweakChanged(i)) return true;
+    for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
+    return TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside;
+}
+
+void ResetTweak(int id) {
+    SliderRef r;
+    if (id == kNippleIn) g.tw.nippleInside = false;
+    else if (SliderFor(id, r)) *r.v = r.def;
+}
+
+void ScheduleApplyTweaks() {
+    g.tweakPending = true;
+    SetTimer(g.hwnd, kTimerApplyTweaks, 800, nullptr);
+    InvalidatePanel();
+}
+
 // Long paths and names must not run out of the panel and over the model: keep the start (the drive) and the
 // useful tail, or cut the end for hints.
 std::string Shorten(const std::string& s, size_t maxChars) {
@@ -375,14 +478,21 @@ bool EnsureResolver(std::string& err) {
     return true;
 }
 
-void StartLoad(const std::string& path, int outfit) {
+void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     g.cardPath = path;
+    g.applyKeep = keepTweaks;
+    g.keepHidden.clear();
+    if (keepTweaks)   // the same card again (another outfit, a re-shape): keep the part checkboxes
+        if (std::shared_ptr<Loaded> prev = Current())
+            for (size_t i = 0; i < prev->scene.parts.size() && i < g.hidden.size(); ++i) g.keepHidden[prev->scene.parts[i].id] = g.hidden[i];
+    g.tweakPending = false;
+    KillTimer(g.hwnd, kTimerApplyTweaks);
     g.loadingOutfit = outfit;
     g.status = "loading " + fileio::FileName(path) + " ...";   // the full path is in the log
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit]() {
+    std::thread([path, outfit, keepTweaks]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -398,6 +508,24 @@ void StartLoad(const std::string& path, int outfit) {
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;
+            {   // the sliders: the card's own values unless the user changed them
+                std::lock_guard<std::mutex> lk(g.mu);
+                if (!keepTweaks || g.tw.bodyCard.empty()) {
+                    g.tw = Tweaks();
+                    const Value& bv = c.body.at("shapeValueBody");
+                    const Value& fv = c.face.at("shapeValueFace");
+                    for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));
+                    for (size_t i = 0; i < fv.size(); ++i) g.tw.faceCard.push_back(static_cast<float>(fv.at(i).asFloat()));
+                    g.tw.body = g.tw.bodyCard;
+                    g.tw.face = g.tw.faceCard;
+                    g.tw.areolaCard = g.tw.areola = static_cast<float>(c.body.at("areolaSize").asFloat());
+                }
+                ao.bodyShape = g.tw.body;
+                ao.faceShape = g.tw.face;
+                ao.nippleInside = g.tw.nippleInside;
+                ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+                if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
+            }
             ao.log = [](const std::string& m) { Log("  " + m); };
             out->scene = assemble::Assemble(c, *g.resolver, ao);
             out->outfits = static_cast<int>(c.outfits.size());
@@ -497,10 +625,19 @@ std::vector<PartRow> BuildRows(const assemble::Scene& scene) {
 
 int VisibleRows(const PanelLayout& l) { return std::max(1, (l.partsBottom - l.partsTop) / kRowH); }
 
-int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) {
+int RowIndexAt(size_t count, const PanelLayout& l, int x, int y) {
     if (x < 0 || x >= kPanel || y < l.partsTop || y >= l.partsBottom) return -1;
     int row = (y - l.partsTop) / kRowH + g.partScroll;
-    return row >= 0 && static_cast<size_t>(row) < rows.size() ? row : -1;
+    return row >= 0 && static_cast<size_t>(row) < count ? row : -1;
+}
+int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) { return RowIndexAt(rows.size(), l, x, y); }
+
+// A slider row: label on the left, the track, the value on the right.
+constexpr int kTrackL = 168, kTrackR = 300;
+float SliderValueAt(const SliderRef& r, int x) {
+    float t = std::clamp(static_cast<float>(x - kTrackL) / (kTrackR - kTrackL), 0.0f, 1.0f);
+    float v = r.lo + t * (r.hi - r.lo);
+    return std::clamp(std::round(v / r.step) * r.step, r.lo, r.hi);
 }
 
 int ButtonAt(const PanelLayout& l, int x, int y) {
@@ -510,6 +647,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.issues, p)) return 3;
     if (PtInRect(&l.reset, p)) return 4;
     if (PtInRect(&l.all, p)) return 5;
+    for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }
 
@@ -691,10 +829,16 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
 
     // parts / issues ---------------------------------------------------------------------------------------------------
     RECT clip{10, l.partsTop, kPanel - 10, l.partsBottom};
-    DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 10, l.partsHeadingTop, g.showIssues ? "ISSUES" : "PARTS");
+    for (int i = 0; i < TabCount; ++i)
+        Button(dc, l.tabs[i], kTabNames[i], g.hoverButton == 10 + i, !g.showIssues && g.tab == i, L != nullptr);
     if (L) {
-        std::string right = g.showIssues ? std::to_string(L->scene.issues.size()) + " finding(s)" : std::to_string(L->scene.parts.size()) + " parts";
-        DrawTextRight(dc, g.fontSmall, RGB(110, 120, 138), kPanel - 10, l.partsHeadingTop + 2, right, nullptr);
+        std::string right;
+        if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " finding(s)";
+        else if (g.busy && g.tab != TabParts) right = "re-shaping ...";
+        else if (g.tweakPending) right = "applying ...";
+        else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
+        else right = AnyTweak() ? "tweaked" : "as the card says";
+        DrawTextRight(dc, g.fontSmall, g.busy || g.tweakPending ? RGB(120, 200, 255) : RGB(110, 120, 138), kPanel - 10, l.partsHeadingTop + 2, right, nullptr);
     }
     if (!L) {
         DrawTextAt(dc, g.fontUi, g.busy ? RGB(120, 200, 255) : RGB(120, 130, 150), 10, l.partsTop + 4,
@@ -719,6 +863,68 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
             if (idx >= static_cast<int>(lines.size())) break;
             DrawTextAt(dc, g.fontLog, KindColor(lines[static_cast<size_t>(idx)].second), 12, l.partsTop + i * 16,
                        lines[static_cast<size_t>(idx)].first, &clip);
+        }
+    } else if (g.tab != TabParts) {
+        std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+        int visible = VisibleRows(l);
+        g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
+        for (int i = 0; i < visible; ++i) {
+            int idx = g.partScroll + i;
+            if (idx >= static_cast<int>(rows.size())) break;
+            const TweakRow& row = rows[static_cast<size_t>(idx)];
+            int y = l.partsTop + i * kRowH;
+            if (idx == g.hoverRow) {
+                HBRUSH hb = CreateSolidBrush(row.kind == 0 ? RGB(32, 36, 45) : RGB(36, 44, 58));
+                RECT hr{0, y, kPanel, y + kRowH};
+                FillRect(dc, &hr, hb);
+                DeleteObject(hb);
+            }
+            if (row.kind == 0) {
+                std::string name = row.label;
+                for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, y + 3, name);
+                bool any = false;
+                for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
+                DrawTextRight(dc, g.fontSmall, any ? RGB(235, 190, 90) : RGB(80, 88, 104), kPanel - 12, y + 4, "reset", &clip);
+            } else if (row.kind == 2) {
+                bool on = TweakChanged(row.id);
+                DrawTextAt(dc, g.fontMono, on ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 3, on ? "[x]" : "[ ]");
+                DrawTextAt(dc, g.fontUi, on ? RGB(235, 190, 90) : RGB(206, 218, 236), 46, y + 2, row.label, &clip);
+            } else {
+                SliderRef r;
+                if (!SliderFor(row.id, r)) continue;
+                bool changed = TweakChanged(row.id);
+                RECT labelClip{12, y, kTrackL - 6, y + kRowH};
+                DrawTextAt(dc, g.fontUi, changed ? RGB(235, 190, 90) : RGB(206, 218, 236), 12, y + 2, row.label, &labelClip);
+                const int mid = y + kRowH / 2;
+                HBRUSH tr = CreateSolidBrush(RGB(48, 54, 68));
+                RECT track{kTrackL, mid - 1, kTrackR, mid + 2};
+                FillRect(dc, &track, tr);
+                DeleteObject(tr);
+                auto xOf = [&](float v) { return kTrackL + static_cast<int>(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (kTrackR - kTrackL)); };
+                HBRUSH dm = CreateSolidBrush(RGB(110, 120, 140));   // where the card has it
+                RECT dr{xOf(r.def) - 1, mid - 5, xOf(r.def) + 2, mid + 6};
+                FillRect(dc, &dr, dm);
+                DeleteObject(dm);
+                HBRUSH th = CreateSolidBrush(changed ? RGB(235, 190, 90) : RGB(90, 170, 240));
+                RECT tb{xOf(*r.v) - 3, mid - 6, xOf(*r.v) + 4, mid + 7};
+                FillRect(dc, &tb, th);
+                DeleteObject(th);
+                char val[24];
+                if (r.percent) std::snprintf(val, sizeof val, "%d", static_cast<int>(std::lround(*r.v * 100)));
+                else std::snprintf(val, sizeof val, "%+d", static_cast<int>(std::lround(*r.v)));
+                DrawTextRight(dc, g.fontMono, changed ? RGB(235, 190, 90) : RGB(150, 160, 178), kPanel - 12, y + 3, val, nullptr);
+            }
+        }
+        if (static_cast<int>(rows.size()) > visible) {
+            int trackTop = l.partsTop, trackH = l.partsBottom - l.partsTop;
+            int thumbH = std::max(18, trackH * visible / static_cast<int>(rows.size()));
+            int span = std::max(1, static_cast<int>(rows.size()) - visible);
+            int thumbY = trackTop + (trackH - thumbH) * g.partScroll / span;
+            HBRUSH th = CreateSolidBrush(RGB(90, 100, 120));
+            RECT rr{kPanel - 5, thumbY, kPanel - 2, thumbY + thumbH};
+            FillRect(dc, &rr, th);
+            DeleteObject(th);
         }
     } else {
         std::vector<PartRow> rows = BuildRows(L->scene);
@@ -896,7 +1102,39 @@ void ChooseOutfit(int index) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.busy || g.cardPath.empty()) return;
     if (index < 0 || index >= L->outfits || index == L->outfit) return;
-    StartLoad(g.cardPath, index);
+    StartLoad(g.cardPath, index, true);
+}
+
+// A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
+void TweakClick(int x, int y, const PanelLayout& l, bool right) {
+    std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+    int idx = RowIndexAt(rows.size(), l, x, y);
+    if (idx < 0) return;
+    const TweakRow& row = rows[static_cast<size_t>(idx)];
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (row.kind == 0) {
+        bool any = false;
+        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) { any = any || TweakChanged(rows[k].id); ResetTweak(rows[k].id); }
+        if (any) { Log("reset " + row.label); ScheduleApplyTweaks(); }
+        return;
+    }
+    if (row.kind == 2) {
+        if (right) ResetTweak(row.id); else g.tw.nippleInside = !g.tw.nippleInside;
+        Log(row.label + ": " + (g.tw.nippleInside ? "on" : "off"));
+        ScheduleApplyTweaks();
+        return;
+    }
+    SliderRef r;
+    if (!SliderFor(row.id, r)) return;
+    if (right) {
+        if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); ScheduleApplyTweaks(); }
+        return;
+    }
+    if (x < kTrackL - 8) return;
+    g.sliderDrag = row.id;
+    *r.v = SliderValueAt(r, x);
+    SetCapture(g.hwnd);
+    InvalidatePanel();
 }
 
 void ChooseMods() {
@@ -905,7 +1143,7 @@ void ChooseMods() {
     g.settings.mods = d;
     SaveSettings(g.settings);
     Log("mods folder: " + d, LogKind::Good);
-    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1);
+    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
     else InvalidatePanel();
 }
 
@@ -915,13 +1153,22 @@ void ChooseLibrary() {
     g.settings.library = d;
     SaveSettings(g.settings);
     Log("asset library: " + d, LogKind::Good);
-    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1);
+    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
     else InvalidatePanel();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_TIMER: KillTimer(hwnd, 1); g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
+    case WM_TIMER:
+        if (wp == kTimerApplyTweaks) {
+            KillTimer(hwnd, kTimerApplyTweaks);
+            if (g.sliderDrag >= 0) { ScheduleApplyTweaks(); return 0; }   // still dragging
+            std::shared_ptr<Loaded> L = Current();
+            if (g.busy) { ScheduleApplyTweaks(); return 0; }
+            if (L && !g.cardPath.empty()) StartLoad(g.cardPath, L->outfit, true);
+            return 0;
+        }
+        KillTimer(hwnd, 1); g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_LOG: InvalidatePanel(); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
@@ -935,6 +1182,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LOADED: {
         std::shared_ptr<Loaded> L = Current();
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
+        if (L && g.applyKeep)
+            for (size_t i = 0; i < L->scene.parts.size(); ++i) {
+                auto it = g.keepHidden.find(L->scene.parts[i].id);
+                if (it != g.keepHidden.end()) g.hidden[i] = it->second;
+            }
+        g.keepHidden.clear();
         g.partScroll = 0;
         g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
         g.loadingOutfit = -1;
@@ -976,11 +1229,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
             if (button == 4) { if (Current()) ResetView(0); return 0; }
             if (button == 5) { if (Current()) ShowAll(); return 0; }
+            if (button >= 10) {
+                g.showIssues = false;
+                g.tab = button - 10;
+                g.partScroll = 0;
+                g.hoverRow = g.hoverPart = -1;
+                InvalidatePanel();
+                return 0;
+            }
             int chip = OutfitChipAt(l, x, y);
             if (chip >= 0) { ChooseOutfit(chip); return 0; }
             POINT p{x, y};
             if (PtInRect(&l.clearLog, p)) { ClearLog(); return 0; }
             std::shared_ptr<Loaded> L = Current();
+            if (L && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
                 int idx = RowAt(rows, l, x, y);
@@ -1013,6 +1275,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = LayoutFor(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
+            if (L && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
                 int idx = RowAt(rows, l, x, y);
@@ -1042,6 +1305,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (g.sliderDrag >= 0) {
+            SliderRef r;
+            if (SliderFor(g.sliderDrag, r)) { std::lock_guard<std::mutex> lk(g.mu); *r.v = SliderValueAt(r, x); }
+            InvalidatePanel();
+            return 0;
+        }
         if (g.drag) {
             float dx = static_cast<float>(x - g.last.x), dy = static_cast<float>(y - g.last.y);
             if (g.drag == 1) { g.cam.yawDeg -= dx * 0.5f; g.cam.pitchDeg = std::max(-89.0f, std::min(89.0f, g.cam.pitchDeg - dy * 0.5f)); }
@@ -1064,7 +1333,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.hoverPart = -1;
         if (x < kPanel) {
             std::shared_ptr<Loaded> L = Current();
-            if (L && !g.showIssues) {
+            if (L && !g.showIssues && g.tab != TabParts) {
+                g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
+            } else if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(L->scene);
                 int idx = RowAt(rows, l, x, y);
                 if (idx >= 0) {
@@ -1094,6 +1365,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        if (g.sliderDrag >= 0) {
+            SliderRef r;
+            if (SliderFor(g.sliderDrag, r)) {
+                char msg[96];
+                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
+                Log(msg);
+            }
+            g.sliderDrag = -1;
+            ReleaseCapture();
+            ScheduleApplyTweaks();
+            return 0;
+        }
         g.drag = 0; g.interacting = false; g.lastInput = GetTickCount64(); ReleaseCapture();
         g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -1114,6 +1397,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (L) {
                 if (g.showIssues) {
                     g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3));
+                } else if (g.tab != TabParts) {
+                    int maxScroll = std::max(0, static_cast<int>(BuildTweakRows(g.tab).size()) - VisibleRows(l));
+                    g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
                 } else {
                     std::vector<PartRow> rows = BuildRows(L->scene);
                     int maxScroll = std::max(0, static_cast<int>(rows.size()) - VisibleRows(l));
@@ -1140,7 +1426,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         OutfitChipAt(l, p.x, p.y) >= 0;
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();
-                if (L && !g.showIssues) {
+                if (L && !g.showIssues && g.tab != TabParts) {
+                    hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
+                } else if (L && !g.showIssues) {
                     std::vector<PartRow> rows = BuildRows(L->scene);
                     hand = RowAt(rows, l, p.x, p.y) >= 0;
                 }

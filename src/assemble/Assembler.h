@@ -15,6 +15,16 @@ struct AssembleOptions {
     std::string headRigPrefab = "p_cf_head_bone";
     bool applyShape = true;                // apply the card's body sliders to the skeleton
     std::string headAttachBone = "cf_s_head";   // where the head rig hangs (ChaReference HeadParent)
+    // Tweaks from the viewer. A slider vector replaces the card's own values index by index (shorter = the rest stay the card's);
+    // empty = the card's. Body has 44 sliders, face 52 (shape::BodySliders / FaceSliders say what each one is).
+    std::vector<float> bodyShape, faceShape;
+    // Nipples: nippleOffset moves the nipple bones along the chest normal in metres (negative = into the body, positive = out).
+    // nippleInside pushes them in so they do not show through clothes: the nipple stand rate and the nipple depth slider (13)
+    // drop to 0 and the offset is at most nippleInsideOffset.
+    float nippleOffset = 0.0f;
+    bool nippleInside = false;
+    float nippleInsideOffset = -0.008f;
+    float areolaSize = -1.0f;              // the areola texture size (shader _nipsize); negative = the card's
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
 };

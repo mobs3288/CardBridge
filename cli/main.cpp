@@ -345,11 +345,29 @@ int cmdConvert(const Args& a) {
 
     assemble::AssembleOptions ao;
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
+    // --body "4=0.8,13=0.1" / --face "..." set sliders (index=value, 0..1 is the maker's range); --nipple-inside pushes the nipples in.
+    for (const char* which : {"body", "face"}) {
+        std::string spec = a.get(which);
+        std::vector<float>& vals = std::string(which) == "body" ? ao.bodyShape : ao.faceShape;
+        const Value& card0 = std::string(which) == "body" ? c.body.at("shapeValueBody") : c.face.at("shapeValueFace");
+        for (size_t i = 0; i < card0.size(); ++i) vals.push_back(static_cast<float>(card0.at(i).asFloat()));
+        for (size_t at = 0; at < spec.size();) {
+            size_t end = spec.find(',', at);
+            if (end == std::string::npos) end = spec.size();
+            std::string item = spec.substr(at, end - at);
+            at = end + 1;
+            size_t eq = item.find('=');
+            if (eq == std::string::npos) continue;
+            size_t idx = static_cast<size_t>(std::atoi(item.c_str()));
+            if (idx < vals.size()) vals[idx] = static_cast<float>(std::atof(item.c_str() + eq + 1));
+        }
+    }
+    ao.nippleInside = a.has("nipple-inside");
+    if (a.opt.count("nipple-offset")) ao.nippleOffset = static_cast<float>(std::atof(a.get("nipple-offset").c_str()));
     ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
-
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {
         ++parts;
@@ -425,7 +443,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view", "nipple-inside"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

@@ -88,6 +88,15 @@ void RunBodyUpdateAlways(ShapeState& S);
 void RunHeadUpdate(ShapeState& S);
 void RunHeadUpdateAlways(ShapeState& S);
 
+// What each customize slider is, in the maker's own grouping: index = the slider's number in the card (shapeValueBody 44,
+// shapeValueFace 52). Labels follow the bones a slider drives; the card format has no names of its own.
+struct SliderInfo {
+    const char* group;
+    const char* label;
+};
+const std::vector<SliderInfo>& BodySliders();
+const std::vector<SliderInfo>& FaceSliders();
+
 // Unity's Quaternion.Euler(x, y, z): rotate z, then x, then y (degrees).
 Quat EulerToQuat(Vec3 degrees);
 
