@@ -684,20 +684,6 @@ void unitTests() {
         }
     });
 
-    test("physics: a chain becomes an anchor, a capsule per bone and joints; colliders become kinematic bodies; read back from the bytes", [] {
-        assemble::Scene s;
-        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
-        for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0, 1.1f - 0.1f * float(i), 0}, "rig"});
-        assemble::SceneChain ch;
-        ch.name = "strand";
-        ch.bones = {1, 2, 3, 4};
-        ch.stiffness = 0.2f;
-        s.chains.push_back(ch);
-        assemble::SceneCollider col;
-        col.name = "head";
-        col.bone = 0;
-        col.center = {0, 1.2f, 0};
-        col.radius = 0.1f;
     test("pmx: a half turn about Y faces the model -Z, turns bodies and joints with it, mirrors IK limits and undoes itself", [] {
         pmx::Model m;
         pmx::Vertex v; v.position = {1, 2, 3}; v.normal = {0, 0, 1}; m.vertices.push_back(v);
@@ -721,6 +707,20 @@ void unitTests() {
         CHECK(m.bones[2].ikLinks[0].lower.x == orig.bones[2].ikLinks[0].lower.x && m.bones[2].ikLinks[0].upper.z == orig.bones[2].ikLinks[0].upper.z);
     });
 
+    test("physics: a chain becomes a kinematic root, a capsule per bone and joints; colliders become kinematic bodies; read back from the bytes", [] {
+        assemble::Scene s;
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0, 1.1f - 0.1f * float(i), 0}, "rig"});
+        assemble::SceneChain ch;
+        ch.name = "strand";
+        ch.bones = {1, 2, 3, 4};
+        ch.stiffness = 0.2f;
+        s.chains.push_back(ch);
+        assemble::SceneCollider col;
+        col.name = "head";
+        col.bone = 0;
+        col.center = {0, 1.2f, 0};
+        col.radius = 0.1f;
         col.height = 0.4f;
         col.axis = {0, 1, 0};
         s.colliders.push_back(col);
@@ -730,12 +730,12 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.size() == 6);   // collider + anchor + one per chain bone (the inside collider is not exported)
-        CHECK(m.joints.size() == 4);        // anchor-root, root-1, 1-2, 2-3
+        CHECK(m.rigidBodies.size() == 5);   // collider + one per chain bone (the inside collider is not exported)
+        CHECK(m.joints.size() == 3);        // root-1, 1-2, 2-3
         CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].group != exporter::kPmxGroupChain && m.rigidBodies[0].shape == 2);
-        CHECK(m.rigidBodies[1].mode == 0 && m.rigidBodies[1].bone == 0);   // the anchor follows the chain's parent bone
-        CHECK(m.rigidBodies[2].mode == 2 && m.rigidBodies[3].mode == 1 && m.rigidBodies[3].group == 1);   // the root only turns, the rest are free
-        CHECK(std::fabs(m.rigidBodies[3].position.y - 9.5f) < 1e-3f);   // halfway from bone 2 (y 1.0) to bone 3 (0.9), scaled by 10: 9.5
+        CHECK(m.rigidBodies[1].mode == 0 && m.rigidBodies[1].bone == 1 && m.rigidBodies[1].mask == 0);   // the root follows its bone and meets nothing
+        CHECK(m.rigidBodies[2].mode == 1 && m.rigidBodies[3].mode == 1 && m.rigidBodies[3].group == 1);   // the rest are free
+        CHECK(std::fabs(m.rigidBodies[2].position.y - 9.5f) < 1e-3f);   // halfway from bone 2 (y 1.0) to bone 3 (0.9), scaled by 10: 9.5
         for (const auto& j : m.joints) CHECK(j.bodyA >= 0 && j.bodyB >= 0 && j.bodyA != j.bodyB);
         m.vertices.resize(3);
         m.indices = {0, 1, 2};
@@ -750,8 +750,8 @@ void unitTests() {
             CHECK(back.bodies[i].group == m.rigidBodies[i].group && back.bodies[i].mask == m.rigidBodies[i].mask && back.bodies[i].mode == m.rigidBodies[i].mode);
             CHECK(std::fabs(back.bodies[i].pos.y - m.rigidBodies[i].position.y) < 1e-5f && std::fabs(back.bodies[i].size.x - m.rigidBodies[i].size.x) < 1e-5f);
         }
-        // the filter: chains meet colliders (bit 0), colliders meet chains (bit 1), the anchor meets nothing
-        CHECK(back.bodies[0].mask == 0x0002 && back.bodies[1].mask == 0 && (back.bodies[3].mask & 0x0002) == 0);
+        // the filter: chains meet colliders (bit 0), colliders meet chains (bit 1), the root meets nothing
+        CHECK(back.bodies[0].mask == 0x0002 && back.bodies[1].mask == 0 && (back.bodies[2].mask & 0x0002) == 0);
         // a broken file is found: a chain that meets chains, an anchor that moves, a joint on a missing body
         pmxread::Model broken = back;
         broken.bodies[3].mask = 0xFFFF;
@@ -834,7 +834,7 @@ void unitTests() {
             CHECK(pmxPhysicsFindings(back).empty());
             springref::Chain ref(back, 9.8 * scale);
             for (int f = 0; f < 900; ++f) ref.step();
-            const double tipDrop = (back.bodies[1].pos.y - ref.jointPoint(ref.pinCount() - 1).y) / scale;   // below where the anchor stands, metres
+            const double tipDrop = (back.bodies[0].pos.y - ref.jointPoint(ref.pinCount() - 1).y) / scale;   // below where the anchor stands, metres
             std::printf("  ribbon droop: tip %.3f m below its rest height over a strand of 0.3 m, speed %.4f\n", tipDrop, ref.speed());
             CHECK(tipDrop > 0.0 && tipDrop < 0.15);
             CHECK(ref.speed() < 0.05);
@@ -1541,11 +1541,12 @@ void integrationTests() {
             for (const auto& col : scene.colliders)
                 if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;
             for (const auto& chain : scene.chains) {
+                if (chain.part == "body") continue;   // the body's own jiggle chains stay rigid in the PMX
                 size_t valid = 0;
                 for (int b : chain.bones) if (b >= 0 && b < static_cast<int>(scene.bones.size())) ++valid;
                 if (valid < 2) continue;
-                expectBodies += 1 + valid;
-                expectJoints += valid;
+                expectBodies += valid;
+                expectJoints += valid - 1;
             }
             CHECK(back.bodies.size() == expectBodies && back.joints.size() == expectJoints);
             const auto findings = pmxPhysicsFindings(back);
@@ -1553,6 +1554,18 @@ void integrationTests() {
             CHECK(findings.empty());
             size_t kinematic = 0, moving = 0;
             for (const auto& b : back.bodies) (b.mode == 0 ? kinematic : moving)++;
+            {   // MikuMikuDance keeps the number of listed morphs and of frames in a byte: more corrupt its heap
+                size_t listed = 0;
+                for (const auto& f : back.frames) for (const auto& it : f.items) listed += it.first == 1;
+                CHECK(listed <= 255 && back.frames.size() <= 254);
+                CHECK(back.morphs.size() >= listed);   // what does not fit stays in the file, unlisted
+                std::printf("  read back: %zu morphs listed in the display frames of %zu\n", listed, back.morphs.size());
+            }
+            {   // facing -Z: the toes lie in front of the ankle, on the -Z side
+                const pmxread::Bone* foot = nullptr; const pmxread::Bone* toe = nullptr;
+                for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L") foot = &b; if (b.name == "cf_j_toes_L") toe = &b; }
+                CHECK(foot && toe && toe->pos.z < foot->pos.z);
+            }
             std::printf("  read back: %zu rigid bodies (%zu kinematic, %zu moving), %zu joints, %zu morphs, %zu display frames\n", back.bodies.size(), kinematic, moving, back.joints.size(), back.morphs.size(), back.frames.size());
         }
     });
@@ -1566,15 +1579,3 @@ int main() {
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;
 }
-            {   // MikuMikuDance keeps the number of listed morphs and of frames in a byte: more corrupt its heap
-                size_t listed = 0;
-                for (const auto& f : back.frames) for (const auto& it : f.items) listed += it.first == 1;
-                CHECK(listed <= 255 && back.frames.size() <= 254);
-                CHECK(back.morphs.size() >= listed);   // what does not fit stays in the file, unlisted
-                std::printf("  read back: %zu morphs listed in the display frames of %zu\n", listed, back.morphs.size());
-            }
-            {   // facing -Z: the toes lie in front of the ankle, on the -Z side
-                const pmxread::Bone* foot = nullptr; const pmxread::Bone* toe = nullptr;
-                for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L") foot = &b; if (b.name == "cf_j_toes_L") toe = &b; }
-                CHECK(foot && toe && toe->pos.z < foot->pos.z);
-            }
