@@ -370,6 +370,7 @@ int cmdConvert(const Args& a) {
     auto t1 = std::chrono::steady_clock::now();
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {
+        if (p.underPiece || p.nudeSwitch) continue;   // derived from other parts
         ++parts;
         bool ok = p.status == "resolved-base" || p.status == "resolved-mod";
         if (!ok) ++failed;
@@ -380,6 +381,18 @@ int cmdConvert(const Args& a) {
         std::fprintf(stderr, "  %s%s%s: %s\n", is.severity.c_str(), is.part.empty() ? "" : " [", is.part.empty() ? "" : (is.part + "]").c_str(), is.message.c_str());
     for (const auto& is : scene.issues)
         if (is.severity == "error") { std::fprintf(stderr, "conversion failed.\n"); return 3; }
+
+    // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)
+    std::vector<char> hiddenParts(scene.parts.size(), 0);
+    {
+        std::string list = "," + a.get("hide") + ",";
+        for (size_t i = 0; i < scene.parts.size(); ++i) {
+            if (list.find("," + scene.parts[i].id + ",") != std::string::npos) hiddenParts[i] = 1;
+            if (scene.parts[i].nudeSwitch) hiddenParts[i] = a.has("nude") ? 0 : 1;
+        }
+    }
+    exporter::ApplyPartStateForExport(scene, hiddenParts);
+    const std::vector<char> effHidden = exporter::EffectiveHiddenParts(scene, hiddenParts);
 
     if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour
         std::string bakeNote;
@@ -400,8 +413,8 @@ int cmdConvert(const Args& a) {
             cam.pitchDeg = 4;
             std::vector<uint32_t> px;
             auto g0 = std::chrono::steady_clock::now();
-            bool ok = gpu.Render(cam, 640, 800, nullptr, px);
-            ok = ok && gpu.Render(cam, 640, 800, nullptr, px);
+            bool ok = gpu.Render(cam, 640, 800, &effHidden, px);
+            ok = ok && gpu.Render(cam, 640, 800, &effHidden, px);
             std::fprintf(stderr, "  gpu view: %s, second frame %.1f ms, %d material(s) without a shader\n", ok ? "ok" : "failed",
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());
             for (const auto& m : scene.materials) if (m.shaderIndex < 0) std::fprintf(stderr, "    no shader: %s (%s)\n", m.name.c_str(), m.shader.c_str());
@@ -443,7 +456,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view", "nipple-inside"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view", "nipple-inside", "nude"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

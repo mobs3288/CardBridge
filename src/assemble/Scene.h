@@ -113,6 +113,16 @@ struct ScenePart {
     bool visibleInPreview = true;
     bool includeInExport = true;
     std::vector<int> meshes;  // indices into Scene::meshes
+    // The nude body. A garment's body mask hides the triangles under it (as the game does); those triangles are not thrown away but
+    // kept as an "under piece" part so the skin can be shown again: a piece is hidden by default (visibleInPreview false), lists the
+    // garments that cover it in coveredBy, and is shown when none of them is (or when the nude switch is on). "" in coveredBy is a
+    // garment the game hides itself (it still covers). The same is done for the bra, which a top's mask cuts.
+    bool underPiece = false;
+    std::string underOf;                    // id of the part the piece was cut from
+    std::vector<std::string> coveredBy;     // part ids of the garments over it
+    bool nudeSwitch = false;                // the "Nude body" checkbox: no geometry, switches every under piece on
+    // Export: the part's PMX materials start fully transparent (the viewer sets this from its checkboxes); the PMX morphs bring them back.
+    bool startHidden = false;
 };
 
 struct SceneIssue {

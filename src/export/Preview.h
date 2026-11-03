@@ -40,7 +40,7 @@ ViewStatePtr NewViewState();
 
 struct ViewOptions {
     bool textured = true;
-    const std::vector<char>* hiddenParts = nullptr;   // per scene part: 1 = do not draw (on top of visibleInPreview)
+    const std::vector<char>* hiddenParts = nullptr;   // per scene part: 1 = do not draw (on top of visibleInPreview), 2 = draw even when visibleInPreview is false
     int step = 1;                                      // 2 = every other pixel in each direction (fast, while dragging)
     bool shaded = false;                               // run the game's own compiled shaders per pixel (materials without one keep the plain look)
     int highlightPart = -1;                            // scene part drawn with a warm tint (the viewer's hovered part), -1 = none
@@ -56,6 +56,16 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = t
 // Runs every pending Scene::createJobs: the game's "create" materials (eye iris and white, face and body skin) drawn over one quad
 // into their placeholder textures. Called once, at the end of assembly.
 void RunCreateJobs(assemble::Scene& scene);
+
+// The hidden flags the renderers take (ViewOptions::hiddenParts), from the part checkboxes `hidden` (1 = unticked, one per scene part).
+// A body (or bra) triangle a garment's mask hides is kept as an "under piece" part (ScenePart::underPiece): a piece is drawn (flag 2)
+// when the part it was cut from is shown and either the "Nude body" part (ScenePart::nudeSwitch) is ticked or none of the garments over
+// it is; a garment the game hides itself ("" in coveredBy) keeps covering. Every other part keeps its own flag.
+std::vector<char> EffectiveHiddenParts(const assemble::Scene& scene, const std::vector<char>& hidden);
+
+// Makes the exported PMX start the way the viewer shows the checkboxes: under pieces and unticked outfit, accessory and hair parts get
+// ScenePart::startHidden (their PMX materials start transparent; the PMX morphs bring them back).
+void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hidden);
 
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).
 void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int width, int height, const ViewOptions& opt,

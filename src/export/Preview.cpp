@@ -448,8 +448,10 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
     Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
     auto visible = [&](size_t pi) {
         const auto& part = scene.parts[pi];
-        if (!part.includeInExport || !part.visibleInPreview) return false;
-        return !(opt.hiddenParts && pi < opt.hiddenParts->size() && (*opt.hiddenParts)[pi]);
+        const char flag = opt.hiddenParts && pi < opt.hiddenParts->size() ? (*opt.hiddenParts)[pi] : 0;
+        if (!part.includeInExport) return false;
+        if (flag == 2) return true;   // forced on, even for a part that is hidden by default (a nude under piece)
+        return part.visibleInPreview && !flag;
     };
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         if (!visible(pi)) continue;
@@ -645,6 +647,43 @@ void BuildTexMips(const assemble::Scene& scene, ViewState& st, int ti) {
 }
 
 } // namespace
+
+std::vector<char> EffectiveHiddenParts(const assemble::Scene& scene, const std::vector<char>& hiddenIn) {
+    std::vector<char> hidden = hiddenIn;
+    hidden.resize(scene.parts.size(), 0);
+    std::vector<char> eff = hidden;
+    auto shown = [&](size_t i) { return scene.parts[i].visibleInPreview && !hidden[i]; };
+    std::map<std::string, size_t> byId;
+    bool nude = false;
+    for (size_t i = 0; i < scene.parts.size(); ++i) {
+        byId[scene.parts[i].id] = i;
+        if (scene.parts[i].nudeSwitch && !hidden[i]) nude = true;
+    }
+    for (size_t i = 0; i < scene.parts.size(); ++i) {
+        const auto& p = scene.parts[i];
+        if (!p.underPiece) continue;
+        auto parent = byId.find(p.underOf);
+        bool show = parent != byId.end() && shown(parent->second);
+        if (show && !nude)
+            for (const auto& id : p.coveredBy) {
+                auto g = byId.find(id);
+                if (id.empty() || (g != byId.end() && shown(g->second))) { show = false; break; }
+            }
+        eff[i] = show ? 2 : 1;
+    }
+    return eff;
+}
+
+void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hiddenIn) {
+    std::vector<char> hidden = hiddenIn;
+    hidden.resize(scene.parts.size(), 0);
+    const std::vector<char> eff = EffectiveHiddenParts(scene, hidden);
+    for (size_t i = 0; i < scene.parts.size(); ++i) {
+        auto& p = scene.parts[i];
+        if (p.underPiece) p.startHidden = eff[i] == 1;
+        else if ((p.group == "Outfit" || p.group == "Accessories" || p.group == "Hair") && !p.nudeSwitch) p.startHidden = hidden[i] != 0;
+    }
+}
 
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
                         const std::function<void(const std::string&)>& progress) {

@@ -41,6 +41,27 @@ struct Bone {
     Vec3 tailOffset;
 };
 
+// A morph. Only the two kinds the exporter needs: a material morph (type 8: per material an offset that multiplies or adds to its
+// colours) and a group morph (type 0: several morphs at a rate). `panel` is the MMD control panel (1 brows, 2 eyes, 3 mouth, 4 other).
+struct MaterialOffset {
+    int material = -1;              // -1 = all materials
+    bool add = true;                // false = multiply
+    Vec4 diffuse{0, 0, 0, 0};
+    Vec3 specular{0, 0, 0};
+    float specularPower = 0.0f;
+    Vec3 ambient{0, 0, 0};
+    Vec4 edgeColor{0, 0, 0, 0};
+    float edgeSize = 0.0f;
+    Vec4 texture{0, 0, 0, 0}, sphere{0, 0, 0, 0}, toon{0, 0, 0, 0};
+};
+
+struct Morph {
+    std::string name, nameEn;
+    int panel = 4;
+    std::vector<MaterialOffset> materials;               // a material morph when non-empty
+    std::vector<std::pair<int, float>> group;            // (morph index, rate): a group morph when non-empty
+};
+
 struct Model {
     std::string name, nameEn, comment, commentEn;
     std::vector<Vertex> vertices;
@@ -48,9 +69,10 @@ struct Model {
     std::vector<std::string> textures;   // relative paths, forward slashes
     std::vector<Material> materials;
     std::vector<Bone> bones;
+    std::vector<Morph> morphs;      // listed in the "Exp" display frame
 };
 
-// Serialises to PMX 2.0 (UTF-16LE text, no morphs, rigid bodies or joints).
+// Serialises to PMX 2.0 (UTF-16LE text, material and group morphs, no rigid bodies or joints).
 // Throws FormatError if the model is inconsistent (index out of range, material
 // index counts not matching the index buffer).
 Bytes WritePmx(const Model& m);

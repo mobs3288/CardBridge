@@ -1388,7 +1388,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (sk2.size() >= 3) skinColor = vec4Of(sk2);
 
     bool topCoversBra = false;
-    std::vector<std::shared_ptr<unity::TextureData>> bodyMasks, braMasks;
+    struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
+    std::vector<MaskSource> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
         const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
@@ -1862,12 +1863,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (!mname.empty() && mname != "0" && !mab.empty() && mab != "0") {
                 std::string w;
                 auto mb = resolver.openItemBundle(item, mab, &w);
-                if (!mb) { if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back(loose); }
+                if (!mb) { if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back({loose, ref.partId}); }
                 if (mb) {
                     PPtr mp = mb->findAsset(mname);
                     if (mp.isNull()) mp = mb->findTexture(mname);
-                    if (!mp.isNull()) { if (auto mt = b.decode(*mb, mp, ref.partId)) bodyMasks.push_back(mt); }
-                    else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back(loose);
+                    if (!mp.isNull()) { if (auto mt = b.decode(*mb, mp, ref.partId)) bodyMasks.push_back({mt, ref.partId}); }
+                    else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back({loose, ref.partId});
                     else scene.warn(ref.partId, "body mask '" + mname + "' not found in " + mab);
                 }
             }
@@ -1875,12 +1876,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (!bname.empty() && bname != "0" && !bab.empty() && bab != "0") {
                 std::string w;
                 auto bb = resolver.openItemBundle(item, bab, &w);
-                if (!bb) { if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back(loose); }
+                if (!bb) { if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back({loose, ref.partId}); }
                 if (bb) {
                     PPtr bp = bb->findAsset(bname);
                     if (bp.isNull()) bp = bb->findTexture(bname);
-                    if (!bp.isNull()) { if (auto bt = b.decode(*bb, bp, ref.partId)) braMasks.push_back(bt); }
-                    else if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back(loose);
+                    if (!bp.isNull()) { if (auto bt = b.decode(*bb, bp, ref.partId)) braMasks.push_back({bt, ref.partId}); }
+                    else if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back({loose, ref.partId});
                 }
             }
         }
@@ -2168,16 +2169,30 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         log(logId + ": " + (logStatus.empty() ? std::string("ok") : logStatus) + ", " + std::to_string(logMeshes) + " mesh(es)");
     }
 
-    // Hide the triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep):
-    // the game masks the body this way, and the bra the same way (OverBraMask).
+    // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
+    if (topCoversBra)
+        for (auto& p : scene.parts)
+            if (p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0 && !p.meshes.empty()) {
+                p.includeInExport = false;
+                p.visibleInPreview = false;
+                p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
+            }
+
+    // The triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep): the game masks
+    // the body this way, and the bra the same way (OverBraMask). The covered triangles leave the part but are kept as "under pieces"
+    // (one part per set of garments covering them) so the nude body can be shown again, in the viewer and through PMX morphs.
     log("applying clothing masks");
     auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
-                          const std::vector<std::shared_ptr<unity::TextureData>>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
+                          const std::vector<MaskSource>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
         if (masks.empty()) return;
         size_t dropped = 0, total = 0;
-        for (auto& part : scene.parts) {
-            if (!pick(part)) continue;
-            for (int mi : part.meshes) {
+        const size_t partCount = scene.parts.size();
+        for (size_t pi = 0; pi < partCount; ++pi) {
+            if (!pick(scene.parts[pi])) continue;
+            const std::vector<int> meshIndices = scene.parts[pi].meshes;
+            // garments covering a triangle -> per mesh, per material, the triangles' indices
+            std::map<std::vector<std::string>, std::map<int, std::map<int, std::vector<uint32_t>>>> pieces;
+            for (int mi : meshIndices) {
                 SceneMesh& m = scene.meshes[static_cast<size_t>(mi)];
                 if (meshOk && !meshOk(m)) continue;
                 for (auto& sub : m.submeshes) {
@@ -2188,32 +2203,92 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                         for (int k = 0; k < 3; ++k) { u += m.vertices[sub.indices[t + static_cast<size_t>(k)]].uv.x; v += m.vertices[sub.indices[t + static_cast<size_t>(k)]].uv.y; }
                         u /= 3; v /= 3;
                         u -= std::floor(u); v -= std::floor(v);
-                        bool hidden = false;
+                        std::vector<std::string> cover;
                         for (const auto& mk : masks) {
-                            int x = std::min(mk->width - 1, static_cast<int>(u * mk->width)), y = std::min(mk->height - 1, static_cast<int>((1.0f - v) * mk->height));
-                            if (mk->rgba[(static_cast<size_t>(y) * mk->width + x) * 4] < 128) { hidden = true; break; }
+                            int x = std::min(mk.tex->width - 1, static_cast<int>(u * mk.tex->width)), y = std::min(mk.tex->height - 1, static_cast<int>((1.0f - v) * mk.tex->height));
+                            if (mk.tex->rgba[(static_cast<size_t>(y) * mk.tex->width + x) * 4] < 128 && std::find(cover.begin(), cover.end(), mk.owner) == cover.end()) cover.push_back(mk.owner);
                         }
-                        if (hidden) { ++dropped; continue; }
-                        keep.insert(keep.end(), sub.indices.begin() + static_cast<long>(t), sub.indices.begin() + static_cast<long>(t) + 3);
+                        if (cover.empty()) {
+                            keep.insert(keep.end(), sub.indices.begin() + static_cast<long>(t), sub.indices.begin() + static_cast<long>(t) + 3);
+                            continue;
+                        }
+                        ++dropped;
+                        // a garment the game itself hides still covers: it counts as "" (always)
+                        for (auto& id : cover)
+                            for (const auto& gp : scene.parts)
+                                if (gp.id == id && !gp.visibleInPreview) id.clear();
+                        std::sort(cover.begin(), cover.end());
+                        cover.erase(std::unique(cover.begin(), cover.end()), cover.end());
+                        auto& dst = pieces[cover][mi][sub.material];
+                        dst.insert(dst.end(), sub.indices.begin() + static_cast<long>(t), sub.indices.begin() + static_cast<long>(t) + 3);
                     }
                     sub.indices = std::move(keep);
                 }
+            }
+            for (auto& [cover, byMesh] : pieces) {
+                ScenePart piece;
+                const ScenePart parent = scene.parts[pi];   // a copy: scene.parts grows below
+                std::string tag;
+                for (const auto& id : cover) {
+                    std::string shortName = id.rfind("outfit", 0) == 0 && id.find('.') != std::string::npos ? id.substr(id.find('.') + 1) : id;
+                    tag += (tag.empty() ? "" : "+") + (shortName.empty() ? std::string("always") : shortName);
+                }
+                piece.id = parent.id + ".under." + tag;
+                piece.label = parent.label + " under " + tag;
+                piece.group = parent.group;
+                piece.status = parent.status;
+                piece.bundle = parent.bundle;
+                piece.detail = "the " + what + " triangles that " + tag + " covers (kept so the nude body can be shown)";
+                piece.visibleInPreview = false;
+                piece.startHidden = true;
+                piece.includeInExport = parent.includeInExport;
+                piece.underPiece = true;
+                piece.underOf = parent.id;
+                piece.coveredBy = cover;
+                const int pieceIdx = static_cast<int>(scene.parts.size());
+                for (auto& [mi, byMat] : byMesh) {
+                    const SceneMesh src = scene.meshes[static_cast<size_t>(mi)];   // a copy: scene.meshes grows below
+                    SceneMesh nm;
+                    nm.name = src.name + ".under";
+                    nm.part = pieceIdx;
+                    std::map<uint32_t, uint32_t> remap;
+                    for (auto& [mat, idx] : byMat) {
+                        SceneSubmesh sm;
+                        sm.material = mat;
+                        for (uint32_t i : idx) {
+                            auto it = remap.find(i);
+                            if (it == remap.end()) { it = remap.emplace(i, static_cast<uint32_t>(nm.vertices.size())).first; nm.vertices.push_back(src.vertices[i]); }
+                            sm.indices.push_back(it->second);
+                        }
+                        nm.submeshes.push_back(std::move(sm));
+                    }
+                    piece.meshes.push_back(static_cast<int>(scene.meshes.size()));
+                    scene.meshes.push_back(std::move(nm));
+                }
+                scene.parts.push_back(std::move(piece));
             }
         }
         scene.warn(what, what + " mask: " + std::to_string(dropped) + " of " + std::to_string(total) + " triangles hidden under clothing (as the game does)");
     };
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
-    applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
+    applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && !p.underPiece && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
                [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
+    {   // the nude switch: one checkbox in the outfit list that brings back all the skin under the clothes
+        bool any = false;
+        for (const auto& p : scene.parts) any = any || p.underPiece;
+        if (any) {
+            ScenePart nude;
+            nude.id = "nude";
+            nude.label = "Nude body";
+            nude.group = "Outfit";
+            nude.status = "resolved-base";
+            nude.detail = "tick to show the whole body, also where clothes cover it; the PMX has the same as the 'Nude body' morph";
+            nude.nudeSwitch = true;
+            nude.includeInExport = false;
+            scene.parts.push_back(std::move(nude));
+        }
+    }
 
-    // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
-    if (topCoversBra)
-        for (auto& p : scene.parts)
-            if (p.group == "Outfit" && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0 && !p.meshes.empty()) {
-                p.includeInExport = false;
-                p.visibleInPreview = false;
-                p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
-            }
     if (std::getenv("CARDBRIDGE_DEBUG_RIG"))
         for (const char* nm : {"cf_j_neck", "cf_j_head", "cf_s_head", "cf_J_N_FaceRoot", "cf_J_FaceRoot", "cf_J_FaceBase", "cf_J_FaceUp_ty", "a_n_headside", "cf_J_Mouth_L", "cf_J_Chin_Base", "cf_J_FaceUp_tz", "cf_J_Eye_tx_L", "cf_J_NoseBridge_ty"}) {
             auto w = rig.world.find(nm);

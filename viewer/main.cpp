@@ -249,7 +249,8 @@ struct App {
     std::string resolverKey;
 
     std::shared_ptr<Loaded> loaded;
-    std::vector<char> hidden;
+    std::vector<char> hidden;      // the part checkboxes (1 = unticked)
+    std::vector<char> effHidden;   // what the renderers get: hidden plus the nude logic (1 hide, 2 show a default-hidden under piece)
     std::atomic<bool> busy{false};
     std::atomic<bool> exporting{false};
     std::string status = "drop a Koikatsu card on this window";
@@ -569,11 +570,13 @@ void StartExport() {
     std::string outDir = parent + "/" + stem;
     for (int n = 2; Exists(outDir) && n < 1000; ++n) outDir = parent + "/" + stem + " (" + std::to_string(n) + ")";
     const std::string library = g.settings.library, mods = g.settings.mods;
+    const std::vector<char> hiddenNow = g.hidden;
     Log("export started: " + outDir, LogKind::Info);
-    std::thread([L, outDir, stem, library, mods]() {
+    std::thread([L, outDir, stem, library, mods, hiddenNow]() {
         auto t0 = std::chrono::steady_clock::now();
         try {
             assemble::Scene scene = L->scene;   // bake the copy, not what the viewport is drawing
+            exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
             exporter::BakeShaderTextures(scene, 1024, true, nullptr, [](const std::string& m) { Log("  " + m); });
             exporter::ExportOptions eo;
@@ -605,14 +608,14 @@ std::vector<PartRow> BuildRows(const assemble::Scene& scene) {
     auto addGroup = [&](const std::string& group) {
         bool any = false;
         for (const auto& p : scene.parts) {
-            if (p.group != group) continue;
+            if (p.group != group || p.underPiece) continue;   // under pieces follow their garments and the Nude body box
             if (!any) { rows.push_back({-1, group}); any = true; }
             rows.push_back({static_cast<int>(&p - scene.parts.data()), group});
         }
     };
     for (const char* group : order) { addGroup(group); seen.insert(group); }
     for (const auto& p : scene.parts)
-        if (!seen.count(p.group)) { addGroup(p.group); seen.insert(p.group); }
+        if (!seen.count(p.group) && !p.underPiece) { addGroup(p.group); seen.insert(p.group); }
     // Collapsed groups lose their part rows but keep the header.
     std::vector<PartRow> out;
     std::string collapsed;
@@ -685,17 +688,18 @@ void Render(int w, int h) {
     g.fw = w; g.fh = h;
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     g.hidden.resize(L->scene.parts.size(), 0);
+    g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
     g.vopt.textured = g.textured;
     g.vopt.highlightPart = g.hoverPart;
     if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate
-        if (g.gpu.Render(g.cam, w, h, &g.hidden, g.frame, g.hoverPart)) return;
+        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, g.hoverPart)) return;
         g.gpuOk = false;
     }
     // Software shaders are slow: only once the view has been still for a moment.
     const bool still = GetTickCount64() - g.lastInput > 300;
     g.vopt.shaded = g.shaded && still;
     if (g.shaded && !still) SetTimer(g.hwnd, 1, 320, nullptr);   // come back and draw the shaded picture
-    g.vopt.hiddenParts = &g.hidden;
+    g.vopt.hiddenParts = &g.effHidden;
     g.vopt.step = g.interacting ? 3 : 1;
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
 }
@@ -765,8 +769,10 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     if (title.empty()) title = "CardBridge viewer";
     DrawTextAt(dc, g.fontTitle, RGB(238, 241, 248), 10, 7, ClipText(title, 38));
     if (L && !L->scene.parts.empty()) {
+        size_t listed = 0;
+        for (const auto& p : L->scene.parts) listed += !p.underPiece;
         std::string stats = Count(Triangles(L->scene)) + " triangles, " + std::to_string(L->scene.materials.size()) + " materials, " +
-                            std::to_string(L->scene.parts.size()) + " parts";
+                            std::to_string(listed) + " parts";
         DrawTextAt(dc, g.fontUi, RGB(150, 160, 178), 10, 30, stats);
         size_t warn = 0, err = 0;
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
@@ -947,7 +953,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
                 for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                 bool collapsed = g.collapsedGroups.count(row.group) != 0;
                 int count = 0;
-                for (const auto& p : L->scene.parts) if (p.group == row.group) ++count;
+                for (const auto& p : L->scene.parts) if (p.group == row.group && !p.underPiece) ++count;
                 DrawTextAt(dc, g.fontBold, RGB(120, 180, 240), 12, y + 3, (collapsed ? "+ " : "- ") + name);
                 DrawTextRight(dc, g.fontSmall, RGB(100, 110, 128), kPanel - 12, y + 4, std::to_string(count), &clip);
             } else {
@@ -966,7 +972,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
                 }
                 COLORREF col = off ? RGB(95, 100, 112) : !ok ? RGB(235, 110, 110) : RGB(206, 218, 236);
                 DrawTextAt(dc, g.fontMono, col, 12, y + 3, off ? "[ ]" : "[x]");
-                std::string name = p.id;
+                std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                 if (!ok) name += "  (" + p.status + ")";
                 DrawTextAt(dc, g.fontMono, col, 46, y + 3, name, &clip);
                 std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
@@ -1187,6 +1193,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 auto it = g.keepHidden.find(L->scene.parts[i].id);
                 if (it != g.keepHidden.end()) g.hidden[i] = it->second;
             }
+        if (L)
+            for (size_t i = 0; i < L->scene.parts.size(); ++i)
+                if (L->scene.parts[i].nudeSwitch && !(g.applyKeep && g.keepHidden.count(L->scene.parts[i].id))) g.hidden[i] = 1;   // starts unticked
         g.keepHidden.clear();
         g.partScroll = 0;
         g.hoverRow = g.hoverPart = g.hoverOutfit = -1;

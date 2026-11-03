@@ -393,8 +393,10 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     auto visible = [&](size_t pi) {
         const auto& part = scene.parts[pi];
-        if (!part.includeInExport || !part.visibleInPreview) return false;
-        return !(hiddenParts && pi < hiddenParts->size() && (*hiddenParts)[pi]);
+        const char flag = hiddenParts && pi < hiddenParts->size() ? (*hiddenParts)[pi] : 0;
+        if (!part.includeInExport) return false;
+        if (flag == 2) return true;   // forced on, even for a part that is hidden by default (a nude under piece)
+        return part.visibleInPreview && !flag;
     };
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         if (!visible(pi)) continue;

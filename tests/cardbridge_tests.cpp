@@ -21,6 +21,7 @@
 #include "core/Sha256.h"
 #include "core/ZipArchive.h"
 #include "export/Exporter.h"
+#include "export/Preview.h"
 #include "library/Library.h"
 #include "pmx/PmxWriter.h"
 #include "resolve/ListTable.h"
@@ -382,6 +383,65 @@ void unitTests() {
         try { pmx::WritePmx(m); } catch (const FormatError&) { threw = true; }
         CHECK(threw);
     });
+    test("nude body: under pieces show when their garments are off or the nude box is ticked", [] {
+        using namespace assemble;
+        Scene sc;
+        auto add = [&](const std::string& id, bool visible = true) { ScenePart p; p.id = id; p.visibleInPreview = visible; sc.parts.push_back(p); return sc.parts.size() - 1; };
+        size_t body = add("body"), top = add("top"), bra = add("bra"), hiddenByGame = add("hid", false);
+        size_t pTop = add("body.under.top", false), pBoth = add("body.under.bra+top", false), pGame = add("body.under.always", false);
+        sc.parts[pTop].underPiece = true; sc.parts[pTop].underOf = "body"; sc.parts[pTop].coveredBy = {"top"};
+        sc.parts[pBoth].underPiece = true; sc.parts[pBoth].underOf = "body"; sc.parts[pBoth].coveredBy = {"bra", "top"};
+        sc.parts[pGame].underPiece = true; sc.parts[pGame].underOf = "body"; sc.parts[pGame].coveredBy = {""};
+        size_t nude = add("nude");
+        sc.parts[nude].nudeSwitch = true;
+        (void)hiddenByGame;
+        std::vector<char> hidden(sc.parts.size(), 0);
+        hidden[nude] = 1;
+        auto eff = exporter::EffectiveHiddenParts(sc, hidden);
+        CHECK(eff[pTop] == 1 && eff[pBoth] == 1 && eff[pGame] == 1);   // everything dressed: no skin
+        hidden[top] = 1;
+        eff = exporter::EffectiveHiddenParts(sc, hidden);
+        CHECK(eff[pTop] == 2 && eff[pBoth] == 1 && eff[pGame] == 1);   // top off: the skin only it covers; the bra still covers its part
+        hidden[bra] = 1;
+        eff = exporter::EffectiveHiddenParts(sc, hidden);
+        CHECK(eff[pTop] == 2 && eff[pBoth] == 2 && eff[pGame] == 1);   // a garment the game hides keeps covering
+        hidden[top] = hidden[bra] = 0;
+        hidden[nude] = 0;
+        eff = exporter::EffectiveHiddenParts(sc, hidden);
+        CHECK(eff[pTop] == 2 && eff[pBoth] == 2 && eff[pGame] == 2);   // nude box: everything, clothes stay
+        CHECK(eff[top] == 0 && eff[body] == 0);
+        hidden[body] = 1;
+        eff = exporter::EffectiveHiddenParts(sc, hidden);
+        CHECK(eff[pTop] == 1);   // no body, no skin pieces
+    });
+    test("pmx writer: material and group morphs", [] {
+        pmx::Model m;
+        m.name = "t";
+        pmx::Bone b; b.name = "root"; m.bones.push_back(b);
+        for (int i = 0; i < 3; ++i) { pmx::Vertex v; v.position = {float(i), 0, 0}; m.vertices.push_back(v); }
+        m.indices = {0, 1, 2};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        Bytes plain = pmx::WritePmx(m);
+        pmx::Morph hide;
+        hide.name = "Hide m";
+        pmx::MaterialOffset off; off.material = 0; off.add = false; off.diffuse = {1, 1, 1, 0};
+        hide.materials.push_back(off);
+        m.morphs.push_back(hide);
+        pmx::Morph grp; grp.name = "All"; grp.group.emplace_back(0, 1.0f);
+        m.morphs.push_back(grp);
+        Bytes withMorphs = pmx::WritePmx(m);
+        // each morph: two names, panel, type, count, then 4 + 1 + 4*4 + 3*4 + 4 + 3*4 + 4*4 + 4 + 3*4*4 bytes (material) or 8 (group)
+        CHECK(withMorphs.size() > plain.size() + 100);
+        m.morphs[1].group[0].first = 5;   // a group member that does not exist
+        bool threw = false;
+        try { pmx::WritePmx(m); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        m.morphs[1].group[0].first = 0;
+        m.morphs[0].materials[0].material = 9;   // a material that does not exist
+        threw = false;
+        try { pmx::WritePmx(m); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    });
 }
 
 void integrationTests() {
@@ -431,6 +491,22 @@ void integrationTests() {
                 if (std::abs(s - 1.0f) > 1e-3f) ++badWeights;
             }
         CHECK(badWeights == 0);
+        {   // the nude body: what a garment's mask cuts from the body is kept as under pieces, nothing is lost
+            const assemble::ScenePart* body0 = nullptr;
+            bool nudeSwitch = false;
+            size_t pieces = 0;
+            for (const auto& p : scene.parts) {
+                if (p.id == "body") body0 = &p;
+                if (p.nudeSwitch) nudeSwitch = true;
+                if (p.underPiece) {
+                    ++pieces;
+                    CHECK(!p.visibleInPreview && p.startHidden && !p.coveredBy.empty() && !p.underOf.empty());
+                    for (int mi : p.meshes) for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes) CHECK(!sm.indices.empty());
+                }
+            }
+            CHECK(body0 != nullptr);
+            CHECK(nudeSwitch == (pieces > 0));
+        }
 
         // ---- golden facts from the Python reference run (tests/golden/*.json) ----
         std::string goldenPath = env("CARDBRIDGE_TEST_GOLDEN");
