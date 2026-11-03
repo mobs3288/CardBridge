@@ -15,6 +15,7 @@ struct ExportOptions {
     std::string baseName;          // file stem; defaults to the character name
     float scale = 12.5f;           // model units per metre (MMD convention)
     bool overwrite = false;
+    bool physics = true;           // rigid bodies and joints for hair, skirts and ribbons; false = a rigid PMX with no physics at all
     bool faceMinusZ = true;        // turn the model half a turn about Y so it faces -Z, where MikuMikuDance puts a PMX's front; false = as built (+Z, Unity)
     int outfit = 0;                // recorded in the manifest
     std::string assetLibrary;      // recorded as provenance only

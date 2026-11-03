@@ -387,7 +387,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
     const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale);
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
-    AddPhysics(scene, model, opt.scale);
+    if (opt.physics) AddPhysics(scene, model, opt.scale);
     const std::vector<int> ikBones = AddIk(scene, model, opt.scale);
     {   // display frames: Root, Exp (the first 255 morphs), then the bones by group
         pmx::DisplayFrame root;
