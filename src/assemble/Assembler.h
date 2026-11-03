@@ -36,4 +36,11 @@ struct AssembleOptions {
 // silent gap.
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt);
 
+// Re-shapes an assembled scene in place when only the shape changed: `opt` carries the new body and face sliders, the nipple settings and
+// the outfit the scene was assembled with. The skeleton is rebuilt (the game's formulas, KKABMX, the head on the new neck) and every vertex,
+// normal, bone position and collider follows through the per-bone frames the assembly stored. A few milliseconds, no bundle is read again
+// but the small shape tables. Not redone: hair and accessory chains that were settled by a DynamicBone (off by default), blend shape offsets,
+// and the areola texture size, which is a texture, not a bone. Returns false when the scene cannot be re-shaped (no skeleton in the library).
+bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt);
+
 } // namespace cardbridge::assemble

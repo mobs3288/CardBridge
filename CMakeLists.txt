@@ -74,6 +74,7 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
     src/assemble/Pose.cpp
+    src/assemble/PhysicsSim.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
     src/export/SkeletonOverlay.cpp

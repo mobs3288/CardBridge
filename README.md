@@ -154,6 +154,11 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
 # P (or Look tab > Pose) is the automatic A-pose: clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
 # pose as the model's rest pose and lists it in the manifest's "pose". CLI: --apose [--apose-degrees N]; --gpu-view --gpu-bones draws the skeleton on the picture.
+# With the skeleton on, the bone under the pointer is ringed and a click-drag on a bone turns it (Ctrl+drag moves it): the tip follows the pointer, the bone and
+# everything below it (drawn in the same warm colour) swing. The body and face sliders and the nipple controls are real time too (about 6 ms: the skeleton is rebuilt
+# with the game's formulas and every vertex follows through its per-bone frames, no loading); only the areola size is a texture and still assembles again.
+# Y switches the physics preview on: the DynamicBone chains (hair, skirts, ribbons, the body's jiggle) are simulated live at 60 updates a second against the body
+# colliders, so they swing as bones, sliders or the A-pose move what they hang from; N gives them a shove. The camera never pauses it.
 # Drop a card .png on the window to open it.
 cardbridge_viewer "<card.png>" --library "<library folder>" --mods "<mods folder>"      # the folders are remembered
 ```

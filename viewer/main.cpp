@@ -16,6 +16,7 @@
 
 #include "assemble/Assembler.h"
 #include "assemble/Pose.h"
+#include "assemble/PhysicsSim.h"
 #include "export/BoneLabels.h"
 #include "export/SkeletonOverlay.h"
 #include "export/ColourGrade.h"
@@ -225,7 +226,7 @@ enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabCount };
 const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text
     int id = 0;
@@ -287,7 +288,7 @@ struct App {
     std::atomic<bool> exporting{false};
     std::string status = "drop a Koikatsu card on this window";
     std::string modsInfo;   // what the mod index found, shown in the panel
-    std::mutex mu;
+    std::recursive_mutex mu;   // recursive: a slider handler holds it while it re-shapes, which reads the character through Current()
 
     exporter::ViewCamera cam;
     exporter::ViewStatePtr state = exporter::NewViewState();
@@ -334,6 +335,15 @@ struct App {
     exporter::GpuView* lastGpu = nullptr;     // the view that drew the last picture
     POINT downAt{};                           // where the left button went down in the view (a click without a drag picks a bone)
     int boneScroll = 0;
+    int hoverBone = -1;                       // the bone under the pointer (in the view or the tree), lit up in the overlay
+    int dragBone = -1;                        // the bone being turned (or moved) with the left button in the view
+    bool dragMove = false;
+    // Physics preview: the DynamicBone chains simulated live while the switch is on.
+    assemble::PhysicsSim sim;
+    bool physics = false, physicsMoving = false, physicsKick = false;
+    ULONGLONG physicsLast = 0;
+    double physicsAccum = 0.0;
+    std::vector<Mat4> poseWorld;
 
     std::mutex logMu;
     std::vector<LogLine> logLines;
@@ -348,9 +358,10 @@ constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
 constexpr UINT WM_EXP_READY = WM_APP + 4;
 constexpr UINT_PTR kTimerApplyTweaks = 2;
+constexpr UINT_PTR kTimerPhysics = 3;
 
 std::shared_ptr<Loaded> Current() {
-    std::lock_guard<std::mutex> lk(g.mu);
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     return g.loaded;
 }
 
@@ -474,6 +485,8 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, -1, "Pose (shows at once, the export carries it)", "Pose"});
         rows.push_back({2, kAPose, "Automatic A-pose: arms down from the T-pose", "Pose"});
         rows.push_back({1, kAPoseDeg, "A-pose angle (degrees)", "Pose"});
+        rows.push_back({0, -1, "Physics preview (Y; N shakes it)", "Physics"});
+        rows.push_back({2, kPhysics, "Simulate hair, skirts and ribbons live", "Physics"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -487,6 +500,7 @@ bool TweakChanged(int id) {
     if (id >= kLayerBase && id < kBoneEdit) return g.gpu.layerEnabled(static_cast<size_t>(id - kLayerBase));
     if (id == kNippleIn) return g.tw.nippleInside;
     if (id == kAPose) return g.aPose;
+    if (id == kPhysics) return g.physics;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
 
@@ -521,21 +535,27 @@ assemble::Pose BuildPose(const Loaded& L) {
     return p;
 }
 
-// Re-skins every Direct3D view with the current pose, without a re-assembly, and refreshes the bone positions the overlay draws.
-void ApplyPoseLive() {
+// Re-skins every Direct3D view with the current pose (and the physics, when it is on) without a re-assembly, and refreshes the bone
+// positions the overlay draws. `simSteps` physics updates run first (0 only makes the chains follow the pose).
+void ApplyPoseLive(int simSteps = 0) {
     std::shared_ptr<Loaded> L = Current();
     g.skin.clear();
     g.boneWorld.clear();
     if (!L || L->scene.bones.empty()) return;
+    const assemble::Scene& scene = L->scene;
+    const size_t n = scene.bones.size();
     const assemble::Pose p = BuildPose(*L);
-    g.boneWorld.resize(L->scene.bones.size());
-    if (p.empty()) {
-        for (size_t i = 0; i < g.boneWorld.size(); ++i) g.boneWorld[i] = L->scene.bones[i].pos;
-    } else {
-        g.skin = assemble::SkinMatrices(L->scene, p);
-        const std::vector<Mat4> w = assemble::BoneWorlds(L->scene, p);
-        for (size_t i = 0; i < g.boneWorld.size(); ++i) g.boneWorld[i] = w[i].translation();
+    g.poseWorld = assemble::BoneWorlds(scene, p);
+    if (!p.empty() || (g.physics && !g.sim.empty())) {
+        g.skin.resize(n);
+        for (size_t i = 0; i < n; ++i) g.skin[i] = g.poseWorld[i] * Mat4::TRS(scene.bones[i].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
+        if (g.physics && !g.sim.empty()) {
+            g.physicsMoving = g.sim.Step(scene, g.poseWorld, simSteps, g.skin);
+            if (simSteps == 0) g.physicsKick = true;   // the anchors moved: let the chains catch up
+        }
     }
+    g.boneWorld.resize(n);
+    for (size_t i = 0; i < n; ++i) g.boneWorld[i] = g.skin.empty() ? scene.bones[i].pos : g.skin[i].point(scene.bones[i].pos);
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
@@ -543,6 +563,40 @@ void ApplyPoseLive() {
     if (sk && !g.gpuOk && !warned) { warned = true; Log("posing needs the Direct3D 11 view; the software renderer shows the rest pose", LogKind::Warn); }
     g.dirty = true;
     if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
+}
+
+// The physics switch: on starts every chain at rest under the current pose and a 60 Hz timer; the chains then swing and settle as bones,
+// sliders or the A-pose move what they hang from (N gives them a shove).
+void SetPhysics(bool on) {
+    std::shared_ptr<Loaded> L = Current();
+    if (on && (!L || L->scene.chains.empty())) { Log("no physics chains in this character", LogKind::Warn); on = false; }
+    g.physics = on;
+    if (on) {
+        g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)));
+        g.physicsLast = GetTickCount64();
+        g.physicsAccum = 0.0;
+        g.physicsKick = g.physicsMoving = true;
+        SetTimer(g.hwnd, kTimerPhysics, 16, nullptr);
+        Log("physics: on (" + std::to_string(L->scene.chains.size()) + " chains; move a bone or press N)", LogKind::Good);
+    } else {
+        KillTimer(g.hwnd, kTimerPhysics);
+        Log("physics: off");
+    }
+    ApplyPoseLive();
+}
+
+// One timer tick of the physics preview: as many 1/60 s updates as the time asks for (at most four), drawn once.
+void PhysicsTick() {
+    if (!g.physics) { KillTimer(g.hwnd, kTimerPhysics); return; }
+    const ULONGLONG now = GetTickCount64();
+    g.physicsAccum = std::min(0.1, g.physicsAccum + static_cast<double>(now - g.physicsLast) / 1000.0);
+    g.physicsLast = now;
+    const int steps = std::min(4, static_cast<int>(g.physicsAccum * 60.0));
+    if (steps <= 0) return;
+    g.physicsAccum -= steps / 60.0;
+    if (!g.physicsMoving && !g.physicsKick) return;   // everything has settled: nothing to draw
+    g.physicsKick = false;
+    ApplyPoseLive(steps);
 }
 
 // The bone tree as list rows. Driven, shape and attach nodes are left out unless asked for (their children move up to the
@@ -607,6 +661,42 @@ void SelectBone(const assemble::Scene& scene, int bone) {
         if (rows[i].bone == bone) { g.boneScroll = static_cast<int>(i) > 3 ? static_cast<int>(i) - 3 : 0; break; }
 }
 
+// A body or face slider, the nipple switch or offset: re-shapes the assembled scene in place (a few milliseconds, no loading) and re-skins the
+// views. `final` (the slider was let go) also rebuilds the normal map frames, which are left alone while dragging. False when it cannot
+// be done and the character has to be assembled again.
+bool ReshapeNow(bool final) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.busy || !g.resolver || L->scene.bones.empty()) return false;
+    assemble::AssembleOptions ao;
+    ao.outfit = L->outfit;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        ao.bodyShape = g.tw.body;
+        ao.faceShape = g.tw.face;
+        ao.nippleInside = g.tw.nippleInside;
+        ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+    }
+    if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
+    if (g.gpuOk) g.gpu.Refresh(final);
+    if (g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
+        assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
+        g.gpuExp.Refresh(final);
+    }
+    if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)));
+    ApplyPoseLive();
+    return true;
+}
+
+bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kNippleIn; }
+
+// Something a slider or switch controls changed. Pose controls and the shape sliders show at once; the areola size is a texture and still
+// waits for the pointer to be still and assembles the character again.
+void TweakEdited(int id, bool released) {
+    if (IsLiveId(id)) { ApplyPoseLive(); return; }
+    if (IsShapeId(id)) { if (!ReshapeNow(released)) ScheduleApplyTweaks(); return; }
+    if (released) ScheduleApplyTweaks();
+}
+
 // Long paths and names must not run out of the panel and over the model: keep the start (the drive) and the
 // useful tail, or cut the end for hints.
 std::string Shorten(const std::string& s, size_t maxChars) {
@@ -624,7 +714,7 @@ bool EnsureResolver(std::string& err) {
     if (g.settings.library.empty()) { err = "no asset library: start with --library <dir>"; return false; }
     std::vector<std::string> issues;
     {
-        std::lock_guard<std::mutex> lk(g.mu);
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo.clear();
     }
     if (!g.settings.mods.empty()) {
@@ -640,12 +730,12 @@ bool EnsureResolver(std::string& err) {
             });
             SaveSettings(g.settings);
         }
-        std::lock_guard<std::mutex> lk(g.mu);
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo = std::to_string(g.mods.guidCount()) + " mods found";
         if (g.mods.guidCount() == 0) g.modsInfo = "NO mods found in that folder - press M and pick the folder that holds the .zipmod files";
         Log(g.modsInfo, g.mods.guidCount() ? LogKind::Good : LogKind::Error);
     } else {
-        std::lock_guard<std::mutex> lk(g.mu);
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo = "no mods folder set - mod items will be missing (press M)";
         Log(g.modsInfo, LogKind::Warn);
     }
@@ -691,7 +781,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             assemble::AssembleOptions ao;
             ao.outfit = shown;
             {   // the sliders: the card's own values unless the user changed them
-                std::lock_guard<std::mutex> lk(g.mu);
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
                     g.tw = Tweaks();
                     const Value& bv = c.body.at("shapeValueBody");
@@ -728,7 +818,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             Log(std::string("load failed: ") + e.what(), LogKind::Error);
         }
         {
-            std::lock_guard<std::mutex> lk(g.mu);
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
             g.loaded = out;
         }
         g.busy = false;
@@ -754,10 +844,11 @@ void StartExport() {
     const std::vector<char> hiddenNow = g.hidden;
     const assemble::Pose pose = BuildPose(*L);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
-    std::thread([L, outDir, stem, library, mods, hiddenNow, pose]() {
+    assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
+    std::thread([L, outDir, stem, library, mods, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         try {
-            assemble::Scene scene = L->scene;   // bake the copy, not what the viewport is drawing
+            assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
@@ -795,17 +886,18 @@ void ToggleAsExported() {
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
     Log(std::string("baking the export preview (colour only, ") + (grade ? "graded" : "not graded") + ")");
-    std::thread([L, grade]() {
+    auto copy = std::make_shared<assemble::Scene>(L->scene);
+    std::thread([L, grade, copy]() {
         std::shared_ptr<assemble::Scene> sc;
         try {
-            sc = std::make_shared<assemble::Scene>(L->scene);
+            sc = copy;
             exporter::BakeShaderTextures(*sc, 1024, false, nullptr, {}, grade);
         } catch (const std::exception& e) {
             Log(std::string("export preview failed: ") + e.what(), LogKind::Error);
             sc.reset();
         }
         {
-            std::lock_guard<std::mutex> lock(g.mu);
+            std::lock_guard<std::recursive_mutex> lock(g.mu);
             g.expPending = sc; g.expPendingFor = L; g.expPendingGrade = grade;
         }
         PostMessageW(g.hwnd, WM_EXP_READY, 0, 0);
@@ -899,7 +991,49 @@ void DrawSkeleton(int w, int h) {
     g.boneScreen.clear();
     std::shared_ptr<Loaded> L = Current();
     if (!g.showBones || !g.lastGpu || !L) return;
-    exporter::DrawSkeletonOverlay(L->scene, g.boneWorld, *g.lastGpu, g.frame, w, h, g.selBoneName.empty() ? -1 : L->scene.boneIndex(g.selBoneName), g.showHelpers, &g.boneScreen);
+    exporter::DrawSkeletonOverlay(L->scene, g.boneWorld, *g.lastGpu, g.frame, w, h, g.selBoneName.empty() ? -1 : L->scene.boneIndex(g.selBoneName), g.hoverBone, g.showHelpers, &g.boneScreen);
+}
+
+// Turns (or, with Ctrl, moves) a bone by a pointer movement: the bone's tip follows the pointer, as if it were grabbed there. The new
+// angles go into the bone's edit and the views re-skin at once.
+void DragBone(int bone, float dx, float dy, bool move) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || bone < 0 || static_cast<size_t>(bone) >= L->scene.bones.size() || g.boneWorld.size() != L->scene.bones.size() || !g.lastGpu) return;
+    const assemble::Scene& scene = L->scene;
+    const size_t n = scene.bones.size();
+    // the picture's right and up in the world (the same camera GpuView::Render builds)
+    const float yaw = g.cam.yawDeg * 3.14159265f / 180.0f, pit = g.cam.pitchDeg * 3.14159265f / 180.0f;
+    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
+    const Vec3 right{-cs, 0.0f, -sn}, up{sp * sn, cp, -sp * cs};
+    // the tip: the first child that is shown, else the first child, else the parent's direction extended
+    int tipBone = -1;
+    for (size_t i = 0; i < n; ++i)
+        if (scene.bones[i].parent == bone && static_cast<int>(i) != bone) { if (tipBone < 0 || (exporter::IsHelperBone(scene.bones[static_cast<size_t>(tipBone)].name) && !exporter::IsHelperBone(scene.bones[i].name))) tipBone = static_cast<int>(i); }
+    const Vec3 pivot = g.boneWorld[static_cast<size_t>(bone)];
+    Vec3 tip;
+    if (tipBone >= 0) tip = g.boneWorld[static_cast<size_t>(tipBone)];
+    else {
+        const int par = scene.bones[static_cast<size_t>(bone)].parent;
+        Vec3 back = par >= 0 ? Vec3{pivot.x - g.boneWorld[static_cast<size_t>(par)].x, pivot.y - g.boneWorld[static_cast<size_t>(par)].y, pivot.z - g.boneWorld[static_cast<size_t>(par)].z} : Vec3{0, -0.05f, 0};
+        tip = pivot + normalize(back) * 0.05f;
+    }
+    Vec3 arm{tip.x - pivot.x, tip.y - pivot.y, tip.z - pivot.z};
+    const float armLen = std::sqrt(arm.x * arm.x + arm.y * arm.y + arm.z * arm.z);
+    if (armLen < 1e-5f) return;
+    float ax, ay, bx, by, depth;
+    if (!g.lastGpu->Project(pivot, ax, ay, depth) || !g.lastGpu->Project(tip, bx, by, depth)) return;
+    const float pixels = std::max(8.0f, std::sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)));
+    const float perPixel = armLen / pixels;                        // world length of one pixel at the bone
+    const Vec3 delta = (right * dx + up * (-dy)) * perPixel;      // the pointer's movement in the world
+    assemble::Pose pose = BuildPose(*L);
+    assemble::BonePose& e = g.boneEdits[scene.bones[static_cast<size_t>(bone)].name];
+    if (move) e.pos = assemble::MoveBone(scene, pose, static_cast<size_t>(bone), delta);
+    else {
+        const Vec3 dir = normalize(arm);
+        const Mat4 turn = assemble::RotationBetween(dir, normalize(arm + delta));
+        e.rot = assemble::TurnBone(scene, pose, static_cast<size_t>(bone), turn);
+    }
+    ApplyPoseLive();
 }
 
 // A click in the view on a bone of the overlay selects it (the nearest within a few pixels) and shows it in the Bones tab.
@@ -1084,7 +1218,7 @@ void DrawBonesTab(HDC dc, const PanelLayout& l, const Loaded& L) {
 void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     std::shared_ptr<Loaded> L = Current();
     std::string modsInfo;
-    { std::lock_guard<std::mutex> lk(g.mu); modsInfo = g.modsInfo; }
+    { std::lock_guard<std::recursive_mutex> lk(g.mu); modsInfo = g.modsInfo; }
     PanelLayout l = Lay(rc.bottom);
 
     HBRUSH bg = CreateSolidBrush(RGB(24, 26, 32));
@@ -1346,7 +1480,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     FillRect(dc, &fr, foot);
     DeleteObject(foot);
     DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
-    std::string hint = "1-7 outfit · L library · M mods · K bones · P A-pose · C log";
+    std::string hint = "1-7 outfit · L lib · K bones · P A-pose · Y physics · N shake";
     if (g.busy) hint = "working ...";
     else if (g.exporting) hint = "exporting PMX ...";
     if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
@@ -1432,7 +1566,7 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;
     const TweakRow& row = rows[static_cast<size_t>(idx)];
-    std::lock_guard<std::mutex> lk(g.mu);
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     if (row.kind == 4 || (row.kind == 0 && row.id < 0)) return;
     if (row.kind == 2 && row.id >= kLayerBase && row.id < kBoneEdit) {   // a shader layer: no re-assembly, just another frame
         const size_t li = static_cast<size_t>(row.id - kLayerBase);
@@ -1444,9 +1578,22 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         return;
     }
     if (row.kind == 0) {
-        bool any = false;
-        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) { any = any || TweakChanged(rows[k].id); ResetTweak(rows[k].id); }
-        if (any) { Log("reset " + row.label); ScheduleApplyTweaks(); }
+        bool any = false, texture = false;
+        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
+            any = any || TweakChanged(rows[k].id);
+            texture = texture || (rows[k].id == kAreola && TweakChanged(kAreola));
+            ResetTweak(rows[k].id);
+        }
+        if (any) {
+            Log("reset " + row.label);
+            if (!ReshapeNow(true)) ScheduleApplyTweaks();
+            else if (texture) ScheduleApplyTweaks();
+        }
+        return;
+    }
+    if (row.kind == 2 && row.id == kPhysics) {
+        SetPhysics(right ? false : !g.physics);
+        InvalidatePanel();
         return;
     }
     if (row.kind == 2 && row.id == kAPose) {
@@ -1459,19 +1606,19 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (row.kind == 2) {
         if (right) ResetTweak(row.id); else g.tw.nippleInside = !g.tw.nippleInside;
         Log(row.label + ": " + (g.tw.nippleInside ? "on" : "off"));
-        ScheduleApplyTweaks();
+        TweakEdited(kNippleIn, true);
         return;
     }
     SliderRef r;
     if (!SliderFor(row.id, r)) return;
     if (right) {
-        if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); if (IsLiveId(row.id)) ApplyPoseLive(); else ScheduleApplyTweaks(); }
+        if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
         return;
     }
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
     *r.v = SliderValueAt(r, x);
-    if (IsLiveId(row.id)) ApplyPoseLive();
+    TweakEdited(row.id, false);
     SetCapture(g.hwnd);
     InvalidatePanel();
 }
@@ -1545,6 +1692,7 @@ void ChooseLibrary() {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_TIMER:
+        if (wp == kTimerPhysics) { PhysicsTick(); return 0; }
         if (wp == kTimerApplyTweaks) {
             KillTimer(hwnd, kTimerApplyTweaks);
             if (g.sliderDrag >= 0) { ScheduleApplyTweaks(); return 0; }   // still dragging
@@ -1567,7 +1715,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_EXP_READY: {
         std::shared_ptr<assemble::Scene> sc;
         {
-            std::lock_guard<std::mutex> lock(g.mu);
+            std::lock_guard<std::recursive_mutex> lock(g.mu);
             sc = std::move(g.expPending);
             g.expFor = g.expPendingFor; g.expGrade = g.expPendingGrade;
             g.expPendingFor.reset();
@@ -1618,7 +1766,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.selBoneName.clear(); g.boneScroll = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
-        ApplyPoseLive();
+        if (g.physics) { g.physics = false; SetPhysics(true); }
+        else ApplyPoseLive();
         g.dirty = true;
         if (L) SetWindowTextW(hwnd, Utf8ToWide("CardBridge viewer - " + (L->title.empty() ? g.cardPath : L->title)).c_str());
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1679,6 +1828,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (g.showBones && !g.boneScreen.empty()) {   // a bone under the pointer is grabbed: dragging turns it, Ctrl+drag moves it
+            const int hit = exporter::PickBone(g.boneScreen, static_cast<float>(x - kPanel), static_cast<float>(y), 12.0f);
+            if (std::shared_ptr<Loaded> L = Current(); L && hit >= 0) {
+                g.selBoneName = L->scene.bones[static_cast<size_t>(hit)].name;
+                g.dragBone = hit;
+                g.dragMove = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                g.drag = 3; g.last = {x, y}; g.interacting = true; SetCapture(hwnd);
+                InvalidatePanel();
+                return 0;
+            }
+        }
         g.drag = 1; g.last = {x, y}; g.downAt = {x, y}; g.interacting = true; SetCapture(hwnd);
         return 0;
     }
@@ -1722,8 +1882,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         if (g.sliderDrag >= 0) {
             SliderRef r;
-            if (SliderFor(g.sliderDrag, r)) { std::lock_guard<std::mutex> lk(g.mu); *r.v = SliderValueAt(r, x); }
-            if (IsLiveId(g.sliderDrag)) ApplyPoseLive();
+            if (SliderFor(g.sliderDrag, r)) { std::lock_guard<std::recursive_mutex> lk(g.mu); *r.v = SliderValueAt(r, x); }
+            TweakEdited(g.sliderDrag, false);
+            InvalidatePanel();
+            return 0;
+        }
+        if (g.drag == 3) {
+            DragBone(g.dragBone, static_cast<float>(x - g.last.x), static_cast<float>(y - g.last.y), g.dragMove);
+            g.last = {x, y};
             InvalidatePanel();
             return 0;
         }
@@ -1743,6 +1909,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         GetClientRect(hwnd, &rc);
         PanelLayout l = Lay(rc.bottom);
         int oldRow = g.hoverRow, oldPart = g.hoverPart, oldButton = g.hoverButton, oldOutfit = g.hoverOutfit;
+        int hoverBone = -1;   // the pointer over a bone of the overlay in the view, or over its row in the tree
+        if (x >= kPanel && g.showBones) hoverBone = exporter::PickBone(g.boneScreen, static_cast<float>(x - kPanel), static_cast<float>(y), 12.0f);
+        else if (x < kPanel && g.tab == TabBones && y >= l.boneListTop && y < l.boneListBottom)
+            if (std::shared_ptr<Loaded> LL = Current()) {
+                const std::vector<BoneRow> rows = BuildBoneRows(LL->scene);
+                const int ri = (y - l.boneListTop) / kRowH + g.boneScroll;
+                if (ri >= 0 && static_cast<size_t>(ri) < rows.size()) hoverBone = rows[static_cast<size_t>(ri)].bone;
+            }
+        if (hoverBone != g.hoverBone) {
+            g.hoverBone = hoverBone;
+            if (g.showBones) { g.dirty = true; RECT vp{kPanel, 0, rc.right, rc.bottom}; InvalidateRect(hwnd, &vp, FALSE); }
+        }
         g.hoverButton = x < kPanel ? ButtonAt(l, x, y) : 0;
         g.hoverOutfit = x < kPanel ? OutfitChipAt(l, x, y) : -1;
         g.hoverRow = -1;
@@ -1774,6 +1952,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
+        if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); }
         if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0) {
             bool part = g.hoverPart >= 0;
             g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
@@ -1791,9 +1970,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
                 Log(msg);
             }
+            const int released = g.sliderDrag;
             g.sliderDrag = -1;
             ReleaseCapture();
-            if (!live) ScheduleApplyTweaks();
+            TweakEdited(released, true);
+            return 0;
+        }
+        if (g.drag == 3) {
+            if (std::shared_ptr<Loaded> LL = Current(); LL && g.dragBone >= 0 && static_cast<size_t>(g.dragBone) < LL->scene.bones.size()) Log((g.dragMove ? "moved " : "turned ") + LL->scene.bones[static_cast<size_t>(g.dragBone)].name);
+            g.dragBone = -1; g.drag = 0; g.interacting = false; ReleaseCapture();
+            g.dirty = true; InvalidateRect(hwnd, nullptr, FALSE); InvalidatePanel();
             return 0;
         }
         if (msg == WM_LBUTTONUP && g.drag == 1 && g.showBones && std::abs(GET_X_LPARAM(lp) - g.downAt.x) < 4 && std::abs(GET_Y_LPARAM(lp) - g.downAt.y) < 4)
@@ -1887,6 +2073,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'G') { exporter::SetColourGradeEnabled(!exporter::ColourGradeEnabled()); g.dirty = true; }
         else if (wp == 'X') ToggleAsExported();
         else if (wp == 'K') { g.showBones = !g.showBones; Log(g.showBones ? "skeleton: on (click a bone to select it)" : "skeleton: off"); g.dirty = true; }
+        else if (wp == 'Y') { SetPhysics(!g.physics); InvalidatePanel(); }
+        else if (wp == 'N') { if (g.physics) { g.sim.Nudge({0.004f, 0.0f, 0.002f}); g.physicsKick = g.physicsMoving = true; Log("physics: shake"); } else Log("physics is off (Y)", LogKind::Warn); }
         else if (wp == 'P') { g.aPose = !g.aPose; Log(std::string("A-pose: ") + (g.aPose ? "on" : "off")); ApplyPoseLive(); }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);

@@ -76,6 +76,7 @@ struct GpuView::Impl {
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
     int skipped = 0;
+    std::vector<Mat4> skinCopy;    // the skin SetSkin was last given (empty = rest), kept for Refresh
     float lastM[16] = {};          // world -> clip of the last Render, for Project()
     int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
@@ -281,6 +282,9 @@ void GpuView::SetPlain(bool on) { impl_->plain = on; }
 void GpuView::SetSkin(const std::vector<Mat4>* skin) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene) return;
+    if (skin && skin != &I.skinCopy) I.skinCopy = *skin;
+    else if (!skin) I.skinCopy.clear();
+    if (skin == &I.skinCopy) skin = I.skinCopy.empty() ? nullptr : &I.skinCopy;
     std::vector<GVert> posed;
     for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
         GpuMesh& g = I.meshes[mi];
@@ -315,6 +319,25 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
         }
         I.ctx->UpdateSubresource(g.vb, 0, nullptr, src->data(), 0, 0);
     }
+}
+
+void GpuView::Refresh(bool tangents) {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return;
+    for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
+        GpuMesh& g = I.meshes[mi];
+        const auto& m = I.scene->meshes[mi];
+        if (!g.vb || g.rest.size() != m.vertices.size()) continue;
+        std::vector<Vec3> tan;
+        if (tangents) tan = detail::ComputeMeshTangents(m);
+        for (size_t v = 0; v < g.rest.size(); ++v) {
+            const auto& sv = m.vertices[v];
+            g.rest[v].pos[0] = sv.pos.x; g.rest[v].pos[1] = sv.pos.y; g.rest[v].pos[2] = sv.pos.z;
+            g.rest[v].nrm[0] = sv.normal.x; g.rest[v].nrm[1] = sv.normal.y; g.rest[v].nrm[2] = sv.normal.z;
+            if (tangents) { g.rest[v].tan[0] = tan[v].x; g.rest[v].tan[1] = tan[v].y; g.rest[v].tan[2] = tan[v].z; }
+        }
+    }
+    SetSkin(I.skinCopy.empty() ? nullptr : &I.skinCopy);
 }
 
 bool GpuView::Project(Vec3 world, float& sx, float& sy, float& depth) const {
