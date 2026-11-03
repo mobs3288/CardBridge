@@ -7,3 +7,8 @@ out/
 /library*/
 /build/
 /dist/
+/sidecar/io/
+/sidecar/obj/
+/sidecar/out/
+/sidecar/bin/
+__pycache__/
