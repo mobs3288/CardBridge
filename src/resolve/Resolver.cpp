@@ -1,6 +1,7 @@
 #include "resolve/Resolver.h"
 
 #include "core/FileIo.h"
+#include "card/MaterialEdits.h"
 #include "core/ZipArchive.h"
 #include <nlohmann/json.hpp>
 
@@ -79,6 +80,9 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     // id 0 means "none" for hair, clothing and accessories - but for the head it is the first real head.
     // Jacket/sailor sub-parts (categories 200-212) are the same: id 0 there is a real shirt or a listed "none".
     bool zeroIsItem = ref.category == 100 || (ref.category >= 200 && ref.category <= 212);
+    // Face textures (eyebrow, eyelines, nose, eye white / pupil / highlight rows) are the same where the base lists have a row 0: it is the
+    // first real texture (cw_t_mayuge_000, cw_t_eyeline_down_000, cw_t_noseline_000), not "none".
+    if (ref.category >= 406 && ref.category <= 414 && lists_.findBase(ref.category, 0)) zeroIsItem = true;
     if (ref.id == 0 && !zeroIsItem) { r.status = ItemStatus::Empty; return r; }
 
     // The card's resolver row for this item: by property path first, then by
@@ -287,6 +291,41 @@ std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& i
         if (why) *why = std::string(e.what());
         return nullptr;
     }
+}
+
+std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedItem& item, const std::string& ab, const std::string& name, std::string* why) {
+    if (item.status != ItemStatus::ResolvedMod || item.modPath.empty()) { if (why) *why = "not a mod item"; return nullptr; }
+    std::string stem = lowerOf(ab);
+    if (stem.size() > 8 && stem.compare(stem.size() - 8, 8, ".unity3d") == 0) stem.resize(stem.size() - 8);
+    std::string modPath = item.modPath;
+    if (auto pr = providers_.find(lowerOf(ab)); pr != providers_.end() && pr->second.size() > 1)
+        modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    std::string key = "loose:" + modPath + "|" + stem + "/" + lowerOf(name);
+    auto hit = looseTextures_.find(key);
+    if (hit != looseTextures_.end()) return hit->second;
+    try {
+        ZipArchive z(modPath);
+        const std::string want = "abdata/" + stem + "/" + lowerOf(name) + ".png";
+        for (const auto& e : z.entries()) {
+            if (lowerOf(e.name) != want) continue;
+            int w = 0, h = 0;
+            std::vector<uint8_t> rgba;
+            if (!card::DecodeImageBytes(z.read(e), w, h, rgba)) { if (why) *why = e.name + " is not a readable image"; return nullptr; }
+            auto t = std::make_shared<unity::TextureData>();
+            t->name = name;
+            t->width = w;
+            t->height = h;
+            t->unityFormat = 4;   // RGBA32
+            t->rgba = std::move(rgba);
+            looseTextures_[key] = t;
+            return t;
+        }
+    } catch (const std::exception& e) {
+        if (why) *why = e.what();
+        return nullptr;
+    }
+    if (why) *why = "no loose image abdata/" + stem + "/" + name + ".png in " + modPath;
+    return nullptr;
 }
 
 } // namespace cardbridge::resolve

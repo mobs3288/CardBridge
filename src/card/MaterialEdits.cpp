@@ -47,6 +47,15 @@ bool decodeImage(const Bytes& bytes, MaterialEdits::Image& out) {
 
 } // namespace
 
+bool DecodeImageBytes(const Bytes& bytes, int& width, int& height, std::vector<uint8_t>& rgba) {
+    MaterialEdits::Image img;
+    if (!decodeImage(bytes, img)) return false;
+    width = img.width;
+    height = img.height;
+    rgba = std::move(img.rgba);
+    return true;
+}
+
 bool MaterialEdits::decode(int texId, Image& out) const {
     auto it = encoded.find(texId);
     return it != encoded.end() && decodeImage(it->second, out);

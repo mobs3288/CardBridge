@@ -228,6 +228,14 @@ void unitTests() {
         CHECK(t.find("cf_d_sk_top", 5) == nullptr);
     });
 
+    test("image bytes (the loose textures mods ship) decode to RGBA", [] {
+        int w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+        CHECK(card::DecodeImageBytes(tinyPng(), w, h, rgba));
+        CHECK(w == 1 && h == 1 && rgba.size() == 4);
+        CHECK(!card::DecodeImageBytes(B({1, 2, 3}), w, h, rgba));
+    });
+
     test("sha256", [] {
         std::string s = "abc";
         CHECK(Sha256Hex(reinterpret_cast<const uint8_t*>(s.data()), s.size()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");

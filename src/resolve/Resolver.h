@@ -74,6 +74,10 @@ public:
     // "archive:/CAB-xxxx/CAB-xxxx"): the first call indexes which bundle holds which CAB (cached in library/cab_index.json).
     // A row of the base-game lists (the library's abdata/list), or null.
     const ListItem* baseRow(int category, int64_t id) const { return lists_.findBase(category, id); }
+    // A texture a mod's list row names that is not in any bundle: Sideloader serves loose images the zipmod ships at
+    // abdata/<bundle path without .unity3d>/<texture name>.png (e.g. abdata/sideloader/mt_nose_00/01.png for MainAB "sideloader/mt_nose_00.unity3d",
+    // MainTex "01"). Null when the mod has no such file.
+    std::shared_ptr<unity::TextureData> openLooseTexture(const ResolvedItem& item, const std::string& ab, const std::string& name, std::string* why);
     std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
 
 private:
@@ -82,6 +86,7 @@ private:
     std::string abdata_;
     std::map<std::string, bool> modListsLoaded_;
     std::map<std::string, std::shared_ptr<unity::UnityFile>> cache_;
+    std::map<std::string, std::shared_ptr<unity::TextureData>> looseTextures_;
     std::map<std::string, std::vector<std::string>> providers_;   // lower-case bundle path -> zipmods of this character that contain it
     std::map<std::string, std::string> cabIndex_;   // lower-case CAB name -> library-relative bundle path
     bool cabIndexBuilt_ = false;

@@ -67,6 +67,9 @@ struct MaterialEdits {
     bool decode(int texId, Image& out) const;
 };
 
+// Decodes a PNG / JPEG / BMP / TGA into RGBA8, top row first. False when the bytes are not a readable image.
+bool DecodeImageBytes(const Bytes& bytes, int& width, int& height, std::vector<uint8_t>& rgba);
+
 MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate);
 
 } // namespace cardbridge::card
