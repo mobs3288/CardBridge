@@ -189,6 +189,7 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
         float nip = opt.nippleInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
         if (opt.nippleInside) v[13] = std::min(v[13], 0.0f);
+        if (opt.nippleInside) v[11] = 0.0f;   // the areola dome flat too: it is what shows as a pale disc through thin clothes
     }
     for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
@@ -202,7 +203,8 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     {
         const float off = opt.nippleInside ? std::min(opt.nippleOffset, opt.nippleInsideOffset) : opt.nippleOffset;
         if (off != 0.0f)
-            for (const char* nm : {"cf_s_bnip02_L", "cf_s_bnip02_R", "cf_s_bnipacc_L", "cf_s_bnipacc_R", "cf_s_bnip015_L", "cf_s_bnip015_R"}) {
+            for (const char* nm : {"cf_s_bnip02_L", "cf_s_bnip02_R", "cf_s_bnipacc_L", "cf_s_bnipacc_R", "cf_s_bnip015_L", "cf_s_bnip015_R",
+                              "cf_s_bnip025_L", "cf_s_bnip025_R", "cf_s_bnip01_L", "cf_s_bnip01_R"}) {
                 auto it = bones.find(nm);
                 if (it != bones.end()) it->second.pos.z += off;
             }
@@ -1000,9 +1002,9 @@ struct Builder {
     }
 };
 
-// True when the path ("/a/b/") runs through a clothes-state node other than the worn one: n_top_b, n_bot_c ...
+// True when the path ("/a/b/") runs through a clothes-state node other than the worn one: n_top_b, n_bot_c, n_panst_b ...
 bool hiddenClothesState(const std::string& path) {
-    for (const char* kind : {"/n_top_", "/n_bot_"}) {
+    for (const char* kind : {"/n_top_", "/n_bot_", "/n_panst_"}) {
         for (size_t at = path.find(kind); at != std::string::npos; at = path.find(kind, at + 1)) {
             size_t state = at + std::strlen(kind);
             if (state + 1 < path.size() && path[state + 1] == '/' && path[state] != 'a') return true;

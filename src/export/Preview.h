@@ -50,8 +50,10 @@ struct ViewOptions {
 // texture with the result, so the PMX carries the colour the game's shader produces. Materials without a shader are left alone.
 // maxSize caps the baked texture's longer side. lit = run on the real mesh with the front view's light and camera, so the texture
 // carries the toon shading too (the material is then unlit); otherwise the material is a flat sheet and only its colour is baked.
+// grade = pass the baked colours through the game's colour grading (ColourGrade.h, when it is loaded and on), which the preview
+// applies to every frame; a PMX has no such step, so this is what makes its colours match the preview.
 void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr,
-                        const std::function<void(const std::string&)>& progress = {});
+                        const std::function<void(const std::string&)>& progress = {}, bool grade = false);
 
 // Runs every pending Scene::createJobs: the game's "create" materials (eye iris and white, face and body skin) drawn over one quad
 // into their placeholder textures. Called once, at the end of assembly.

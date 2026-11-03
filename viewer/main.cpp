@@ -8,6 +8,7 @@
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
+//          G colour grading on/off, X "as exported": the baked PMX textures on plain materials (what a PMX viewer shows),
 //          R reset view, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
@@ -281,6 +282,12 @@ struct App {
     exporter::GpuView gpu;                    // the game's shaders on Direct3D 11
     std::shared_ptr<Loaded> gpuScene;         // the scene the GPU copy was made from (keeps it alive while the GPU draws it)
     bool gpuOk = false;
+    // "As exported" (X): a baked copy of the scene (colour only, graded like the preview when G is on) drawn with plain materials.
+    exporter::GpuView gpuExp;
+    std::shared_ptr<assemble::Scene> expScene, expPending;   // pending: filled by the bake thread, taken over on WM_EXP_READY
+    std::shared_ptr<Loaded> expFor, expPendingFor;           // the loaded character the baked copy belongs to
+    bool showExp = false, expOk = false, expGrade = false, expPendingGrade = false;
+    std::atomic<bool> expBusy{false};
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
@@ -311,6 +318,7 @@ App g;
 constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
+constexpr UINT WM_EXP_READY = WM_APP + 4;
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 
 std::shared_ptr<Loaded> Current() {
@@ -603,7 +611,8 @@ void StartExport() {
             assemble::Scene scene = L->scene;   // bake the copy, not what the viewport is drawing
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
-            exporter::BakeShaderTextures(scene, 1024, true, nullptr, [](const std::string& m) { Log("  " + m); });
+            // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
+            exporter::BakeShaderTextures(scene, 1024, false, nullptr, [](const std::string& m) { Log("  " + m); }, true);
             exporter::ExportOptions eo;
             eo.outDir = outDir;
             eo.baseName = stem;
@@ -622,6 +631,34 @@ void StartExport() {
         }
         g.exporting = false;
         PostMessageW(g.hwnd, WM_EXPORT_DONE, 0, 0);
+    }).detach();
+}
+
+// X: show the character the way the exported PMX looks (baked textures, plain materials). The bake takes a while, so it runs
+// on a thread once per character and grading state; later presses only switch.
+void ToggleAsExported() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || L->scene.parts.empty()) return;
+    if (g.showExp) { g.showExp = false; g.dirty = true; Log("as exported: off"); return; }
+    if (!g.gpu.ready()) { Log("as exported needs the Direct3D 11 view", LogKind::Warn); return; }
+    if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
+    if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
+    const bool grade = exporter::ColourGradeEnabled();
+    Log(std::string("baking the export preview (colour only, ") + (grade ? "graded" : "not graded") + ")");
+    std::thread([L, grade]() {
+        std::shared_ptr<assemble::Scene> sc;
+        try {
+            sc = std::make_shared<assemble::Scene>(L->scene);
+            exporter::BakeShaderTextures(*sc, 1024, false, nullptr, {}, grade);
+        } catch (const std::exception& e) {
+            Log(std::string("export preview failed: ") + e.what(), LogKind::Error);
+            sc.reset();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g.mu);
+            g.expPending = sc; g.expPendingFor = L; g.expPendingGrade = grade;
+        }
+        PostMessageW(g.hwnd, WM_EXP_READY, 0, 0);
     }).detach();
 }
 
@@ -716,6 +753,7 @@ void Render(int w, int h) {
     g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
     g.vopt.textured = g.textured;
     g.vopt.highlightPart = g.hoverPart;
+    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, g.hoverPart)) return;   // as exported
     if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate
         if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, g.hoverPart)) return;
         g.gpuOk = false;
@@ -803,7 +841,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         DrawTextAt(dc, g.fontUi, warn + err ? RGB(235, 190, 90) : RGB(120, 200, 120), 10, 48,
                    std::to_string(err) + " errors, " + std::to_string(warn) + " warnings   [I]");
-        std::string mode = g.gpuOk ? "Direct3D 11 shaders" : "software shaders";
+        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported (graded colours)" : "as exported") : g.gpuOk ? "Direct3D 11 shaders" : "software shaders";
         mode += g.textured ? "  ·  textured" : "  ·  untextured";
         DrawTextAt(dc, g.fontUi, g.gpuOk ? RGB(110, 180, 240) : RGB(150, 160, 178), 10, 66, mode);
     } else if (L) {
@@ -1058,7 +1096,7 @@ void DrawPanel(HDC dc, const RECT& rc, const RECT& paint) {
     RECT fr{0, l.footerTop, kPanel, rc.bottom};
     FillRect(dc, &fr, foot);
     DeleteObject(foot);
-    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  V layers  R reset", 64));
+    DrawTextAt(dc, g.fontSmall, RGB(110, 120, 138), 10, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
     std::string hint = "1-7 outfit · L library · M mods · C clear log · drop a card";
     if (g.busy) hint = "working ...";
     else if (g.exporting) hint = "exporting PMX ...";
@@ -1223,6 +1261,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_EXPORT_DONE: InvalidatePanel(); return 0;
+    case WM_EXP_READY: {
+        std::shared_ptr<assemble::Scene> sc;
+        {
+            std::lock_guard<std::mutex> lock(g.mu);
+            sc = std::move(g.expPending);
+            g.expFor = g.expPendingFor; g.expGrade = g.expPendingGrade;
+            g.expPendingFor.reset();
+        }
+        g.expBusy = false;
+        g.expOk = false;
+        std::string why;
+        if (sc && (g.gpuExp.ready() || g.gpuExp.Init(&why))) {
+            g.gpuExp.SetPlain(true);
+            if (g.gpuExp.Load(*sc, &why)) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); Log("as exported: on (X switches back)", LogKind::Good); }
+            else Log("export preview upload failed: " + why, LogKind::Warn);
+        } else if (sc) Log("export preview: no Direct3D 11 device (" + why + ")", LogKind::Warn);
+        g.dirty = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_LOADED: {
         std::shared_ptr<Loaded> L = Current();
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
@@ -1242,6 +1300,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.state = exporter::NewViewState();
         g.gpuOk = false;
         g.gpuScene.reset();
+        g.showExp = g.expOk = false;   // the baked copy belongs to the previous character
+        g.expFor.reset();
         if (L && g.gpu.ready()) {
             if (g.gpu.Load(L->scene)) {
                 g.gpuScene = L;
@@ -1497,6 +1557,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.dirty = true;
         }
         else if (wp == 'G') { exporter::SetColourGradeEnabled(!exporter::ColourGradeEnabled()); g.dirty = true; }
+        else if (wp == 'X') ToggleAsExported();
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
         else if (wp == 'S') ResetView(90);

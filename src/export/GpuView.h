@@ -37,6 +37,11 @@ public:
 
     int skippedMaterials() const;
 
+    // Plain mode draws every material with its texture and diffuse colour under one headlight and no colour grading, the way a
+    // PMX viewer shows the exported file when the scene's textures are baked (BakeShaderTextures, colour only). Off by default.
+    void SetPlain(bool on);
+    bool plain() const;
+
     // Extra HLSL shading layers (ShaderLayer.h) drawn over the game's shaders. SetLayers compiles them (replacing earlier ones) and
     // returns false when none compiled; `report` gets one line per layer that did not. Layers start in their default state.
     bool SetLayers(const std::vector<ShaderLayer>& layers, std::string* report = nullptr);

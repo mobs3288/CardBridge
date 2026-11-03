@@ -98,7 +98,7 @@ void usage() {
         "cardbridge " "0.1.0-m1" " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
-        "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-flat] [--mod-cache <file>]\n"
+        "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--mod-cache <file>]\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -394,16 +394,19 @@ int cmdConvert(const Args& a) {
     exporter::ApplyPartStateForExport(scene, hiddenParts);
     const std::vector<char> effHidden = exporter::EffectiveHiddenParts(scene, hiddenParts);
 
+    exporter::LoadColourGrade(a.get("library"));   // the game's colour grading, when the library holds it
+    if (a.has("no-grade")) exporter::SetColourGradeEnabled(false);
+    // Default: colour only (the viewer or engine lights it, over a white material) with the preview's grading baked in.
+    // --bake-lit puts the toon shading in the texture too (the material is then unlit: black in an engine that lights it itself).
     if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour
         std::string bakeNote;
         auto tb0 = std::chrono::steady_clock::now();
-        exporter::BakeShaderTextures(scene, 1024, !a.has("bake-flat"), &bakeNote,
-                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); });
+        exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
+                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); }, true);
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
     }
 
-    exporter::LoadColourGrade(a.get("library"));   // the game's colour grading, when the library holds it
-    std::vector<uint8_t> gpuRgba;   // written after the export, which with --overwrite clears the folder first
+    std::vector<uint8_t> gpuRgba, plainRgba;   // written after the export, which with --overwrite clears the folder first
     if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
         exporter::GpuView gpu;
         std::string why;
@@ -418,6 +421,8 @@ int cmdConvert(const Args& a) {
             }
             exporter::ViewCamera cam;
             cam.pitchDeg = 4;
+            // Test aid: CARDBRIDGE_GPU_CAM=yaw,pitch,zoom,panX,panY frames the picture (a close-up of the chest, say 0,4,3.5,0,0.2).
+            if (const char* gc = std::getenv("CARDBRIDGE_GPU_CAM")) std::sscanf(gc, "%f,%f,%f,%f,%f", &cam.yawDeg, &cam.pitchDeg, &cam.zoom, &cam.panX, &cam.panY);
             std::vector<uint32_t> px;
             auto g0 = std::chrono::steady_clock::now();
             bool ok = gpu.Render(cam, 640, 800, &effHidden, px);
@@ -425,6 +430,15 @@ int cmdConvert(const Args& a) {
             std::fprintf(stderr, "  gpu view: %s, second frame %.1f ms, %d material(s) without a shader\n", ok ? "ok" : "failed",
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count() / 2, gpu.skippedMaterials());
             for (const auto& m : scene.materials) if (m.shaderIndex < 0) std::fprintf(stderr, "    no shader: %s (%s)\n", m.name.c_str(), m.shader.c_str());
+            if (ok && !a.has("no-bake")) {   // the baked textures on plain materials: what a PMX viewer shows (the viewer's X key)
+                gpu.SetPlain(true);
+                std::vector<uint32_t> pp;
+                if (gpu.Render(cam, 640, 800, &effHidden, pp)) {
+                    plainRgba.resize(pp.size() * 4);
+                    for (size_t i = 0; i < pp.size(); ++i) { plainRgba[i * 4] = (pp[i] >> 16) & 255; plainRgba[i * 4 + 1] = (pp[i] >> 8) & 255; plainRgba[i * 4 + 2] = pp[i] & 255; plainRgba[i * 4 + 3] = 255; }
+                }
+                gpu.SetPlain(false);
+            }
             if (ok) {
                 gpuRgba.resize(px.size() * 4);
                 for (size_t i = 0; i < px.size(); ++i) { gpuRgba[i * 4] = (px[i] >> 16) & 255; gpuRgba[i * 4 + 1] = (px[i] >> 8) & 255; gpuRgba[i * 4 + 2] = px[i] & 255; gpuRgba[i * 4 + 3] = 255; }
@@ -443,6 +457,7 @@ int cmdConvert(const Args& a) {
     try {
         auto r = exporter::ExportScene(scene, c, eo);
         if (!gpuRgba.empty()) stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, gpuRgba.data(), 640 * 4);
+        if (!plainRgba.empty()) stbi_write_png((out + "/gpu_plain.png").c_str(), 640, 800, 4, plainRgba.data(), 640 * 4);
         double secs = std::chrono::duration<double>(t1 - t0).count();
         std::printf("wrote %s\n  %zu vertices, %zu triangles, %zu materials, %zu bones, %zu textures; %zu of %zu card items loaded (assembled in %.1fs)\n  manifest: %s\n",
                     r.pmxPath.c_str(), r.vertices, r.triangles, r.materials, r.bones, r.textures, parts - failed - 0, parts, secs, r.manifestPath.c_str(), r.previewPath.c_str());
@@ -463,7 +478,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "gpu-view", "nipple-inside", "nude"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "gpu-view", "nipple-inside", "nude"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
