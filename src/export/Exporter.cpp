@@ -210,7 +210,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     pmx::Model model;
     model.name = scene.name;
     {   // the model information MikuMikuDance shows (it wants Windows line breaks): the tool, its author, where the model came from
-        const std::string author = !opt.author.empty() ? opt.author : std::getenv("CARDBRIDGE_AUTHOR") ? std::string(std::getenv("CARDBRIDGE_AUTHOR")) : std::string(CARDBRIDGE_AUTHOR);
+        const std::string author = CARDBRIDGE_AUTHOR;   // fixed: not an option, not read from the environment
         model.nameEn = scene.name;
         model.comment = "Converted by CardBridge " CARDBRIDGE_VERSION "\r\nCardBridge by " + author + "\r\nCharacter: " + scene.name + "\r\nSource card: " + fileio::FileName(card.path);
         model.commentEn = model.comment;

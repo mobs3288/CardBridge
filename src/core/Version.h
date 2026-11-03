@@ -5,7 +5,7 @@
 #define CARDBRIDGE_VERSION "dev"
 #endif
 
-// Who made CardBridge; it is written into the model information of every exported PMX (CARDBRIDGE_AUTHOR in the environment overrides it).
+// Who made CardBridge. It is written into the model information of every exported PMX and cannot be changed by a setting or the environment.
 #ifndef CARDBRIDGE_AUTHOR
 #define CARDBRIDGE_AUTHOR "Ryan Oktaviandi Susilo Wibowo"
 #endif
