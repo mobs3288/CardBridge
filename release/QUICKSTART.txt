@@ -1,0 +1,18 @@
+CardBridge - Koikatsu character card to PMX / 3D workbench
+Version: see VERSION (alpha: usable, still in development)
+
+What works: 100% for base-game cards; several modded cards also work; some mod items still break.
+See README.md for the details and the known limitations.
+
+1. Set up the library (once, only if there is no "library" folder in here):
+   run "Set up library.bat" and give it your own Koikatsu folder. It copies the base-game data CardBridge needs.
+2. Open a card: run "CardBridge Viewer.bat", or drag a card .png onto it.
+   The first time it asks for your Koikatsu MODS folder (Cancel = base-game items only).
+   Mods are never shipped with CardBridge: each user points it at their own.
+3. Export: press E (or the Export PMX button) in the viewer, or drag a card onto "Convert a card.bat".
+
+Files:
+  cardbridge.exe          command line converter (cardbridge --help)
+  cardbridge_viewer.exe   the viewer
+  layers\                 optional extra shader layers (.hlsl) the viewer can draw over the game's shaders
+  library\                the asset library (made by step 1)
