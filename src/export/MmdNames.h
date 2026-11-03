@@ -13,11 +13,18 @@ namespace cardbridge::exporter {
 // root, センター a bone of its own above both 下半身 and 上半身 (so the two halves turn independently, as a motion expects).
 //
 // Run after AddIk: the foot IK bones it added become 左足ＩＫ / 右足ＩＫ (aimed at 足首, the ankle) and a つま先ＩＫ is added under each.
-// Returns the indices of the bones added (the toe IKs), to be listed with the other IK bones. Bones the rig does not have are skipped.
-std::vector<int> ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model);
+// The eyes get their pivot at the eyeball's centre (a sphere fitted to the eye white) and a 両目 bone under the head turns both (the eyes
+// follow it by append rotation). `scale` is the model scale the scene's positions were multiplied by. Bones the rig does not have are skipped.
+struct MmdBones {
+    std::vector<int> ik;     // the toe IKs added, to be listed with the other IK bones
+    std::vector<int> extra;  // 両目
+};
+MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, float scale);
 
-// Adds the standard facial morphs a motion keys (まばたき ...) as copies of the game's expression morphs they correspond to, and returns
-// their indices (they are listed first in the morph panel). Run after the expression morphs exist.
+// Adds the standard facial morphs a motion keys and returns their indices (they are listed first in the morph panel): まばたき is a copy of
+// the game's closed eyes; あ is the game's wide open mouth, and い う え お are built from it (a smaller opening, the mouth corners spread or
+// drawn in, the lips pushed forward) because which of the game's mouth patterns is which vowel is not recorded anywhere. Run after the
+// expression morphs exist (they and the model's vertices are what these are made from).
 std::vector<int> AddMmdMorphs(pmx::Model& model);
 
 } // namespace cardbridge::exporter

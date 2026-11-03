@@ -213,9 +213,11 @@ Bytes WritePmx(const Model& m) {
         o.i32(b.layer);
         uint16_t flags = static_cast<uint16_t>(b.tailBone >= 0 ? (b.flags | 0x0001) : (b.flags & ~0x0001));   // bit 0: the tail is a bone, else an offset
         flags = static_cast<uint16_t>(b.ikTarget >= 0 ? (flags | 0x0020) : (flags & ~0x0020));              // bit 5: IK
+        flags = static_cast<uint16_t>(b.appendParent >= 0 ? (flags | 0x0100) : (flags & ~0x0300));   // bit 8: rotation follows the append parent
         o.u16(flags);
         if (b.tailBone >= 0) o.sidx(b.tailBone, bSize);
         else o.vec3(b.tailOffset);
+        if (b.appendParent >= 0) { o.sidx(b.appendParent, bSize); o.f32(b.appendRatio); }
         if (b.ikTarget >= 0) {
             o.sidx(b.ikTarget, bSize);
             o.i32(b.ikLoop);
