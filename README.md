@@ -8,11 +8,13 @@
 
 It is a standalone C++ Windows application built in the same style as the Project K engine and Map Maker. Its core is a UI-free library so the Map Maker can later import its output (or call it) without a second implementation.
 
-> **Status: Milestone 1 done.** Two real cards convert to PMX offline, the result is read back by the engine's own PMX loader, and the acceptance tests pass ([`docs/OFFLINE_FORMAT_FEASIBILITY.md`](../docs/OFFLINE_FORMAT_FEASIBILITY.md), section 12). The output is **recognisable but not yet a faithful likeness**: body proportions, garment colours, jacket sub-parts and the main face features follow the card, but skin textures, lips, face shape, hair colour for some cards, shading and animation do not (see Known limitations). Every export also writes a `_preview.png` (front, side, back) so a result can be judged without a PMX viewer. The checklist at the bottom of this file is the source of truth for what is done.
+> **Version 0.5.0-alpha. It is usable today, but it is not finished.** It works **100% only for the base game**: cards made with the stock Koikatsu items convert and look right. **Several modded cards also work**, but not all of them, and a mod can still break a conversion or a material. It is **still in development**: expect rough edges, wrong colours on some mod items, and missing pieces (see Known limitations). Every export also writes a `_preview.png` (front, side, back) so a result can be judged without a PMX viewer, and the viewer shows exactly what the game's shaders draw. The checklist at the bottom of this file is the source of truth for what is done. The version is in the [`VERSION`](VERSION) file; `cardbridge --version` and the viewer's header show it.
 
 ## Why this project exists
 
-CardBridge exists to make character conversion more reliable, mod compatibility more extensible, and the entire workflow less painful.
+CardBridge is a tool for making anime characters for my own game, Project K, using the established Koikatsu character engine instead of Blender. I am not good at 3D modelling or texturing, and Koikatsu's character maker already does that part very well; what was missing was a reliable way to get a finished character out of it, rigged and textured, into my own engine.
+
+It also exists to make character conversion more reliable, mod compatibility more extensible, and the entire workflow less painful.
 
 Existing exporters run inside the running game, so a conversion needs a launched game, a working plugin set and a matching patch level, and it breaks whenever any of those drift. CardBridge reads the same data from disk instead.
 
@@ -116,9 +118,11 @@ cardbridge/
     export/           output folder and manifest
     library/          asset library import and check
   cli/                command-line shell
-  tools/              Python reference (research only, not shipped)
+  viewer/             the viewer window (Win32 + Direct3D 11): main.cpp, Ui.* (off-screen panel, theme), res/ (icon, logo)
+  tools/              Python reference (research only, not shipped), viewer_smoke.ps1
   tests/              unit and golden tests
-  image/              README artwork
+  image/              README artwork (CB.png is the logo)
+  VERSION             the one place the version number is written
 ```
 
 ## Building
@@ -159,6 +163,9 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # with the game's formulas and every vertex follows through its per-bone frames, no loading), the blend shape offsets and the areola size follow too (a character whose DynamicBone chains were settled with CARDBRIDGE_DYNBONE is assembled again instead).
 # Ctrl+Z / Ctrl+Y undo and redo bone edits and the A-pose (one drag or click is one step), Ctrl+S / Ctrl+O (or the buttons under the bone editor) save and load a pose as
 # JSON; `--pose <file>` on the viewer loads one at start, `cardbridge convert --pose <file>` bakes it into the PMX. The software view (no Direct3D 11) shows the pose too.
+# The panel is drawn off screen and only where it changed, the mouse never queues work faster than a picture can be made, and the lists scroll
+# smoothly. Timing: set CARDBRIDGE_BENCH=<file.json> and open a card; the viewer plays a scripted session (orbit, hover, tabs, a slider drag, a flood of
+# mouse moves, log lines, wheel), writes how long each step took from input to finished paint, and closes.
 # tools/viewer_smoke.ps1 runs a private viewer on a card and takes screenshots of every tab and interaction (see its header).
 # Y switches the physics preview on: the DynamicBone chains (hair, skirts, ribbons, the body's jiggle) are simulated live at 60 updates a second against the body
 # colliders, so they swing as bones, sliders or the A-pose move what they hang from; N gives them a shove. The camera never pauses it.
