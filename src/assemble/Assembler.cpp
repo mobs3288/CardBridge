@@ -79,6 +79,24 @@ void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, cons
     }
 }
 
+// The accessory attach nodes (a_n_*: hair pin, pony, twin tails, head top, earrings ...) of a character's head come from the head model's
+// own prefab, which carries them placed for that head (the pony node of the default head points its ponytail down the back; the generic
+// p_cf_head_bone only has placeholders). Local transforms by node name, for the nodes `ov` does not already replace.
+void headAttachOverrides(Overrides& ov, UnityFile& head, const std::string& prefabName) {
+    auto roots = head.findXformsByName(prefabName);
+    if (roots.empty()) return;
+    for (int64_t id : head.subtree(roots[0])) {
+        const unity::Xform* x = head.xform(id);
+        if (!x || x->name.rfind("a_n_", 0) != 0 || ov.count(x->name)) continue;
+        LocalOverride o;
+        o.pos = x->pos;
+        o.rot = x->rot;
+        o.hasRot = true;
+        o.scl = x->scl;
+        ov[x->name] = o;
+    }
+}
+
 // Adds every transform of a prefab to the scene skeleton, with world matrices built from local transforms
 // (so a bone's shape override moves its whole subtree); returns false if the prefab root is missing.
 bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& prefabName, const Mat4& base,
@@ -515,9 +533,11 @@ struct Builder {
         if (it != meTextures.end()) return it->second;
         card::MaterialEdits::Image img;
         int result = -1;
-        if (edits && edits->decode(texId, img)) result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
-        else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
-        meTextures[texId] = result;
+        if (edits && edits->decode(texId, img)) {
+            result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
+            scene.textures[static_cast<size_t>(result)].srgb = colour;
+        } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
+        meTextures[key] = result;
         return result;
     }
 
@@ -989,6 +1009,14 @@ struct Builder {
                     inChain.insert(id);
                     ids.push_back(id);
                 }
+                // A root with no bone under it still moves: the component adds an end particle past it (m_EndLength / m_EndOffset) and swings
+                // the bone towards it (a ribbon's tail bone). The bone then hangs from its parent, which is the chain's anchor.
+                if (ids.size() == 1) {
+                    const Vec3 endOff = vec3Of(mb.fields.at("m_EndOffset"));
+                    const bool endParticle = mb.fields.at("m_EndLength").asFloat(0.0) > 0.0 || endOff.x != 0.0f || endOff.y != 0.0f || endOff.z != 0.0f;
+                    const unity::Xform* rx = uf.xform(rootId);
+                    if (endParticle && rx && rx->parent && uf.xform(rx->parent)) ids.insert(ids.begin(), rx->parent);
+                }
                 ch.damping = static_cast<float>(mb.fields.at("m_Damping").asFloat(0.1));
                 ch.elasticity = static_cast<float>(mb.fields.at("m_Elasticity").asFloat(0.1));
                 ch.stiffness = static_cast<float>(mb.fields.at("m_Stiffness").asFloat(0.1));
@@ -1356,8 +1384,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     } else {
         scene.warn("", "bone '" + opt.headAttachBone + "' not found; the head rig is placed at the origin");
     }
-    Overrides headOv;
-    if (opt.applyShape) {
+    Overrides headOv, attachOv;
+    {
         resolve::ItemRef hr;
         for (const auto& it : resolve::ItemsFromCard(card, outfit))
             if (it.group == "Head") hr = it;
@@ -1366,7 +1394,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (hi.ok()) {
                 std::string hwhy;
                 auto hb = resolver.openBundle(hi, &hwhy);
-                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene, opt);
+                if (hb) {
+                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene, opt);
+                    headAttachOverrides(attachOv, *hb, hi.assetName());
+                    for (const auto& [name, o] : attachOv) headOv[name] = o;   // not slider-driven: the head model's own placement wins
+                }
             }
         }
     }
@@ -1378,7 +1410,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         Mat4 headBase0;
         auto hw0 = rigDefault.world.find(opt.headAttachBone);
         if (hw0 != rigDefault.world.end()) headBase0 = hw0->second;
-        addRigPrefab(scratch, rigDefault, *base, opt.headRigPrefab, headBase0, -1, "rig", nullptr);
+        addRigPrefab(scratch, rigDefault, *base, opt.headRigPrefab, headBase0, -1, "rig", attachOv.empty() ? nullptr : &attachOv);
         b.rigDefault = &rigDefault;
     }
     applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
@@ -2593,7 +2625,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
     if (auto hw = rig.world.find(opt.headAttachBone); hw != rig.world.end()) headBase = hw->second;
     const int headAttach = scratch.boneIndex(opt.headAttachBone);
     Overrides headOv;
-    if (opt.applyShape) {
+    {
         resolve::ItemRef hr;
         for (const auto& it : resolve::ItemsFromCard(card, outfit))
             if (it.group == "Head") hr = it;
@@ -2602,7 +2634,12 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
             if (hi.ok()) {
                 std::string hwhy;
                 auto hb = resolver.openBundle(hi, &hwhy);
-                if (hb) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scratch, opt);
+                if (hb) {
+                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scratch, opt);
+                    Overrides attachOv;
+                    headAttachOverrides(attachOv, *hb, hi.assetName());
+                    for (const auto& [name, o] : attachOv) headOv[name] = o;   // not slider-driven: the head model's own placement wins
+                }
             }
         }
     }
