@@ -52,8 +52,12 @@ struct MmdLook {
     uint8_t drawFlags = 0;   // 0x01 double-sided, 0x02 ground shadow, 0x04 casts self-shadow, 0x08 receives self-shadow, 0x10 edge
     Vec4 edgeColor{0, 0, 0, 1};
     float edgeSize = 0.0f;
+    int sphere = 0;              // 0 none, 1 the teeth's roundness (multiply), 2 a soft gloss (add), 3 the hair's ring highlight (add)
+    float sphereStrength = 0.0f; // the add spheres' peak
 };
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+// The sphere map image of a look (64 x 64, its name says kind and strength), the same for the PMX file and the viewer.
+assemble::SceneTexture MmdSphereImage(const MmdLook& look);
 
 // The manifest as JSON (exposed for tests).
 nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,

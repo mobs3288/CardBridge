@@ -1755,9 +1755,10 @@ void integrationTests() {
             // The semi-standard bones the MMD names add (AddMmdStandardBones), each found by name and placed after its parent and append parent.
             size_t standard = 0;
             for (const auto& b : back.bones)
-                for (const char* n : {"操作中心", "左肩P", "右肩P", "左肩C", "右肩C", "左腕捩", "右腕捩", "左手捩", "右手捩", "腰キャンセル左", "腰キャンセル右", "左足IK親", "右足IK親"})
+                for (const char* n : {"操作中心", "左肩P", "右肩P", "左肩C", "右肩C", "左腕捩", "右腕捩", "左手捩", "右手捩", "腰キャンセル左", "腰キャンセル右", "左足IK親", "右足IK親",
+                                      "上半身1", "左手先", "右手先", "左親指先", "右親指先", "左人差指先", "右人差指先", "左中指先", "右中指先", "左薬指先", "右薬指先", "左小指先", "右小指先"})
                     if (b.name == n) ++standard;
-            CHECK(standard == 13);
+            CHECK(standard == 26);
             bool ordered = true;
             for (size_t i = 0; i < back.bones.size(); ++i) {
                 const auto& b = back.bones[i];

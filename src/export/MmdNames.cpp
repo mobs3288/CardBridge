@@ -169,6 +169,26 @@ void AddMmdStandardBones(pmx::Model& model) {
             bone(pi + 1).parent = pi;
         }
     }
+    // 上半身1 between 上半身 and 上半身2, halfway (a motion that keys it bends the middle of the back).
+    if (int u = find(model, "上半身"), u2 = find(model, "上半身2"); u >= 0 && u2 > u && bone(u2).parent == u && find(model, "上半身1") < 0) {
+        const int ui = insertBone(model, u + 1, named("上半身1", "Upper Body 1", lerp(bone(u).position, bone(u2).position, 0.5f), u, 0x001A), u);
+        bone(u2 + 1).parent = ui;
+    }
+    // Tip bones (leaves, nothing hangs from them): 手先 between the wrist and the middle finger's root, and each finger's 指先 one more
+    // joint length past its last joint, as the standard models have them for motions and IK that aim at a hand or finger tip.
+    for (const char* side : {"左", "右"}) {
+        const std::string s = side, en = s == "左" ? "Left " : "Right ";
+        if (int w = find(model, s + "手首"), m1 = find(model, s + "中指１"); w >= 0 && m1 >= 0 && find(model, s + "手先") < 0)
+            insertBone(model, static_cast<int>(model.bones.size()), named(s + "手先", en + "Hand Tip", lerp(bone(w).position, bone(m1).position, 0.6f), w, 0x0012), -1);
+        const struct { const char* last; const char* prev; const char* tip; const char* en; } fingers[] = {
+            {"親指２", "親指１", "親指先", "Thumb Tip"}, {"人指３", "人指２", "人差指先", "Index Tip"}, {"中指３", "中指２", "中指先", "Middle Tip"},
+            {"薬指３", "薬指２", "薬指先", "Ring Tip"}, {"小指３", "小指２", "小指先", "Little Tip"}};
+        for (const auto& f : fingers) {
+            const int last = find(model, s + f.last), prev = find(model, s + f.prev);
+            if (last < 0 || prev < 0 || find(model, s + f.tip) >= 0) continue;
+            insertBone(model, static_cast<int>(model.bones.size()), named(s + f.tip, en + f.en, lerp(bone(prev).position, bone(last).position, 1.8f), last, 0x0012), -1);
+        }
+    }
     // 操作中心: MikuMikuDance's view centre bone, first in the list on its own.
     if (find(model, "操作中心") < 0) insertBone(model, 0, named("操作中心", "View Center", {0, 0, 0}, -1, 0x001E), -1);
 }
@@ -208,6 +228,9 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
             nb.name = n.name;
             nb.nameEn = n.en;
             nb.position = model.bones[static_cast<size_t>(hips)].position;
+            // Any card: センター and グルーブ sit at about two thirds of this character's own pelvis height, as on the standard models (a
+            // motion's turn of them pivots there); 腰 stays at the pelvis.
+            if (chain && n.bone != w) nb.position.y *= n.bone == c ? 0.65f : 0.67f;
             nb.flags = 0x001E;
             nb.tailBone = -1;
             nb.tailOffset = {0.0f, 0.0f, 0.0f};
@@ -237,6 +260,7 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
             f.ikLinks.insert(f.ikLinks.begin(), links.begin(), links.end());
         }
         f.position = model.bones[static_cast<size_t>(ankle)].position;
+        f.ikLimit = 2.0f;   // the standard models' unit angle (114.6 degrees a pass)
         f.name = std::string(side == 0 ? "左" : "右") + "足ＩＫ";
         f.nameEn = std::string(side == 0 ? "Left" : "Right") + " Leg IK";
         if (toe < 0) continue;
