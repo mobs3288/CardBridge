@@ -710,6 +710,9 @@ void unitTests() {
         CHECK(std::fabs(m.bones[static_cast<size_t>(eyeL)].position.z + 0.5f) < 0.02f && m.bones[static_cast<size_t>(eyeL)].position.y == 16.5f);   // the pivot moved straight back to the ball's centre
         pmx::Model mo;   // morphs: the blink is a copy of the game's closed eyes, once
         pmx::Morph e; e.name = "Eyes 0 closed"; e.vertices = {{3, {0, 1, 0}}};
+        for (int i = 0; i < 12; ++i) { pmx::Vertex v; v.bone[0] = headB; m.vertices.push_back(v); }   // 0-2 white L, 3-5 iris L, 6-8 white R, 9-11 iris R
+        for (int i = 0; i < 12; ++i) m.indices.push_back(i);
+        for (const char* nm : {"head/cf_Ohitomi_L#0", "head/cf_Ohitomi_L02#0", "head/cf_Ohitomi_R#0", "head/cf_Ohitomi_R02#0"}) { pmx::Material mt; mt.name = nm; mt.indexCount = 3; m.materials.push_back(mt); }
         mo.morphs.push_back(e);
         CHECK(AddMmdMorphs(mo).size() == 1 && mo.morphs[1].name == "まばたき" && mo.morphs[1].vertices.size() == 1 && AddMmdMorphs(mo).empty());
         pmx::Morph op; op.name = "Mouth 0 open"; op.vertices = {{0, {0, -0.2f, 0}}, {1, {0, -0.1f, 0}}};   // the vowels are made from the open mouth
@@ -722,6 +725,9 @@ void unitTests() {
         CHECK(std::fabs(morphE.vertices[0].second.y) > std::fabs(morphU.vertices[0].second.y) && morphE.vertices[0].second.x == 0.0f);   // え opens wider than う (2 x the open mouth vs 0.3 x), nothing reshaped sideways
         CHECK(AddMmdMorphs(mo).empty());
     });
+        for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
+        for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
+        for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
         // R = Ry(y) Rx(x) Rz(z) applied to +Y must give the axis
