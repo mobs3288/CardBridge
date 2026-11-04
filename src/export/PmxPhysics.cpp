@@ -132,6 +132,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
     }
     std::vector<Core> chainCore;   // per moving chain body
     std::vector<int> chainBody;
+    std::set<int> pinned;   // chain bodies that follow their bone (see below)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -265,6 +266,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             j.rotLower = {-range, -0.1f * range, -range};
             j.rotUpper = {range, 0.1f * range, range};
             j.springRot = {stiffnessK, stiffnessK, stiffnessK};
+            // A locked link hanging from a body that follows its bone cannot move either: it follows its own bone too. Left as a moving
+            // body held by a zero-range joint, MMD's solver never quite settles it and the skirt's front trembled at rest.
+            if (range == 0.0f && model.rigidBodies[static_cast<size_t>(bodyA)].mode == 0) {
+                auto& rb = model.rigidBodies[static_cast<size_t>(bodyOf[b])];
+                rb.mode = 0;
+                rb.moveDamping = rb.rotDamping = 0.0f;
+                pinned.insert(bodyOf[b]);
+            }
             model.joints.push_back(std::move(j));
         }
     }
@@ -299,7 +308,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         uint16_t mask = 0;
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
-        model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
+        model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = pinned.count(chainBody[bi]) ? 0 : mask;
     }
 }
 

@@ -1013,6 +1013,8 @@ void unitTests() {
             bool locked = true;   // as loose as it gets, standing out sideways: gravity beats the spring, so every joint is written locked
             for (const auto& j : back.joints) locked = locked && j.rotUpper.z == 0.0f && j.rotLower.z == 0.0f;
             CHECK(locked || (tipDrop > 0.0 && tipDrop < 0.15 && ref.speed() < 0.05));
+            // locked links all the way from the root follow their bones (a moving body held by a zero-range joint trembles in MMD)
+            for (const auto& bd : back.bodies) CHECK(!locked || (bd.mode == 0 && bd.mask == 0));
         }
 
         {   // the reference solver itself: one link on a spring rings at sqrt(K / I) and loses energy at the damping it was given
