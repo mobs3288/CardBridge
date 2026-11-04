@@ -66,6 +66,7 @@ struct GpuView::Impl {
     ID3D11SamplerState* samplerWrap = nullptr;
     ID3D11SamplerState* samplerClamp = nullptr;
     ID3D11RasterizerState* raster = nullptr;
+    ID3D11RasterizerState* rasterCull = nullptr;   // back faces culled: what the game and MikuMikuDance do for a single-sided material
     ID3D11DepthStencilState* depth = nullptr;
     ID3D11DepthStencilState* depthOverlay = nullptr;   // depth test without write, for the highlight tint
     ID3D11BlendState* blend = nullptr;
@@ -83,6 +84,7 @@ struct GpuView::Impl {
     int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
     std::vector<MmdLook> looks;                  // plain mode: each scene material as the PMX writes it (made on the first plain Render)
+    std::vector<char> cutout;                    // per scene material: cut to a shape by its texture (HasCutout), so no outline ring
     std::map<std::string, GpuTex> spheres;       // plain mode: the looks' sphere maps, by MmdSphereImage name
     std::vector<ID3D11ShaderResourceView*> lookSphere;   // per look: its sphere map's view (owned by `spheres`), null for none
     // Plain mode's self-shadow map, made on first use.
@@ -241,7 +243,7 @@ float4 ps(VO i) : SV_Target {
         return ok;
     }
 
-    ~Impl() { ClearLayers(); Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
+    ~Impl() { ClearLayers(); Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(rasterCull); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
 
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
 
@@ -506,6 +508,8 @@ bool GpuView::Init(std::string* why) {
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE; rd.MultisampleEnable = TRUE;
     I.dev->CreateRasterizerState(&rd, &I.raster);
+    rd.CullMode = D3D11_CULL_BACK; rd.FrontCounterClockwise = FALSE;   // Unity's convention: a face toward the camera winds clockwise on screen
+    I.dev->CreateRasterizerState(&rd, &I.rasterCull);
     D3D11_DEPTH_STENCIL_DESC dd{};
     dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
     I.dev->CreateDepthStencilState(&dd, &I.depth);
@@ -579,6 +583,9 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
     };
     for (const auto& m : scene.materials) { for (const auto& tb : m.texProps) upload(tb.texture); upload(m.texture); }
     for (const auto& tb : scene.globalTextures) upload(tb.texture);
+
+    I.cutout.assign(scene.materials.size(), 0);
+    for (size_t m = 0; m < scene.materials.size(); ++m) I.cutout[m] = HasCutout(scene, scene.materials[m]) ? 1 : 0;
 
     // Geometry, with the tangents the shaders build their normal-map frame from.
     I.meshes.resize(scene.meshes.size());
@@ -678,6 +685,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     UINT stride = sizeof(GVert), offset = 0;
     // The silhouette ring: the mesh drawn again pushed out along its normals in screen space, in one colour.
     auto ring = [&](const GpuMesh& gm, const GpuSub& gs, const Vec3& col, float px) {
+        ctx->RSSetState(I.raster);
         float cbv[24];
         for (int r = 0; r < 4; ++r) for (int k = 0; k < 4; ++k) cbv[r * 4 + k] = M[r][k];
         const float colr[4] = {LinearLight() ? ToLinear(col.x) : col.x, LinearLight() ? ToLinear(col.y) : col.y, LinearLight() ? ToLinear(col.z) : col.z, 1.0f};
@@ -799,6 +807,9 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
                     if ((mat.alpha ? 1 : 0) != pass) continue;
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
+                    // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
+                    const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
+                    ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : I.rasterCull);
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
                         float cbv[(7 + 32 + 5) * 4] = {};
@@ -888,12 +899,13 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                     ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                     ctx->DrawIndexed(gs.count, 0, 0);
-                    if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE"))
+                    if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && !I.cutout[m] && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE"))
                         ring(gm, gs, mat.outlineColor, 1.2f * std::min(2.0f, mat.outlineWidth) * H / 800.0f);   // ring width in pixels
                 }
             }
         }
 
+    ctx->RSSetState(I.raster);
     // Extra shading layers over what the game's shaders drew: the visible opaque submeshes again with the layer's pixel shader,
     // blended, depth-tested against the finished frame and never written.
     for (const auto& layer : I.layers) {

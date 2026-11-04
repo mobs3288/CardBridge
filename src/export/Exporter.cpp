@@ -85,6 +85,8 @@ int SphereTexture(pmx::Model& model, std::map<std::string, int>& done, const Exp
     return done[t.name] = static_cast<int>(model.textures.size()) - 1;
 }
 
+constexpr uint8_t kItemCutout = 64;   // main_item discards where 2 x alpha - 0.5 < 0: alpha below 0.25
+
 bool IsTooth(const assemble::SceneMaterial& mat) {
     return mat.name.find("tooth") != std::string::npos || mat.name.find("canine") != std::string::npos;
 }
@@ -105,6 +107,27 @@ Vec3 MeanColour(const assemble::Scene& scene, const assemble::SceneMaterial& mat
 }
 
 } // namespace
+
+bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.alpha || mat.shader.find("main_item") == std::string::npos || mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+    if (scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
+    const int mi = static_cast<int>(&mat - &scene.materials.front());
+    const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
+    if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
+    // The texture's alpha where the material's triangles sample it (their centres): empty UV space does not count.
+    for (const auto& mesh : scene.meshes)
+        for (const auto& sm : mesh.submeshes) {
+            if (sm.material != mi) continue;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const auto& a = mesh.vertices[sm.indices[i]].uv, & b = mesh.vertices[sm.indices[i + 1]].uv, & c = mesh.vertices[sm.indices[i + 2]].uv;
+                float u = (a.x + b.x + c.x) / 3.0f, v = (a.y + b.y + c.y) / 3.0f;
+                u -= std::floor(u); v -= std::floor(v);
+                const int x = std::min(t.width - 1, static_cast<int>(u * t.width)), y = std::min(t.height - 1, static_cast<int>((1.0f - v) * t.height));   // rows top first, v up
+                if (t.rgba[(static_cast<size_t>(y) * t.width + x) * 4 + 3] < kItemCutout) return true;
+            }
+        }
+    return false;
+}
 
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     MmdLook look;
@@ -132,8 +155,11 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     const bool overlay = mat.shader.find("toon_") != std::string::npos, lens = mat.shader.find("glasses") != std::string::npos;
     const bool tooth = IsTooth(mat);
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
-    if (!overlay && !lens) look.drawFlags |= 0x02 | 0x04 | 0x08;
-    if (!overlay && !lens && !tooth) look.drawFlags |= 0x10;
+    // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
+    // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
+    const bool cutout = HasCutout(scene, mat);
+    if (!overlay && !lens) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
+    if (!overlay && !lens && !tooth && !cutout) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
     // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
     // dark skin tone, never the white rim a light colour made round hair strands lying on the face).
@@ -423,13 +449,14 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 if (look.sphere > 0) { pm.sphere = SphereTexture(model, sphereFiles, opt, look); pm.sphereMode = look.sphere == 1 ? 1 : 2; }
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
-                    // The game's item shader (main_item) never reads the texture's alpha, and card textures often keep a mask or nothing
-                    // in it; MMD would show those texels see-through, so this material gets the image with alpha 255.
+                    // The game's item shader (main_item) is opaque but discards where the texture's alpha is below 0.25 (a card's
+                    // MaterialEditor image cut to a shape): this material gets the image with exactly that, alpha 0 or 255, so MMD neither
+                    // blends the rest see-through nor shows the cut texels (which were black).
                     const bool solid = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
                     int& pmxTex = solid ? solidTexMap[ti] : texMap[ti];
                     if (pmxTex < 0) {
                         assemble::SceneTexture t = scene.textures[ti];
-                        if (solid) for (size_t px = 3; px < t.rgba.size(); px += 4) t.rgba[px] = 255;
+                        if (solid) for (size_t px = 3; px < t.rgba.size(); px += 4) t.rgba[px] = t.rgba[px] < kItemCutout ? 0 : 255;
                         std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         Bytes png = encodePng(t);
                         fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
