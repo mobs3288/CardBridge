@@ -751,6 +751,9 @@ void unitTests() {
         pmx::Bone ik; ik.name = "cb_ik_foot_L"; ik.parent = 0; ik.ikTarget = foot; m.bones.push_back(ik);
         for (int i = 0; i < 12; ++i) { pmx::Vertex v; v.bone[0] = headB; m.vertices.push_back(v); }   // 0-2 white L, 3-5 iris L, 6-8 white R, 9-11 iris R
         for (int i = 0; i < 12; ++i) m.indices.push_back(i);
+        // the left eye as the game builds it: a flat white cap in front of the pupil bone, the iris a patch just above it
+        const Vec3 capL[6] = {{1.0f, 16.5f, 0.05f}, {1.2f, 16.5f, 0.05f}, {1.0f, 16.7f, -0.2f}, {1.0f, 16.5f, 0.06f}, {1.1f, 16.55f, 0.06f}, {0.95f, 16.45f, 0.05f}};
+        for (int i = 0; i < 6; ++i) m.vertices[static_cast<size_t>(i)].position = capL[i];
         for (const char* nm : {"head/cf_Ohitomi_L#0", "head/cf_Ohitomi_L02#0", "head/cf_Ohitomi_R#0", "head/cf_Ohitomi_R02#0"}) { pmx::Material mt; mt.name = nm; mt.indexCount = 3; m.materials.push_back(mt); }
         { pmx::Morph blink; blink.name = "blink"; blink.vertices = {{0, {0, -1, 0}}, {1, {0, -1, 0}}, {2, {0, -1, 0}}}; m.morphs.push_back(blink); }   // the white's own shape
         const std::vector<int> added = ApplyMmdBoneNames(s, m, 1.0f).ik;
@@ -767,13 +770,15 @@ void unitTests() {
         CHECK(std::fabs(m.bones[static_cast<size_t>(eyeL)].position.z + 0.5f) < 0.02f && m.bones[static_cast<size_t>(eyeL)].position.y == 16.5f);   // the pivot moved straight back to the ball's centre
         for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
         for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
-        {   // the iris takes the white's mean blink offset, the white and the iris lie on balls about the pivot (the iris a hair above)
+        {   // the iris takes the white's mean blink offset
             int irisOffsets = 0;
             for (const auto& [vi, d] : m.morphs[0].vertices) if (vi >= 3 && vi <= 5 && d.y == -1.0f) ++irisOffsets;
             CHECK(irisOffsets == 3 && m.morphs[0].vertices.size() == 3 + 3);
-            const Vec3 pv = m.bones[static_cast<size_t>(eyeL)].position;
-            auto dist = [&](int i) { const Vec3 p = m.vertices[static_cast<size_t>(i)].position; return std::sqrt((p.x - pv.x) * (p.x - pv.x) + (p.y - pv.y) * (p.y - pv.y) + (p.z - pv.z) * (p.z - pv.z)); };
-            CHECK(std::fabs(dist(0) - dist(1)) < 1e-3f && dist(3) > dist(0) * 1.03f && dist(3) < dist(0) * 1.04f);
+            // the white and the iris keep the game's shape and place (laid on a smaller ball they shrank and sank into the socket skin)
+            for (int i = 0; i < 6; ++i) {
+                const Vec3 p = m.vertices[static_cast<size_t>(i)].position;
+                CHECK(p.x == capL[i].x && p.y == capL[i].y && p.z == capL[i].z);
+            }
         }
         for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
         pmx::Model mo;   // morphs: the blink is a copy of the game's closed eyes, once

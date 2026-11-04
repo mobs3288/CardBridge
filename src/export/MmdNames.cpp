@@ -236,10 +236,9 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
             first += mat.indexCount;
         }
         for (auto& side : eyeVerts) for (auto& list : side) { std::sort(list.begin(), list.end()); list.erase(std::unique(list.begin(), list.end()), list.end()); }
-        // A rounder, quieter eye. The game's white is a flat cap and its iris a flat patch on it; turned, they read as a sticker sliding on a
-        // sticker. Both are laid on one ball about the pivot instead (the white on the ball, the iris a hair above it), so a turn foreshortens
-        // the iris the way an eyeball does. The ball is the smallest the cap ever was (86 percent of its depth at the middle), so no part of it
-        // is nearer the camera than the cap was and the game's blink shapes, made for the cap, still close the lids over it.
+        // The white and the iris keep the game's shape and place. Laying them on a ball about the pivot (a rounder eye when turned) pushed them
+        // back into the eye socket: the skin behind the cap then covered the white's edges and the top of the iris, and scaled onto a smaller
+        // ball both shrank as well.
         // The blink shapes squeeze the white with the lid but not the iris, which then showed in front of the lid. The iris takes one rigid
         // offset per shape, the mean of the white's (it stays round, and the lid hides what it should).
         for (auto& mo : model.morphs) {
@@ -255,26 +254,6 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
                 for (int iv : eyeVerts[side][1]) extra.emplace_back(iv, mean);
             }
             mo.vertices.insert(mo.vertices.end(), extra.begin(), extra.end());
-        }
-        for (int side = 0; side < 2; ++side) {
-            const Vec3 pivot = model.bones[static_cast<size_t>(eyeBone[side])].position;
-            auto offsetOf = [&](int vi) { const Vec3 p = model.vertices[static_cast<size_t>(vi)].position; return Vec3{p.x - pivot.x, p.y - pivot.y, p.z - pivot.z}; };
-            float radius = 0.0f, nearestAxis = 1e30f;   // the white's depth at the middle: the vertex nearest the forward axis through the pivot
-            for (int vi : eyeVerts[side][0]) {
-                const Vec3 d = offsetOf(vi);
-                const float axis = d.x * d.x + d.y * d.y;
-                if (axis < nearestAxis) { nearestAxis = axis; radius = std::sqrt(axis + d.z * d.z); }
-            }
-            if (radius < 1e-6f) continue;
-            radius *= 0.86f;
-            for (int part = 0; part < 2; ++part)
-                for (int vi : eyeVerts[side][part]) {
-                    const Vec3 d = offsetOf(vi);
-                    const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
-                    if (len < 1e-6f) continue;
-                    const float k = radius * (part == 0 ? 1.0f : 1.035f) / len;   // the iris a hair above the white, against z-fighting
-                    model.vertices[static_cast<size_t>(vi)].position = {pivot.x + d.x * k, pivot.y + d.y * k, pivot.z + d.z * k};
-                }
         }
     }
     return result;
