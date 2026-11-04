@@ -696,6 +696,7 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.position = b.pos; pb.parent = b.parent; m.bones.push_back(pb); }
         pmx::Bone ik; ik.name = "cb_ik_foot_L"; ik.parent = 0; ik.ikTarget = foot; m.bones.push_back(ik);
+        { pmx::Morph blink; blink.name = "blink"; blink.vertices = {{0, {0, -1, 0}}, {1, {0, -1, 0}}, {2, {0, -1, 0}}}; m.morphs.push_back(blink); }   // the white's own shape
         const std::vector<int> added = ApplyMmdBoneNames(s, m, 1.0f).ik;
         auto find = [&](const char* n) { for (size_t i = 0; i < m.bones.size(); ++i) if (m.bones[i].name == n) return static_cast<int>(i); return -1; };
         CHECK(find("全ての親") == 0 && find("センター") == cRoot && find("グルーブ") == cHips && find("腰") == cWaist);
@@ -727,6 +728,12 @@ void unitTests() {
     });
         for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
         for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
+        {   // the iris follows the white's blink, the eyeball sits 8 percent deeper toward the pivot
+            int irisOffsets = 0;
+            for (const auto& [vi, d] : m.morphs[0].vertices) if (vi >= 3 && vi <= 5 && d.y == -1.0f) ++irisOffsets;
+            CHECK(irisOffsets == 3 && m.morphs[0].vertices.size() == 3 + 3);
+            CHECK(std::fabs(m.vertices[0].position.y - (16.5f + 0.92f * (0.0f - 16.5f))) < 1e-3f);
+        }
         for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
