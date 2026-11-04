@@ -342,6 +342,25 @@ void unitTests() {
         s.meshes[1].submeshes[0].indices[2] = 9;
         CHECK(exporter::ValidateScene(s).size() == 3);
     });
+    test("item cut-out: a main_item texture's alpha below 0.25 where its triangles lie cuts it, empty UV space does not", [] {
+        using namespace assemble;
+        Scene s;
+        SceneTexture t; t.width = 2; t.height = 1; t.rgba = {255, 255, 255, 0, 255, 255, 255, 255};   // left texel cut, right solid
+        s.textures.push_back(t);
+        SceneMaterial m; m.shader = "Shader Forge/main_item"; m.texture = 0;
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        for (float u : {0.6f, 0.9f, 0.9f}) { SceneVertex v; v.uv = {u, 0.5f}; mesh.vertices.push_back(v); }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        CHECK(!exporter::HasCutout(s, s.materials[0]));   // the triangle samples only the solid half
+        for (auto& v : s.meshes[0].vertices) v.uv.x -= 0.5f;
+        CHECK(exporter::HasCutout(s, s.materials[0]));
+        CHECK((exporter::MmdMaterialLook(s, s.materials[0]).drawFlags & 0x16) == 0);   // no ground shadow, shadow map or edge for the cut mesh
+        s.materials[0].shader = "Shader Forge/main_opaque";
+        CHECK(!exporter::HasCutout(s, s.materials[0]));
+    });
     test("KoiClothesOverlayX: overlays are read for the asked coordinate only, with the replace flag", [] {
         Bytes png = tinyPng();
         auto overlayFor = [&](int coordinate, bool replace) {   // {coordinate: {"ct_top_parts_B": [png, replace]}} as MessagePack

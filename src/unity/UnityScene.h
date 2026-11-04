@@ -145,6 +145,9 @@ public:
     std::vector<std::pair<std::string, std::string>> readShaderTextureDefaults(int64_t shaderPathId) const;
     // The declared default of every colour, vector and float property of a shader (floats in .x).
     std::vector<std::pair<std::string, Vec4>> readShaderPropDefaults(int64_t shaderPathId) const;
+    // The face culling of the shader's forward pass (the pass tagged LightMode ForwardBase, else the first): 0 off, 1 front, 2 back, -1 when
+    // unreadable. `property` gets the material float that sets it when the shader reads it from one ("[_Cull]"), else empty.
+    int readShaderCulling(int64_t shaderPathId, std::string* property = nullptr) const;
 
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;

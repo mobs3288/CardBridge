@@ -589,6 +589,17 @@ struct Builder {
     resolve::Resolver* resolverPtr = nullptr;
     std::map<std::string, int> shaderByNameCache;
 
+    // Whether a material is drawn from both sides: alpha and hair shaders (hair cards are drawn from both sides in the game; a culled PMX
+    // loses half of them), and whatever the shader itself draws unculled (Cull Off, or the material float it reads its culling from at 0).
+    bool twoSided(int shaderIndex, const std::string& shaderName, const unity::MaterialData& m) const {
+        if (contains(shaderName, "alpha") || contains(shaderName, "hair")) return true;
+        if (shaderIndex < 0) return false;
+        const SceneShader& sh = scene.shaders[static_cast<size_t>(shaderIndex)];
+        int cull = sh.cull;
+        for (const auto& f : m.floats) if (!sh.cullProperty.empty() && f.first == sh.cullProperty) cull = static_cast<int>(f.second);
+        return cull == 0;
+    }
+
     // A shader by its Unity name, for MaterialEditor shader overrides: one already in the scene, else found in the base bundles
     // that carry the character shaders.
     int shaderByName(const std::string& name) {
@@ -629,6 +640,7 @@ struct Builder {
                 sh.blob = std::move(*blob);
                 sh.texDefaults = uf.readShaderTextureDefaults(pathId);
                 sh.propDefaults = uf.readShaderPropDefaults(pathId);
+                sh.cull = uf.readShaderCulling(pathId, &sh.cullProperty);
                 scene.shaders.push_back(std::move(sh));
                 result = static_cast<int>(scene.shaders.size()) - 1;
             }
@@ -807,7 +819,7 @@ struct Builder {
                 sm.specular = {c->x * k, c->y * k, c->z * k};
             }
             sm.alpha = contains(m->shaderName, "alpha");
-            sm.doubleSided = sm.alpha || contains(m->shaderName, "hair");   // hair cards are drawn from both sides in the game; a culled PMX loses half of them
+            sm.doubleSided = twoSided(sm.shaderIndex, m->shaderName, *m);
             if (look && matIndex == 0) {
                 if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
                 else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
@@ -846,7 +858,7 @@ struct Builder {
             const unity::MaterialData* m_original = m ? &*m : nullptr;
             for (const auto* e : edits->editsFor(edits->shaders, meCoordinate, meType, meSlot, sm.name)) {
                 int si = shaderByName(e->property);
-                if (si < 0) continue;
+                if (si < 0) { scene.warn(partId, "MaterialEditor shader " + e->property + " for " + sm.name + " is not in the library: kept " + sm.shader); continue; }
                 // Changing a material's shader keeps the values of properties both shaders have; the new shader's own
                 // properties start at its declared defaults (the card's run-time colours are for the old shader).
                 if (m_original) {
@@ -863,7 +875,7 @@ struct Builder {
                 sm.shaderIndex = si;
                 sm.shader = e->property;
                 sm.alpha = contains(e->property, "alpha");
-                sm.doubleSided = sm.alpha || contains(e->property, "hair");
+                if (m_original) sm.doubleSided = twoSided(si, e->property, *m_original);
             }
             auto setProp = [&](const std::string& name, Vec4 v) {
                 for (auto& pr : sm.props) if (pr.first == name) { pr.second = v; return; }
@@ -2652,7 +2664,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     log("create materials done");
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
-            std::fprintf(stderr, "mat %s shader=%s idx=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex);
+            std::fprintf(stderr, "mat %s shader=%s idx=%d cull=%d two-sided=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex,
+                         m.shaderIndex >= 0 ? scene.shaders[static_cast<size_t>(m.shaderIndex)].cull : -1, m.doubleSided ? 1 : 0);
             for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d", t.name.c_str(), t.texture);
             std::fprintf(stderr, " | props:");
             for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);

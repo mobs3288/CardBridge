@@ -509,6 +509,42 @@ std::vector<std::pair<std::string, Vec4>> UnityFile::readShaderPropDefaults(int6
     return out;
 }
 
+int UnityFile::readShaderCulling(int64_t shaderPathId, std::string* property) const {
+    const ObjectInfo* o = sf_->find(shaderPathId);
+    if (!o) return -1;
+    try {
+        Value v = sf_->read(*o);
+        const auto& subs = v.at("m_ParsedForm").at("m_SubShaders").asArray();
+        if (subs.empty()) return -1;
+        const auto& passes = subs[0].at("m_Passes").asArray();
+        if (passes.empty()) return -1;
+        const Value* pick = &passes.front();
+        for (const auto& pass : passes) {
+            if (std::getenv("CARDBRIDGE_DEBUG_MAT")) {
+                std::fprintf(stderr, "shader %s pass %s cull=%g tags:", v.at("m_ParsedForm").at("m_Name").asStr().c_str(), pass.at("m_State").at("m_Name").asStr().c_str(),
+                             pass.at("m_State").at("culling").at("val").asFloat());
+                const Value& tg = pass.at("m_State").at("m_Tags").at("tags");
+                for (const auto& t : tg.asArray()) std::fprintf(stderr, " %s=%s", t.at("first").asStr().c_str(), t.at("second").asStr().c_str());
+                for (const auto& t : tg.asMap()) std::fprintf(stderr, " %s=%s", t.first.asStr().c_str(), t.second.asStr().c_str());
+                std::fprintf(stderr, " (array %d map %d)\n", tg.isArray() ? 1 : 0, tg.isMap() ? 1 : 0);
+            }
+            auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); }); return s; };
+            bool forward = false;   // Unity stores the tags upper-cased (LIGHTMODE=FORWARDBASE)
+            const Value& tags = pass.at("m_State").at("m_Tags").at("tags");   // a map, or an array of first / second pairs
+            for (const auto& t : tags.asArray()) forward = forward || (lower(t.at("first").asStr()) == "lightmode" && lower(t.at("second").asStr()) == "forwardbase");
+            for (const auto& t : tags.asMap()) forward = forward || (lower(t.first.asStr()) == "lightmode" && lower(t.second.asStr()) == "forwardbase");
+            if (forward) { pick = &pass; break; }
+        }
+        const Value& c = pick->at("m_State").at("culling");
+        if (property) {
+            const std::string name = c.at("name").asStr();
+            *property = name == "<noninit>" ? std::string() : name;
+        }
+        return static_cast<int>(c.at("val").asFloat());
+    } catch (const std::exception&) {}
+    return -1;
+}
+
 std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* why) const {
     auto fail = [&](const std::string& m) -> std::optional<TextureData> { if (why) *why = m; return std::nullopt; };
     if (p.isNull()) return fail("no texture assigned");

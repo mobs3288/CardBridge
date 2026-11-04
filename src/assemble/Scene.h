@@ -97,6 +97,8 @@ struct SceneShader {
     std::vector<uint8_t> blob;   // decompressed Direct3D 11 program blob
     std::vector<std::pair<std::string, Vec4>> propDefaults;   // colour, vector and float defaults the shader declares
     std::vector<std::pair<std::string, std::string>> texDefaults;   // texture property -> default ("white", "black", "bump", "gray")
+    int cull = -1;                // the forward pass's face culling: 0 off (both sides drawn), 1 front, 2 back; -1 not known
+    std::string cullProperty;     // the material float that sets the culling instead, when the shader reads it from one
 };
 
 struct SceneSubmesh {
