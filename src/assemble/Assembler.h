@@ -5,6 +5,7 @@
 #include "resolve/Resolver.h"
 
 #include <functional>
+#include <string>
 
 namespace cardbridge::assemble {
 
@@ -28,6 +29,10 @@ struct AssembleOptions {
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
 };
+
+// The game draws its garment and eye "create" materials in linear light (sRGB textures decoded, linear colours, encoded result); the skin ones
+// were measured against the game as stored. Checked against the game's own render textures: the iris result was 16/255 off drawn as stored, 1 in linear.
+bool CreateRunsInLinearLight(const std::string& materialName);
 
 // Builds the scene for one outfit: the shared skeleton from the base game,
 // the body mesh, then every card item that resolves (head, hair, clothing,

@@ -1308,6 +1308,10 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 
 } // namespace
 
+bool CreateRunsInLinearLight(const std::string& materialName) {
+    return materialName == "cf_m_clothesN_create" || materialName == "cf_m_eye_create" || materialName == "cf_m_eyewhite_create";
+}
+
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
     Scene scene;
     scene.name = card.displayName();
@@ -1560,6 +1564,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             for (const auto& tb : job.material.texProps) std::fprintf(stderr, " %s=%d", tb.name.c_str(), tb.texture);
             std::fprintf(stderr, "\n");
         }
+        job.linear = CreateRunsInLinearLight(matName);
         job.width = job.height = size;
         job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
         scene.createJobs.push_back(std::move(job));
@@ -1878,7 +1883,6 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     int size = std::min(1024, std::max(mainT->width, mainT->height));
                     int job = createJobFor(ref.partId, "cf_m_clothesN_create", texs, props, size);
                     if (job >= 0) {
-                        scene.createJobs.back().linear = true;
                         // KoiClothesOverlayX paints an image over the garment's texture (named by the garment's object in the game).
                         static const char* const kGarmentNames[] = {"ct_clothesTop", "ct_clothesBot", "ct_bra", "ct_shorts", "ct_gloves", "ct_panst", "ct_socks", "ct_shoes_inner", "ct_shoes_outer"};
                         static const char* const kSubNames[] = {"ct_top_parts_A", "ct_top_parts_B", "ct_top_parts_C"};

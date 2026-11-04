@@ -218,6 +218,12 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
 pmxread::Model readPmx(const Bytes& b) { return pmxread::Read(b.data(), b.size()); }
 
 void unitTests() {
+    test("create materials: garments and eyes are drawn in linear light (the game's iris is 16/255 off drawn as stored), skin as stored", [] {
+        using assemble::CreateRunsInLinearLight;
+        CHECK(CreateRunsInLinearLight("cf_m_eye_create") && CreateRunsInLinearLight("cf_m_eyewhite_create") && CreateRunsInLinearLight("cf_m_clothesN_create"));
+        CHECK(!CreateRunsInLinearLight("cf_m_face_create") && !CreateRunsInLinearLight("cf_m_body_create") && !CreateRunsInLinearLight(""));
+    });
+
     test("linear light: colour properties are decoded, floats and texture scales are left alone", [] {
         using namespace cardbridge;
         for (float c : {0.0f, 0.02f, 0.2f, 0.5f, 1.0f}) CHECK(std::fabs(exporter::detail::ToSrgb(exporter::detail::ToLinear(c)) - c) < 1e-4f);
@@ -1502,6 +1508,18 @@ void integrationTests() {
                 CHECK(ch.boneStiffness.empty() || ch.boneStiffness.size() == ch.bones.size());
                 for (float v : ch.boneStiffness) CHECK(v >= 0.0f && v <= 1.0f);
             }
+        }
+        {   // the iris and eye white create passes ran (a 1x1 placeholder is left when the shader could not run), and the iris carries colour
+            int irises = 0;
+            for (const auto& t : scene.textures)
+                if (t.name == "cf_m_eye_create_result") {
+                    ++irises;
+                    CHECK(t.width == 512 && t.height == 512 && t.rgba.size() == 512u * 512u * 4u);
+                    size_t lit = 0;
+                    for (size_t i = 0; i + 3 < t.rgba.size(); i += 4) if (t.rgba[i + 3] > 128 && t.rgba[i] + t.rgba[i + 1] + t.rgba[i + 2] > 60) ++lit;
+                    CHECK(lit > 20000);
+                }
+            CHECK(irises == 0 || irises == 2);
         }
         // weights sum to 1 on every vertex
         size_t badWeights = 0;
