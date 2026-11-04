@@ -21,6 +21,12 @@ struct MmdBones {
 };
 MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, float scale);
 
+// Adds the semi-standard bones the hand-made MMD models have and many motions key, around the named ones: 肩P / 肩C, the twist bones 腕捩 and
+// 手捩 (the game's driven skin helpers along the arm and forearm take their twist in proportion), 腰キャンセル, 足IK親 and 操作中心. Bones are
+// inserted, not appended (MikuMikuDance evaluates a bone after the ones before it), so every bone index moves: run it last, after the display
+// frames exist, and before nothing that still holds bone indices.
+void AddMmdStandardBones(pmx::Model& model);
+
 // Adds the standard facial morphs a motion keys and returns their indices (they are listed first in the morph panel): まばたき is a copy of
 // the game's closed eyes; あ is the game's wide open mouth, and い う え お are built from it (a smaller opening, the mouth corners spread or
 // drawn in, the lips pushed forward) because which of the game's mouth patterns is which vowel is not recorded anywhere. Run after the

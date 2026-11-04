@@ -49,8 +49,9 @@ public:
     // False before the first Render.
     bool Project(Vec3 world, float& sx, float& sy, float& depth) const;
 
-    // Plain mode draws every material with its texture and diffuse colour under one headlight and no colour grading, the way a
-    // PMX viewer shows the exported file when the scene's textures are baked (BakeShaderTextures, colour only). Off by default.
+    // Plain mode draws the scene the way MikuMikuDance shows the exported PMX when its textures are baked (BakeShaderTextures, colour
+    // only): each material as the PMX writes it (MmdMaterialLook: colours, toon ramp, edge), MMD's default light, its self-shadow
+    // (the lit colour or the ramp's bottom row, by N.L and a shadow map) and its ground shadow, and no colour grading. Off by default.
     void SetPlain(bool on);
     bool plain() const;
 

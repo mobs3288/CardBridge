@@ -52,6 +52,7 @@ struct Bone {
     int tailBone = -1;              // the bone the tail points to
     int appendParent = -1;          // >= 0: this bone also turns by appendRatio times that bone's rotation (MMD's 付与; the parent needs a lower `layer`)
     float appendRatio = 1.0f;
+    Vec3 fixedAxis{0, 0, 0};        // non-zero: the bone turns only about this axis (a twist bone)
     // IK: when `ikTarget` is a bone this is an IK bone. The solver turns the links until `ikTarget` reaches this bone's position, at most
     // `ikLoop` passes of at most `ikLimit` radians each.
     int ikTarget = -1;

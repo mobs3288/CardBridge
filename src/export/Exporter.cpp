@@ -100,7 +100,67 @@ int ToothSphere(pmx::Model& model, int& done, const ExportOptions& opt) {
     return done = static_cast<int>(model.textures.size()) - 1;
 }
 
+bool IsTooth(const assemble::SceneMaterial& mat) {
+    return mat.name.find("tooth") != std::string::npos || mat.name.find("canine") != std::string::npos;
+}
+
+// Mean colour of a material's texture (sRGB, the texels that are not see-through), times its diffuse; white without a texture.
+Vec3 MeanColour(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    double sum[3] = {0, 0, 0}, n = 0;
+    if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size()) {
+        const auto& px = scene.textures[static_cast<size_t>(mat.texture)].rgba;
+        for (size_t i = 0; i + 3 < px.size(); i += 4) {
+            if (px[i + 3] < 128) continue;
+            for (int c = 0; c < 3; ++c) sum[c] += px[i + static_cast<size_t>(c)];
+            n += 255.0;
+        }
+    }
+    if (n == 0) return {mat.diffuse.x, mat.diffuse.y, mat.diffuse.z};
+    return {static_cast<float>(sum[0] / n) * mat.diffuse.x, static_cast<float>(sum[1] / n) * mat.diffuse.y, static_cast<float>(sum[2] / n) * mat.diffuse.z};
+}
+
 } // namespace
+
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    MmdLook look;
+    look.diffuse = mat.diffuse;
+    if (mat.shader.find("glasses") != std::string::npos) {   // lenses: the shader's _Color alpha (see-through), not a solid
+        float a = 0.35f;
+        for (const auto& pr : mat.props) if (pr.first == "_Color") a = pr.second.w < 0.99f ? pr.second.w : 0.35f;
+        look.diffuse.w = a;
+    }
+    // MMD shades as diffuse * light + ambient: the game's shadow colour goes to ambient so the dark side keeps
+    // the tint the card's shader gives it.
+    look.ambient = {mat.diffuse.x * mat.shadow.x, mat.diffuse.y * mat.shadow.y, mat.diffuse.z * mat.shadow.z};
+    look.specularPower = mat.specularPower;
+    // No specular: the bake leaves the game's highlight out, and MMD's broad sheen (power 5) whitened the face, the hair and the shoes.
+    look.specular = {0.0f, 0.0f, 0.0f};
+    if (mat.bakedLit) {   // the texture holds the game's lighting already: show it as it is, no second shading
+        look.diffuse = {0.0f, 0.0f, 0.0f, look.diffuse.w};
+        look.ambient = {1.0f, 1.0f, 1.0f};
+    } else if (!mat.toon.empty()) {
+        look.ambient = {1.0f, 1.0f, 1.0f};   // MMD multiplies the lit colour by the ramp; the shade tint lives in the ramp now
+    }
+    // The face's painted layers (eyes, eye whites, brows, eyelines, nose line: the toon_eye* / toon_nose shaders) and see-through lenses
+    // neither cast nor take shadow and get no edge, like the eyes of hand-made PMX models; everything else gets MikuMikuDance's ground
+    // shadow, casts and receives self-shadow and has an edge, as those models do (without the flags MMD drew no shadow at all).
+    const bool overlay = mat.shader.find("toon_") != std::string::npos, lens = mat.shader.find("glasses") != std::string::npos;
+    const bool tooth = IsTooth(mat);
+    look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
+    if (!overlay && !lens) look.drawFlags |= 0x02 | 0x04 | 0x08;
+    if (!overlay && !lens && !tooth) look.drawFlags |= 0x10;
+    // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
+    // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
+    // dark skin tone, never the white rim a light colour made round hair strands lying on the face).
+    Vec3 e = mat.outlineColor;
+    if (0.3f * e.x + 0.59f * e.y + 0.11f * e.z >= 0.3f) {
+        const Vec3 m = MeanColour(scene, mat);
+        e = {e.x * m.x, e.y * m.y, e.z * m.z};
+    }
+    look.edgeColor = {e.x, e.y, e.z, 1.0f};
+    look.edgeSize = 0.6f;   // the hand-made reference models' 0.6; the game's own outline widths are not material data (mostly 0)
+    return look;
+}
 
 std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
     std::vector<std::string> out;
@@ -332,36 +392,16 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.name = part.id + "/" + mesh.name + "#" + std::to_string(sub++);
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
-                pm.diffuse = mat.diffuse;
-                if (mat.shader.find("glasses") != std::string::npos) {   // lenses: the shader's _Color alpha (see-through), not a solid
-                    float a = 0.35f;
-                    for (const auto& pr : mat.props) if (pr.first == "_Color") a = pr.second.w < 0.99f ? pr.second.w : 0.35f;
-                    pm.diffuse.w = a;
-                }
-                // MMD shades as diffuse * light + ambient: the game's shadow colour goes to ambient so the dark side keeps
-                // the tint the card's shader gives it.
-                pm.ambient = {mat.diffuse.x * mat.shadow.x, mat.diffuse.y * mat.shadow.y, mat.diffuse.z * mat.shadow.z};
-                pm.specular = mat.specular;
-                pm.specularPower = mat.specularPower;
-                if (mat.bakedLit) {   // the texture holds the game's lighting already: show it as it is, no second shading
-                    pm.diffuse = {0.0f, 0.0f, 0.0f, pm.diffuse.w};
-                    pm.ambient = {1.0f, 1.0f, 1.0f};
-                    pm.specular = {0.0f, 0.0f, 0.0f};
-                }
-                if (!mat.toon.empty() && !mat.bakedLit) {   // the game shader's shade, as the material's own toon ramp (bright at the top, like MMD's)
-                    pm.toon = ToonTexture(mat.toon, model, toonFiles, opt);
-                    pm.ambient = {1.0f, 1.0f, 1.0f};   // MMD multiplies the lit colour by the ramp; the shade tint lives in the ramp now
-                }
-                if (mat.name.find("tooth") != std::string::npos || mat.name.find("canine") != std::string::npos) { pm.sphere = ToothSphere(model, toothSphere, opt); }
-                // MMD's broad white sheen (specular power 5) turns the game's skin gloss into a white face, and hair is lit by its texture.
-                if (mat.shader.find("skin") != std::string::npos || mat.shader.find("hair") != std::string::npos) pm.specular = {0.0f, 0.0f, 0.0f};
-                // MMD draws an edge as the model's back faces pushed outwards, which pokes through thin hair lying on the face: a dark line
-                // is fine, the game's light skin outline became a white rim round every strand. Only dark outlines are kept.
-                const float outlineLuma = 0.3f * mat.outlineColor.x + 0.59f * mat.outlineColor.y + 0.11f * mat.outlineColor.z;
-                pm.drawFlags = (mat.doubleSided ? 0x01 : 0x00) | (mat.outlineWidth > 0.0f && outlineLuma < 0.3f ? 0x10 : 0x00);
-                if (pm.sphere >= 0) pm.drawFlags |= 0x01;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
-                pm.edgeColor = {mat.outlineColor.x, mat.outlineColor.y, mat.outlineColor.z, 1.0f};
-                pm.edgeSize = std::min(1.0f, mat.outlineWidth * 20.0f);
+                const MmdLook look = MmdMaterialLook(scene, mat);
+                pm.diffuse = look.diffuse;
+                pm.ambient = look.ambient;
+                pm.specular = look.specular;
+                pm.specularPower = look.specularPower;
+                pm.drawFlags = look.drawFlags;
+                pm.edgeColor = look.edgeColor;
+                pm.edgeSize = look.edgeSize;
+                if (!mat.toon.empty() && !mat.bakedLit) pm.toon = ToonTexture(mat.toon, model, toonFiles, opt);   // the game shader's shade, as the material's own toon ramp (bright at the top, like MMD's)
+                if (IsTooth(mat)) pm.sphere = ToothSphere(model, toothSphere, opt);
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
                     // The game's item shader (main_item) never reads the texture's alpha, and card textures often keep a mask or nothing
@@ -512,6 +552,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             model.frames.push_back(std::move(f));
         }
     }
+    if (opt.mmdNames) AddMmdStandardBones(model);
     log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
     if (opt.faceMinusZ) pmx::TurnAboutY(model);

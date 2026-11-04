@@ -43,6 +43,18 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
 // than 25 % above the head's top or 15 % of the body height below the floor.
 std::vector<std::string> ValidateScene(const assemble::Scene& scene);
 
+// A material as MikuMikuDance shows it: the colours, draw flags and edge the exporter writes into its PMX material (no texture,
+// toon or sphere indices). The viewer's "as exported" view draws with the same numbers, so the two cannot drift apart.
+struct MmdLook {
+    Vec4 diffuse{1, 1, 1, 1};
+    Vec3 ambient{1, 1, 1}, specular{0, 0, 0};
+    float specularPower = 5.0f;
+    uint8_t drawFlags = 0;   // 0x01 double-sided, 0x02 ground shadow, 0x04 casts self-shadow, 0x08 receives self-shadow, 0x10 edge
+    Vec4 edgeColor{0, 0, 0, 1};
+    float edgeSize = 0.0f;
+};
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+
 // The manifest as JSON (exposed for tests).
 nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,
                              const std::string& pmxFile, const std::vector<std::string>& textureFiles,
