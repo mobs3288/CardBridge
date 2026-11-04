@@ -25,6 +25,11 @@ constexpr uint8_t kPmxGroupChain = 1;
 // the spring).
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale);
 
+// The bones of a chain that get a rigid body: the chain's valid bones without its stubs. A stub is a leaf node that points back up the chain
+// (the skirts' cf_j_sk_xx_05_end sits above its parent): a body spanning to it would stand on its joint upside down and flip over in
+// MikuMikuDance, so the parent stays the last link and its body carries on in the direction the chain came from.
+std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble::SceneChain& chain);
+
 // Face expressions: one vertex morph per scene expression (brow / eye / mouth pattern, closed or open, relative to the resting
 // expression built into the vertices) and one per raw blend shape. `meshBase[i]` is the PMX index of scene mesh i's first vertex,
 // -1 for a mesh that was not exported. Returns the number of morphs added.

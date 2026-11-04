@@ -901,6 +901,26 @@ void unitTests() {
         for (const auto& j : flat.joints) CHECK(j.rotUpper.z <= 0.06f);
     });
 
+    test("physics: a stub node pointing back up the chain gets no body, its parent carries on downward", [] {
+        assemble::Scene s;
+        s.bones.push_back({"hip", -1, {0, 1.3f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"s" + std::to_string(i), i == 0 ? 0 : i, {0, 1.2f - 0.2f * float(i), 0}, "rig"});
+        s.bones.push_back({"s3_end", 4, {0, 0.7f, 0}, "item"});   // above its parent (0.6), as the skirts' end nodes are
+        assemble::SceneChain ch;
+        ch.name = "skirt";
+        ch.bones = {1, 2, 3, 4, 5};
+        ch.stiffness = 0.5f;
+        s.chains.push_back(ch);
+        CHECK(exporter::PhysicsChainBones(s, ch).size() == 4);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        CHECK(m.rigidBodies.size() == 4 && m.joints.size() == 3);
+        CHECK(m.rigidBodies[3].position.y < 6.0f);   // the last link hangs below its bone (y 0.6 -> 6), not above it
+        s.bones[5].pos = {0, 0.5f, 0};   // a real continuation stays
+        CHECK(exporter::PhysicsChainBones(s, ch).size() == 5);
+    });
+
     test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
         using namespace assemble;
         struct Setup { const char* what; float damping, elasticity, stiffness; };
@@ -1709,8 +1729,7 @@ void integrationTests() {
                 if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;
             for (const auto& chain : scene.chains) {
                 if (chain.characterOwn) continue;   // the body's own jiggle chains stay rigid in the PMX
-                size_t valid = 0;
-                for (int b : chain.bones) if (b >= 0 && b < static_cast<int>(scene.bones.size())) ++valid;
+                const size_t valid = exporter::PhysicsChainBones(scene, chain).size();
                 if (valid < 2) continue;
                 expectBodies += valid;
                 expectJoints += valid - 1;
