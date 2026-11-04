@@ -2327,6 +2327,20 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (payload.isBin()) hacInfo = MsgPackParse(payload.asBin()).atInt(ref.outfit).atInt(ref.accIndex);
         }
         std::vector<std::string> skipped, skippedByEditor;
+        // A garment's optional pieces (ChaClothesComponent objOpt01 / objOpt02): the maker's two option switches, which the card keeps as
+        // the garment's hideOpt; a switched-off option's objects are inactive in the game.
+        std::vector<int64_t> hiddenOptions;
+        if (ref.group == "Outfit" && ref.outfit >= 0 && ref.slot >= 0) {
+            const Value& hide = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(static_cast<size_t>(ref.subKind >= 0 ? 0 : ref.slot)).at("hideOpt");
+            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                if (mb.className != "ChaClothesComponent") continue;
+                for (size_t k = 0; k < 2; ++k) {
+                    if (!hide.at(k).asBool()) continue;
+                    for (const auto& go : mb.fields.at(k == 0 ? "objOpt01" : "objOpt02").asArray())
+                        if (go.at("m_FileID").asInt() == 0 && go.at("m_PathID").asInt() != 0) hiddenOptions.push_back(go.at("m_PathID").asInt());
+                }
+            }
+        }
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(roots[0])) {
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
@@ -2344,7 +2358,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             // bottom, and the face's tears, gag eyes and tongue.
             // A garment prefab holds one node per clothes state: n_top_a / n_bot_a is the worn state, b and c the pulled-off
             // ones (c = shorts or skirt hanging from one leg); an object inactive in the prefab is off in every state.
-            bool hiddenByDefault = !r.active || hiddenClothesState(path) ||
+            bool hiddenByDefault = !r.active || hiddenClothesState(path) || (!hiddenOptions.empty() && uf->isUnderGameObject(r.xformId, hiddenOptions)) ||
                                    (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye") || contains(r.name, "o_tang")));
             if (hiddenByDefault) { skipped.push_back(r.name); continue; }
             // Debug aid: CARDBRIDGE_SKIP=name1,name2 leaves those renderers out (to find which mesh draws an artefact).
