@@ -792,17 +792,27 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                         ay += tv * H; by += tv * H; cy += tv * H;
                     }
                     float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-                    if (std::fabs(den) < 1e-8f) continue;
+                    // A triangle with no UV area (a garment part coloured from one point of its texture, like a skirt's plain upper half)
+                    // still samples that point in the PMX: the texel under its UV centre is shaded with the triangle's centre.
+                    const bool point = std::fabs(den) < 1e-8f;
                     int x0 = std::max(0, static_cast<int>(std::floor(std::min({ax, bx, cx})))), x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max({ax, bx, cx}))));
                     int y0 = std::max(0, static_cast<int>(std::floor(std::min({ay, by, cy})))), y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max({ay, by, cy}))));
+                    if (point) {
+                        x0 = x1 = static_cast<int>(std::floor((ax + bx + cx) / 3.0f));
+                        y0 = y1 = static_cast<int>(std::floor((ay + by + cy) / 3.0f));
+                        if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) continue;
+                    }
                     for (int y = y0; y <= y1; ++y) {
                         if (static_cast<unsigned>(y) % hw != wi) continue;
                         for (int x = x0; x <= x1; ++x) {
                             float px = x + 0.5f, py = y + 0.5f;
-                            float l0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den;
-                            float l1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den;
-                            float l2 = 1.0f - l0 - l1;
-                            if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                            float l0 = 1.0f / 3.0f, l1 = 1.0f / 3.0f, l2 = 1.0f / 3.0f;
+                            if (!point) {
+                                l0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den;
+                                l1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den;
+                                l2 = 1.0f - l0 - l1;
+                                if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                            }
                             size_t ti = static_cast<size_t>(y) * W + x;
                             if (cov[ti]) continue;   // overlapping UV islands: the first one wins
                             shader::Sm4Io io;
