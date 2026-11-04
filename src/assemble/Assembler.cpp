@@ -147,6 +147,19 @@ bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& pref
     return true;
 }
 
+// The correction table of the alternative bone type (typeBone != 0); a library imported before it was copied lacks it.
+void loadCorrectTable(resolve::Resolver& resolver, shape::ShapeState& S, Scene& scene, const char* what) {
+    std::string why;
+    auto bundle = resolver.openBaseBundle("list/shapecorrect/shapecorrect.unity3d", &why);
+    bool ok = false;
+    if (bundle)
+        for (const auto& [name, bytes] : bundle->readTextAssets())
+            if (name == "shapecorrect") ok = shape::ParseCorrectTable(bytes, S);
+    if (!ok)
+        scene.warn(what, "this body uses an alternative bone type (typeBone " + std::to_string(S.typeBone) +
+                         ") but the library has no list/shapecorrect/shapecorrect.unity3d; import the library again, proportions may be slightly off");
+}
+
 // The card's body sliders as local transforms for the skeleton's driven bones (ChaControl.UpdateShapeBodyValueFromCustomInfo
 // followed by ShapeBodyInfoFemale.Update/UpdateAlways, copied as generated code in shape/).
 Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver, UnityFile& base, UnityFile& rigFile,
@@ -186,9 +199,7 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
 
     shape::ShapeState S;
     S.typeBone = static_cast<int>(card.body.at("typeBone").asInt());
-    if (S.typeBone != 0)
-        scene.warn("body", "this body uses an alternative bone type (typeBone " + std::to_string(S.typeBone) +
-                           "); its correction table is not loaded, proportions may be slightly off");
+    if (S.typeBone != 0) loadCorrectTable(resolver, S, scene, "body");
     const auto& dstNames = shape::BodyDstNames();
     S.dstFn = [&](int i) -> shape::ShapeBone* {
         if (i < 0 || static_cast<size_t>(i) >= dstNames.size()) return nullptr;
@@ -289,6 +300,13 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
 
     shape::ShapeState S;
     S.typeBone = static_cast<int>(card.body.at("typeBone").asInt());
+    if (S.typeBone != 0) {
+        // ChaControl.UpdateShapeFace: the head is divided by the body's neck-base height correction
+        shape::ShapeState corr;
+        corr.typeBone = S.typeBone;
+        loadCorrectTable(resolver, corr, scene, "head");
+        S.headCorrectValue = 1.0f / (1.0f + corr.correct(2).scl.y);
+    }
     const auto& dstNames = shape::HeadDstNames();
     S.dstFn = [&](int i) -> shape::ShapeBone* {
         if (i < 0 || static_cast<size_t>(i) >= dstNames.size()) return nullptr;

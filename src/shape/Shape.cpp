@@ -136,6 +136,23 @@ CategoryTable ParseCategories(const std::string& text, const std::map<std::strin
     return t;
 }
 
+bool ParseCorrectTable(const Bytes& data, ShapeState& S) {
+    try {
+        ByteReader r(data);
+        const int32_t n = r.i32();
+        if (n < 0 || static_cast<size_t>(n) > data.size() / 36) return false;
+        for (int32_t i = 0; i < n; ++i) {
+            ShapeSrc& c = S.correct(i);
+            c.pos = {r.f32(), r.f32(), r.f32()};
+            c.rot = {r.f32(), r.f32(), r.f32()};
+            c.scl = {r.f32(), r.f32(), r.f32()};
+        }
+    } catch (const FormatError&) {
+        return false;
+    }
+    return true;
+}
+
 void ChangeValue(ShapeState& S, const AnimKeys& anm, const CategoryTable& cats, int slider, float value) {
     auto it = cats.find(slider);
     if (it == cats.end()) return;
