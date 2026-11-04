@@ -1640,6 +1640,15 @@ void integrationTests() {
                 CHECK(back.morphs.size() >= listed);   // what does not fit stays in the file, unlisted
                 std::printf("  read back: %zu morphs listed in the display frames of %zu\n", listed, back.morphs.size());
             }
+            {   // MikuMikuDance writes depth for the face's see-through mouth window: the teeth must be drawn before the face to show through it
+                int face = -1, lastTooth = -1;
+                for (size_t i = 0; i < back.materials.size(); ++i) {
+                    const std::string& n = back.materials[i].name;
+                    if (face < 0 && n.find("cf_O_face") != std::string::npos) face = static_cast<int>(i);
+                    if (n.find("cf_O_tooth") != std::string::npos || n.find("cf_O_canine") != std::string::npos) lastTooth = static_cast<int>(i);
+                }
+                CHECK(face < 0 || lastTooth < face);
+            }
             {   // facing -Z: the toes lie in front of the ankle, on the -Z side
                 const pmxread::Bone* foot = nullptr; const pmxread::Bone* toe = nullptr;
                 for (const auto& b : back.bones) { if (b.name == "cf_j_foot_L" || b.name == "左足首") foot = &b; if (b.name == "cf_j_toes_L" || b.name == "左つま先") toe = &b; }
