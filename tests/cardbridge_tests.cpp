@@ -1475,6 +1475,11 @@ void integrationTests() {
             for (const auto& p : scene.parts) if (p.id == "head" && !p.meshes.empty()) headLoaded = true;
             std::printf("  head loaded: %d\n", headLoaded ? 1 : 0);
             if (headLoaded) CHECK(!scene.expressions.empty());
+            // the accessory attach nodes come from the head model (bo_head_00's pony node has its local y up; the generic rig's points down)
+            for (const auto& p : scene.parts) {
+                int pony = scene.boneIndex("a_n_hair_pony");
+                if (p.id == "head" && p.bundle == "chara/bo_head_00.unity3d" && pony >= 0) CHECK(scene.bones[static_cast<size_t>(pony)].world.m[5] > 0.0f);
+            }
             CHECK(!scene.colliders.empty());
             std::printf("  %zu expressions, %zu physics chains, %zu colliders\n", scene.expressions.size(), scene.chains.size(), scene.colliders.size());
         }
