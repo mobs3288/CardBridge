@@ -27,7 +27,8 @@ bool BendLimits(Vec3 root, Vec3 mid, Vec3 end, Vec3& lower, Vec3& upper);
 
 // Appends one IK bone per limb to the model, at the end bone's place under the model's root: the solver turns the middle bone (with the
 // bending limits) and the root bone until the end bone reaches the IK bone, so a PMX editor can pose a limb by moving one handle. The
-// scene's bones are the model's first bones, unchanged. Returns the indices of the bones added.
-std::vector<int> AddIk(const assemble::Scene& scene, pmx::Model& model, float scale);
+// scene's bones are the model's first bones, unchanged. Returns the indices of the bones added. With arms=false only the legs get one: MMD
+// solves every IK bone each frame and a motion keys the foot IK but not an arm one, so an arm handle at rest would pin the arm to the A-pose.
+std::vector<int> AddIk(const assemble::Scene& scene, pmx::Model& model, float scale, bool arms = true);
 
 } // namespace cardbridge::exporter
