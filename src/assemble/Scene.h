@@ -133,6 +133,7 @@ struct SceneExpression {
     std::string name;
     int panel = 4;                    // MMD panel: 1 brows, 2 eyes, 3 mouth, 4 other
     std::vector<Target> targets;
+    std::string shape;                // the main blend shape's own name without its mesh and face prefix ("a_l_op", "def_cl"): what the pattern is
 };
 
 // A DynamicBone chain (hair strand, skirt, ribbon, breast and hip jiggle): bones[0] is the anchor that follows the body, the

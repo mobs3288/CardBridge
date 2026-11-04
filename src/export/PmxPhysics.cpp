@@ -378,7 +378,8 @@ void AddLegFollow(const assemble::Scene& scene, pmx::Model& model) {
     }
 }
 
-size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, const std::vector<int>& meshBase, float scale) {
+size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, const std::vector<int>& meshBase, float scale,
+                           std::map<std::string, std::string>* shapes) {
     size_t added = 0;
     auto push = [&](const std::string& name, int panel, std::map<int, Vec3>& acc) {
         pmx::Morph m;
@@ -400,6 +401,7 @@ size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, cons
             for (const auto& [vi, d] : shapes[static_cast<size_t>(t.shape)].offsets) acc[meshBase[static_cast<size_t>(t.mesh)] + static_cast<int>(vi)] = acc[meshBase[static_cast<size_t>(t.mesh)] + static_cast<int>(vi)] + d * k;
         }
         push(ex.name, ex.panel, acc);
+        if (shapes && !ex.shape.empty()) (*shapes)[ex.name] = ex.shape;
     }
     for (size_t mi = 0; mi < scene.meshes.size() && mi < meshBase.size(); ++mi) {
         if (meshBase[mi] < 0) continue;

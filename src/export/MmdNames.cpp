@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <string>
 
 namespace cardbridge::exporter {
@@ -46,12 +47,6 @@ constexpr Pair kSided[] = {
     {"cf_j_foot_", "足首", "Ankle"},
     {"cf_j_toes_", "つま先", "Toe"},
     {"cf_J_hitomi_tx_", "目", "Eye"},   // the face rig spells its J with a capital
-};
-
-// The standard facial morphs a motion keys, and the game's expression morph each copies. Eye pattern 0 is the face's default eyes, its
-// "closed" state a blink. (The vowels あ い う え お are not here: which of the game's mouth patterns is which vowel is not known.)
-constexpr Pair kMorphs[] = {
-    {"Eyes 0 closed", "まばたき", "Blink"},
 };
 
 int find(const pmx::Model& model, const std::string& name) {
@@ -366,61 +361,115 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
     return result;
 }
 
-std::vector<int> AddMmdMorphs(pmx::Model& model) {
+std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std::string>& shapes) {
     std::vector<int> added;
-    for (const Pair& p : kMorphs) {
-        int src = -1;
-        for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == p.mmd) { src = -2; break; }
-        if (src == -2) continue;
-        for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == p.rig) { src = static_cast<int>(i); break; }
-        if (src < 0) continue;
-        pmx::Morph m = model.morphs[static_cast<size_t>(src)];
-        m.name = p.mmd;
-        m.nameEn = p.en;
+    auto find = [&](const std::string& n) { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == n) return static_cast<int>(i); return -1; };
+    // The game expression morph that plays a pattern, by the pattern's own blend shape name (each FaceBlendShape pattern is a whole face:
+    // lips, teeth, canines, tongue and nose line move together, so a copy keeps them together). Only the same panel (brows, eyes and mouth reuse names such as def_cl); several keys: the first one the head has.
+    auto byShape = [&](const char* keys, int panel) {
+        std::string list = keys;
+        for (size_t at = 0; at <= list.size();) {
+            const size_t end = std::min(list.find(',', at), list.size());
+            const std::string key = list.substr(at, end - at);
+            at = end + 1;
+            for (size_t i = 0; i < model.morphs.size(); ++i) {
+                auto it = shapes.find(model.morphs[i].name);
+                if (it != shapes.end() && it->second == key && model.morphs[i].panel == panel && !model.morphs[i].vertices.empty()) return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    auto add = [&](const std::string& name, const char* en, int panel, std::vector<std::pair<int, Vec3>> verts) {
+        if (verts.empty() || find(name) >= 0) return;
+        pmx::Morph m;
+        m.name = name;
+        m.nameEn = en;
+        m.panel = panel;
+        m.vertices = std::move(verts);
         added.push_back(static_cast<int>(model.morphs.size()));
         model.morphs.push_back(std::move(m));
+    };
+
+    // The standard morphs a motion keys, each the game's own pattern of the same meaning (which is which was read off renders of every pattern
+    // next to the reference model's morph of that name). Names and panels as MikuMikuDance's standard models have them.
+    struct Standard { const char* mmd; const char* en; int panel; const char* keys; const char* fallback; float gain; };
+    static const Standard kStandard[] = {
+        // vowels: the game's lip-sync shapes, the large ones (a_l = あ wide open with both rows of teeth, ...); n_l is the closed ん
+        {"あ", "A", 3, "a_l_op", "Mouth 0 open", 2.0f},
+        {"い", "I", 3, "i_l_op", "Mouth 0 open", 0.6f},
+        {"う", "U", 3, "u_l_op", "Mouth 0 open", 0.6f},
+        {"え", "E", 3, "e_l_op", "Mouth 0 open", 1.2f},
+        {"お", "O", 3, "o_l_op", "Mouth 0 open", 1.4f},
+        {"ん", "N", 3, "n_l_cl", nullptr, 1.0f},
+        {"い2", "I2", 3, "i_s_op", nullptr, 1.0f},
+        {"え2", "E2", 3, "e_s_op", nullptr, 1.0f},
+        {"お2", "O2", 3, "o_s_op", nullptr, 1.0f},
+        {"ワ", "Wa", 3, "egao_op", nullptr, 1.0f},
+        {"ワ1", "Wa1", 3, "uresi_op", nullptr, 1.0f},
+        {"ワ2", "Wa2", 3, "uresi_s_op", nullptr, 1.0f},
+        {"∧", "Frown", 3, "doki_ss_cl", nullptr, 1.0f},
+        {"ω", "Omega", 3, "neko_cl", nullptr, 1.0f},
+        {"ω□", "Omega open", 3, "neko_op", nullptr, 1.0f},
+        {"▲", "Triangle", 3, "san_op", nullptr, 1.0f},
+        {"ぺろっ", "Tongue out", 3, "pero_cl", nullptr, 1.0f},
+        {"口角上げ", "Mouth corner up", 3, "niko_cl", nullptr, 1.0f},
+        {"口角下げ", "Mouth corner down", 3, "ikari_cl", nullptr, 1.0f},
+        {"にやり", "Grin", 3, "doya_cl", nullptr, 1.0f},
+        {"にやり２", "Grin 2", 3, "doya_op", nullptr, 1.0f},
+        {"にやり３", "Grin 3", 3, "niko_op", nullptr, 1.0f},
+        {"ムッ", "Pout", 3, "human_cl", nullptr, 1.0f},
+        {"怒った", "Angry", 3, "ikari_op", nullptr, 1.0f},
+        {"怒った2", "Angry 2", 3, "ikari02_op", nullptr, 1.0f},
+        {"口", "Open", 3, "sinken03_op", nullptr, 1.0f},
+        {"大口", "Wide open", 3, "name_op", nullptr, 1.0f},
+        {"心配する", "Worry", 3, "aseri_op", nullptr, 1.0f},
+        {"えー", "Eh", 3, "akire_op", nullptr, 1.0f},
+        // eyes
+        {"まばたき", "Blink", 2, "def_cl", "Eyes 0 closed", 1.0f},
+        {"笑い", "Smile", 2, "egao_cl", nullptr, 1.0f},
+        {"じと目", "Jito-eye", 2, "tumara_op", nullptr, 1.0f},
+        {"ｷﾘｯ", "Sharp", 2, "sinken_op", nullptr, 1.0f},
+        {"ｷﾘｯ2", "Sharp 2", 2, "ikari_op", nullptr, 1.0f},
+        {"喜び", "Joy", 2, "egao_op", nullptr, 1.0f},
+        {"慈愛", "Gentle", 2, "tere_op", nullptr, 1.0f},
+        // brows
+        {"真面目", "Serious", 1, "sinken_op,sinken_cl", nullptr, 1.0f},
+        {"困る", "Troubled", 1, "koma_op,koma_cl", nullptr, 1.0f},
+        {"怒り", "Angry", 1, "oko_op,oko_cl", nullptr, 1.0f},
+        {"悲しい", "Sad", 1, "rakutan_op,rakutan_cl", nullptr, 1.0f},
+        {"上", "Up", 1, "odoro_cl,odoro_op", nullptr, 1.0f},
+        {"やっかい", "Uneasy", 1, "huan_op,huan_cl", nullptr, 1.0f},
+    };
+    for (const Standard& s : kStandard) {
+        if (find(s.mmd) >= 0) continue;   // made already
+        int src = byShape(s.keys, s.panel);
+        float gain = 1.0f;
+        if (src < 0 && s.fallback) { src = find(s.fallback); gain = s.gain; }   // another head: the plain pattern stands in, scaled
+        if (src < 0) continue;
+        auto verts = model.morphs[static_cast<size_t>(src)].vertices;
+        for (auto& [vi, d] : verts) d = Vec3{d.x * gain, d.y * gain, d.z * gain};
+        add(s.mmd, s.en, s.panel, std::move(verts));
     }
 
-    // Vowels, made from the game's own mouth patterns (the face's blend shapes, each a mouth shape with its teeth and cavity): pattern 2 open
-    // is the open mouth with both rows of teeth (あ; い at 0.3 and え at 0.6), pattern 22 the tall round open mouth (お at 0.7, う at 0.3).
-    // Only scaled, never reshaped: lips, teeth and cavity move together in a game pattern, and pushing the lips about on their own left the
-    // teeth showing under the lower lip. (The spread and forward columns are for a vowel that needs them; none does now.)
-    // Without those patterns (another head) the plain open mouth (pattern 0) stands in for all of them at twice its opening, so the vowels
-    // still exist, only without teeth. Which pattern is which was read off renders of each one.
-    for (const auto& m : model.morphs) if (m.name == "あ") return added;   // made already
-    auto find = [&](const char* n) { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == n) return static_cast<int>(i); return -1; };
-    struct Vowel { const char* mmd; const char* en; const char* source; float opening, spread, forward; };
-    const Vowel vowels[] = {{"あ", "A", "Mouth 2 open", 1.0f, 0.0f, 0.0f}, {"い", "I", "Mouth 2 open", 0.3f, 0.0f, 0.0f}, {"う", "U", "Mouth 22 open", 0.3f, 0.0f, 0.0f},
-                            {"え", "E", "Mouth 2 open", 0.6f, 0.0f, 0.0f}, {"お", "O", "Mouth 22 open", 0.7f, 0.0f, 0.0f}};
-    const int plain = find("Mouth 0 open");
-    for (const Vowel& v : vowels) {
-        int src = find(v.source);
-        float gain = 1.0f;
-        if (src < 0 || model.morphs[static_cast<size_t>(src)].vertices.empty()) { src = plain; gain = 2.0f; }
-        if (src < 0 || model.morphs[static_cast<size_t>(src)].vertices.empty()) continue;
-        const auto srcVerts = model.morphs[static_cast<size_t>(src)].vertices;   // a copy: push_back below moves the morphs
-        float maxLen = 0.0f;
-        for (const auto& [vi, d] : srcVerts) maxLen = std::max(maxLen, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
-        if (maxLen < 1e-6f) continue;
-        double sumX = 0, sumW = 0;
-        for (const auto& [vi, d] : srcVerts) {
-            const double w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
-            sumX += w * model.vertices[static_cast<size_t>(vi)].position.x;
-            sumW += w;
-        }
-        const float centreX = sumW > 0 ? static_cast<float>(sumX / sumW) : 0.0f;
-        pmx::Morph m;
-        m.name = v.mmd;
-        m.nameEn = v.en;
-        m.panel = 3;
-        for (const auto& [vi, d] : srcVerts) {
-            const float w = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) / maxLen;
-            const float x = model.vertices[static_cast<size_t>(vi)].position.x - centreX;
-            const float k = v.opening * gain;
-            m.vertices.emplace_back(vi, Vec3{d.x * k + v.spread * x * w, d.y * k, d.z * k + v.forward * maxLen * w});
-        }
-        added.push_back(static_cast<int>(model.morphs.size()));
-        model.morphs.push_back(std::move(m));
+    // One-eyed versions: the closed-eye shapes cut at the face's middle. ウィンク closes the character's left eye: the side the rig's left
+    // eye bone is on (the model is still as built here, before the half turn that puts its front at -Z, so the sign of x alone says nothing).
+    float leftSign = 1.0f;
+    for (const auto& b : model.bones) if (b.name == "cf_J_hitomi_tx_L" || b.name == "左目") { leftSign = b.position.x < 0.0f ? -1.0f : 1.0f; break; }
+    struct Wink { const char* from; const char* left; const char* leftEn; const char* right; const char* rightEn; };
+    static const Wink kWinks[] = {{"笑い", "ウィンク", "Wink", "ウィンク右", "Wink R"}, {"まばたき", "ウィンク２", "Wink 2", "ｳｨﾝｸ２右", "Wink 2 R"}};
+    for (const Wink& w : kWinks) {
+        const int src = find(w.from);
+        if (src < 0) continue;
+        const auto verts = model.morphs[static_cast<size_t>(src)].vertices;
+        double sum = 0;
+        size_t n = 0;
+        for (const auto& [vi, d] : verts) if (static_cast<size_t>(vi) < model.vertices.size()) { sum += model.vertices[static_cast<size_t>(vi)].position.x; ++n; }
+        if (n != verts.size() || n == 0) continue;
+        const float mid = static_cast<float>(sum / static_cast<double>(n));
+        std::vector<std::pair<int, Vec3>> side[2];
+        for (const auto& p : verts) side[(model.vertices[static_cast<size_t>(p.first)].position.x - mid) * leftSign > 0.0f ? 0 : 1].push_back(p);
+        add(w.left, w.leftEn, 2, std::move(side[0]));
+        add(w.right, w.rightEn, 2, std::move(side[1]));
     }
     return added;
 }

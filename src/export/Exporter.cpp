@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -551,8 +553,10 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             if (!all.group.empty()) addMorph(std::move(all));
         }
     }
-    const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale);
-    const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model) : std::vector<int>();
+    std::map<std::string, std::string> expressionShapes;
+    const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale, &expressionShapes);
+    if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& [n, sh] : expressionShapes) std::fprintf(stderr, "expression %s = %s\n", n.c_str(), sh.c_str());
+    const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model, expressionShapes) : std::vector<int>();
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     if (opt.physics) AddPhysics(scene, model, opt.scale);
     std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys

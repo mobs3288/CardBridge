@@ -811,8 +811,29 @@ void unitTests() {
         CHECK(vowels.size() == 5 && mo.morphs[static_cast<size_t>(vowels[0])].name == "あ" && mo.morphs[static_cast<size_t>(vowels[4])].name == "お");
         const auto& morphU = mo.morphs[static_cast<size_t>(vowels[2])]; const auto& morphE = mo.morphs[static_cast<size_t>(vowels[3])];
         CHECK(morphU.vertices.size() == 2 && std::fabs(morphU.vertices[0].second.y) > std::fabs(morphE.vertices[0].second.y) * 0.0f);   // う: made from the open mouth, scaled only
-        CHECK(std::fabs(morphE.vertices[0].second.y) > std::fabs(morphU.vertices[0].second.y) && morphE.vertices[0].second.x == 0.0f);   // え opens wider than う (2 x the open mouth vs 0.3 x), nothing reshaped sideways
+        CHECK(std::fabs(morphE.vertices[0].second.y) > std::fabs(morphU.vertices[0].second.y) && morphE.vertices[0].second.x == 0.0f);   // え opens wider than う (1.2 x the open mouth vs 0.6 x), nothing reshaped sideways
         CHECK(AddMmdMorphs(mo).empty());
+        // With the game's pattern names: each standard morph copies the pattern of its meaning, from its own panel (def_cl is a brow and an
+        // eye pattern), and the winks are the closed eyes cut on the rig's left eye side (+x here; the model is not turned yet).
+        pmx::Model g;
+        for (float x : {-1.0f, -1.0f, 1.0f}) { pmx::Vertex v; v.position = {x, 16.7f, 0}; g.vertices.push_back(v); }
+        pmx::Bone leftEye; leftEye.name = "cf_J_hitomi_tx_L"; leftEye.position = {1.0f, 16.8f, 0}; g.bones.push_back(leftEye);
+        auto morph = [&](const char* n, int panel, std::vector<std::pair<int, Vec3>> v) { pmx::Morph m; m.name = n; m.panel = panel; m.vertices = std::move(v); g.morphs.push_back(m); };
+        morph("Brow 0 closed", 1, {{1, {0, 0.5f, 0}}});
+        morph("Eyes 0 closed", 2, {{0, {0, -1, 0}}, {2, {0, -1, 0}}});
+        morph("Mouth 0 open", 3, {{0, {0, -0.1f, 0}}});
+        morph("Mouth 26 open", 3, {{1, {0, -0.3f, 0.1f}}});
+        const std::map<std::string, std::string> shapes = {{"Brow 0 closed", "def_cl"}, {"Eyes 0 closed", "def_cl"}, {"Mouth 0 open", "def_op"}, {"Mouth 26 open", "a_l_op"}};
+        AddMmdMorphs(g, shapes);
+        auto get = [&](const char* n) -> const pmx::Morph* { for (const auto& m : g.morphs) if (m.name == n) return &m; return nullptr; };
+        const pmx::Morph* a = get("あ");
+        CHECK(a && a->panel == 3 && a->vertices.size() == 1 && a->vertices[0].first == 1 && a->vertices[0].second.y == -0.3f);   // the game's あ, as it is
+        const pmx::Morph* blink = get("まばたき");
+        CHECK(blink && blink->panel == 2 && blink->vertices.size() == 2);   // the eyes' def_cl, not the brows'
+        const pmx::Morph* winkL = get("ウィンク２"); const pmx::Morph* winkR = get("ｳｨﾝｸ２右");
+        CHECK(winkL && winkR && winkL->vertices.size() == 1 && winkL->vertices[0].first == 2 && winkR->vertices.size() == 1 && winkR->vertices[0].first == 0);
+        const pmx::Morph* i = get("い");
+        CHECK(!get("ワ") && i && i->vertices.size() == 1 && i->vertices[0].first == 0);   // a pattern the head lacks: no morph, except a vowel (the plain open mouth, scaled)
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -1510,11 +1531,14 @@ void unitTests() {
         ex.name = "Eyes 0 closed";
         ex.panel = 2;
         ex.targets = {{0, 0, 0.0f}, {0, 1, 100.0f}};
+        ex.shape = "def_cl";
         s.expressions.push_back(ex);
         pmx::Model m;
         for (int i = 0; i < 10; ++i) m.vertices.push_back({});
-        size_t added = exporter::AddExpressionMorphs(s, m, {5}, 2.0f);
+        std::map<std::string, std::string> shapes;
+        size_t added = exporter::AddExpressionMorphs(s, m, {5}, 2.0f, &shapes);
         CHECK(added >= 1 && m.morphs[0].name == "Eyes 0 closed" && m.morphs[0].panel == 2);
+        CHECK(shapes.size() == 1 && shapes["Eyes 0 closed"] == "def_cl");   // the pattern each expression plays, for the standard MMD morphs
         // vertex 1 (PMX 6): open from 100 to 0 = -1 * (0,1,0), close from 0 to 100 = +1 * (0,-2,0), scaled by 2: (0,-6,0); vertex 2 (PMX 7): (2,0,0)
         std::map<int, Vec3> got;
         for (const auto& [v, d] : m.morphs[0].vertices) got[v] = d;
