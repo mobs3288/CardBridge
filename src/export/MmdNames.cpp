@@ -215,6 +215,23 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
             e.appendRatio = 1.0f;
         }
     }
+        // The eye white turns with the eyeball. The iris is a patch cut to the same cap, and the cap is not a sphere about the pivot: with the
+        // white left still, a turned iris slid behind it (a sliver left on one eye) or out of the lid opening (on the other).
+        size_t first = 0;
+        for (const auto& mat : model.materials) {
+            for (int side = 0; side < 2; ++side) {
+                const std::string key = std::string("cf_Ohitomi_") + (side == 0 ? "L" : "R");
+                const size_t at = mat.name.find(key);
+                if (at == std::string::npos) continue;
+                const size_t next = at + key.size();
+                if (next < mat.name.size() && mat.name[next] >= '0' && mat.name[next] <= '9') continue;   // cf_Ohitomi_L02 is the iris
+                for (size_t i = first; i < first + mat.indexCount && i < model.indices.size(); ++i) {
+                    pmx::Vertex& v = model.vertices[static_cast<size_t>(model.indices[i])];
+                    for (int k = 0; k < 4; ++k) { v.bone[k] = k == 0 ? eyeBone[side] : 0; v.weight[k] = k == 0 ? 1.0f : 0.0f; }
+                }
+            }
+            first += mat.indexCount;
+        }
     return result;
 }
 
