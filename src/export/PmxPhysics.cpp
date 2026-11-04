@@ -71,6 +71,30 @@ Vec3 PmxRotationFromYAxis(Vec3 axis) {
     return {b, std::atan2(r02, r22), std::atan2(r10, r11)};
 }
 
+std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble::SceneChain& chain) {
+    const int boneCount = static_cast<int>(scene.bones.size());
+    std::vector<int> bones;
+    for (int b : chain.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
+    const std::set<int> inChain(bones.begin(), bones.end());
+    std::set<int> hasChild;
+    for (int b : bones) {
+        const int p = scene.bones[static_cast<size_t>(b)].parent;
+        if (p != b) hasChild.insert(p);
+    }
+    std::vector<int> kept;
+    for (int b : bones) {
+        const int p = scene.bones[static_cast<size_t>(b)].parent;
+        const int gp = p >= 0 ? scene.bones[static_cast<size_t>(p)].parent : -1;
+        if (!hasChild.count(b) && inChain.count(p) && gp >= 0) {
+            const Vec3 out = sub(scene.bones[static_cast<size_t>(b)].pos, scene.bones[static_cast<size_t>(p)].pos);
+            const Vec3 in = sub(scene.bones[static_cast<size_t>(p)].pos, scene.bones[static_cast<size_t>(gp)].pos);
+            if (out.x * in.x + out.y * in.y + out.z * in.z < 0.0f) continue;
+        }
+        kept.push_back(b);
+    }
+    return kept;
+}
+
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
@@ -115,8 +139,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         // the body shivers in MikuMikuDance (tried again with a 7 degree swing: the bust shook visibly at rest). They stay rigid in the PMX; the
         // game's jiggle is not carried.
         if (ch.characterOwn) continue;
-        std::vector<int> bones;
-        for (int b : ch.bones) if (b >= 0 && b < boneCount) bones.push_back(b);
+        std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (bones.size() < 2) continue;
         const std::set<int> inChain(bones.begin(), bones.end());
         std::map<int, std::vector<int>> next;   // chain bone -> its chain children
