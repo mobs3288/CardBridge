@@ -508,8 +508,10 @@ struct Builder {
     int meCoordinate = 0, meType = -1, meSlot = 0;
     std::map<int, int> meTextures;   // embedded TexID -> scene texture (-1 when unreadable)
 
-    int embeddedTexture(int texId, const std::string& partId) {
-        auto it = meTextures.find(texId);
+    // `colour` = the image is colour data (a main texture, sRGB); the other maps (normal, line mask, ramp) are linear.
+    int embeddedTexture(int texId, const std::string& partId, bool colour = true) {
+        const int key = colour ? texId : texId + (1 << 20);
+        auto it = meTextures.find(key);
         if (it != meTextures.end()) return it->second;
         card::MaterialEdits::Image img;
         int result = -1;
@@ -831,10 +833,23 @@ struct Builder {
             };
             for (const auto* e : edits->editsFor(edits->floats, meCoordinate, meType, meSlot, sm.name)) setProp("_" + e->property, Vec4{e->value[0], 0, 0, 0});
             for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) setProp("_" + e->property, Vec4{e->value[0], e->value[1], e->value[2], e->value[3]});
-            int id = edits->mainTexFor(meCoordinate, meType, meSlot, sm.name);
-            if (id >= 0) {
-                int t = embeddedTexture(id, partId);
-                if (t >= 0) { sm.texture = t; sm.diffuse = {1, 1, 1, 1}; }
+            // Texture overrides: the main texture (also what the PMX shows) and the other maps the shader reads, each with its tiling.
+            for (const auto* e : edits->texEditsFor(meCoordinate, meType, meSlot, sm.name)) {
+                const std::string prop = "_" + e->property;
+                const bool main = e->property == "MainTex";
+                int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main) : -1;
+                if (main && t >= 0) { sm.texture = t; sm.diffuse = {1, 1, 1, 1}; }
+                SceneTexBinding* bind = nullptr;
+                for (auto& tb : sm.texProps) if (tb.name == prop) bind = &tb;
+                if (!bind) {
+                    if (t < 0) continue;   // only the tiling of a map this material does not have
+                    sm.texProps.emplace_back();
+                    bind = &sm.texProps.back();
+                    bind->name = prop;
+                }
+                if (t >= 0) bind->texture = t;
+                if (e->hasScale) { bind->st.x = e->scale[0]; bind->st.y = e->scale[1]; }
+                if (e->hasOffset) { bind->st.z = e->offset[0]; bind->st.w = e->offset[1]; }
             }
         }
         scene.materials.push_back(std::move(sm));

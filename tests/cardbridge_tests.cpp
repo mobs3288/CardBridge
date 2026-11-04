@@ -232,6 +232,39 @@ void unitTests() {
         CHECK(std::fabs(lin.props[1].second.z - 0.2140f) < 1e-3f && lin.props[1].second.x == 1.0f);
         CHECK(lin.props[2].second.x == 0.5f && lin.props[3].second.x == 0.5f);
     });
+    test("MaterialEditor: every texture property of a material is read with its tiling, not only the main texture", [] {
+        Bytes b;
+        auto str = [&](const char* s) { b.push_back(static_cast<uint8_t>(0xa0 | std::strlen(s))); for (const char* c = s; *c; ++c) b.push_back(static_cast<uint8_t>(*c)); };
+        auto f32 = [&](float f) { uint32_t u; std::memcpy(&u, &f, 4); b.push_back(0xca); for (int k = 3; k >= 0; --k) b.push_back(static_cast<uint8_t>(u >> (8 * k))); };
+        auto row = [&](int slot, const char* prop, int texId, bool tiling) {
+            b.push_back(0x80 | (tiling ? 8 : 6));
+            str("CoordinateIndex"); b.push_back(1);
+            str("ObjectType"); b.push_back(2);
+            str("Slot"); b.push_back(static_cast<uint8_t>(slot));
+            str("MaterialName"); str("mf_m_primmaterial");
+            str("Property"); str(prop);
+            str("TexID"); if (texId < 0) b.push_back(0xc0); else b.push_back(static_cast<uint8_t>(texId));
+            if (tiling) { str("Scale"); b.push_back(0x92); f32(2); f32(3); str("Offset"); b.push_back(0x92); f32(0.5f); f32(0.25f); }
+        };
+        b.push_back(0x94);
+        row(21, "MainTex", 9, false);
+        row(21, "NormalMap", 10, true);
+        row(21, "LineMask", -1, true);    // only the tiling of the game's own map
+        row(21, "AnotherRamp", -1, false);   // nothing to apply: dropped
+        Value payload(Value::Map{{Value(std::string("MaterialTexturePropertyList")), Value(b)}});
+        Value ext(Value::Map{{Value(std::string("com.deathweasel.bepinex.materialeditor")), Value(Value::Array{Value(int64_t(1)), payload})}});
+        const auto me = card::LoadMaterialEdits(ext, 1);
+        CHECK(me.mainTexFor(1, 2, 21, "mf_m_primmaterial") == 9);
+        const auto edits = me.texEditsFor(1, 2, 21, "mf_m_primmaterial");
+        CHECK(edits.size() == 3);
+        bool normal = false, mask = false;
+        for (const auto* e : edits) {
+            if (e->property == "NormalMap") normal = e->texId == 10 && e->hasScale && e->scale[0] == 2 && e->scale[1] == 3 && e->hasOffset && e->offset[0] == 0.5f && e->offset[1] == 0.25f;
+            if (e->property == "LineMask") mask = e->texId < 0 && e->hasScale;
+        }
+        CHECK(normal && mask);
+        CHECK(me.texEditsFor(1, 2, 22, "mf_m_primmaterial").empty());
+    });
     test("shape sliders: key frames interpolate inside 0..1, extrapolate beyond it (SliderUnlocker)", [] {
         Bytes d;
         auto i32 = [&](int32_t v) { for (int k = 0; k < 4; ++k) d.push_back(static_cast<uint8_t>(v >> (8 * k))); };

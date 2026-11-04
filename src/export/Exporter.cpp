@@ -263,6 +263,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
 
     // --- textures: only those a written material uses ---------------------
     std::vector<int> texMap(scene.textures.size(), -1);   // scene texture -> pmx texture
+    std::vector<int> solidTexMap(scene.textures.size(), -1);   // the same, written with alpha 255 (for the item shader)
     pmx::Model model;
     model.name = scene.name;
     {   // the model information MikuMikuDance shows (it wants Windows line breaks): the tool, its author, where the model came from
@@ -363,17 +364,22 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.edgeSize = std::min(1.0f, mat.outlineWidth * 20.0f);
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
-                    if (texMap[ti] < 0) {
-                        const auto& t = scene.textures[ti];
-                        std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + ".png";
+                    // The game's item shader (main_item) never reads the texture's alpha, and card textures often keep a mask or nothing
+                    // in it; MMD would show those texels see-through, so this material gets the image with alpha 255.
+                    const bool solid = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
+                    int& pmxTex = solid ? solidTexMap[ti] : texMap[ti];
+                    if (pmxTex < 0) {
+                        assemble::SceneTexture t = scene.textures[ti];
+                        if (solid) for (size_t px = 3; px < t.rgba.size(); px += 4) t.rgba[px] = 255;
+                        std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         Bytes png = encodePng(t);
                         fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
                         log("texture " + t.name + " (" + std::to_string(t.width) + "x" + std::to_string(t.height) + ")");
-                        textureFiles[ti] = file;
-                        texMap[ti] = static_cast<int>(model.textures.size());
+                        if (textureFiles[ti].empty()) textureFiles[ti] = file;
+                        pmxTex = static_cast<int>(model.textures.size());
                         model.textures.push_back(file);
                     }
-                    pm.texture = texMap[ti];
+                    pm.texture = pmxTex;
                 }
                 baseAlpha.push_back(pm.diffuse.w);
                 if (part.startHidden) { pm.diffuse.w = 0.0f; pm.edgeColor.w = 0.0f; }   // the morphs bring it back
