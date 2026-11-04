@@ -33,7 +33,7 @@ namespace {
 
 template <class T> void Rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
-struct GVert { float pos[3], nrm[3], tan[4], uv[2], col[4], uv1[2]; };   // 72 bytes
+struct GVert { float pos[3], nrm[3], tan[4], uv[2], col[4], uv1[2], uv2[2]; };   // 80 bytes
 
 struct GpuSub { ID3D11Buffer* ib = nullptr; UINT count = 0; int material = 0; };
 struct GpuMesh { ID3D11Buffer* vb = nullptr; std::vector<GpuSub> subs; std::vector<GVert> rest; };   // rest: the vertices as loaded, for re-skinning
@@ -505,7 +505,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
             else if (in.semantic == "NORMAL") { e.Format = DXGI_FORMAT_R32G32B32_FLOAT; e.AlignedByteOffset = offsetof(GVert, nrm); }
             else if (in.semantic == "TANGENT") { e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; e.AlignedByteOffset = offsetof(GVert, tan); }
             else if (in.semantic == "COLOR") { e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; e.AlignedByteOffset = offsetof(GVert, col); }
-            else { e.Format = DXGI_FORMAT_R32G32_FLOAT; e.AlignedByteOffset = in.index == 1 ? offsetof(GVert, uv1) : offsetof(GVert, uv); }   // TEXCOORD1 is the second UV set, the rest read the first
+            else { e.Format = DXGI_FORMAT_R32G32_FLOAT; e.AlignedByteOffset = in.index == 1 ? offsetof(GVert, uv1) : in.index == 2 ? offsetof(GVert, uv2) : offsetof(GVert, uv); }   // TEXCOORD1 is the second UV set, the rest read the first
             el.push_back(e);
         }
         if (FAILED(I.dev->CreateInputLayout(el.data(), static_cast<UINT>(el.size()), vp.dxbc.data(), vp.dxbc.size(), &g.il))) { Rel(g.vs); Rel(g.ps); continue; }
@@ -532,7 +532,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
         std::vector<GVert> vb(m.vertices.size());
         for (size_t v = 0; v < vb.size(); ++v) {
             const auto& s = m.vertices[v];
-            vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}};
+            vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}, {s.uv2.x, s.uv2.y}};
         }
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = static_cast<UINT>(vb.size() * sizeof(GVert)); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;   // default, not immutable: SetSkin rewrites it

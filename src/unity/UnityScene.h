@@ -29,6 +29,7 @@ struct MeshData {
     std::vector<Vec3> normals;
     std::vector<Vec2> uv0;
     std::vector<Vec2> uv1;                // second UV set, empty when absent
+    std::vector<Vec2> uv2;                // third UV set, empty when absent
     std::vector<BoneInfluence> skin;      // empty if the mesh is not skinned
     std::vector<Mat4> bindPoses;
     std::vector<std::vector<uint32_t>> subMeshTriangles;   // 3 indices per triangle

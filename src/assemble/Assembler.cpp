@@ -1184,6 +1184,7 @@ struct Builder {
             Vec3 nrm = v < mesh->normals.size() ? mesh->normals[v] : Vec3{0, 1, 0};
             out.uv = v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{};
             out.uv1 = v < mesh->uv1.size() ? mesh->uv1[v] : out.uv;
+            out.uv2 = v < mesh->uv2.size() ? mesh->uv2[v] : out.uv;
             bool placed = false;
             if (skinned) {
                 const unity::BoneInfluence& bi = mesh->skin[v];
