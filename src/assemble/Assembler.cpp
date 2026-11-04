@@ -1065,7 +1065,10 @@ struct Builder {
             for (int64_t id : ids)
                 if (int bi = sceneBoneOf(id); bi >= 0 && std::find(ch.bones.begin(), ch.bones.end(), bi) == ch.bones.end()) ch.bones.push_back(bi);
             if (ch.bones.size() < 2) continue;
-            if (classic) {
+            // The curves only for hair and accessory chains (a ponytail stiff where it is tied, free at its tip). A garment's chains keep the
+            // component's own values all along: with its curves this card's skirt was rigid down to the hem and looked frozen in MMD.
+            const bool garment = partId.rfind("outfit", 0) == 0 && partId.find(".acc") == std::string::npos;
+            if (classic && !garment) {
                 auto curveOf = [&](const char* key) {
                     DbCurve c;
                     for (const auto& k : mb.fields.at(key).at("m_Curve").asArray())
