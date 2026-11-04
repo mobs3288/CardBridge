@@ -88,7 +88,90 @@ bool fitSphere(const std::vector<Vec3>& pts, Vec3& centre) {
     return std::isfinite(centre.x) && std::isfinite(centre.y) && std::isfinite(centre.z);
 }
 
+// Inserts `b` at index `at`: every later bone moves up one and every reference to it with it (bones, IK, weights, rigid bodies, display
+// frames). `b` refers to bones by their indices before the insert. It is listed in the display frame that lists `frameAfter`, after it.
+int insertBone(pmx::Model& m, int at, pmx::Bone b, int frameAfter) {
+    const auto fix = [at](int& i) { if (i >= at) ++i; };
+    const auto fixBone = [&](pmx::Bone& x) { fix(x.parent); fix(x.tailBone); fix(x.appendParent); fix(x.ikTarget); for (auto& l : x.ikLinks) fix(l.bone); };
+    for (auto& x : m.bones) fixBone(x);
+    fixBone(b);
+    for (auto& v : m.vertices) for (int& bi : v.bone) fix(bi);
+    for (auto& r : m.rigidBodies) fix(r.bone);
+    fix(frameAfter);
+    for (auto& f : m.frames) {
+        for (int& i : f.bones) fix(i);
+        auto it = std::find(f.bones.begin(), f.bones.end(), frameAfter);
+        if (frameAfter >= 0 && it != f.bones.end()) { f.bones.insert(it + 1, at); frameAfter = -1; }
+    }
+    m.bones.insert(m.bones.begin() + at, std::move(b));
+    return at;
+}
+
+Vec3 lerp(Vec3 a, Vec3 b, float t) { return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t}; }
+
 } // namespace
+
+void AddMmdStandardBones(pmx::Model& model) {
+    const auto bone = [&](int i) -> pmx::Bone& { return model.bones[static_cast<size_t>(i)]; };
+    const auto named = [](const std::string& name, const std::string& en, Vec3 pos, int parent, uint16_t flags) {
+        pmx::Bone b;
+        b.name = name; b.nameEn = en; b.position = pos; b.parent = parent; b.flags = flags;
+        return b;
+    };
+    for (const char* side : {"左", "右"}) {
+        const std::string s = side, en = s == "左" ? "Left " : "Right ";
+        // 肩P / 肩C: 肩P above the shoulder, 肩C between the shoulder and the arm undoing 肩P's turn, so a motion's 肩P lifts the shoulder alone.
+        if (int sh = find(model, s + "肩"), arm = find(model, s + "腕"); sh >= 0 && arm >= 0 && bone(arm).parent == sh && find(model, s + "肩P") < 0) {
+            const int p = insertBone(model, sh, named(s + "肩P", en + "Shoulder P", bone(sh).position, bone(sh).parent, 0x001A), sh);
+            ++sh; ++arm;
+            bone(sh).parent = p;
+            pmx::Bone c = named(s + "肩C", en + "Shoulder C", bone(arm).position, sh, 0x0012);
+            c.appendParent = p; c.appendRatio = -1.0f;
+            const int ci = insertBone(model, sh + 1, std::move(c), -1);
+            bone(arm + 1).parent = ci;   // the arm moved one further on
+        }
+        // Twist bones: 腕捩 between the arm and the elbow, 手捩 between the elbow and the wrist, each turning only about the limb (a motion keys
+        // the forearm's and the hand's roll on them). The game's driven helpers along the limb (cf_d_arm01-03, cf_d_forearm02, cf_d_wrist,
+        // which carry the skin) take the twist in proportion to how far along they sit, as the 捩1-3 bones of the standard models do.
+        const struct { const char* upper; const char* lower; const char* name; const char* nameEn; } twists[] = {{"腕", "ひじ", "腕捩", "Arm Twist"}, {"ひじ", "手首", "手捩", "Wrist Twist"}};
+        for (const auto& t : twists) {
+            const int up = find(model, s + t.upper), low = find(model, s + t.lower);
+            if (up < 0 || low < 0 || bone(low).parent != up || find(model, s + t.name) >= 0) continue;
+            const Vec3 a = bone(up).position, b = bone(low).position, d = {b.x - a.x, b.y - a.y, b.z - a.z};
+            const float len2 = d.x * d.x + d.y * d.y + d.z * d.z;
+            if (len2 < 1e-8f) continue;
+            const float inv = 1.0f / std::sqrt(len2);
+            pmx::Bone tw = named(s + t.name, en + t.nameEn, lerp(a, b, 0.6f), up, 0x001A);
+            tw.fixedAxis = {d.x * inv, d.y * inv, d.z * inv};
+            const int ti = insertBone(model, up + 1, std::move(tw), up);
+            bone(low + 1).parent = ti;
+            for (size_t i = 0; i < model.bones.size(); ++i) {
+                pmx::Bone& h = model.bones[i];
+                if (h.parent != up || h.name.rfind("cf_d_", 0) != 0) continue;
+                const Vec3 p = {h.position.x - a.x, h.position.y - a.y, h.position.z - a.z};
+                const float f = (p.x * d.x + p.y * d.y + p.z * d.z) / len2;
+                if (f <= 0.0f || f > 1.0f) continue;
+                h.appendParent = ti;
+                h.appendRatio = std::round(f * 20.0f) / 20.0f;
+            }
+        }
+        // 腰キャンセル: the leg undoes 腰's turn, so a motion's 腰 bends the body over the legs instead of swinging them.
+        if (int leg = find(model, s + "足"), waist = find(model, "腰"); leg >= 0 && waist >= 0 && find(model, "腰キャンセル" + s) < 0) {
+            pmx::Bone c = named("腰キャンセル" + s, en + "Waist Cancel", bone(leg).position, bone(leg).parent, 0x0012);
+            c.appendParent = waist; c.appendRatio = -1.0f;
+            const int ci = insertBone(model, leg, std::move(c), -1);
+            bone(leg + 1).parent = ci;
+        }
+        // 足IK親: the foot IK's parent on the floor, so a motion can carry the foot IK there.
+        if (int ik = find(model, s + "足ＩＫ"), root = find(model, "全ての親"); ik >= 0 && root >= 0 && find(model, s + "足IK親") < 0) {
+            const Vec3 at = bone(ik).position;
+            const int pi = insertBone(model, ik, named(s + "足IK親", en + "Leg IK Parent", {at.x, 0.0f, at.z}, root, 0x001E), ik);
+            bone(pi + 1).parent = pi;
+        }
+    }
+    // 操作中心: MikuMikuDance's view centre bone, first in the list on its own.
+    if (find(model, "操作中心") < 0) insertBone(model, 0, named("操作中心", "View Center", {0, 0, 0}, -1, 0x001E), -1);
+}
 
 MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, float scale) {
     MmdBones result;

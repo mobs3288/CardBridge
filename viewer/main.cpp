@@ -8,7 +8,7 @@
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
-//          G colour grading on/off, X "as exported": the baked PMX textures on plain materials (what a PMX viewer shows),
+//          G colour grading on/off, X (or the MMD button) "as exported": the PMX as MikuMikuDance shows it (toon, edge, self-shadow, ground shadow),
 //          K the skeleton over the model (click a bone to select it, Bones tab edits it), P automatic A-pose,
 //          R reset view, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
@@ -225,7 +225,7 @@ struct LogLine {
 // ---- the pose the user has made: bone edits and the A-pose, what undo and redo move between ----
 struct PoseState {
     std::map<std::string, assemble::BonePose> edits;
-    bool aPose = false;
+    bool aPose = true;   // MikuMikuDance's rest pose: a motion (VMD) is keyed for arms about 40 degrees down
     float aPoseDeg = 40.0f;
 };
 
@@ -287,7 +287,7 @@ struct TweakRow {
 
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
-    RECT open{}, exportPmx{}, issues{}, reset{}, all{};
+    RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
     int outfitNameTop = 0, outfitChipsTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
@@ -303,11 +303,12 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     PanelLayout l;
     l.logo = {12, 12, 68, 68};
     const int by = 98, bh = 26;
-    l.open = {10, by, 66, by + bh};
-    l.exportPmx = {72, by, 172, by + bh};
-    l.issues = {178, by, 234, by + bh};
-    l.reset = {240, by, 308, by + bh};
-    l.all = {314, by, 370, by + bh};
+    l.open = {10, by, 58, by + bh};
+    l.exportPmx = {64, by, 156, by + bh};
+    l.issues = {162, by, 214, by + bh};
+    l.reset = {220, by, 288, by + bh};
+    l.all = {294, by, 324, by + bh};
+    l.asExported = {330, by, 370, by + bh};
     // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots.
     l.outfitNameTop = 138;
     l.outfitChipsTop = 160;
@@ -403,7 +404,7 @@ struct App {
     PoseState undoBase;                           // the pose when the pointer went down: a gesture is one undo step
     bool undoBaseValid = false;
     ULONGLONG wheelUndoTick = 0;                  // wheel steps within a moment are one undo step
-    bool aPose = false;
+    bool aPose = true;                            // on by default: the PMX rest pose a motion expects (see PoseState)
     float aPoseDeg = 40.0f;
     bool showBones = false, showHelpers = false;
     std::string selBoneName;                  // the selected bone, by name
@@ -658,7 +659,7 @@ bool AnyTweak() {
 void ResetTweak(int id) {
     SliderRef r;
     if (id == kNippleIn) g.tw.nippleInside = false;
-    else if (id == kAPose) g.aPose = false;
+    else if (id == kAPose) g.aPose = true;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 
@@ -1225,6 +1226,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.issues, p)) return 3;
     if (PtInRect(&l.reset, p)) return 4;
     if (PtInRect(&l.all, p)) return 5;
+    if (PtInRect(&l.asExported, p)) return 6;
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }
@@ -1556,7 +1558,7 @@ void DrawHeader(ui::Surface& s, const RECT& clip, const PanelLayout& l, const st
         size_t warn = 0, err = 0;
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         s.Text(g.fontSmall, warn + err ? ui::kAmber : ui::kGood, tx, 68, std::to_string(err) + " errors, " + std::to_string(warn) + " warnings  [I]", &line);
-        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported (graded)" : "as exported") : g.gpuOk ? "Direct3D 11" : "software";
+        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported, MMD look (graded)" : "as exported, MMD look") : g.gpuOk ? "Direct3D 11" : "software";
         mode += g.textured ? "" : "  ·  untextured";
         s.TextRight(g.fontSmall, g.gpuOk ? ui::kAccent : ui::kSub, right, 68, mode);
     } else if (L) {
@@ -1593,6 +1595,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         Button(s, l.issues, "Issues", g.hoverButton == 3, g.showIssues, L != nullptr);
         Button(s, l.reset, "Reset view", g.hoverButton == 4, false, L != nullptr);
         Button(s, l.all, "All", g.hoverButton == 5, false, L != nullptr);
+        Button(s, l.asExported, "MMD", g.hoverButton == 6, g.showExp, L != nullptr);   // X: the exported PMX as MikuMikuDance shows it
     }
 
     lap(1);
@@ -2494,6 +2497,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
             if (button == 4) { if (Current()) ResetView(0); return 0; }
             if (button == 5) { if (Current()) ShowAll(); return 0; }
+            if (button == 6) { ToggleAsExported(); InvalidateRect(hwnd, nullptr, FALSE); InvalidatePanel(); return 0; }
             if (button >= 10) {
                 g.showIssues = false;
                 g.tab = button - 10;

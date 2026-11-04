@@ -1754,8 +1754,25 @@ void integrationTests() {
             size_t ikBack = 0, legs = 0;
             for (const auto& l : exporter::FindLimbs(scene)) if (l.role == "foot") ++legs;   // the MMD names leave the arms to the motion's FK keys
             for (const auto& b : back.bones) if (b.isIk()) ++ikBack;
-            CHECK(ikBack >= legs && back.bones.size() == scene.bones.size() + ikBack + 1);   // (+1: 両目) the scene's bones, then one IK bone per leg (and a toe IK under each foot IK)
+            // The semi-standard bones the MMD names add (AddMmdStandardBones), each found by name and placed after its parent and append parent.
+            size_t standard = 0;
+            for (const auto& b : back.bones)
+                for (const char* n : {"操作中心", "左肩P", "右肩P", "左肩C", "右肩C", "左腕捩", "右腕捩", "左手捩", "右手捩", "腰キャンセル左", "腰キャンセル右", "左足IK親", "右足IK親"})
+                    if (b.name == n) ++standard;
+            CHECK(standard == 13);
+            bool ordered = true;
+            for (size_t i = 0; i < back.bones.size(); ++i) {
+                const auto& b = back.bones[i];
+                ordered = ordered && b.parent < static_cast<int>(i) && (b.appendParent < 0 || b.appendParent < static_cast<int>(i) || b.layer > back.bones[static_cast<size_t>(b.appendParent)].layer);
+            }
+            CHECK(ordered);   // MikuMikuDance evaluates bones in list order: a parent after its child lags a frame behind
+            CHECK(ikBack >= legs && back.bones.size() == scene.bones.size() + ikBack + 1 + standard);   // (+1: 両目) the scene's bones, then one IK bone per leg (and a toe IK under each foot IK)
             std::printf("  read back: %zu IK bones (%zu legs in the rig)\n", ikBack, legs);
+            {   // MikuMikuDance draws the ground shadow and self-shadow only for materials that ask for them (the body did not)
+                bool bodyShadow = false;
+                for (const auto& m : back.materials) if (m.name.rfind("body/", 0) == 0) bodyShadow = (m.drawFlags & 0x1E) == 0x1E;
+                CHECK(bodyShadow);
+            }
             size_t expectBodies = 0, expectJoints = 0;
             for (const auto& col : scene.colliders)
                 if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;

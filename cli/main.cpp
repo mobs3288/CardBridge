@@ -102,7 +102,8 @@ void usage() {
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
         "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--no-toon-ramp] [--mod-cache <file>]\n"
-        "             [--apose [--apose-degrees N]]   arms down from the T-pose (40 degrees by default)\n"
+        "             [--apose-degrees N] [--tpose]   the rest pose has the arms N degrees down from the T-pose (40 by default,\n"
+        "                                             what a MikuMikuDance motion expects); --tpose keeps the T-pose\n"
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
         "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
@@ -392,8 +393,9 @@ int cmdConvert(const Args& a) {
         if (is.severity == "error") { std::fprintf(stderr, "conversion failed.\n"); return 3; }
 
     std::vector<Mat4> liveSkin;
-    // --apose [--apose-degrees N] brings the arms down from the T-pose (clavicle and upper arm), 40 degrees by default; the PMX is written in that pose.
-    // --pose <file.json> bakes a pose saved by the viewer (bone edits and the A-pose switch); with --apose the arms come down as well.
+    // The arms come down from the T-pose (clavicle and upper arm), 40 degrees by default (--apose-degrees N), and the PMX is written in that pose:
+    // MikuMikuDance's motions are keyed for it. --tpose keeps the T-pose. --pose <file.json> bakes a pose saved by the viewer (bone edits and the
+    // A-pose switch, which then decides); --apose brings the arms down as well.
     assemble::PoseFile poseFile;
     if (a.opt.count("pose")) {
         std::string err;
@@ -408,7 +410,8 @@ int cmdConvert(const Args& a) {
             return 1;
         }
     }
-    if (a.has("apose")) poseFile.aPose = true;
+    if (!a.opt.count("pose") || a.has("apose")) poseFile.aPose = true;
+    if (a.has("tpose")) poseFile.aPose = false;
     if (a.opt.count("apose-degrees")) poseFile.aPoseDegrees = static_cast<float>(std::atof(a.get("apose-degrees").c_str()));
     if (poseFile.aPose || !poseFile.bones.empty()) {
         std::vector<std::string> unknown;
@@ -527,7 +530,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

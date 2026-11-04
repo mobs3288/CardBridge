@@ -1,6 +1,7 @@
 #include "export/GpuView.h"
 
 #include "export/ColourGrade.h"
+#include "export/Exporter.h"
 
 #include "shader/UnityShader.h"
 
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <tuple>
 
@@ -80,6 +82,32 @@ struct GpuView::Impl {
     float lastM[16] = {};          // world -> clip of the last Render, for Project()
     int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
+    std::vector<MmdLook> looks;                  // plain mode: each scene material as the PMX writes it (made on the first plain Render)
+    // Plain mode's self-shadow map, made on first use.
+    static constexpr int kShadowSize = 2048;
+    ID3D11Texture2D* smTex = nullptr;
+    ID3D11DepthStencilView* smDsv = nullptr;
+    ID3D11ShaderResourceView* smSrv = nullptr;
+    ID3D11SamplerState* smCmp = nullptr;
+
+    bool MakeShadowMap() {
+        if (smSrv) return true;
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = d.Height = kShadowSize; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R32_TYPELESS; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&d, nullptr, &smTex))) return false;
+        D3D11_DEPTH_STENCIL_VIEW_DESC dv{};
+        dv.Format = DXGI_FORMAT_D32_FLOAT; dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_FLOAT; sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MipLevels = 1;
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT; sd.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+        sd.BorderColor[0] = sd.BorderColor[1] = sd.BorderColor[2] = sd.BorderColor[3] = 1.0f;   // outside the map: lit
+        if (FAILED(dev->CreateDepthStencilView(smTex, &dv, &smDsv)) || FAILED(dev->CreateShaderResourceView(smTex, &sv, &smSrv)) ||
+            FAILED(dev->CreateSamplerState(&sd, &smCmp))) { Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex); return false; }
+        return true;
+    }
     // A plain textured, toon-lit shader for materials whose game shader is not in the bundle; compiled at run time by the
     // system's d3dcompiler (absent: such materials are left out).
     ID3D11VertexShader* fbVs = nullptr;
@@ -151,14 +179,29 @@ float4 ps() : SV_Target { return color; }
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
         if (!compile) return false;
         static const char src[] = R"HLSL(
-cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
+cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; float4 l0, l1, l2, mmd; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
+// MikuMikuDance's look (the "as exported" view): mmd.x = 1 the material takes self-shadow (l0..l2: world -> shadow map, z = depth),
+// mmd.y = 1 the ground shadow pass (the mesh flattened along the light onto the floor at height mmd.z, drawn in `diffuse`), mmd.w the model's radius.
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
+Texture2D<float> sm : register(t1); SamplerComparisonState sc : register(s1);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
-struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; };
-VO vs(VI i) { VO o; float4 p = float4(i.p, 1); o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; return o; }
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; float3 w : TEXCOORD2; };
+VO vs(VI i) {
+    VO o; float4 p = float4(i.p, 1);
+    if (mmd.y > 0.5) p.xyz -= light.xyz * ((p.y - mmd.z) / max(light.y, 0.05));
+    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; o.w = p.xyz; return o;
+}
 float4 ps(VO i) : SV_Target {
+    if (mmd.y > 0.5) return diffuse;
     float4 c = t0.Sample(s0, i.uv) * diffuse;
     float d = dot(normalize(i.n), light.xyz);
+    if (shadow.w > 1.5 && mmd.x > 0.5) {   // MMD's self-shadow shading: the lit colour, or it times the ramp's bottom row, by N.L * 3 and the shadow map
+        float4 w = float4(i.w + normalize(i.n) * 0.006 * mmd.w, 1);
+        float3 lp = float3(dot(l0, w), dot(l1, w), dot(l2, w));
+        float vis = sm.SampleCmpLevelZero(sc, float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5), lp.z - 0.0015);
+        c.rgb *= lerp(ramp[31].rgb, float3(1, 1, 1), min(saturate(d * 3.0), vis));
+        return c;
+    }
     if (shadow.w > 1.5) {
         float f = saturate(0.5 - 0.5 * d) * 32.0 - 0.5;
         int a = clamp((int)floor(f), 0, 31), b = min(a + 1, 31);
@@ -181,13 +224,13 @@ float4 ps(VO i) : SV_Target {
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
         ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = (7 + 32) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = (7 + 32 + 4) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
         Rel(vb); Rel(pb); Rel(err);
         return ok;
     }
 
-    ~Impl() { ClearLayers(); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
+    ~Impl() { ClearLayers(); Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
 
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
 
@@ -200,6 +243,7 @@ float4 ps(VO i) : SV_Target {
         textures.clear();
         for (auto& c : cbufs) Rel(c.second);
         cbufs.clear();
+        looks.clear();
         skipped = 0;
     }
 
@@ -586,6 +630,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const float toCam[3] = {-sn * cp, sp, cs * cp};
     float L[3] = {toCam[0], toCam[1], toCam[2]};   // the character maker's light shines straight along the view (its Directional Light faces -Z)
+    if (I.plain) { L[0] = -0.5f; L[1] = 1.0f; L[2] = 0.5f; }   // MikuMikuDance's default light (direction -0.5, -1, 0.5), for the PMX turned to face -Z
     if (const char* ld = std::getenv("CARDBRIDGE_LIGHTDIR")) std::sscanf(ld, "%f,%f,%f", &L[0], &L[1], &L[2]);   // test aid: world-space direction towards the light
     { float n = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]); for (float& c : L) c /= n; }
     const float camPos[3] = {cx + toCam[0] * 5.0f, cy + toCam[1] * 5.0f, cz + toCam[2] * 5.0f};
@@ -616,10 +661,112 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     ctx->OMSetBlendState(I.blend, bf, 0xFFFFFFFFu);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    UINT stride = sizeof(GVert), offset = 0;
+    // The silhouette ring: the mesh drawn again pushed out along its normals in screen space, in one colour.
+    auto ring = [&](const GpuMesh& gm, const GpuSub& gs, const Vec3& col, float px) {
+        float cbv[24];
+        for (int r = 0; r < 4; ++r) for (int k = 0; k < 4; ++k) cbv[r * 4 + k] = M[r][k];
+        const float colr[4] = {LinearLight() ? ToLinear(col.x) : col.x, LinearLight() ? ToLinear(col.y) : col.y, LinearLight() ? ToLinear(col.z) : col.z, 1.0f};
+        const float prm[4] = {px * 2.0f / W, px * 2.0f / H, 0.004f, 0.0f};
+        std::memcpy(cbv + 16, colr, 16);
+        std::memcpy(cbv + 20, prm, 16);
+        ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
+        ctx->IASetInputLayout(I.olIl);
+        ctx->VSSetShader(I.olVs, nullptr, 0);
+        ctx->PSSetShader(I.olPs, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &I.olCb);
+        ctx->PSSetConstantBuffers(0, 1, &I.olCb);
+        ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+        ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+        ctx->DrawIndexed(gs.count, 0, 0);
+    };
+    // Each visible submesh, opaque materials first and then the alpha-flagged ones.
+    auto eachSub = [&](const std::function<void(const GpuMesh&, const GpuSub&, const assemble::SceneMaterial&)>& fn) {
+        for (int pass = 0; pass < 2; ++pass)
+            for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+                if (!visible(pi)) continue;
+                for (int mi : scene.parts[pi].meshes) {
+                    const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
+                    if (!gm.vb) continue;
+                    for (const auto& gs : gm.subs) {
+                        const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
+                        if ((mat.alpha ? 1 : 0) == pass) fn(gm, gs, mat);
+                    }
+                }
+            }
+    };
+
+    // Plain mode is MikuMikuDance's look: every material as the PMX writes it (MmdMaterialLook), the self-shadow its casters throw
+    // along the light (a depth map) and the ground shadow, the flagged meshes flattened along the light onto the floor.
+    const float radius = 0.5f * std::sqrt((mx[0] - mn[0]) * (mx[0] - mn[0]) + (mx[1] - mn[1]) * (mx[1] - mn[1]) + (mx[2] - mn[2]) * (mx[2] - mn[2])) * 1.05f;
+    float LS[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 1}};   // world -> shadow map (x, y in -1..1, depth 0..1)
+    bool selfShadow = false;
+    const bool fallbackOk = I.fbVs && I.fbPs && I.fbIl && I.fbCb;
+    if (I.plain && fallbackOk) {
+        if (I.looks.size() != scene.materials.size()) {
+            I.looks.clear();
+            for (const auto& m : scene.materials) I.looks.push_back(MmdMaterialLook(scene, m));
+        }
+        const float f[3] = {-L[0], -L[1], -L[2]};   // along the light
+        float x[3] = {f[2], 0.0f, -f[0]};           // up x f
+        float xn = std::sqrt(x[0] * x[0] + x[2] * x[2]);
+        if (xn < 1e-4f) { x[0] = 1.0f; x[2] = 0.0f; xn = 1.0f; }
+        x[0] /= xn; x[2] /= xn;
+        const float y[3] = {f[1] * x[2] - f[2] * x[1], f[2] * x[0] - f[0] * x[2], f[0] * x[1] - f[1] * x[0]};
+        const float ctr[3] = {cx, cy, cz};
+        const float* axes[3] = {x, y, f};
+        for (int r = 0; r < 3; ++r) {
+            const float k = r == 2 ? 0.5f / radius : 1.0f / radius;
+            for (int col = 0; col < 3; ++col) LS[r][col] = axes[r][col] * k;
+            LS[r][3] = -(LS[r][0] * ctr[0] + LS[r][1] * ctr[1] + LS[r][2] * ctr[2]) + (r == 2 ? 0.5f : 0.0f);
+        }
+        float cbv[(7 + 32 + 4) * 4] = {};
+        ctx->IASetInputLayout(I.fbIl);
+        ctx->VSSetShader(I.fbVs, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &I.fbCb);
+        ctx->PSSetConstantBuffers(0, 1, &I.fbCb);
+        auto draw = [&](const GpuMesh& gm, const GpuSub& gs) {
+            ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+            ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+            ctx->DrawIndexed(gs.count, 0, 0);
+        };
+        ID3D11ShaderResourceView* none = nullptr;
+        ctx->PSSetShaderResources(1, 1, &none);
+        if (I.MakeShadowMap()) {
+            selfShadow = true;
+            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = LS[r][col];
+            ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
+            ctx->OMSetRenderTargets(0, nullptr, I.smDsv);
+            ctx->ClearDepthStencilView(I.smDsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            const D3D11_VIEWPORT sv{0, 0, static_cast<float>(Impl::kShadowSize), static_cast<float>(Impl::kShadowSize), 0, 1};
+            ctx->RSSetViewports(1, &sv);
+            ctx->PSSetShader(nullptr, nullptr, 0);
+            eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial&) {
+                if (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x04) draw(gm, gs);
+            });
+            ctx->OMSetRenderTargets(1, &I.rtv, I.dsv);
+            ctx->RSSetViewports(1, &vp);
+            ctx->PSSetShaderResources(1, 1, &I.smSrv);
+            ctx->PSSetSamplers(1, 1, &I.smCmp);
+        }
+        // The ground shadow, under everything (depth tested, not written): one solid shade of the background, so overlaps do not darken twice.
+        for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+        for (int i = 0; i < 3; ++i) cbv[16 + i] = LinearLight() ? ToLinear(0.7f * (i == 0 ? 0xE2 : i == 1 ? 0xE4 : 0xE8) / 255.0f) : 0.7f * (i == 0 ? 0xE2 : i == 1 ? 0xE4 : 0xE8) / 255.0f;
+        cbv[19] = 1.0f;
+        cbv[24] = L[0]; cbv[25] = L[1]; cbv[26] = L[2];
+        cbv[(7 + 32 + 3) * 4 + 1] = 1.0f; cbv[(7 + 32 + 3) * 4 + 2] = mn[1]; cbv[(7 + 32 + 3) * 4 + 3] = radius;
+        ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
+        ctx->PSSetShader(I.fbPs, nullptr, 0);
+        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+        eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial&) {
+            if (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x02) draw(gm, gs);
+        });
+        ctx->OMSetDepthStencilState(I.depth, 0);
+    }
+
     I.skipped = 0;
     std::vector<char> matDone(scene.materials.size(), 0), matSkipped(scene.materials.size(), 0);
     std::vector<std::vector<std::vector<float>>> matVs(scene.materials.size()), matPs(scene.materials.size());
-    UINT stride = sizeof(GVert), offset = 0;
     for (int pass = 0; pass < 2; ++pass)   // opaque materials first, then the alpha-flagged ones
         for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
             if (!visible(pi)) continue;
@@ -632,14 +779,25 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
-                        float cbv[(7 + 32) * 4] = {};
+                        float cbv[(7 + 32 + 4) * 4] = {};
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
-                        const float dif4[4] = {lin(mat.diffuse.x), lin(mat.diffuse.y), lin(mat.diffuse.z), mat.diffuse.w};
-                        std::memcpy(cbv + 16, dif4, 16);
-                        const float sh4[4] = {lin(mat.shadow.x), lin(mat.shadow.y), lin(mat.shadow.z), 1.0f};
-                        std::memcpy(cbv + 20, sh4, 16);
+                        const MmdLook* look = I.plain && gs.material >= 0 && static_cast<size_t>(gs.material) < I.looks.size() ? &I.looks[static_cast<size_t>(gs.material)] : nullptr;
+                        if (look) {   // MMD's lit colour: diffuse times its light (154/255) plus ambient, at most 1; no two-step shade without a ramp
+                            const auto amb = [](float d, float a) { return std::min(1.0f, d * 154.0f / 255.0f + a); };
+                            const float dif4[4] = {lin(amb(look->diffuse.x, look->ambient.x)), lin(amb(look->diffuse.y, look->ambient.y)), lin(amb(look->diffuse.z, look->ambient.z)), look->diffuse.w};
+                            std::memcpy(cbv + 16, dif4, 16);
+                            cbv[20] = cbv[21] = cbv[22] = cbv[23] = 1.0f;
+                            for (int r = 0; r < 3; ++r) for (int col = 0; col < 4; ++col) cbv[(7 + 32 + r) * 4 + col] = LS[r][col];
+                            cbv[(7 + 32 + 3) * 4] = selfShadow && (look->drawFlags & 0x08) ? 1.0f : 0.0f;
+                            cbv[(7 + 32 + 3) * 4 + 3] = radius;
+                        } else {
+                            const float dif4[4] = {lin(mat.diffuse.x), lin(mat.diffuse.y), lin(mat.diffuse.z), mat.diffuse.w};
+                            std::memcpy(cbv + 16, dif4, 16);
+                            const float sh4[4] = {lin(mat.shadow.x), lin(mat.shadow.y), lin(mat.shadow.z), 1.0f};
+                            std::memcpy(cbv + 20, sh4, 16);
+                        }
                         std::memcpy(cbv + 24, lit, 16);
                         if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows)) {   // the game shader's shade ramp instead of the two-step shadow tint
                             cbv[23] = 2.0f;
@@ -660,6 +818,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                         ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                         ctx->DrawIndexed(gs.count, 0, 0);
+                        if (look && (look->drawFlags & 0x10) && look->edgeSize > 0.0f && I.olVs && I.olPs && I.olIl && I.olCb)   // the PMX edge
+                            ring(gm, gs, {look->edgeColor.x, look->edgeColor.y, look->edgeColor.z}, 1.5f * look->edgeSize * H / 800.0f);
                         continue;
                     }
                     const size_t m = static_cast<size_t>(gs.material);
@@ -702,23 +862,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                     ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                     ctx->DrawIndexed(gs.count, 0, 0);
-                    if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE")) {
-                        float cbv[24];
-                        for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-                        const float colr[4] = {LinearLight() ? ToLinear(mat.outlineColor.x) : mat.outlineColor.x, LinearLight() ? ToLinear(mat.outlineColor.y) : mat.outlineColor.y,
-                                               LinearLight() ? ToLinear(mat.outlineColor.z) : mat.outlineColor.z, 1.0f};
-                        const float px = 1.2f * std::min(2.0f, mat.outlineWidth) * H / 800.0f;   // ring width in pixels
-                        const float prm[4] = {px * 2.0f / W, px * 2.0f / H, 0.004f, 0.0f};
-                        std::memcpy(cbv + 16, colr, 16);
-                        std::memcpy(cbv + 20, prm, 16);
-                        ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
-                        ctx->IASetInputLayout(I.olIl);
-                        ctx->VSSetShader(I.olVs, nullptr, 0);
-                        ctx->PSSetShader(I.olPs, nullptr, 0);
-                        ctx->VSSetConstantBuffers(0, 1, &I.olCb);
-                        ctx->PSSetConstantBuffers(0, 1, &I.olCb);
-                        ctx->DrawIndexed(gs.count, 0, 0);
-                    }
+                    if (mat.outlineWidth > 0.0f && !mat.alpha && !mat.doubleSided && I.olVs && I.olPs && I.olIl && I.olCb && !std::getenv("CARDBRIDGE_NO_OUTLINE"))
+                        ring(gm, gs, mat.outlineColor, 1.2f * std::min(2.0f, mat.outlineWidth) * H / 800.0f);   // ring width in pixels
                 }
             }
         }
