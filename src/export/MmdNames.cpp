@@ -218,20 +218,58 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
         // The eye white turns with the eyeball. The iris is a patch cut to the same cap, and the cap is not a sphere about the pivot: with the
         // white left still, a turned iris slid behind it (a sliver left on one eye) or out of the lid opening (on the other).
         size_t first = 0;
+        std::vector<int> eyeVerts[2][2];   // [side][0 white, 1 iris]
         for (const auto& mat : model.materials) {
             for (int side = 0; side < 2; ++side) {
                 const std::string key = std::string("cf_Ohitomi_") + (side == 0 ? "L" : "R");
                 const size_t at = mat.name.find(key);
                 if (at == std::string::npos) continue;
                 const size_t next = at + key.size();
-                if (next < mat.name.size() && mat.name[next] >= '0' && mat.name[next] <= '9') continue;   // cf_Ohitomi_L02 is the iris
+                const bool iris = next < mat.name.size() && mat.name[next] >= '0' && mat.name[next] <= '9';   // cf_Ohitomi_L02 is the iris
                 for (size_t i = first; i < first + mat.indexCount && i < model.indices.size(); ++i) {
-                    pmx::Vertex& v = model.vertices[static_cast<size_t>(model.indices[i])];
+                    const int vi = static_cast<int>(model.indices[i]);
+                    eyeVerts[side][iris ? 1 : 0].push_back(vi);
+                    if (iris) continue;
+                    pmx::Vertex& v = model.vertices[static_cast<size_t>(vi)];
                     for (int k = 0; k < 4; ++k) { v.bone[k] = k == 0 ? eyeBone[side] : 0; v.weight[k] = k == 0 ? 1.0f : 0.0f; }
                 }
             }
             first += mat.indexCount;
         }
+        for (auto& side : eyeVerts) for (auto& list : side) { std::sort(list.begin(), list.end()); list.erase(std::unique(list.begin(), list.end()), list.end()); }
+        // Half-closed eyes. The game's blink shapes move the white with the lid but not the iris, so a half-closed eye showed the iris (and a
+        // turned white's corner) in front of the lid. The iris takes the offset of the nearest white vertex in every shape the white is in, and
+        // the whole eyeball sits a little deeper (8 percent toward the pivot) so a turned corner stays behind the skin.
+        for (auto& mo : model.morphs) {
+            if (mo.vertices.empty()) continue;
+            std::vector<std::pair<int, Vec3>> extra;
+            for (int side = 0; side < 2; ++side) {
+                std::vector<std::pair<int, Vec3>> white;   // the white's own offsets in this shape
+                for (const auto& [vi, d] : mo.vertices) if (std::binary_search(eyeVerts[side][0].begin(), eyeVerts[side][0].end(), vi)) white.emplace_back(vi, d);
+                if (white.empty()) continue;
+                for (int iv : eyeVerts[side][1]) {
+                    const Vec3 p = model.vertices[static_cast<size_t>(iv)].position;
+                    float best = 1e30f;
+                    Vec3 offset{0, 0, 0};
+                    for (const auto& [wv, d] : white) {
+                        const Vec3 q = model.vertices[static_cast<size_t>(wv)].position;
+                        const float dist = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y) + (q.z - p.z) * (q.z - p.z);
+                        if (dist < best) { best = dist; offset = d; }
+                    }
+                    extra.emplace_back(iv, offset);
+                }
+            }
+            mo.vertices.insert(mo.vertices.end(), extra.begin(), extra.end());
+        }
+        for (int side = 0; side < 2; ++side) {
+            const Vec3 pivot = model.bones[static_cast<size_t>(eyeBone[side])].position;
+            for (const auto& list : eyeVerts[side])
+                for (int vi : list) {
+                    Vec3& p = model.vertices[static_cast<size_t>(vi)].position;
+                    p = {pivot.x + 0.92f * (p.x - pivot.x), pivot.y + 0.92f * (p.y - pivot.y), pivot.z + 0.92f * (p.z - pivot.z)};
+                }
+        }
+    }
     return result;
 }
 
