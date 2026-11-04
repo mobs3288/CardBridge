@@ -37,6 +37,10 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
 constexpr float kMaxBodySwing = 15.0f;
 
+// How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
+// A skirt flares out from the thighs at rest: following the whole turn lifted it off them and showed its lining (MMD, crouching).
+constexpr float kLegFollow = 0.75f;
+
 // The least distance between the segments a-b and c-d (a segment may be a point).
 float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
     auto dot = [](Vec3 u, Vec3 v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
@@ -300,6 +304,77 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
+    }
+    AddLegFollow(scene, model);
+}
+
+void AddLegFollow(const assemble::Scene& scene, pmx::Model& model) {
+    auto find = [&](const std::string& name) {
+        for (size_t i = 0; i < scene.bones.size(); ++i) if (scene.bones[i].name == name) return static_cast<int>(i);
+        return -1;
+    };
+    int thigh[2], knee[2], foot[2], toes[2];
+    for (int s = 0; s < 2; ++s) {
+        const std::string side = s == 0 ? "L" : "R";
+        thigh[s] = find("cf_j_thigh00_" + side); knee[s] = find("cf_j_leg01_" + side);
+        foot[s] = find("cf_j_foot_" + side); toes[s] = find("cf_j_toes_" + side);
+        if (thigh[s] < 0 || knee[s] < 0 || foot[s] < 0 || toes[s] < 0) return;
+    }
+    if (model.bones.size() < scene.bones.size()) return;
+    auto pos = [&](int b) { return scene.bones[static_cast<size_t>(b)].pos; };
+    auto flat = [](Vec3 v) { return Vec3{v.x, 0.0f, v.z}; };
+    const Vec3 front = normalize(flat(sub(pos(toes[0]), pos(foot[0])) + sub(pos(toes[1]), pos(foot[1]))));
+    const Vec3 hips = (pos(thigh[0]) + pos(thigh[1])) * 0.5f;
+    const float hipY = std::max(pos(thigh[0]).y, pos(thigh[1]).y), kneeY = std::max(pos(knee[0]).y, pos(knee[1]).y);
+    const float legLen = hipY - std::min(pos(foot[0]).y, pos(foot[1]).y);
+    if (length(front) < 0.5f || legLen <= 0.0f) return;
+    auto underLeg = [&](int b) {
+        for (int p = b; p >= 0; p = scene.bones[static_cast<size_t>(p)].parent)
+            if (p == thigh[0] || p == thigh[1]) return true;
+        return false;
+    };
+    // The bones that move after the leg: an append parent has to be solved (foot IK included) before the bone that follows it.
+    auto lateLayer = [&](int top) {
+        for (size_t b = 0; b < model.bones.size(); ++b)
+            for (int p = static_cast<int>(b); p >= 0; p = model.bones[static_cast<size_t>(p)].parent)
+                if (p == top) { model.bones[b].layer = std::max(model.bones[b].layer, 1); break; }
+    };
+    for (const auto& ch : scene.chains) {
+        if (ch.characterOwn) continue;
+        const std::vector<int> bones = PhysicsChainBones(scene, ch);
+        if (bones.size() < 2) continue;
+        const int root = bones[0];
+        const Vec3 r = pos(root);
+        float lowest = r.y;
+        for (int b : bones) lowest = std::min(lowest, pos(b).y);
+        // A garment hanging over the legs: tied between the knees and a bit above the hips, near the hips, reaching below the hip joints.
+        if (r.y < kneeY || r.y > hipY + 0.5f * (hipY - kneeY) || length(flat(sub(r, hips))) > 0.5f * legLen || lowest >= hipY || underLeg(root)) continue;
+        if (model.bones[static_cast<size_t>(root)].appendParent >= 0) continue;
+        float rate[2];
+        const Vec3 across = normalize(flat(sub(pos(thigh[0]), pos(thigh[1]))));
+        const float halfHip = std::max(1e-4f, 0.5f * length(flat(sub(pos(thigh[0]), pos(thigh[1])))));
+        for (int s = 0; s < 2; ++s) {
+            const Vec3 d = flat(sub(r, pos(thigh[s])));
+            const float ahead = length(d) > 1e-5f ? clamp01((d.x * front.x + d.z * front.z) / length(d)) : 0.0f;
+            // In front of the thigh it takes the whole share; the piece between the legs two thirds of each (both thighs reach under it).
+            const float share = clamp01(1.0f - std::fabs(d.x * across.x + d.z * across.z) / (3.0f * halfHip));
+            rate[s] = kLegFollow * ahead * share;
+        }
+        const int lead = rate[0] >= rate[1] ? 0 : 1;
+        if (rate[lead] < 0.05f) continue;
+        pmx::Bone& rb = model.bones[static_cast<size_t>(root)];
+        rb.appendParent = thigh[lead];
+        rb.appendRatio = rate[lead];
+        lateLayer(root);
+        // A piece between the legs (the front of a skirt) follows both: the other leg turns the root's parent, when that bone carries this chain alone.
+        const int parent = scene.bones[static_cast<size_t>(root)].parent;
+        if (rate[1 - lead] < 0.05f || parent < 0 || underLeg(parent) || model.bones[static_cast<size_t>(parent)].appendParent >= 0) continue;
+        int children = 0;
+        for (const auto& b : scene.bones) children += b.parent == parent ? 1 : 0;
+        if (children != 1) continue;
+        model.bones[static_cast<size_t>(parent)].appendParent = thigh[1 - lead];
+        model.bones[static_cast<size_t>(parent)].appendRatio = rate[1 - lead];
+        lateLayer(parent);
     }
 }
 

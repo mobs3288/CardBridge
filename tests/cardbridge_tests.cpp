@@ -932,6 +932,49 @@ void unitTests() {
         CHECK(exporter::PhysicsChainBones(s, ch).size() == 5);
     });
 
+    test("physics: garments hanging in front of the thighs turn with the legs, after them; the sides, the back and the hair do not", [] {
+        assemble::Scene s;
+        s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
+        for (int side = 0; side < 2; ++side) {   // the game's leg bones; the toes point to +Z, so that is the front
+            const std::string n = side == 0 ? "L" : "R";
+            const float x = side == 0 ? 0.1f : -0.1f;
+            const int t = static_cast<int>(s.bones.size());
+            s.bones.push_back({"cf_j_thigh00_" + n, 0, {x, 0.9f, 0}, "rig"});
+            s.bones.push_back({"cf_j_leg01_" + n, t, {x, 0.5f, 0}, "rig"});
+            s.bones.push_back({"cf_j_foot_" + n, t + 1, {x, 0.1f, 0}, "rig"});
+            s.bones.push_back({"cf_j_toes_" + n, t + 2, {x, 0.05f, 0.1f}, "rig"});
+        }
+        auto addChain = [&](const std::string& name, int parent, Vec3 top) {
+            assemble::SceneChain ch;
+            ch.name = name;
+            for (int i = 0; i < 4; ++i) {
+                ch.bones.push_back(static_cast<int>(s.bones.size()));
+                s.bones.push_back({name + std::to_string(i), i == 0 ? parent : ch.bones[static_cast<size_t>(i) - 1], {top.x, top.y - 0.15f * float(i), top.z}, "item"});
+            }
+            s.chains.push_back(ch);
+            return ch.bones[0];
+        };
+        const int frontLeft = addChain("frontL", 0, {0.1f, 1.0f, 0.15f});
+        const int centreTop = static_cast<int>(s.bones.size());
+        s.bones.push_back({"centre_top", 0, {0, 1.0f, 0.15f}, "item"});   // carries the centre chain alone
+        const int centre = addChain("centre", centreTop, {0, 1.0f, 0.15f});
+        const int side = addChain("side", 0, {0.25f, 1.0f, 0});
+        const int back = addChain("back", 0, {0.1f, 1.0f, -0.15f});
+        const int hair = addChain("hair", 0, {0, 1.5f, -0.1f});
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        const auto& fl = m.bones[static_cast<size_t>(frontLeft)];
+        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.7f && fl.appendRatio <= 0.75f && fl.layer == 1);
+        CHECK(m.bones[static_cast<size_t>(frontLeft) + 3].layer == 1);   // what hangs from it moves after it too
+        const auto& c = m.bones[static_cast<size_t>(centre)];
+        const auto& ct = m.bones[static_cast<size_t>(centreTop)];
+        CHECK(c.appendParent >= 0 && ct.appendParent >= 0 && c.appendParent != ct.appendParent);   // one leg each
+        CHECK(c.appendRatio > 0.35f && c.appendRatio < 0.5f && std::fabs(c.appendRatio - ct.appendRatio) < 1e-4f && ct.layer == 1);
+        for (int b : {side, back, hair}) CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0 && m.bones[static_cast<size_t>(b)].layer == 0);
+        CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);   // the legs themselves are untouched
+    });
+
     test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
         using namespace assemble;
         struct Setup { const char* what; float damping, elasticity, stiffness; };
