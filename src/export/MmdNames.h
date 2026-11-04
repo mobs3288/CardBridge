@@ -3,6 +3,8 @@
 #include "assemble/Scene.h"
 #include "pmx/PmxWriter.h"
 
+#include <map>
+#include <string>
 #include <vector>
 
 namespace cardbridge::exporter {
@@ -27,10 +29,11 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
 // frames exist, and before nothing that still holds bone indices.
 void AddMmdStandardBones(pmx::Model& model);
 
-// Adds the standard facial morphs a motion keys and returns their indices (they are listed first in the morph panel): まばたき is a copy of
-// the game's closed eyes; あ is the game's wide open mouth, and い う え お are built from it (a smaller opening, the mouth corners spread or
-// drawn in, the lips pushed forward) because which of the game's mouth patterns is which vowel is not recorded anywhere. Run after the
-// expression morphs exist (they and the model's vertices are what these are made from).
-std::vector<int> AddMmdMorphs(pmx::Model& model);
+// Adds the standard facial morphs a motion keys and returns their indices (they are listed first in the morph panel): the vowels あ い う え お
+// ん, ワ, ∧, ω, ▲, にやり ..., the eyes まばたき, 笑い, ウィンク ..., the brows 真面目, 困る, 怒り .... Each is a copy of the game expression morph
+// that plays the pattern of that meaning, found by the pattern's own blend shape name (`shapes`: expression morph name -> SceneExpression::shape,
+// from AddExpressionMorphs), so lips, teeth, tongue and nose move together as in the game. A head without those names gets the vowels and
+// まばたき from its plain open mouth and closed eyes ("Mouth 0 open", "Eyes 0 closed"). Run after the expression morphs exist.
+std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std::string>& shapes = {});
 
 } // namespace cardbridge::exporter

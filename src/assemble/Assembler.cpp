@@ -2355,11 +2355,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (onlyHelperMaterials(*uf, r)) continue;
             std::string path = "/" + uf->pathOf(r.xformId) + "/";
             // Variants the game keeps switched off in the default state: the pulled-off ("nuge") top and
-            // bottom, and the face's tears, gag eyes and tongue.
+            // bottom, and the face's tears and gag eyes. (The tongue, o_tang, stays: it sits in the mouth, and an open mouth without it is
+            // an empty black hole.)
             // A garment prefab holds one node per clothes state: n_top_a / n_bot_a is the worn state, b and c the pulled-off
             // ones (c = shorts or skirt hanging from one leg); an object inactive in the prefab is off in every state.
             bool hiddenByDefault = !r.active || hiddenClothesState(path) || (!hiddenOptions.empty() && uf->isUnderGameObject(r.xformId, hiddenOptions)) ||
-                                   (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye") || contains(r.name, "o_tang")));
+                                   (ref.group == "Head" && (contains(r.name, "namida") || contains(r.name, "gag_eye")));
             if (hiddenByDefault) { skipped.push_back(r.name); continue; }
             // Debug aid: CARDBRIDGE_SKIP=name1,name2 leaves those renderers out (to find which mesh draws an artefact).
             if (const char* sk = std::getenv("CARDBRIDGE_SKIP")) {
@@ -2509,6 +2510,23 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             ex.name = std::string(c.label) + " " + std::to_string(ptn) + (open ? " open" : " closed");
                             ex.panel = c.panel;
                             for (const auto& [key, w] : weights) ex.targets.push_back({key.first, key.second, std::min(100.0f, w)});
+                            {   // the pattern's own name: the strongest shape on the biggest mesh it moves ("kuti_face.f00_a_l_op" -> "a_l_op")
+                                size_t best = 0, bestVerts = 0;
+                                float bestW = -1.0f;
+                                for (size_t ti = 0; ti < ex.targets.size(); ++ti) {
+                                    const auto& t = ex.targets[ti];
+                                    const size_t nv = scene.meshes[static_cast<size_t>(t.mesh)].vertices.size();
+                                    if (nv > bestVerts || (nv == bestVerts && t.weight > bestW)) { best = ti; bestVerts = nv; bestW = t.weight; }
+                                }
+                                const auto& t = ex.targets[best];
+                                const auto& shapes = scene.meshes[static_cast<size_t>(t.mesh)].shapes;
+                                if (t.shape >= 0 && static_cast<size_t>(t.shape) < shapes.size()) {
+                                    std::string n = shapes[static_cast<size_t>(t.shape)].name;
+                                    if (const size_t dot = n.rfind('.'); dot != std::string::npos) n = n.substr(dot + 1);
+                                    if (const size_t us = n.find('_'); us != std::string::npos) n = n.substr(us + 1);
+                                    ex.shape = n;
+                                }
+                            }
                             scene.expressions.push_back(std::move(ex));
                         }
                 }

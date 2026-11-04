@@ -4,6 +4,8 @@
 #include "pmx/PmxWriter.h"
 
 #include <cstdint>
+#include <map>
+#include <string>
 #include <vector>
 
 namespace cardbridge::exporter {
@@ -39,8 +41,10 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
 
 // Face expressions: one vertex morph per scene expression (brow / eye / mouth pattern, closed or open, relative to the resting
 // expression built into the vertices) and one per raw blend shape. `meshBase[i]` is the PMX index of scene mesh i's first vertex,
-// -1 for a mesh that was not exported. Returns the number of morphs added.
-size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, const std::vector<int>& meshBase, float scale);
+// -1 for a mesh that was not exported. Returns the number of morphs added. `shapes`, when given, gets each expression morph's name mapped to
+// the game pattern it plays (SceneExpression::shape, "a_l_op"), what AddMmdMorphs builds the standard morphs from.
+size_t AddExpressionMorphs(const assemble::Scene& scene, pmx::Model& model, const std::vector<int>& meshBase, float scale,
+                           std::map<std::string, std::string>* shapes = nullptr);
 
 // The least distance between the segments a-b and c-d (a segment may be a point).
 float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d);
