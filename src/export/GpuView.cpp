@@ -83,6 +83,8 @@ struct GpuView::Impl {
     int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
     std::vector<MmdLook> looks;                  // plain mode: each scene material as the PMX writes it (made on the first plain Render)
+    std::map<std::string, GpuTex> spheres;       // plain mode: the looks' sphere maps, by MmdSphereImage name
+    std::vector<ID3D11ShaderResourceView*> lookSphere;   // per look: its sphere map's view (owned by `spheres`), null for none
     // Plain mode's self-shadow map, made on first use.
     static constexpr int kShadowSize = 2048;
     ID3D11Texture2D* smTex = nullptr;
@@ -179,21 +181,30 @@ float4 ps() : SV_Target { return color; }
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
         if (!compile) return false;
         static const char src[] = R"HLSL(
-cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; float4 l0, l1, l2, mmd; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
+cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; float4 l0, l1, l2, mmd, sph; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
+// sph.x: the PMX sphere map in t2, 1 multiplies, 2 adds (looked up by the normal's screen x and y, as MMD does).
 // MikuMikuDance's look (the "as exported" view): mmd.x = 1 the material takes self-shadow (l0..l2: world -> shadow map, z = depth),
 // mmd.y = 1 the ground shadow pass (the mesh flattened along the light onto the floor at height mmd.z, drawn in `diffuse`), mmd.w the model's radius.
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 Texture2D<float> sm : register(t1); SamplerComparisonState sc : register(s1);
+Texture2D t2 : register(t2);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
-struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; float3 w : TEXCOORD2; };
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; float3 w : TEXCOORD2; float2 vn : TEXCOORD3; };
 VO vs(VI i) {
     VO o; float4 p = float4(i.p, 1);
     if (mmd.y > 0.5) p.xyz -= light.xyz * ((p.y - mmd.z) / max(light.y, 0.05));
-    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; o.w = p.xyz; return o;
+    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; o.w = p.xyz;
+    o.vn = float2(dot(normalize(r0.xyz), i.n), dot(normalize(r1.xyz), i.n));
+    return o;
 }
 float4 ps(VO i) : SV_Target {
     if (mmd.y > 0.5) return diffuse;
     float4 c = t0.Sample(s0, i.uv) * diffuse;
+    if (sph.x > 0.5) {
+        float2 vn = i.vn / max(length(i.vn), 1.0);
+        float3 s = t2.Sample(s0, float2(vn.x * 0.5 + 0.5, 0.5 - vn.y * 0.5)).rgb;
+        c.rgb = sph.x > 1.5 ? c.rgb + s : c.rgb * s;
+    }
     float d = dot(normalize(i.n), light.xyz);
     if (shadow.w > 1.5 && mmd.x > 0.5) {   // MMD's self-shadow shading: the lit colour, or it times the ramp's bottom row, by N.L * 3 and the shadow map
         float4 w = float4(i.w + normalize(i.n) * 0.006 * mmd.w, 1);
@@ -224,7 +235,7 @@ float4 ps(VO i) : SV_Target {
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
         ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = (7 + 32 + 4) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = (7 + 32 + 5) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
         Rel(vb); Rel(pb); Rel(err);
         return ok;
@@ -244,6 +255,9 @@ float4 ps(VO i) : SV_Target {
         for (auto& c : cbufs) Rel(c.second);
         cbufs.clear();
         looks.clear();
+        for (auto& s : spheres) { Rel(s.second.srv); Rel(s.second.tex); }
+        spheres.clear();
+        lookSphere.clear();
         skipped = 0;
     }
 
@@ -705,7 +719,15 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     if (I.plain && fallbackOk) {
         if (I.looks.size() != scene.materials.size()) {
             I.looks.clear();
-            for (const auto& m : scene.materials) I.looks.push_back(MmdMaterialLook(scene, m));
+            for (const auto& m : scene.materials) {
+                I.looks.push_back(MmdMaterialLook(scene, m));
+                if (I.looks.back().sphere == 0) continue;
+                const assemble::SceneTexture t = MmdSphereImage(I.looks.back());
+                if (!I.spheres.count(t.name)) I.MakeTexture(t.width, t.height, t.rgba.data(), I.spheres[t.name], false, LinearLight());
+            }
+            I.lookSphere.assign(I.looks.size(), nullptr);
+            for (size_t k = 0; k < I.looks.size(); ++k)
+                if (I.looks[k].sphere > 0) I.lookSphere[k] = I.spheres[MmdSphereImage(I.looks[k]).name].srv;
         }
         const float f[3] = {-L[0], -L[1], -L[2]};   // along the light
         float x[3] = {f[2], 0.0f, -f[0]};           // up x f
@@ -720,7 +742,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
             for (int col = 0; col < 3; ++col) LS[r][col] = axes[r][col] * k;
             LS[r][3] = -(LS[r][0] * ctr[0] + LS[r][1] * ctr[1] + LS[r][2] * ctr[2]) + (r == 2 ? 0.5f : 0.0f);
         }
-        float cbv[(7 + 32 + 4) * 4] = {};
+        float cbv[(7 + 32 + 5) * 4] = {};
         ctx->IASetInputLayout(I.fbIl);
         ctx->VSSetShader(I.fbVs, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &I.fbCb);
@@ -779,7 +801,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
-                        float cbv[(7 + 32 + 4) * 4] = {};
+                        float cbv[(7 + 32 + 5) * 4] = {};
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
@@ -792,6 +814,10 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                             for (int r = 0; r < 3; ++r) for (int col = 0; col < 4; ++col) cbv[(7 + 32 + r) * 4 + col] = LS[r][col];
                             cbv[(7 + 32 + 3) * 4] = selfShadow && (look->drawFlags & 0x08) ? 1.0f : 0.0f;
                             cbv[(7 + 32 + 3) * 4 + 3] = radius;
+                            if (ID3D11ShaderResourceView* sp = I.lookSphere[static_cast<size_t>(gs.material)]) {
+                                cbv[(7 + 32 + 4) * 4] = look->sphere == 1 ? 1.0f : 2.0f;
+                                ctx->PSSetShaderResources(2, 1, &sp);
+                            }
                         } else {
                             const float dif4[4] = {lin(mat.diffuse.x), lin(mat.diffuse.y), lin(mat.diffuse.z), mat.diffuse.w};
                             std::memcpy(cbv + 16, dif4, 16);

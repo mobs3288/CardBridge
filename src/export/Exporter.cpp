@@ -73,31 +73,16 @@ int ToonTexture(const std::vector<Vec3>& ramp, pmx::Model& model, std::map<std::
     return done[key] = static_cast<int>(model.textures.size()) - 1;
 }
 
-// A sphere map that shades by the normal as the camera sees it (MMD multiplies the colour by it): the game's teeth are one flat colour and
-// get their roundness from the shader's lighting, which a PMX does not carry, so they would read as a flat white strip. Bright toward the
-// upper left front, 0.62 at the grazing edge.
-int ToothSphere(pmx::Model& model, int& done, const ExportOptions& opt) {
-    if (done >= 0) return done;
-    constexpr int kS = 64;
-    assemble::SceneTexture t;
-    t.name = "sphere_tooth";
-    t.width = t.height = kS;
-    t.rgba.resize(static_cast<size_t>(kS) * kS * 4);
-    const float lx = -0.35f, ly = 0.45f, lz = 0.82f, ln = std::sqrt(lx * lx + ly * ly + lz * lz);
-    for (int y = 0; y < kS; ++y)
-        for (int x = 0; x < kS; ++x) {
-            const float u = (static_cast<float>(x) + 0.5f) / kS * 2.0f - 1.0f, v = 1.0f - (static_cast<float>(y) + 0.5f) / kS * 2.0f;
-            const float r2 = std::min(1.0f, u * u + v * v), z = std::sqrt(1.0f - r2);
-            const float d = std::max(0.0f, (u * lx + v * ly + z * lz) / ln);
-            const uint8_t g = static_cast<uint8_t>(255.0f * (0.62f + 0.38f * d) + 0.5f);
-            uint8_t* px = &t.rgba[(static_cast<size_t>(y) * kS + static_cast<size_t>(x)) * 4];
-            px[0] = px[1] = px[2] = g;
-            px[3] = 255;
-        }
+// The material's sphere map written once per kind and strength (MmdSphereImage), as a PMX texture index.
+int SphereTexture(pmx::Model& model, std::map<std::string, int>& done, const ExportOptions& opt, const MmdLook& look) {
+    const assemble::SceneTexture t = MmdSphereImage(look);
+    auto it = done.find(t.name);
+    if (it != done.end()) return it->second;
+    const std::string file = "textures/" + t.name + ".png";
     Bytes png = encodePng(t);
-    fileio::WriteFile(fileio::Join(opt.outDir, "textures/sphere_tooth.png"), png.data(), png.size());
-    model.textures.push_back("textures/sphere_tooth.png");
-    return done = static_cast<int>(model.textures.size()) - 1;
+    fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
+    model.textures.push_back(file);
+    return done[t.name] = static_cast<int>(model.textures.size()) - 1;
 }
 
 bool IsTooth(const assemble::SceneMaterial& mat) {
@@ -159,7 +144,41 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     }
     look.edgeColor = {e.x, e.y, e.z, 1.0f};
     look.edgeSize = 0.6f;   // the hand-made reference models' 0.6; the game's own outline widths are not material data (mostly 0)
+    // Sphere maps, the gloss MMD models carry instead of specular, chosen from the material itself: the teeth get roundness (multiply), any
+    // hair shader the anime ring highlight, and any other surface the game gives a highlight (_SpecularColor x _SpecularPower) a soft add-gloss
+    // as strong as that highlight. Skin, the face's layers, lenses and lit bakes get none.
+    const bool skin = mat.shader.find("skin") != std::string::npos, hair = mat.shader.find("hair") != std::string::npos;
+    const float gloss = 0.3f * mat.specular.x + 0.59f * mat.specular.y + 0.11f * mat.specular.z;
+    if (tooth) look.sphere = 1;
+    else if (!mat.bakedLit && !overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
+    else if (!mat.bakedLit && !overlay && !lens && !skin && gloss * 0.25f >= 0.02f) { look.sphere = 2; look.sphereStrength = std::min(0.25f, gloss * 0.25f); }
     return look;
+}
+
+assemble::SceneTexture MmdSphereImage(const MmdLook& look) {
+    constexpr int kS = 64;
+    assemble::SceneTexture t;
+    const int pct = static_cast<int>(std::lround(look.sphereStrength * 100.0f));
+    t.name = look.sphere == 1 ? "sphere_tooth" : (look.sphere == 3 ? "sphere_hair_" : "sphere_gloss_") + std::to_string(pct);
+    t.width = t.height = kS;
+    t.rgba.resize(static_cast<size_t>(kS) * kS * 4);
+    // u right, v up, z toward the camera: the normal as MMD looks the sphere up (its view-space x and y).
+    const float lx = look.sphere == 1 ? -0.35f : 0.35f, ly = look.sphere == 1 ? 0.45f : 0.55f, lz = look.sphere == 1 ? 0.82f : 0.75f;
+    const float ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+    for (int y = 0; y < kS; ++y)
+        for (int x = 0; x < kS; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / kS * 2.0f - 1.0f, v = 1.0f - (static_cast<float>(y) + 0.5f) / kS * 2.0f;
+            const float r2 = std::min(1.0f, u * u + v * v), z = std::sqrt(1.0f - r2);
+            const float d = std::max(0.0f, (u * lx + v * ly + z * lz) / ln);
+            float g;
+            if (look.sphere == 1) g = 0.62f + 0.38f * d;   // teeth: bright toward the upper left front, 0.62 at the grazing edge
+            else if (look.sphere == 3) g = look.sphereStrength * std::exp(-((v - 0.45f) / 0.12f) * ((v - 0.45f) / 0.12f)) * (1.0f - std::min(1.0f, u * u));   // a band across the upper head
+            else g = look.sphereStrength * std::pow(d, 12.0f);   // a soft highlight toward MMD's light (upper right, front)
+            uint8_t* px = &t.rgba[(static_cast<size_t>(y) * kS + static_cast<size_t>(x)) * 4];
+            px[0] = px[1] = px[2] = static_cast<uint8_t>(std::min(255.0f, 255.0f * g + 0.5f));
+            px[3] = 255;
+        }
+    return t;
 }
 
 std::vector<std::string> ValidateScene(const assemble::Scene& scene) {
@@ -357,7 +376,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
     std::vector<std::string> textureFiles(scene.textures.size());
     std::map<std::string, int> toonFiles;   // ramp bytes -> PMX texture index
-    int toothSphere = -1;                   // PMX texture index of the tooth sphere map, once made
+    std::map<std::string, int> sphereFiles; // sphere map name -> PMX texture index
     int meshOrdinal = 0;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         const auto& part = scene.parts[pi];
@@ -401,7 +420,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.edgeColor = look.edgeColor;
                 pm.edgeSize = look.edgeSize;
                 if (!mat.toon.empty() && !mat.bakedLit) pm.toon = ToonTexture(mat.toon, model, toonFiles, opt);   // the game shader's shade, as the material's own toon ramp (bright at the top, like MMD's)
-                if (IsTooth(mat)) pm.sphere = ToothSphere(model, toothSphere, opt);
+                if (look.sphere > 0) { pm.sphere = SphereTexture(model, sphereFiles, opt, look); pm.sphereMode = look.sphere == 1 ? 1 : 2; }
                 if (mat.texture >= 0) {
                     size_t ti = static_cast<size_t>(mat.texture);
                     // The game's item shader (main_item) never reads the texture's alpha, and card textures often keep a mask or nothing
