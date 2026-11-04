@@ -728,11 +728,13 @@ void unitTests() {
     });
         for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
         for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
-        {   // the iris follows the white's blink, the eyeball sits 8 percent deeper toward the pivot
+        {   // the iris takes the white's mean blink offset, the white and the iris lie on balls about the pivot (the iris a hair above)
             int irisOffsets = 0;
             for (const auto& [vi, d] : m.morphs[0].vertices) if (vi >= 3 && vi <= 5 && d.y == -1.0f) ++irisOffsets;
             CHECK(irisOffsets == 3 && m.morphs[0].vertices.size() == 3 + 3);
-            CHECK(std::fabs(m.vertices[0].position.y - (16.5f + 0.92f * (0.0f - 16.5f))) < 1e-3f);
+            const Vec3 pv = m.bones[static_cast<size_t>(eyeL)].position;
+            auto dist = [&](int i) { const Vec3 p = m.vertices[static_cast<size_t>(i)].position; return std::sqrt((p.x - pv.x) * (p.x - pv.x) + (p.y - pv.y) * (p.y - pv.y) + (p.z - pv.z) * (p.z - pv.z)); };
+            CHECK(std::fabs(dist(0) - dist(1)) < 1e-3f && dist(3) > dist(0) * 1.03f && dist(3) < dist(0) * 1.04f);
         }
         for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
 
