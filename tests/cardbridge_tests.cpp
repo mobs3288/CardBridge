@@ -1044,6 +1044,12 @@ void unitTests() {
         const int hips = add("cf_j_hips", -1, {0, 1, 0});
         const int sh = add("cf_j_shoulder_L", hips, {0.1f, 1.4f, 0});
         const int arm = add("cf_j_arm00_L", sh, {0.2f, 1.4f, 0});
+        {   // arms=false (the MMD names): the legs only
+            pmx::Model legs = m;
+            legs.bones.resize(before);
+            const std::vector<int> legIks = exporter::AddIk(s, legs, 10.0f, false);
+            CHECK(legIks.size() == 1 && legs.bones[static_cast<size_t>(legIks[0])].ikTarget == ankle);
+        }
         const int fore = add("cf_j_forearm01_L", arm, {0.5f, 1.4f, 0});
         const int shR = add("cf_j_shoulder_R", hips, {-0.1f, 1.4f, 0});
         const int armR = add("cf_j_arm00_R", shR, {-0.2f, 1.4f, 0});
@@ -1590,10 +1596,11 @@ void integrationTests() {
         {   // read the file back with the independent reader: counts, physics, morphs and frames all hold together
             const pmxread::Model back = readPmx(fileio::ReadFile(res.pmxPath));
             CHECK(back.vertices.size() == res.vertices && back.indices.size() == res.triangles * 3 && back.materials.size() == res.materials && back.bones.size() == res.bones);
-            size_t ikBack = 0;
+            size_t ikBack = 0, legs = 0;
+            for (const auto& l : exporter::FindLimbs(scene)) if (l.role == "foot") ++legs;   // the MMD names leave the arms to the motion's FK keys
             for (const auto& b : back.bones) if (b.isIk()) ++ikBack;
-            CHECK(ikBack >= exporter::FindLimbs(scene).size() && back.bones.size() == scene.bones.size() + ikBack + 1);   // (+1: 両目) the scene's bones, then one IK bone per limb (and a toe IK under each foot IK)
-            std::printf("  read back: %zu IK bones (%zu limbs in the rig)\n", ikBack, exporter::FindLimbs(scene).size());
+            CHECK(ikBack >= legs && back.bones.size() == scene.bones.size() + ikBack + 1);   // (+1: 両目) the scene's bones, then one IK bone per leg (and a toe IK under each foot IK)
+            std::printf("  read back: %zu IK bones (%zu legs in the rig)\n", ikBack, legs);
             size_t expectBodies = 0, expectJoints = 0;
             for (const auto& col : scene.colliders)
                 if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;

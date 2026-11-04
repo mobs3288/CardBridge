@@ -65,7 +65,7 @@ bool BendLimits(Vec3 root, Vec3 mid, Vec3 end, Vec3& lower, Vec3& upper) {
     return true;
 }
 
-std::vector<int> AddIk(const assemble::Scene& scene, pmx::Model& model, float scale) {
+std::vector<int> AddIk(const assemble::Scene& scene, pmx::Model& model, float scale, bool arms) {
     std::vector<int> added;
     if (model.bones.size() < scene.bones.size()) return added;
     int rootBone = -1;
@@ -73,6 +73,7 @@ std::vector<int> AddIk(const assemble::Scene& scene, pmx::Model& model, float sc
     for (const Limb& l : FindLimbs(scene)) {
         const Role* role = nullptr;
         for (const Role& r : kRoles) if (l.role == r.key) role = &r;
+        if (!arms && l.role == "hand") continue;
         const std::string name = "cb_ik_" + l.role + "_" + l.side;
         if (scene.boneIndex(name) >= 0) continue;   // never shadow a bone of the rig
         pmx::Bone ik;

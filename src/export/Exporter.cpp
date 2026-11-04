@@ -453,7 +453,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model) : std::vector<int>();
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     if (opt.physics) AddPhysics(scene, model, opt.scale);
-    std::vector<int> ikBones = AddIk(scene, model, opt.scale);
+    std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys
     std::vector<int> mmdExtraBones;
     if (opt.mmdNames) {
         const MmdBones mb = ApplyMmdBoneNames(scene, model, opt.scale);
