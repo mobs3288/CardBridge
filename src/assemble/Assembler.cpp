@@ -947,7 +947,9 @@ struct Builder {
         int bi = scene.boneIndex(bx->name);
         if (bi >= 0) return bi;
         const Mat4 bw = itemBoneWorld(uf, id, prefabRoot);
-        int parent = 0;
+        // A hair item's own top bone (cf_J_hairB_top ...) hangs on the head's hair parent, not on the model root: left on the root it stays
+        // behind when the head moves (a floating cap of hair in MikuMikuDance once a motion turns the head).
+        int parent = hairParent ? std::max(0, scene.boneIndex("cf_J_FaceUp_ty")) : 0;
         for (const unity::Xform* a = uf.xform(bx->parent); a; a = uf.xform(a->parent)) {
             int pi = scene.boneIndex(a->name);
             if (pi >= 0) { parent = pi; break; }
@@ -1063,6 +1065,36 @@ struct Builder {
             for (int64_t id : ids)
                 if (int bi = sceneBoneOf(id); bi >= 0 && std::find(ch.bones.begin(), ch.bones.end(), bi) == ch.bones.end()) ch.bones.push_back(bi);
             if (ch.bones.size() < 2) continue;
+            if (classic) {
+                auto curveOf = [&](const char* key) {
+                    DbCurve c;
+                    for (const auto& k : mb.fields.at(key).at("m_Curve").asArray())
+                        c.keys.push_back({static_cast<float>(k.at("time").asFloat()), static_cast<float>(k.at("value").asFloat()),
+                                          static_cast<float>(k.at("inSlope").asFloat()), static_cast<float>(k.at("outSlope").asFloat())});
+                    return c;
+                };
+                const DbCurve dc = curveOf("m_DampingDistrib"), ec = curveOf("m_ElasticityDistrib"), sc = curveOf("m_StiffnessDistrib");
+                if (!dc.keys.empty() || !ec.keys.empty() || !sc.keys.empty()) {
+                    std::vector<float> dist(ch.bones.size(), 0.0f);   // each bone's distance from the chain root along the chain
+                    float total = 0.0f;
+                    for (size_t k = 1; k < ch.bones.size(); ++k) {
+                        const SceneBone& sb = scene.bones[static_cast<size_t>(ch.bones[k])];
+                        auto pi = std::find(ch.bones.begin(), ch.bones.end(), sb.parent);
+                        const size_t pk = pi == ch.bones.end() ? 0 : static_cast<size_t>(pi - ch.bones.begin());
+                        const Vec3 up = scene.bones[static_cast<size_t>(sb.parent >= 0 ? sb.parent : ch.bones[0])].pos;
+                        const float dx = sb.pos.x - up.x, dy = sb.pos.y - up.y, dz = sb.pos.z - up.z;
+                        dist[k] = dist[pk] + std::sqrt(dx * dx + dy * dy + dz * dz);
+                        total = std::max(total, dist[k]);
+                    }
+                    for (size_t k = 0; k < ch.bones.size(); ++k) {
+                        const float t = total > 1e-6f ? dist[k] / total : 0.0f;
+                        auto at = [&](float base, const DbCurve& c) { return std::min(1.0f, std::max(0.0f, base * (c.keys.empty() ? 1.0f : c.eval(t)))); };
+                        ch.boneDamping.push_back(at(ch.damping, dc));
+                        ch.boneElasticity.push_back(at(ch.elasticity, ec));
+                        ch.boneStiffness.push_back(at(ch.stiffness, sc));
+                    }
+                }
+            }
             const std::string comment = mb.fields.at("Comment").asStr();
             ch.name = comment.empty() ? scene.bones[static_cast<size_t>(ch.bones[0])].name : comment;
             scene.chains.push_back(std::move(ch));

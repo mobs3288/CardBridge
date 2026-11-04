@@ -138,6 +138,10 @@ struct SceneChain {
     std::string name, part;
     std::vector<int> bones;
     float damping = 0.1f, elasticity = 0.1f, stiffness = 0.1f, inert = 0.0f;
+    // The same three per bone (parallel to `bones`), with the component's distribution curves applied along the chain (the curve is read at
+    // the bone's distance from the root over the chain's length, as the component does): a ponytail with stiffness 1 near the root and 0 at
+    // the tip is stiff where it is tied and free where it hangs. Empty = no curves, the chain-wide values hold.
+    std::vector<float> boneDamping, boneElasticity, boneStiffness;
     float radius = 0.0f;              // collision radius in model units (0 = none given)
     bool characterOwn = false;        // the character's own Ver02 component (breast and hip jiggle: skin, not cloth or hair)
     Vec3 gravity, force;

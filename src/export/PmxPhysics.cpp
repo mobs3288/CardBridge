@@ -152,17 +152,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             links[b] = l;
         }
 
-        // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
-        // 60 * damping is the same decay in both, so the swing dies away at the same pace.
-        const float decay = std::max(0.6f, 60.0f * ch.damping);
-        const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
-        // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
-        const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, ch.elasticity))));
-        // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
-        // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
-        const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - ch.stiffness))));
-        // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
-        const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(ch.stiffness * 2.0f));
+        // The component's damping, elasticity and stiffness vary along the chain by its distribution curves (the scene carries the result per bone).
+        std::map<int, size_t> chainIndex;
+        for (size_t i = 0; i < ch.bones.size(); ++i) chainIndex[ch.bones[i]] = i;
+        auto along = [&](const std::vector<float>& perBone, float whole, int bone) {
+            auto it = chainIndex.find(bone);
+            return perBone.empty() || it == chainIndex.end() || it->second >= perBone.size() ? whole : perBone[it->second];
+        };
 
         std::map<int, int> bodyOf;   // chain bone -> rigid body
         for (size_t k = 0; k < bones.size(); ++k) {
@@ -177,6 +173,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.position = l.centre;
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(l.unit);
             rb.mass = l.mass;
+            // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
+            // 60 * damping is the same decay in both, so the swing dies away at the same pace.
+            const float decay = std::max(0.6f, 60.0f * along(ch.boneDamping, ch.damping, l.bone));
+            const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
             rb.moveDamping = damp;
             rb.rotDamping = damp;
             rb.friction = 0.5f;
@@ -201,6 +201,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
         for (size_t k = 1; k < bones.size(); ++k) {
             const int b = bones[k];
             const Link& self = links[b];
+            // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
+            const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
+            // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
+            // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
+            const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
+            const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+            // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
+            const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
             auto pb = bodyOf.find(parentBone);
             const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root

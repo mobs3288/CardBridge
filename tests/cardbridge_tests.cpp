@@ -876,6 +876,31 @@ void unitTests() {
         CHECK(pmxPhysicsFindings(broken).size() >= 3);
     });
 
+    test("physics: the distribution curves reach the joints (stiff where a ponytail is tied, free toward its tip)", [] {
+        assemble::Scene s;
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        for (int i = 0; i < 5; ++i) s.bones.push_back({"b" + std::to_string(i), i == 0 ? 0 : i, {0, 1.1f - 0.2f * float(i), 0}, "rig"});
+        assemble::SceneChain ch;
+        ch.name = "pony";
+        ch.bones = {1, 2, 3, 4, 5};
+        ch.stiffness = 1.0f;   // the component's own value: a chain of stiffness 1 does not move at all
+        ch.boneStiffness = {1.0f, 1.0f, 0.5f, 0.2f, 0.0f};   // ... but its curve lets the tip go
+        s.chains.push_back(ch);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        CHECK(m.joints.size() == 4);
+        // joint k hangs bone k + 1 (the chain's root has none): the stiff bone barely turns, the looser ones turn freely
+        CHECK(m.joints[0].rotUpper.z <= 0.06f);
+        CHECK(m.joints[1].rotUpper.z > 0.5f && m.joints[2].rotUpper.z > 0.5f && m.joints[3].rotUpper.z > 0.5f);
+        // without the per-bone values the whole chain is as stiff as the component says
+        s.chains[0].boneStiffness.clear();
+        pmx::Model flat;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; flat.bones.push_back(pb); }
+        exporter::AddPhysics(s, flat, 10.0f);
+        for (const auto& j : flat.joints) CHECK(j.rotUpper.z <= 0.06f);
+    });
+
     test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
         using namespace assemble;
         struct Setup { const char* what; float damping, elasticity, stiffness; };
@@ -1447,6 +1472,17 @@ void integrationTests() {
         for (const auto& is : scene.issues) CHECK(is.severity != "error");
         CHECK(scene.bones.size() > 100);
         CHECK(!scene.meshes.empty());
+        {   // a hair item's own bones hang on the head (through cf_J_FaceUp_ty), never on the model root: left there they stay behind when the head turns
+            const int faceUp = scene.boneIndex("cf_J_FaceUp_ty");
+            for (const auto& b : scene.bones)
+                if (b.source.rfind("hair", 0) == 0 && faceUp >= 0) CHECK(b.parent != 0 || b.name == "cf_j_root");
+            // the curves of a chain's DynamicBone come through per bone, in range
+            for (const auto& ch : scene.chains) {
+                CHECK(ch.boneStiffness.size() == ch.boneDamping.size() && ch.boneStiffness.size() == ch.boneElasticity.size());
+                CHECK(ch.boneStiffness.empty() || ch.boneStiffness.size() == ch.bones.size());
+                for (float v : ch.boneStiffness) CHECK(v >= 0.0f && v <= 1.0f);
+            }
+        }
         // weights sum to 1 on every vertex
         size_t badWeights = 0;
         for (const auto& m : scene.meshes)
