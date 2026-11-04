@@ -17,12 +17,17 @@ struct MaterialEdits {
     // MaterialEditor's ObjectType.
     enum ObjectType { StudioItem = 0, Clothing = 1, Accessory = 2, Hair = 3, Character = 4 };
 
+    // One texture property of one material: the embedded image replacing it (texId, -1 when the card only changes the
+    // tiling) and its scale / offset. `property` is MaterialEditor's name without the underscore ("MainTex", "NormalMap", "LineMask").
     struct MainTex {
         int coordinate = 0;
         int objectType = 0;
         int slot = 0;             // clothing kind / accessory index / hair kind
         std::string material;     // material name as in the prefab (copies carry a ".MECopyN" or "_Copy" suffix)
+        std::string property = "MainTex";
         int texId = 0;
+        bool hasScale = false, hasOffset = false;
+        float scale[2] = {1, 1}, offset[2] = {0, 0};
     };
     struct Image {
         int width = 0, height = 0;
@@ -62,6 +67,8 @@ struct MaterialEdits {
 
     // The embedded texture replacing `material`'s main texture, or -1.
     int mainTexFor(int coordinate, int objectType, int slot, const std::string& material) const;
+    // Every texture property the card changes on one material (main texture, normal map, line mask, ramp ...).
+    std::vector<const MainTex*> texEditsFor(int coordinate, int objectType, int slot, const std::string& material) const;
 
     // Decodes an embedded image. False when the id is unknown or the bytes are not a readable image.
     bool decode(int texId, Image& out) const;

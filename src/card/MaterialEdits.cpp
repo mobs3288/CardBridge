@@ -28,8 +28,15 @@ std::vector<const MaterialEdits::Edit*> MaterialEdits::editsFor(const std::vecto
 
 int MaterialEdits::mainTexFor(int coordinate, int objectType, int slot, const std::string& material) const {
     for (const auto& m : mainTex)
-        if (m.coordinate == coordinate && m.objectType == objectType && m.slot == slot && m.material == material) return m.texId;
+        if (m.property == "MainTex" && m.coordinate == coordinate && m.objectType == objectType && m.slot == slot && m.material == material) return m.texId;
     return -1;
+}
+
+std::vector<const MaterialEdits::MainTex*> MaterialEdits::texEditsFor(int coordinate, int objectType, int slot, const std::string& material) const {
+    std::vector<const MainTex*> out;
+    for (const auto& m : mainTex)
+        if (m.coordinate == coordinate && m.objectType == objectType && m.slot == slot && m.material == material) out.push_back(&m);
+    return out;
 }
 
 namespace {
@@ -113,15 +120,25 @@ MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
         if (kv.first.isInt() && kv.second.isBin()) me.encoded[static_cast<int>(kv.first.asInt())] = kv.second.asBin();
 
     Value list = inner(payload, "MaterialTexturePropertyList");
+    // Every texture property the card changes (main texture, normal map, line mask, ramp ...), with its tiling.
+    auto vec2 = [](const Value& v, float out[2]) {
+        if (!v.isArray() || v.size() < 2) return false;
+        out[0] = static_cast<float>(v.at(size_t(0)).asFloat());
+        out[1] = static_cast<float>(v.at(size_t(1)).asFloat());
+        return true;
+    };
     for (const auto& row : list.asArray()) {
-        if (row.at("Property").asStr() != "MainTex") continue;
-        if (row.at("TexID").isNil()) continue;
         MaterialEdits::MainTex m;
+        m.property = row.at("Property").asStr();
+        if (m.property.empty()) continue;
+        m.texId = row.at("TexID").isNil() ? -1 : static_cast<int>(row.at("TexID").asInt());
+        m.hasScale = vec2(row.at("Scale"), m.scale);
+        m.hasOffset = vec2(row.at("Offset"), m.offset);
+        if (m.texId < 0 && !m.hasScale && !m.hasOffset) continue;
         m.coordinate = static_cast<int>(row.at("CoordinateIndex").asInt());
         m.objectType = static_cast<int>(row.at("ObjectType").asInt());
         m.slot = static_cast<int>(row.at("Slot").asInt());
         m.material = row.at("MaterialName").asStr();
-        m.texId = static_cast<int>(row.at("TexID").asInt());
         me.mainTex.push_back(std::move(m));
     }
 
