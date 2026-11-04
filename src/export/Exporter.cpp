@@ -302,7 +302,17 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         const auto& part = scene.parts[pi];
         if (!part.includeInExport) continue;
         range[pi].first = static_cast<int>(model.materials.size());
-        for (int mi : part.meshes) {
+        // The teeth are drawn before the face: in MikuMikuDance teeth drawn after it never showed, however the mouth opened (the game's face has
+        // a see-through window onto the mouth, and MMD's depth test evidently still takes it for a surface); drawn first they show through.
+        std::vector<int> drawOrder = part.meshes;
+        std::stable_partition(drawOrder.begin(), drawOrder.end(), [&](int mi) {
+            for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes) {
+                const std::string& n = scene.materials[static_cast<size_t>(sm.material)].name;
+                if (n.find("tooth") != std::string::npos || n.find("canine") != std::string::npos) return true;
+            }
+            return false;
+        });
+        for (int mi : drawOrder) {
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             uint32_t base = static_cast<uint32_t>(model.vertices.size());
             meshBase[static_cast<size_t>(mi)] = static_cast<int>(base);
