@@ -139,8 +139,13 @@ The PMX faces -Z, MikuMikuDance's front (`--unity-facing` on the CLI keeps the +
 | KKManager | Reference for card-marker detection | GPL-3.0: read for format knowledge only, no code is copied |
 | UnityPy | Used for research and golden reference data only; not shipped | MIT |
 | AssetRipper | Not used; noted as a reference | GPL-3.0 |
+| bc7decomp (Richard Geldreich, Jr.) | BC7 texture decoder, the only third-party code in the repository (`third_party/bc7decomp`, its notice kept in the file) | MIT or public domain |
+| nlohmann/json, stb_image, stb_image_write, glm | Downloaded by CMake at build time, not in the repository; glm only for the engine cross-check test | MIT; MIT or public domain; MIT |
+| BepInEx | The sidecar plugin builds against the game install's copy; not in the repository | LGPL-2.1 |
 
-Format knowledge is re-implemented from observation and the decompiled assembly; no third-party code is copied. Game and mod assets are never committed to this repository.
+Format knowledge is re-implemented from observation and the decompiled assembly; no code from the reference tools above is copied. Game and mod assets are never committed to this repository.
+
+CardBridge's own code is released under the MIT License (see [LICENSE](LICENSE)). The licence covers this repository's code only: the game's and mods' assets, and anything converted from them, belong to their owners and are not covered by it.
 
 ## Layout
 
