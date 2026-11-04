@@ -1507,6 +1507,13 @@ void integrationTests() {
             const int faceUp = scene.boneIndex("cf_J_FaceUp_ty");
             for (const auto& b : scene.bones)
                 if (b.source.rfind("hair", 0) == 0 && faceUp >= 0) CHECK(b.parent != 0 || b.name == "cf_j_root");
+            // the body's third UV set (TEXCOORD2, where the shader places the underhair) is read: without it the underhair covered the whole body
+            for (const auto& m : scene.meshes)
+                if (m.name == "o_body_a") {
+                    size_t differs = 0;
+                    for (const auto& v : m.vertices) differs += std::fabs(v.uv2.x - v.uv.x) + std::fabs(v.uv2.y - v.uv.y) > 1e-4f;
+                    CHECK(differs > m.vertices.size() / 2);
+                }
             // the curves of a chain's DynamicBone come through per bone, in range
             for (const auto& ch : scene.chains) {
                 CHECK(ch.boneStiffness.size() == ch.boneDamping.size() && ch.boneStiffness.size() == ch.boneElasticity.size());
