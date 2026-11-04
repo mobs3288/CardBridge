@@ -214,7 +214,6 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
             e.appendParent = bothIndex;
             e.appendRatio = 0.4f;   // the game's eye is a flat iris on a shallow cap: past about 10 degrees it leaves the lid opening or pokes through the skin
         }
-    }
         // The eye white turns with the eyeball. The iris is a patch cut to the same cap, and the cap is not a sphere about the pivot: with the
         // white left still, a turned iris slid behind it (a sliver left on one eye) or out of the lid opening (on the other).
         size_t first = 0;

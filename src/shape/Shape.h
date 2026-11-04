@@ -73,6 +73,10 @@ struct ShapeState {
     Vec3 parentLossyScale(ShapeBone* b) { return parentScaleFn ? parentScaleFn(b) : Vec3{1, 1, 1}; }
 };
 
+// Reads list/shapecorrect/shapecorrect (ShapeBodyInfoFemale.LoadCorrectInfo): int32 count, then 9 floats
+// (pos, rot, scl) per row into S.correctMap. The rows only matter when the card's typeBone is not 0. False if truncated.
+bool ParseCorrectTable(const Bytes& data, ShapeState& S);
+
 // Sets one slider: samples the key frames at `value` into the source bones (ShapeInfoBase.ChangeValue).
 void ChangeValue(ShapeState& S, const AnimKeys& anm, const CategoryTable& cats, int slider, float value);
 

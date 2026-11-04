@@ -112,6 +112,7 @@ ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(si
     };
     addDir("list/characustom", false);
     if (fileio::Exists(fileio::Join(srcAbdata, "list/customshape.unity3d"))) rels.push_back("list/customshape.unity3d");
+    if (fileio::Exists(fileio::Join(srcAbdata, "list/shapecorrect/shapecorrect.unity3d"))) rels.push_back("list/shapecorrect/shapecorrect.unity3d");
     if (opt.profile == Profile::Full) addDir("chara", false);
     std::sort(rels.begin(), rels.end());
     rels.erase(std::unique(rels.begin(), rels.end()), rels.end());

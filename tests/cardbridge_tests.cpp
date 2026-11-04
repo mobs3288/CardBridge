@@ -290,6 +290,20 @@ void unitTests() {
         anm.get("cf_s_Mouth_x", 1.5f, v, all);   // the plugin leaves these rotations clamped
         CHECK(near(v[0].x, 1.5f) && near(v[1].x, 90.0f));
     });
+    test("typeBone correction table: int32 count, 9 floats a row; a truncated table is refused", [] {
+        Bytes d;
+        auto i32 = [&](int32_t v) { for (int k = 0; k < 4; ++k) d.push_back(static_cast<uint8_t>((static_cast<uint32_t>(v) >> (8 * k)) & 0xFF)); };
+        auto f32 = [&](float f) { uint32_t u; std::memcpy(&u, &f, 4); i32(static_cast<int32_t>(u)); };
+        i32(3);
+        for (int row = 0; row < 3; ++row)
+            for (int k = 0; k < 9; ++k) f32(static_cast<float>(row * 10 + k));
+        shape::ShapeState S;
+        CHECK(shape::ParseCorrectTable(d, S));
+        CHECK(S.correct(2).pos.x == 20.0f && S.correct(2).rot.y == 24.0f && S.correct(1).scl.z == 18.0f);
+        d.resize(d.size() - 4);
+        shape::ShapeState T;
+        CHECK(!shape::ParseCorrectTable(d, T));
+    });
     test("slider tables name every body and face slider the card format has", [] {
         CHECK(shape::BodySliders().size() == 44 && shape::FaceSliders().size() == 52);
         for (const auto& si : shape::BodySliders()) CHECK(si.group[0] && si.label[0]);
@@ -729,6 +743,9 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.position = b.pos; pb.parent = b.parent; m.bones.push_back(pb); }
         pmx::Bone ik; ik.name = "cb_ik_foot_L"; ik.parent = 0; ik.ikTarget = foot; m.bones.push_back(ik);
+        for (int i = 0; i < 12; ++i) { pmx::Vertex v; v.bone[0] = headB; m.vertices.push_back(v); }   // 0-2 white L, 3-5 iris L, 6-8 white R, 9-11 iris R
+        for (int i = 0; i < 12; ++i) m.indices.push_back(i);
+        for (const char* nm : {"head/cf_Ohitomi_L#0", "head/cf_Ohitomi_L02#0", "head/cf_Ohitomi_R#0", "head/cf_Ohitomi_R02#0"}) { pmx::Material mt; mt.name = nm; mt.indexCount = 3; m.materials.push_back(mt); }
         { pmx::Morph blink; blink.name = "blink"; blink.vertices = {{0, {0, -1, 0}}, {1, {0, -1, 0}}, {2, {0, -1, 0}}}; m.morphs.push_back(blink); }   // the white's own shape
         const std::vector<int> added = ApplyMmdBoneNames(s, m, 1.0f).ik;
         auto find = [&](const char* n) { for (size_t i = 0; i < m.bones.size(); ++i) if (m.bones[i].name == n) return static_cast<int>(i); return -1; };
@@ -742,11 +759,19 @@ void unitTests() {
         CHECK(both >= 0 && m.bones[static_cast<size_t>(both)].parent == find("頭") && added.size() == 1);
         CHECK(find("左目") == eyeL && find("右目") == eyeR && m.bones[static_cast<size_t>(eyeL)].appendParent == both && m.bones[static_cast<size_t>(eyeR)].layer > m.bones[static_cast<size_t>(both)].layer);
         CHECK(std::fabs(m.bones[static_cast<size_t>(eyeL)].position.z + 0.5f) < 0.02f && m.bones[static_cast<size_t>(eyeL)].position.y == 16.5f);   // the pivot moved straight back to the ball's centre
+        for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
+        for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
+        {   // the iris takes the white's mean blink offset, the white and the iris lie on balls about the pivot (the iris a hair above)
+            int irisOffsets = 0;
+            for (const auto& [vi, d] : m.morphs[0].vertices) if (vi >= 3 && vi <= 5 && d.y == -1.0f) ++irisOffsets;
+            CHECK(irisOffsets == 3 && m.morphs[0].vertices.size() == 3 + 3);
+            const Vec3 pv = m.bones[static_cast<size_t>(eyeL)].position;
+            auto dist = [&](int i) { const Vec3 p = m.vertices[static_cast<size_t>(i)].position; return std::sqrt((p.x - pv.x) * (p.x - pv.x) + (p.y - pv.y) * (p.y - pv.y) + (p.z - pv.z) * (p.z - pv.z)); };
+            CHECK(std::fabs(dist(0) - dist(1)) < 1e-3f && dist(3) > dist(0) * 1.03f && dist(3) < dist(0) * 1.04f);
+        }
+        for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
         pmx::Model mo;   // morphs: the blink is a copy of the game's closed eyes, once
         pmx::Morph e; e.name = "Eyes 0 closed"; e.vertices = {{3, {0, 1, 0}}};
-        for (int i = 0; i < 12; ++i) { pmx::Vertex v; v.bone[0] = headB; m.vertices.push_back(v); }   // 0-2 white L, 3-5 iris L, 6-8 white R, 9-11 iris R
-        for (int i = 0; i < 12; ++i) m.indices.push_back(i);
-        for (const char* nm : {"head/cf_Ohitomi_L#0", "head/cf_Ohitomi_L02#0", "head/cf_Ohitomi_R#0", "head/cf_Ohitomi_R02#0"}) { pmx::Material mt; mt.name = nm; mt.indexCount = 3; m.materials.push_back(mt); }
         mo.morphs.push_back(e);
         CHECK(AddMmdMorphs(mo).size() == 1 && mo.morphs[1].name == "まばたき" && mo.morphs[1].vertices.size() == 1 && AddMmdMorphs(mo).empty());
         pmx::Morph op; op.name = "Mouth 0 open"; op.vertices = {{0, {0, -0.2f, 0}}, {1, {0, -0.1f, 0}}};   // the vowels are made from the open mouth
@@ -759,17 +784,6 @@ void unitTests() {
         CHECK(std::fabs(morphE.vertices[0].second.y) > std::fabs(morphU.vertices[0].second.y) && morphE.vertices[0].second.x == 0.0f);   // え opens wider than う (2 x the open mouth vs 0.3 x), nothing reshaped sideways
         CHECK(AddMmdMorphs(mo).empty());
     });
-        for (int i : {0, 1, 2}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeL && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f && m.vertices[static_cast<size_t>(i)].weight[1] == 0.0f);   // the whites turn with the eyeball
-        for (int i : {6, 7, 8}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == eyeR && m.vertices[static_cast<size_t>(i)].weight[0] == 1.0f);
-        {   // the iris takes the white's mean blink offset, the white and the iris lie on balls about the pivot (the iris a hair above)
-            int irisOffsets = 0;
-            for (const auto& [vi, d] : m.morphs[0].vertices) if (vi >= 3 && vi <= 5 && d.y == -1.0f) ++irisOffsets;
-            CHECK(irisOffsets == 3 && m.morphs[0].vertices.size() == 3 + 3);
-            const Vec3 pv = m.bones[static_cast<size_t>(eyeL)].position;
-            auto dist = [&](int i) { const Vec3 p = m.vertices[static_cast<size_t>(i)].position; return std::sqrt((p.x - pv.x) * (p.x - pv.x) + (p.y - pv.y) * (p.y - pv.y) + (p.z - pv.z) * (p.z - pv.z)); };
-            CHECK(std::fabs(dist(0) - dist(1)) < 1e-3f && dist(3) > dist(0) * 1.03f && dist(3) < dist(0) * 1.04f);
-        }
-        for (int i : {3, 4, 5, 9, 10, 11}) CHECK(m.vertices[static_cast<size_t>(i)].bone[0] == headB);   // the iris patches (cf_Ohitomi_L02 / R02) are not the whites
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
         // R = Ry(y) Rx(x) Rz(z) applied to +Y must give the axis
@@ -1078,6 +1092,12 @@ void unitTests() {
             // a bend about a diagonal axis cannot be written as a per-axis limit: left free
             CHECK(!exporter::BendLimits({0, 0, 0}, {1, 0, 0}, {1.5f, 0.5f, 0.5f}, lo, hi));
         }
+        {   // arms=false (the MMD names): the legs only
+            pmx::Model legs = m;
+            legs.bones.resize(before);
+            const std::vector<int> legIks = exporter::AddIk(s, legs, 10.0f, false);
+            CHECK(legIks.size() == 1 && legs.bones[static_cast<size_t>(legIks[0])].ikTarget == ankle);
+        }
         Scene none;
         none.bones.push_back({"root", -1, {}, "rig"});
         pmx::Model nm;
@@ -1092,12 +1112,6 @@ void unitTests() {
         const int hips = add("cf_j_hips", -1, {0, 1, 0});
         const int sh = add("cf_j_shoulder_L", hips, {0.1f, 1.4f, 0});
         const int arm = add("cf_j_arm00_L", sh, {0.2f, 1.4f, 0});
-        {   // arms=false (the MMD names): the legs only
-            pmx::Model legs = m;
-            legs.bones.resize(before);
-            const std::vector<int> legIks = exporter::AddIk(s, legs, 10.0f, false);
-            CHECK(legIks.size() == 1 && legs.bones[static_cast<size_t>(legIks[0])].ikTarget == ankle);
-        }
         const int fore = add("cf_j_forearm01_L", arm, {0.5f, 1.4f, 0});
         const int shR = add("cf_j_shoulder_R", hips, {-0.1f, 1.4f, 0});
         const int armR = add("cf_j_arm00_R", shR, {-0.2f, 1.4f, 0});
