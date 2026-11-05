@@ -1820,6 +1820,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     break;
                 }
         }
+        // The game instantiates the prefab and parents it with SetParent(node, false), so the prefab root keeps its own local
+        // transform under the attach node (a cape authored facing back is turned 180 degrees by its root). rootInv cancels it below.
+        if (accessoryMode)
+            if (const unity::Xform* rx = uf->xform(roots[0])) placement = placement * Mat4::TRS(rx->pos, rx->rot, rx->scl);
 
         // ---- colouring: what the game does at run time with the card's colours ----
         ItemLook look;
