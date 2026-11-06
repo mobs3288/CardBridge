@@ -1044,7 +1044,8 @@ void unitTests() {
             CHECK(jig.rigidBodies[2].moveDamping == 0.9f && jig.rigidBodies[2].rotDamping == 0.9f && jig.rigidBodies[2].friction == 0.0f);
             CHECK(jig.rigidBodies[2].mask == 0);
             CHECK(jig.rigidBodies[1].mass == 1.0f && jig.rigidBodies[2].mass == 0.5f);   // 1, 1/2, ...
-            CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x == 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.45f);
+            CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x == 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.30f);
+            CHECK(jig.joints[1].rotUpper.z == 0.4f * jig.joints[1].rotUpper.x);   // the other bend axis is narrow, like the reference models'
             pmx::Model loud = count(make(true), true, false, 2.0f);
             CHECK(loud.joints[1].rotUpper.x > jig.joints[1].rotUpper.x);   // the intensity opens the envelope
             CHECK(plain.rigidBodies[1].mode == 1 && plain.rigidBodies[1].friction == 0.5f);   // hair keeps the strand conversion
@@ -1063,6 +1064,8 @@ void unitTests() {
             CHECK(count(s, true, false, 1.0f).rigidBodies.empty());   // default off
             CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 3); // on: anchor + chain bodies
             CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 3); // independent of the boobs switch
+            const pmx::Model butt = count(s, true, true, 1.0f);
+            CHECK(butt.joints[1].rotUpper.x > 0.0f && butt.joints[1].rotUpper.x <= 0.18f);   // the butt's envelope is smaller than the bust's
         }
     });
 

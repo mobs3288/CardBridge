@@ -144,11 +144,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         // like the hand-made MMD models' breast jiggle (mode-2 bodies tracking their bones, no joint spring, rotation limits as the
         // envelope); a strand's spring conversion hung them from a light link and they vibrated at rest, so jiggle gets its own path below.
         float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
+        bool jigBust = false;  // which jiggle: the bust gets a wider envelope than the butt
         if (ch.characterOwn) {
             const bool bust = assemble::IsBustJiggleChain(scene, ch);
             if (bust && jiggleBust) jiggle = jiggleIntensity;
             else if (!bust && jiggleButt) jiggle = jiggleIntensity;
             if (jiggle <= 0.0f) continue;   // switch off: the part stays rigid, following its bone
+            jigBust = bust;
         }
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (bones.size() < 2) continue;
@@ -280,21 +282,23 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
             const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // A jiggle joint has no spring at all, like the reference models' breast joints: the mode-2 body tracks its bone, its momentum
-            // swings it against the rotation limits, and the limits are the jiggle. They come from the game's stiffness, capped at the
-            // reference models' ~26 degrees a link, and the intensity opens them up.
+            // swings it against the rotation limits, and the limits are the jiggle. They come from the game's stiffness, opened by the
+            // intensity, and shaped like the reference models': the main swing axis is wide, the other bend axis is narrow (their breast
+            // joints are about 0.44 / 0.26 / 0.18 rad per axis), so the part flops forward and back instead of wobbling sideways.
             if (jiggle > 0.0f) {
                 const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
                 auto pb = bodyOf.find(parentBone);
                 const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
-                const float range = std::min(0.9f, std::min(bend, 0.45f) * jiggle);
+                const float cap = jigBust ? 0.30f : 0.18f;   // the butt's swing is smaller than the bust's
+                const float range = std::min(0.9f, std::min(bend, cap) * jiggle);
                 pmx::Joint j;
                 j.name = ch.name + " " + std::to_string(k);
                 j.bodyA = bodyA;
                 j.bodyB = bodyOf[b];
                 j.position = self.head;
                 j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
-                j.rotLower = {-range, -0.1f * range, -range};
-                j.rotUpper = {range, 0.1f * range, range};
+                j.rotLower = {-range, -0.1f * range, -0.4f * range};
+                j.rotUpper = {range, 0.1f * range, 0.4f * range};
                 j.springRot = {0, 0, 0};
                 model.joints.push_back(std::move(j));
                 continue;
