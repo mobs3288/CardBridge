@@ -154,6 +154,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             jigBust = bust;
         }
         std::vector<int> bones = PhysicsChainBones(scene, ch);
+        if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
+            std::fprintf(stderr, "chain '%s' own=%d raw=[", ch.name.c_str(), ch.characterOwn ? 1 : 0);
+            for (int b : ch.bones) std::fprintf(stderr, "%s ", (b >= 0 && static_cast<size_t>(b) < scene.bones.size()) ? scene.bones[static_cast<size_t>(b)].name.c_str() : "?");
+            std::fprintf(stderr, "] pruned=[");
+            for (int b : bones) std::fprintf(stderr, "%s ", scene.bones[static_cast<size_t>(b)].name.c_str());
+            std::fprintf(stderr, "]\n");
+        }
         if (bones.size() < 2) continue;
         const std::set<int> inChain(bones.begin(), bones.end());
         std::map<int, std::vector<int>> next;   // chain bone -> its chain children

@@ -1158,7 +1158,34 @@ struct Builder {
             }
             const std::string comment = mb.fields.at("Comment").asStr();
             ch.name = comment.empty() ? scene.bones[static_cast<size_t>(ch.bones[0])].name : comment;
-            scene.chains.push_back(std::move(ch));
+            // A Ver02 component's bone list can be a forest, not a line: the hip jiggle lists both cheeks under one component. One chain
+            // per root, so a bone never hangs from another subtree's joint (bridging subtrees across the pelvis yanked the butt inward).
+            const std::set<int> inSet(ch.bones.begin(), ch.bones.end());
+            std::vector<std::vector<int>> groups;
+            std::map<int, size_t> groupOf;
+            for (int b : ch.bones) {
+                int root = b;
+                while (true) {
+                    const int p = scene.bones[static_cast<size_t>(root)].parent;
+                    if (p >= 0 && p != root && inSet.count(p)) root = p;
+                    else break;
+                }
+                auto it = groupOf.find(root);
+                size_t g;
+                if (it == groupOf.end()) { g = groups.size(); groupOf[root] = g; groups.push_back({}); }
+                else g = it->second;
+                groups[g].push_back(b);
+            }
+            if (groups.size() <= 1) {
+                scene.chains.push_back(std::move(ch));
+            } else {
+                for (auto& g : groups) {
+                    if (g.size() < 2) continue;
+                    SceneChain sub = ch;
+                    sub.bones = std::move(g);
+                    scene.chains.push_back(std::move(sub));
+                }
+            }
         }
     }
 

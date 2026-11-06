@@ -423,7 +423,7 @@ struct App {
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: boobs on by default, the butt off
-    float jiggleIntensity = 1.0f;                 // how hard it jiggles (1 = the game's own)
+    float jiggleIntensity = 0.15f;                // how wide it jiggles (0.15 = subtle; 1 = the game's own)
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
@@ -570,7 +570,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kNippleMm) { r.v = &g.tw.nippleMm; r.def = 0; r.lo = -15; r.hi = 15; r.step = 1; r.percent = false; return true; }
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
-    if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.15f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
         assemble::BonePose& e = g.boneEdits[g.selBoneName];
