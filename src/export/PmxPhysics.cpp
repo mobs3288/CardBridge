@@ -195,8 +195,27 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         };
 
         std::map<int, int> bodyOf;   // chain bone -> rigid body
+        int jigAnchor = -1;   // a jiggle chain's anchor: a kinematic body on the parent bone, rigid-jointed to the root, like the reference models' torso body
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
+            if (jiggle > 0.0f && k == 0) {
+                const int parent = scene.bones[static_cast<size_t>(l.bone)].parent;
+                if (parent >= 0) {
+                    pmx::RigidBody anchor;
+                    anchor.name = ch.name + " anchor";
+                    anchor.bone = parent;
+                    anchor.group = 0;
+                    anchor.mask = 0x0002;   // meets chains, like the other kinematic bodies
+                    anchor.shape = l.cylinder > 1e-4f ? 2 : 0;
+                    anchor.size = {std::max(l.radius, 0.6f * l.cylinder), l.cylinder, 0};
+                    anchor.position = l.centre;
+                    if (anchor.shape == 2) anchor.rotation = PmxRotationFromYAxis(l.unit);
+                    anchor.mass = 1.0f;
+                    anchor.mode = 0;   // kinematic: it follows the parent bone, and the rigid joint carries the jiggle root with it
+                    jigAnchor = static_cast<int>(model.rigidBodies.size());
+                    model.rigidBodies.push_back(std::move(anchor));
+                }
+            }
             pmx::RigidBody rb;
             rb.name = ch.name + " " + std::to_string(k);
             rb.bone = l.bone;
@@ -230,6 +249,19 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
+            if (jiggle > 0.0f && k == 0 && jigAnchor >= 0) {
+                // The rigid anchor joint: every limit and spring zero, like the reference models' torso-to-breast joint. Without it the
+                // mode-2 chain has nothing holding it to the model and stays where the model spawned.
+                const pmx::RigidBody& rootBody = model.rigidBodies[static_cast<size_t>(bodyOf[l.bone])];
+                pmx::Joint j;
+                j.name = ch.name + " anchor";
+                j.bodyA = jigAnchor;
+                j.bodyB = bodyOf[l.bone];
+                j.position = rootBody.position;
+                j.rotation = rootBody.rotation;
+                j.moveLower = j.moveUpper = j.rotLower = j.rotUpper = j.springMove = j.springRot = {0, 0, 0};
+                model.joints.push_back(std::move(j));
+            }
         }
 
         // Everything hanging from a bone, itself included.
