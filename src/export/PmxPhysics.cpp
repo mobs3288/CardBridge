@@ -200,11 +200,16 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
 
         std::map<int, int> bodyOf;   // chain bone -> rigid body
         int jigAnchor = -1;   // a jiggle chain's anchor: a kinematic body on the parent bone, rigid-jointed to the root, like the reference models' torso body
+        Vec3 jigAnchorPos;   // the anchor body's authored position (its bone's), the anchor joint's place
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
             if (jiggle > 0.0f && k == 0) {
                 const int parent = scene.bones[static_cast<size_t>(l.bone)].parent;
                 if (parent >= 0) {
+                    // The anchor is authored at its OWN bone's position, like the reference models' torso body. Authored at the root
+                    // body's place instead, the kinematic body snaps inward to the parent bone every frame and the rigid joint drags the
+                    // whole chain inward with it: the part twitches toward the inside and vibrates.
+                    const Vec3 parentPos = scene.bones[static_cast<size_t>(parent)].pos * scale;
                     pmx::RigidBody anchor;
                     anchor.name = ch.name + " anchor";
                     anchor.bone = parent;
@@ -212,11 +217,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                     anchor.mask = 0x0002;   // meets chains, like the other kinematic bodies
                     anchor.shape = l.cylinder > 1e-4f ? 2 : 0;
                     anchor.size = {std::max(l.radius, 0.6f * l.cylinder), l.cylinder, 0};
-                    anchor.position = l.centre;
+                    anchor.position = parentPos;
                     if (anchor.shape == 2) anchor.rotation = PmxRotationFromYAxis(l.unit);
                     anchor.mass = 1.0f;
                     anchor.mode = 0;   // kinematic: it follows the parent bone, and the rigid joint carries the jiggle root with it
                     jigAnchor = static_cast<int>(model.rigidBodies.size());
+                    jigAnchorPos = parentPos;
                     model.rigidBodies.push_back(std::move(anchor));
                 }
             }
@@ -261,7 +267,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 j.name = ch.name + " anchor";
                 j.bodyA = jigAnchor;
                 j.bodyB = bodyOf[l.bone];
-                j.position = rootBody.position;
+                j.position = jigAnchorPos;   // the anchor's place, so the rigid joint is already satisfied at rest
                 j.rotation = rootBody.rotation;
                 j.moveLower = j.moveUpper = j.rotLower = j.rotUpper = j.springMove = j.springRot = {0, 0, 0};
                 model.joints.push_back(std::move(j));
