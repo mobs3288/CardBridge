@@ -1036,9 +1036,16 @@ void unitTests() {
             CHECK(hair.rigidBodies.size() == 2);                       // hair is not the body's own: always simulated
             pmx::Model jig = count(make(true), true, false, 1.0f);
             pmx::Model plain = count(make(false), true, false, 1.0f);
-            CHECK(jig.rigidBodies[1].mass > plain.rigidBodies[1].mass);            // the jiggle link carries body skin: heavier
-            CHECK(jig.rigidBodies[1].moveDamping > plain.rigidBodies[1].moveDamping);   // and settles faster
-            CHECK(jig.rigidBodies[1].mask == 0);   // the jiggle body meets no collider: the bust hit spheres would shove it for ever
+            // the reference models' breast bodies: mode 2 (the body follows its bone with physics on top), heavy fixed damping, no
+            // friction, no collider, no joint spring (the rotation limits are the jiggle), weight tapering toward the tip
+            CHECK(jig.rigidBodies[0].mode == 2 && jig.rigidBodies[1].mode == 2);
+            CHECK(jig.rigidBodies[1].moveDamping == 0.9f && jig.rigidBodies[1].rotDamping == 0.9f && jig.rigidBodies[1].friction == 0.0f);
+            CHECK(jig.rigidBodies[1].mask == 0);
+            CHECK(jig.rigidBodies[0].mass == 1.0f && jig.rigidBodies[1].mass == 0.5f);   // 1, 1/2, ...
+            CHECK(jig.joints.size() == 1 && jig.joints[0].springRot.x == 0.0f && jig.joints[0].rotUpper.x > 0.0f && jig.joints[0].rotUpper.x <= 0.45f);
+            pmx::Model loud = count(make(true), true, false, 2.0f);
+            CHECK(loud.joints[0].rotUpper.x > jig.joints[0].rotUpper.x);   // the intensity opens the envelope
+            CHECK(plain.rigidBodies[1].mode == 1 && plain.rigidBodies[1].friction == 0.5f);   // hair keeps the strand conversion
             CHECK((plain.rigidBodies[1].mask & 0x0001) != 0);   // a hair strand still meets the colliders (group 0 here: this scene has none)
         }
         {   // the butt chain rides the butt switch

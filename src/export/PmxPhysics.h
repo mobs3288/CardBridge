@@ -25,7 +25,9 @@ constexpr uint8_t kPmxGroupChain = 1;
 // decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2, never more than
 // 15 rad/s for the one link it acts on), stiffness the rotation limits (at most 35 degrees a link) and the least spring that keeps a strand
 // standing out sideways from drooping; gravity and force are not carried (the PMX world has its own gravity, 9.8 m/s^2 is assumed for
-// the spring).
+// the spring). The body's own jiggle is the exception, built like the hand-made MMD models' breast jiggle: mode-2 bodies tracking their
+// bones, fixed 0.9 damping, fat capsules with weight tapering toward the tip, no joint spring (the rotation limits are the envelope), no
+// collider (see the mask note above).
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 1.0f);
 
 // Skirts and coat tails turn with the legs (called by AddPhysics). Most links of a garment chain are locked to hold its rest shape, so a
