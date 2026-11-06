@@ -935,7 +935,8 @@ struct Builder {
 
     // The world matrix (model space) of a transform only this item has (a mod's necklace joint, a hair chain joint): its offset from
     // the nearest ancestor the shared skeleton knows, so it moves with the (possibly reshaped) body instead of staying at its authored place.
-    Mat4 itemBoneWorld(UnityFile& uf, int64_t id, int64_t prefabRoot) {
+    // `placement` is where the prefab root hangs (the attach node for accessories, the hair parent for hair), root transform included.
+    Mat4 itemBoneWorld(UnityFile& uf, int64_t id, int64_t prefabRoot, const Mat4& placement) {
         const Mat4 rootInv = inverse(W(uf, prefabRoot));
         Mat4 bw = rootInv * Wp(uf, id);
         const unity::Xform* bx = uf.xform(id);
@@ -947,18 +948,18 @@ struct Builder {
             anchored = true;
             break;
         }
-        // A hair item's prefab hangs under the head's hair parent (cf_J_FaceUp_ty) in the game.
-        if (!anchored && hairParent) bw = *hairParent * (rootInv * Wp(uf, id));
+        // Not anchored to the shared skeleton: hang the whole prefab on the node the game parents it to.
+        if (!anchored) bw = placement * bw;
         return bw;
     }
 
     // The scene bone of one of the item's own transforms: found by name, else added under the nearest ancestor the scene already has.
-    int itemBone(UnityFile& uf, int64_t id, int64_t prefabRoot, const std::string& partId) {
+    int itemBone(UnityFile& uf, int64_t id, int64_t prefabRoot, const Mat4& placement, const std::string& partId) {
         const unity::Xform* bx = uf.xform(id);
         if (!bx) return -1;
         int bi = scene.boneIndex(bx->name);
         if (bi >= 0) return bi;
-        const Mat4 bw = itemBoneWorld(uf, id, prefabRoot);
+        const Mat4 bw = itemBoneWorld(uf, id, prefabRoot, placement);
         // A hair item's own top bone (cf_J_hairB_top ...) hangs on the head's hair parent, not on the model root: left on the root it stays
         // behind when the head moves (a floating cap of hair in MikuMikuDance once a motion turns the head).
         int parent = hairParent ? std::max(0, scene.boneIndex("cf_J_FaceUp_ty")) : 0;
@@ -1000,7 +1001,7 @@ struct Builder {
             if (!seeds.count(id) && !bones.count(x->parent)) continue;
             bones.insert(id);
             if (accessoryMode) accessoryBone(uf, id, prefabRoot, placement, staticBone, partId);
-            else itemBone(uf, id, prefabRoot, partId);
+            else itemBone(uf, id, prefabRoot, placement, partId);
         }
         addChains(uf, prefabRoot, partId, accessoryMode);
     }
@@ -1172,10 +1173,10 @@ struct Builder {
                 int bi = bname.empty() ? -1 : scene.boneIndex(bname);
                 auto rw = rig.world.find(bname);
                 if (rw == rig.world.end() && bx && bi < 0) {   // a bone only this item has (a mod's necklace joint ...)
-                    bi = itemBone(uf, r.boneXforms[i], prefabRoot, partId);
+                    bi = itemBone(uf, r.boneXforms[i], prefabRoot, placement, partId);
                     rw = rig.world.find(bname);
                 }
-                const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, r.boneXforms[i], prefabRoot);
+                const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, r.boneXforms[i], prefabRoot, placement);
                 if (bi < 0) bi = 0;
                 boneIdx.push_back(bi);
                 boneMat.push_back(bw * mesh->bindPoses[i]);
@@ -1183,10 +1184,6 @@ struct Builder {
         }
 
         Mat4 staticM = placement * (rootInv * rendererW);
-        if (hairParent) {   // a hair mesh without a skin hangs on the hair parent (cf_J_FaceUp_ty) like the prefab does in the game
-            staticM = *hairParent * (rootInv * rendererW);
-            if (int fi = scene.boneIndex("cf_J_FaceUp_ty"); fi >= 0) staticBone = fi;
-        }
         // Inverse rest worlds of the bones that move this mesh: a vertex is also stored in each bone's own frame (SceneVertex::local), so a
         // re-shape that moves the bones moves the vertices too. Taking the frame from the scene's bone makes the identity re-shape exact.
         std::vector<Mat4> invBone(boneIdx.size());
@@ -1326,6 +1323,10 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 
 bool CreateRunsInLinearLight(const std::string& materialName) {
     return materialName == "cf_m_clothesN_create" || materialName == "cf_m_eye_create" || materialName == "cf_m_eyewhite_create";
+}
+
+Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale) {
+    return parent * Mat4::TRS(position, rotation, scale);
 }
 
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
@@ -1793,6 +1794,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
 
         // Accessories hang on a named body node; everything else is skinned.
+        const unity::Xform* rootXf = uf->xform(roots[0]);
         Mat4 placement;
         int staticBone = 0;
         if (ref.group == "Accessories" && !ref.attachNode.empty()) {
@@ -1820,10 +1822,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     break;
                 }
         }
-        // The game instantiates the prefab and parents it with SetParent(node, false), so the prefab root keeps its own local
-        // transform under the attach node (a cape authored facing back is turned 180 degrees by its root). rootInv cancels it below.
-        if (accessoryMode)
-            if (const unity::Xform* rx = uf->xform(roots[0])) placement = placement * Mat4::TRS(rx->pos, rx->rot, rx->scl);
+        // The game instantiates the item prefab and parents it with SetParent(parent, false), so the prefab root keeps its own
+        // local transform under the parent (a cape authored facing back is turned 180 degrees by its root). `rootInv` cancels
+        // it again when a transform is expressed relative to the prefab root.
+        if (accessoryMode && rootXf) placement = PrefabRootPlacement(placement, rootXf->pos, rootXf->rot, rootXf->scl);
 
         // ---- colouring: what the game does at run time with the card's colours ----
         ItemLook look;
@@ -2261,20 +2263,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.hairParent = nullptr;
         if (ref.group == "Hair") {
             auto hp = rig.world.find("cf_J_FaceUp_ty");
-            if (hp != rig.world.end()) b.hairParent = &hp->second;
-            else scene.warn(ref.partId, "hair parent node cf_J_FaceUp_ty not found; the hair is placed at the model origin");
+            if (hp != rig.world.end()) {
+                b.hairParent = &hp->second;
+                placement = rootXf ? PrefabRootPlacement(hp->second, rootXf->pos, rootXf->rot, rootXf->scl) : hp->second;
+                staticBone = std::max(0, scene.boneIndex("cf_J_FaceUp_ty"));
+            } else scene.warn(ref.partId, "hair parent node cf_J_FaceUp_ty not found; the hair is placed at the model origin");
         }
         std::map<int64_t, Mat4> simW;   // hair and accessory chains settle under their DynamicBones
         b.simW = nullptr;
         // Off by default: against the game dumps the settle helped one card in four and hurt the others (docs: sidecar notes), so hair and accessory chains
         // stay at their authored pose unless CARDBRIDGE_DYNBONE=1.
         if (std::getenv("CARDBRIDGE_DYNBONE") && ((ref.group == "Hair" && b.hairParent) || accessoryMode)) {
-            const Mat4 anchor = ref.group == "Hair" ? *b.hairParent : placement;
+            const Mat4 anchor = placement;
             Mat4 start;
             const Mat4* startPtr = nullptr;
             if (b.rigDefault) {
                 auto sw = b.rigDefault->world.find(ref.group == "Hair" ? std::string("cf_J_FaceUp_ty") : ref.attachNode);
-                if (sw != b.rigDefault->world.end()) { start = sw->second; startPtr = &start; }
+                if (sw != b.rigDefault->world.end()) {
+                    start = rootXf ? PrefabRootPlacement(sw->second, rootXf->pos, rootXf->rot, rootXf->scl) : sw->second;
+                    startPtr = &start;
+                }
             }
             if (settleItem(*uf, roots[0], anchor, startPtr, b.dbColliders, b.localOv, simW)) { b.simW = &simW; scene.chainsSettled = true; }
         }

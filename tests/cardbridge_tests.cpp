@@ -223,6 +223,18 @@ void unitTests() {
         CHECK(CreateRunsInLinearLight("cf_m_eye_create") && CreateRunsInLinearLight("cf_m_eyewhite_create") && CreateRunsInLinearLight("cf_m_clothesN_create"));
         CHECK(!CreateRunsInLinearLight("cf_m_face_create") && !CreateRunsInLinearLight("cf_m_body_create") && !CreateRunsInLinearLight(""));
     });
+    test("item prefab roots keep their own transform under the node the game parents them to", [] {
+        // SetParent(parent, worldPositionStays: false): a hair or accessory root with an offset and scale keeps both.
+        const Mat4 parent = Mat4::TRS({1, 2, 3}, Quat{}, {1, 1, 1});
+        const Mat4 got = assemble::PrefabRootPlacement(parent, {0, 0.051f, 0}, Quat{}, {0.98f, 1, 1});
+        const Vec3 p = got.point({0, 0, 0});
+        CHECK(std::fabs(p.x - 1) < 1e-5f && std::fabs(p.y - 2.051f) < 1e-5f && std::fabs(p.z - 3) < 1e-5f);
+        const Vec3 x = got.dir({1, 0, 0});
+        CHECK(std::fabs(x.x - 0.98f) < 1e-5f && std::fabs(x.y) < 1e-5f && std::fabs(x.z) < 1e-5f);
+        // The identity root must leave the parent alone (every ordinary prefab).
+        const Mat4 same = assemble::PrefabRootPlacement(parent, {0, 0, 0}, Quat{}, {1, 1, 1});
+        for (int i = 0; i < 16; ++i) CHECK(std::fabs(same.m[i] - parent.m[i]) < 1e-6f);
+    });
 
     test("linear light: colour properties are decoded, floats and texture scales are left alone", [] {
         using namespace cardbridge;
@@ -1627,6 +1639,57 @@ void integrationTests() {
                 if (std::abs(s - 1.0f) > 1e-3f) ++badWeights;
             }
         CHECK(badWeights == 0);
+        {   // a hair prefab root keeps its own transform under cf_J_FaceUp_ty (the game's SetParent(parent, false)); the base side hair
+            // p_cf_hair_s_02 has a root 5.1 cm up and scaled 0.98 in x, so cancelling the root is visible
+            card::Card rooted = c;
+            auto mutableChild = [](Value& v, const std::string& key) -> Value* {
+                if (!v.isMap()) return nullptr;
+                for (auto& kv : v.map()) if (kv.first.isStr() && kv.first.asStr() == key) return &kv.second;
+                return nullptr;
+            };
+            Value* parts = mutableChild(rooted.hair, "parts");
+            CHECK(parts && parts->isArray() && parts->array().size() >= 3);
+            Value* sideId = parts && parts->isArray() && parts->array().size() >= 3 ? mutableChild(parts->array()[2], "id") : nullptr;
+            CHECK(sideId != nullptr);
+            if (sideId) *sideId = Value(int64_t(2));
+            if (sideId) {
+                assemble::AssembleOptions rootedOpt = ao;
+                rootedOpt.outfit = 0;
+                assemble::Scene rootedScene = assemble::Assemble(rooted, resolver, rootedOpt);
+                resolve::ItemRef side;
+                for (const auto& r : resolve::ItemsFromCard(rooted, 0)) if (r.partId == "hair.side") side = r;
+                CHECK(side.category == 103 && side.id == 2);
+                const resolve::ResolvedItem item = resolver.resolve(rooted, side);
+                CHECK(item.status == resolve::ItemStatus::ResolvedBase);
+                std::string rootedWhy;
+                auto uf = item.ok() ? resolver.openBundle(item, &rootedWhy) : nullptr;
+                CHECK(uf != nullptr);
+                if (uf) {
+                    auto roots = uf->findXformsByName(item.assetName());
+                    int64_t hairBone = 0;
+                    if (!roots.empty())
+                        for (int64_t id : uf->subtree(roots[0]))
+                            if (const unity::Xform* x = uf->xform(id); x && x->name == "cf_J_hairS_top") { hairBone = id; break; }
+                    CHECK(!roots.empty() && hairBone != 0);
+                    int bi = -1;
+                    for (size_t i = 0; i < rootedScene.bones.size() && bi < 0; ++i)
+                        if (rootedScene.bones[i].source == "hair.side" && rootedScene.bones[i].name == "cf_J_hairS_top") bi = static_cast<int>(i);
+                    const int faceUp = rootedScene.boneIndex("cf_J_FaceUp_ty");
+                    CHECK(bi >= 0 && faceUp >= 0);
+                    if (bi >= 0 && faceUp >= 0 && !roots.empty() && hairBone != 0) {
+                        const Mat4& parentWorld = rootedScene.bones[static_cast<size_t>(faceUp)].world;
+                        const Mat4 expected = parentWorld * uf->worldMatrix(hairBone);
+                        const Mat4& got = rootedScene.bones[static_cast<size_t>(bi)].world;
+                        float worst = 0;
+                        for (int i = 0; i < 16; ++i) worst = std::max(worst, std::fabs(got.m[i] - expected.m[i]));
+                        const Vec3 withoutRoot = (parentWorld * inverse(uf->worldMatrix(roots[0])) * uf->worldMatrix(hairBone)).translation();
+                        std::printf("  hair root: worst matrix delta %.6f; y with root %.4f, without it %.4f\n", worst, got.translation().y, withoutRoot.y);
+                        CHECK(worst < 1e-4f);
+                        CHECK(std::fabs(got.translation().y - withoutRoot.y) > 0.03f);   // the test would catch the old cancellation
+                    }
+                }
+            }
+        }
         {   // every transform of the body and head rig prefabs is a scene bone (by name; the face bones included)
             std::string why;
             auto base = resolver.openBaseBundle("chara/oo_base.unity3d", &why);
