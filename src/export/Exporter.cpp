@@ -191,10 +191,11 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
     // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
     const bool cutout = HasCutout(scene, mat);
-    // A transparent garment modelled as two co-located layers: MikuMikuDance's edge draws back faces pushed outward, so it draws the inner
-    // layer pushed through the outer one and covers the whole garment in the edge colour (the underpants went flat grey). Such a garment
-    // gets no edge; its texture still shows. Single-layer garments (the skirt) keep theirs.
-    const bool innerLayer = mat.alpha && HasInnerLayer(scene, mat);
+    // A mesh modelled as two co-located layers (an outer and an inner surface sharing one vertex grid): MikuMikuDance's edge draws back
+    // faces pushed outward, so it draws the inner layer pushed through the outer one. On a flat garment that covered it in the edge colour
+    // (the underpants went flat grey); on hair strands it pokes the inner layer out through the outer one and through the body beside it,
+    // which reads as hair clipping back-to-front. Such a mesh gets no edge; its texture still shows. Single-layer meshes (the skirt) keep theirs.
+    const bool innerLayer = HasInnerLayer(scene, mat);
     if (!overlay && !lens && !transparent) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
     if (!overlay && !lens && !tooth && !cutout && !innerLayer) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
