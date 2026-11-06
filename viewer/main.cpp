@@ -612,7 +612,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kAPoseDeg, "A-pose angle (degrees)", "Pose"});
         rows.push_back({0, -1, "Physics preview (Y; N shakes it)", "Physics"});
         rows.push_back({2, kPhysics, "Simulate hair, skirts and ribbons live", "Physics"});
-        rows.push_back({0, kJiggleBust, "Jiggle physics in the exported PMX (in MikuMikuDance)", "Jiggle"});
+        rows.push_back({0, kJiggleBust, "Jiggle (the exported PMX, and the physics preview)", "Jiggle"});
         rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
         rows.push_back({1, kJiggleIntensity, "Jiggle intensity (1 = the game)", "Jiggle"});
@@ -843,7 +843,7 @@ void SetPhysics(bool on) {
     if (on && (!L || L->scene.chains.empty())) { Log("no physics chains in this character", LogKind::Warn); on = false; }
     g.physics = on;
     if (on) {
-        g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)));
+        g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
         g.physicsLast = GetTickCount64();
         g.physicsAccum = 0.0;
         g.physicsKick = g.physicsMoving = true;
@@ -957,7 +957,7 @@ bool ReshapeNow(bool final) {
         assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
         g.gpuExp.Refresh(final);
     }
-    if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)));
+    if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
     ApplyPoseLive();
     return true;
 }
@@ -967,7 +967,15 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
-    if (id == kJiggleBust || id == kJiggleButt || id == kJiggleIntensity) { InvalidatePanel(); return; }   // export-only: nothing to re-assemble
+    if (id == kJiggleBust || id == kJiggleButt || id == kJiggleIntensity) {
+        if (g.physics) {   // the preview shows what the export will do: prime the sim again with the new switches
+            if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+            g.physicsKick = g.physicsMoving = true;
+            Log(std::string("jiggle preview: boobs ") + (g.jiggleBust ? "on" : "off") + ", butt " + (g.jiggleButt ? "on" : "off"));
+        }
+        InvalidatePanel();
+        return;
+    }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kAreola && g.expOk) {   // the baked "as exported" copy has the old areola in its textures
         g.expOk = false;
