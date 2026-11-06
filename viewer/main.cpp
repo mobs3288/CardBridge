@@ -282,7 +282,8 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
-              kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011, kSetGpuNext = 20012, kSetSkinNext = 20013;
+              kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
+constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017;
 void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
@@ -650,9 +651,14 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, -1, "Graphics (GPU when there is one, CPU fallback otherwise)", "Graphics"});
         rows.push_back({4, 0, "device: " + Shorten(g.gpu.adapter(), 44), "Graphics"});
         rows.push_back({4, 0, "use: " + g.settings.gpu + "  (auto picks a discrete NVIDIA/AMD card first; applies at once)", "Graphics"});
-        rows.push_back({5, kSetGpuNext, "Change device (auto / hardware / warp / software) ...", "Graphics"});
+        auto pick = [](bool active, const std::string& label) { return std::string(active ? "[x] " : "[ ] ") + label; };
+        rows.push_back({5, kSetGpuAuto, pick(g.settings.gpu == "auto", "auto (discrete GPU first)"), "Graphics"});
+        rows.push_back({5, kSetGpuHardware, pick(g.settings.gpu == "hardware", "hardware only (no WARP fallback)"), "Graphics"});
+        rows.push_back({5, kSetGpuWarp, pick(g.settings.gpu == "warp", "WARP on CPU (no real GPU needed)"), "Graphics"});
+        rows.push_back({5, kSetGpuSoftware, pick(g.settings.gpu == "software", "software renderer (CPU fallback)"), "Graphics"});
         rows.push_back({4, 0, "skin: " + g.settings.skin + (g.gpu.ready() && g.gpu.gpuSkin() ? "  (this card: GPU compute shader)" : g.gpu.ready() ? "  (this card: CPU loop)" : ""), "Graphics"});
-        rows.push_back({5, kSetSkinNext, "Skin with the GPU compute shader / the CPU loop ...", "Graphics"});
+        rows.push_back({5, kSetSkinGpu, pick(g.settings.skin == "gpu", "skin on GPU (compute shader)"), "Graphics"});
+        rows.push_back({5, kSetSkinCpu, pick(g.settings.skin == "cpu", "skin on CPU"), "Graphics"});
         rows.push_back({0, -1, "CardBridge", std::string("v") + CARDBRIDGE_VERSION});
         rows.push_back({5, kSetOpenFolder, "Open the settings folder in Explorer", "CardBridge"});
         rows.push_back({5, kSetForget, "Forget all settings (asked again next start)", "CardBridge"});
@@ -2330,18 +2336,19 @@ void SettingsAction(int id) {
         SaveSettings(g.settings);
         ReloadLayers(true);
         break;
-    case kSetGpuNext: {
-        const char* order[] = {"auto", "hardware", "warp", "software"};
-        const char* next = "auto";
-        for (int i = 0; i < 4; ++i) if (g.settings.gpu == order[i]) next = order[(i + 1) % 4];
-        g.settings.gpu = next;
+    case kSetGpuAuto: case kSetGpuHardware: case kSetGpuWarp: case kSetGpuSoftware: {
+        const std::string value = id == kSetGpuAuto ? "auto" : id == kSetGpuHardware ? "hardware" : id == kSetGpuWarp ? "warp" : "software";
+        if (g.settings.gpu == value) { Log("graphics device: already on " + value); break; }
+        g.settings.gpu = value;
         SaveSettings(g.settings);
-        Log(std::string("graphics device: ") + next, LogKind::Good);
+        Log(std::string("graphics device: ") + value, LogKind::Good);
         ReinitGpu();
         break;
     }
-    case kSetSkinNext: {
-        g.settings.skin = g.settings.skin == "cpu" ? "gpu" : "cpu";
+    case kSetSkinGpu: case kSetSkinCpu: {
+        const std::string value = id == kSetSkinGpu ? "gpu" : "cpu";
+        if (g.settings.skin == value) { Log("skin: already on " + value); break; }
+        g.settings.skin = value;
         SaveSettings(g.settings);
         g.gpu.SetSkinMode(g.settings.skin);
         g.gpuExp.SetSkinMode(g.settings.skin);
