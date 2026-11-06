@@ -141,8 +141,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
         // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on, built
-        // like the hand-made MMD models' breast jiggle (mode-2 bodies tracking their bones, no joint spring, rotation limits as the
-        // envelope); a strand's spring conversion hung them from a light link and they vibrated at rest, so jiggle gets its own path below.
+        // like the hand-made MMD models' breast jiggle (mode-2 bodies, fat capsules with weight tapering to the tip, heavy damping, no
+        // collider), plus our own joint spring: the reference models' bare pendulum hangs displaced under gravity and wobbles like jelly,
+        // the spring pulls the part back to the rest pose so it bounces like skin instead.
         float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
         bool jigBust = false;  // which jiggle: the bust gets a wider envelope than the butt
         if (ch.characterOwn) {
@@ -185,6 +186,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
+            if (jiggle > 0.0f) l.mass = std::pow(0.5f, static_cast<float>(links.size()));   // the reference models' taper: 1, 1/2, 1/4... toward the tip
             links[b] = l;
         }
 
@@ -278,31 +280,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
             const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
             // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
-            // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
+            // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
+            // chain gets the reference models' envelope: the bust about 26 degrees a link, the butt less.
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
-            const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
-            // A jiggle joint has no spring at all, like the reference models' breast joints: the mode-2 body tracks its bone, its momentum
-            // swings it against the rotation limits, and the limits are the jiggle. They come from the game's stiffness, opened by the
-            // intensity, and shaped like the reference models': the main swing axis is wide, the other bend axis is narrow (their breast
-            // joints are about 0.44 / 0.26 / 0.18 rad per axis), so the part flops forward and back instead of wobbling sideways.
-            if (jiggle > 0.0f) {
-                const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
-                auto pb = bodyOf.find(parentBone);
-                const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
-                const float cap = jigBust ? 0.30f : 0.18f;   // the butt's swing is smaller than the bust's
-                const float range = std::min(0.9f, std::min(bend, cap) * jiggle);
-                pmx::Joint j;
-                j.name = ch.name + " " + std::to_string(k);
-                j.bodyA = bodyA;
-                j.bodyB = bodyOf[b];
-                j.position = self.head;
-                j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
-                j.rotLower = {-range, -0.1f * range, -0.4f * range};
-                j.rotUpper = {range, 0.1f * range, 0.4f * range};
-                j.springRot = {0, 0, 0};
-                model.joints.push_back(std::move(j));
-                continue;
-            }
+            const float bendCap = jiggle > 0.0f ? (jigBust ? 0.45f : 0.20f) : 0.6f;
+            const float bend = std::min(bendCap, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
             const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
@@ -334,9 +316,16 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
             // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
             const bool holds = sideways * gravity / stiffnessK < 0.6f * bend;
-            const float range = holds ? bend : 0.0f;
-            j.rotLower = {-range, -0.1f * range, -range};
-            j.rotUpper = {range, 0.1f * range, range};
+            // The intensity opens a jiggle joint's envelope. The spring below stays: with the limits alone, a pendulum hangs displaced
+            // under gravity and wobbles like jelly; the spring pulls it back to the rest pose, so it bounces like skin instead. And a jiggle
+            // joint is never droop-locked: locked means no jiggle at all, which is worse than a soft hang.
+            float range = (holds || jiggle > 0.0f) ? bend : 0.0f;
+            if (jiggle > 0.0f) range = std::min(0.9f, range * jiggle);
+            // The reference models' breast joints are wide on the flop axis, moderate on the sway, narrow on the twist (about 0.44 / 0.26 /
+            // 0.18 rad). A strand keeps the old shape: the twist nearly locked, the two bends wide.
+            const float yF = jiggle > 0.0f ? 0.6f : 0.1f, zF = jiggle > 0.0f ? 0.4f : 1.0f;
+            j.rotLower = {-range, -yF * range, -zF * range};
+            j.rotUpper = {range, yF * range, zF * range};
             j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             model.joints.push_back(std::move(j));
         }
