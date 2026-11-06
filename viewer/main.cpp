@@ -2868,7 +2868,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int maxScroll = std::max(0, static_cast<int>(g.logLines.size()) - visible);
                 g.logScroll = std::max(0, std::min(maxScroll, g.logScroll + (d > 0 ? 3 : -3)));
                 InvalidateLog();
-            } else if (L) {
+            } else if (L || g.tab == TabSettings) {
                 if (g.showIssues) {
                     g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3));
                 } else if (g.tab == TabBones) {
