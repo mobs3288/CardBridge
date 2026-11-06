@@ -34,6 +34,12 @@ struct AssembleOptions {
 // were measured against the game as stored. Checked against the game's own render textures: the iris result was 16/255 off drawn as stored, 1 in linear.
 bool CreateRunsInLinearLight(const std::string& materialName);
 
+// Where an item prefab's root hangs in the model: the game instantiates the prefab and parents it with
+// SetParent(parent, worldPositionStays: false) (ChaControl.ChangeAccessoryParent for accessories, ChangeHairAsync for hair),
+// so the root keeps its own local position, rotation and scale under the parent. `parent` is the attach or hair node's world
+// matrix; the prefab root's local transform comes from the bundle.
+Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale);
+
 // Builds the scene for one outfit: the shared skeleton from the base game,
 // the body mesh, then every card item that resolves (head, hair, clothing,
 // accessories) skinned onto that skeleton by bone name. An item that cannot be
