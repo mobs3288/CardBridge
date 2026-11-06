@@ -2474,6 +2474,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     if (std::getenv("CARDBRIDGE_DEBUG_EYE")) std::fprintf(stderr, "eye %s main_st %g %g %g %g up_st y %g down_st y %g\n", r.name.c_str(), 1 + sx, 1 + sy, vx - sx * 0.5f, vy - sy * 0.5f, vy + hlUpY - sy * 0.5f, vy + hlDownY - sy * 0.5f);
                 }
             }
+            // The brow and lash shaders (toon_eyew) paint with the material's _Color, the texture only a mask, and the game's
+            // ChangeSettingEyebrow/Eyeline puts the card's colour there at run time; the bundle's value is white, which baked the
+            // strokes white. Set it from the card so the bake (and the live shader) paint the strokes in the card's colour.
+            if (ref.group == "Head") {
+                if (r.name == "cf_O_mayuge") b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyebrowColor"))));
+                else if (r.name == "cf_O_eyeline" || r.name == "cf_O_eyeline_low") b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyelineColor"))));
+            }
             // The face material's _overcolor2 alpha is the blush of the character's emotion state: 0 at rate 0, 0.2 at rate 1.
             b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
                                ? 0.2f * std::min(1.0f, std::max(0.0f, static_cast<float>(card.status.at("hohoAkaRate").asFloat(0.0))))
