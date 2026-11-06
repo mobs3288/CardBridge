@@ -1633,7 +1633,7 @@ void unitTests() {
         std::vector<Mat4> pw = BoneWorlds(s, rest);
         {   // the default (boobs on): the chain is simulated
             PhysicsSim sim;
-            sim.Reset(s, pw);
+            sim.Reset(s, pw, true, false, 1.0f);   // at full intensity, so the tip lags behind the jump
             CHECK(sim.particleCount() == 2);
             std::vector<Mat4> skin(s.bones.size());
             rest.edit(0).pos = {0.3f, 0, 0};

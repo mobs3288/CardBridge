@@ -14,7 +14,7 @@ class PhysicsSim {
 public:
     // Starts every chain at rest under the pose (`poseWorld` = assemble::BoneWorlds). The body's own jiggle chains are simulated only
     // when their switch is on (as the PMX export does), with the intensity as the swing envelope; the defaults match the export's.
-    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 1.0f);
+    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 0.15f);
 
     // Runs `steps` updates (1/60 s each; 0 only refreshes the output after the anchors moved) and writes the skin matrices of the chain bones
     // (every bone of a chain but its first, which follows the pose) into `skin`, sized like the scene's bones. Returns true while any
