@@ -584,12 +584,19 @@ std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* wh
         size = static_cast<size_t>(sz);
     }
     try {
-        std::vector<uint8_t> px = DecodeTexture(t.unityFormat, t.width, t.height, src, size);
+        t.rgba = DecodeTexture(t.unityFormat, t.width, t.height, src, size);
         // Unity stores rows bottom-first; PNG and PMX viewers want top-first.
-        size_t row = static_cast<size_t>(t.width) * 4;
-        t.rgba.resize(px.size());
-        for (int y = 0; y < t.height; ++y)
-            std::memcpy(&t.rgba[static_cast<size_t>(y) * row], &px[static_cast<size_t>(t.height - 1 - y) * row], row);
+        // Flipped in place (one row of scratch): a second full-size copy of a
+        // 4096 texture is 64 MB held only to reverse its rows.
+        const size_t row = static_cast<size_t>(t.width) * 4;
+        std::vector<uint8_t> scratch(row);
+        for (int y = 0; y < t.height / 2; ++y) {
+            uint8_t* a = &t.rgba[static_cast<size_t>(y) * row];
+            uint8_t* b = &t.rgba[static_cast<size_t>(t.height - 1 - y) * row];
+            std::memcpy(scratch.data(), a, row);
+            std::memcpy(a, b, row);
+            std::memcpy(b, scratch.data(), row);
+        }
     } catch (const FormatError& e) {
         return fail(e.what());
     }

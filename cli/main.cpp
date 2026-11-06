@@ -17,6 +17,7 @@
 #include "assemble/Pose.h"
 #include "card/CardFile.h"
 #include "core/FileIo.h"
+#include "core/MemoryProbe.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include <stb_image_write.h>
@@ -347,13 +348,16 @@ int cmdConvert(const Args& a) {
     if (out.empty() || a.get("library").empty()) { std::fprintf(stderr, "--library and --out are required\n"); return 1; }
     card::Card c;
     int code = 0;
+    LogMemory("startup");
     if (!loadCard(normalizeSlashes(a.positional[1]), c, code)) return code;
+    LogMemory("after card load");
     if (!c.supported) {
         std::fprintf(stderr, "%s: %s\n", c.path.c_str(), c.supportNote.c_str());
         return 2;
     }
     Context ctx;
     if (!buildContext(a, ctx)) return 3;
+    LogMemory("after context (lists)");
 
     assemble::AssembleOptions ao;
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
@@ -380,6 +384,8 @@ int cmdConvert(const Args& a) {
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
+    LogMemory("after assemble");
+    std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0);
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {
         if (p.underPiece || p.nudeSwitch) continue;   // derived from other parts
@@ -439,6 +445,11 @@ int cmdConvert(const Args& a) {
     exporter::ApplyPartStateForExport(scene, hiddenParts);
     const std::vector<char> effHidden = exporter::EffectiveHiddenParts(scene, hiddenParts);
 
+    // The bake and the export read only the assembled scene: the bundles it
+    // was built from are no longer needed, so drop them before the bake's
+    // mip chains and baked textures allocate beside the scene.
+    ctx.resolver->clearCaches();
+    LogMemory("after bundle cache clear");
     exporter::LoadColourGrade(a.get("library"));   // the game's colour grading, when the library holds it
     if (a.has("no-grade")) exporter::SetColourGradeEnabled(false);
     // Default: colour only (the viewer or engine lights it, over a white material) with the preview's grading baked in.
@@ -449,6 +460,7 @@ int cmdConvert(const Args& a) {
         exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
                                      [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); }, true, !a.has("no-toon-ramp"));
         std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
+        LogMemory("after bake");
     }
 
     std::vector<uint8_t> gpuRgba, plainRgba;   // written after the export, which with --overwrite clears the folder first
@@ -513,6 +525,7 @@ int cmdConvert(const Args& a) {
     eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     try {
         auto r = exporter::ExportScene(scene, c, eo);
+        LogMemory("after export");
         if (!gpuRgba.empty()) stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, gpuRgba.data(), 640 * 4);
         if (!plainRgba.empty()) stbi_write_png((out + "/gpu_plain.png").c_str(), 640, 800, 4, plainRgba.data(), 640 * 4);
         double secs = std::chrono::duration<double>(t1 - t0).count();

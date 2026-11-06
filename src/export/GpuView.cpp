@@ -537,6 +537,15 @@ bool GpuView::Init(std::string* why) {
     return true;
 }
 
+void GpuView::Unload() {
+    Impl& I = *impl_;
+    I.Clear();
+    I.scene = nullptr;
+    I.skinCopy.clear();
+    I.lastM[0] = 0;
+    I.lastW = I.lastH = 0;
+}
+
 bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
     auto fail = [&](const std::string& m) { if (why) *why = m; return false; };
     Impl& I = *impl_;

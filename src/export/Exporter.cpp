@@ -493,8 +493,17 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     const bool solid = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
                     int& pmxTex = solid ? solidTexMap[ti] : texMap[ti];
                     if (pmxTex < 0) {
-                        assemble::SceneTexture t = scene.textures[ti];
-                        if (solid) for (size_t px = 3; px < t.rgba.size(); px += 4) t.rgba[px] = t.rgba[px] < kItemCutout ? 0 : 255;
+                        // Encoded straight from the scene texture: copying a 2048 texture (16 MB) only to hand it to the
+                        // PNG encoder was a needless transient at export time. The solid variant needs its own copy
+                        // because its alpha channel is rewritten.
+                        assemble::SceneTexture solidCopy;
+                        const assemble::SceneTexture* tp = &scene.textures[ti];
+                        if (solid) {
+                            solidCopy = scene.textures[ti];
+                            for (size_t px = 3; px < solidCopy.rgba.size(); px += 4) solidCopy.rgba[px] = solidCopy.rgba[px] < kItemCutout ? 0 : 255;
+                            tp = &solidCopy;
+                        }
+                        const assemble::SceneTexture& t = *tp;
                         std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         Bytes png = encodePng(t);
                         fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());

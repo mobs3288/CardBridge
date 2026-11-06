@@ -5,8 +5,10 @@
 #include "resolve/ModIndex.h"
 #include "unity/UnityScene.h"
 
+#include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -79,14 +81,44 @@ public:
     // MainTex "01"). Null when the mod has no such file.
     std::shared_ptr<unity::TextureData> openLooseTexture(const ResolvedItem& item, const std::string& ab, const std::string& name, std::string* why);
     std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
+    // Drops every cached bundle and loose texture. Callers that hold a
+    // shared_ptr to a bundle keep it alive, so this only releases the
+    // resolver's own references: the next open re-reads the file. Used when a
+    // new character is loaded and before the bake/export preview stages, so
+    // the previous character's bundles do not sit beside the new scene.
+    void clearCaches();
+    // Decompressed bytes currently held by the bundle cache (diagnostics).
+    size_t cacheBytes() const;
 
 private:
+    struct CacheEntry {
+        std::string key;
+        std::shared_ptr<unity::UnityFile> file;
+        size_t bytes = 0;
+    };
+    // Finds a cached bundle and makes it most-recently-used; null when absent.
+    std::shared_ptr<unity::UnityFile> cacheFind(const std::string& key);
+    void cachePut(const std::string& key, const std::shared_ptr<unity::UnityFile>& file);
+    void cacheEvictLocked();
+
     const ModIndex& mods_;
     ListTable& lists_;
     std::string abdata_;
     std::map<std::string, bool> modListsLoaded_;
-    std::map<std::string, std::shared_ptr<unity::UnityFile>> cache_;
-    std::map<std::string, std::shared_ptr<unity::TextureData>> looseTextures_;
+    // Bounded LRU of opened bundles, most-recent first. Previously this was an
+    // unbounded map: every bundle a character touched (the library's largest
+    // is 132 MB on disk) was decompressed once and kept for the life of the
+    // resolver - i.e. for the whole viewer session, across every character -
+    // so memory grew monotonically and never returned after a conversion.
+    std::list<CacheEntry> cache_;
+    std::map<std::string, std::list<CacheEntry>::iterator> cacheByKey_;
+    size_t cacheBytes_ = 0;
+    // Loose textures are held weakly: a caller that needs one holds the
+    // shared_ptr for the duration of its use, and the decoded pixels are
+    // freed as soon as it does not. The zip entry can be re-read - these are
+    // the small images mods ship loose, not bundles.
+    std::map<std::string, std::weak_ptr<unity::TextureData>> looseTextures_;
+    mutable std::mutex cacheMutex_;
     std::map<std::string, std::vector<std::string>> providers_;   // lower-case bundle path -> zipmods of this character that contain it
     std::map<std::string, std::string> cabIndex_;   // lower-case CAB name -> library-relative bundle path
     bool cabIndexBuilt_ = false;

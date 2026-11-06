@@ -2,8 +2,8 @@
 
 namespace cardbridge {
 
-Bytes Lz4DecompressBlock(const uint8_t* src, size_t srcSize, size_t uncompressedSize) {
-    Bytes out(uncompressedSize);
+void Lz4DecompressBlockTo(const uint8_t* src, size_t srcSize, uint8_t* dst, size_t uncompressedSize) {
+    uint8_t* out = dst;
     size_t ip = 0, op = 0;
     while (ip < srcSize) {
         uint8_t token = src[ip++];
@@ -41,6 +41,11 @@ Bytes Lz4DecompressBlock(const uint8_t* src, size_t srcSize, size_t uncompressed
         op += len;
     }
     if (op != uncompressedSize) throw FormatError("LZ4: output size mismatch");
+}
+
+Bytes Lz4DecompressBlock(const uint8_t* src, size_t srcSize, size_t uncompressedSize) {
+    Bytes out(uncompressedSize);
+    Lz4DecompressBlockTo(src, srcSize, out.data(), uncompressedSize);
     return out;
 }
 

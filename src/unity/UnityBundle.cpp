@@ -2,6 +2,8 @@
 
 #include "core/Lz4.h"
 
+#include <cstring>
+
 namespace cardbridge::unity {
 
 namespace {
@@ -14,6 +16,26 @@ Bytes decompressBlock(const uint8_t* src, size_t srcSize, size_t outSize, uint32
     case 2:
     case 3:
         return Lz4DecompressBlock(src, srcSize, outSize);
+    case 1:
+        throw FormatError(what + ": LZMA-compressed bundles are not supported yet");
+    default:
+        throw FormatError(what + ": unknown bundle compression " + std::to_string(mode & 0x3f));
+    }
+}
+
+// Decompresses one block straight into `dst` (outSize bytes), with no
+// temporary Bytes for the block: a large bundle otherwise holds its file
+// bytes, a per-block copy and the whole decompressed blob at once.
+void decompressBlockTo(const uint8_t* src, size_t srcSize, uint8_t* dst, size_t outSize, uint32_t mode, const std::string& what) {
+    switch (mode & 0x3f) {
+    case 0:
+        if (srcSize != outSize) throw FormatError(what + ": stored block size mismatch");
+        if (outSize) std::memcpy(dst, src, outSize);
+        return;
+    case 2:
+    case 3:
+        Lz4DecompressBlockTo(src, srcSize, dst, outSize);
+        return;
     case 1:
         throw FormatError(what + ": LZMA-compressed bundles are not supported yet");
     default:
@@ -65,12 +87,13 @@ std::shared_ptr<UnityBundle> UnityBundle::Open(Bytes file, const std::string& de
 
     uint64_t total = 0;
     for (const auto& bl : blocks) total += bl.usize;
-    b->data_.reserve(total);
+    b->data_.resize(static_cast<size_t>(total));
+    size_t written = 0;
     for (const auto& bl : blocks) {
         if (bl.csize > r.remaining()) throw FormatError(debugName + ": truncated block data");
-        Bytes out = decompressBlock(r.ptr(), bl.csize, bl.usize, bl.flags, debugName);
+        decompressBlockTo(r.ptr(), bl.csize, b->data_.data() + written, bl.usize, bl.flags, debugName);
         r.skip(bl.csize);
-        b->data_.insert(b->data_.end(), out.begin(), out.end());
+        written += bl.usize;
     }
     for (const auto& n : b->nodes_)
         if (n.offset + n.size > b->data_.size()) throw FormatError(debugName + ": node " + n.path + " outside the data");

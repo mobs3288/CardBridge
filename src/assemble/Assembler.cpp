@@ -5,6 +5,7 @@
 #include "shape/Shape.h"
 #include "card/Abmx.h"
 #include "card/MaterialEdits.h"
+#include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
 #include "export/Preview.h"
 
@@ -14,6 +15,7 @@
 #include <functional>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <map>
 #include <memory>
 #include <set>
@@ -691,19 +693,51 @@ struct Builder {
         return result;
     }
 
-    std::map<std::string, std::shared_ptr<unity::TextureData>> decoded;   // "<bundle>#<pathId>" -> decoded pixels
+    // "<bundle>#<pathId>" -> decoded pixels, bounded LRU. Previously every
+    // texture decoded during assembly was kept until the Builder died, so a
+    // character's decoded textures (hundreds of MB at full resolution) sat
+    // beside the scene textures they were copied into - the same pixels
+    // twice. 64 MB keeps the shared ramps, masks and the texture a whole
+    // item's materials touch, and evicts the rest (re-decoded from the still
+    // cached bundle on demand; the scene copy is what is kept).
+    struct DecodedEntry { std::string key; std::shared_ptr<unity::TextureData> tex; size_t bytes = 0; };
+    std::list<DecodedEntry> decoded;
+    std::map<std::string, std::list<DecodedEntry>::iterator> decodedByKey;
+    size_t decodedBytes = 0;
+    static constexpr size_t kDecodedCap = 64ull * 1024 * 1024;
+    void decodedEvict() {
+        while (decodedBytes > kDecodedCap && decoded.size() > 1) {
+            auto& back = decoded.back();
+            decodedBytes -= back.bytes;
+            decodedByKey.erase(back.key);
+            decoded.pop_back();
+        }
+    }
+
     std::map<std::string, int> bakedCache;                                  // tint recipe -> scene texture
 
     std::shared_ptr<unity::TextureData> decode(UnityFile& uf, const PPtr& p, const std::string& partId) {
         std::string key = uf.name() + "#" + std::to_string(p.pathId);
-        auto it = decoded.find(key);
-        if (it != decoded.end()) return it->second;
+        auto it = decodedByKey.find(key);
+        if (it != decodedByKey.end()) {
+            decoded.splice(decoded.begin(), decoded, it->second);
+            return it->second->tex;
+        }
         std::string why;
         auto t = uf.readTexture(p, &why);
         std::shared_ptr<unity::TextureData> out;
         if (t) out = std::make_shared<unity::TextureData>(std::move(*t));
         else scene.warn(partId, "texture not loaded: " + why);
-        decoded[key] = out;
+        if (out) {
+            DecodedEntry e;
+            e.key = key;
+            e.tex = out;
+            e.bytes = out->rgba.size();
+            decoded.push_front(e);
+            decodedByKey[key] = decoded.begin();
+            decodedBytes += decoded.front().bytes;
+            decodedEvict();
+        }
         return out;
     }
 
@@ -828,18 +862,29 @@ struct Builder {
                 const PPtr* tp = m->texture("_MainTex");
                 if (tp && !tp->isNull()) {
                     if (look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) {
-                        auto main = decode(uf, *tp, partId);
-                        const PPtr* mp = m->texture("_ColorMask");
-                        std::shared_ptr<unity::TextureData> mask;
-                        std::string maskKey = "-";
-                        if (mp && !mp->isNull() && mp->isLocal()) { mask = decode(uf, *mp, partId); maskKey = uf.name() + "#" + std::to_string(mp->pathId); }
                         Vec4 tint[3] = {look->colors[0], look->colors[1], look->colors[2]};
                         if (edits && meType >= 0)   // MaterialEditor colour overrides replace the card's slot colours in the tint
                             for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) {
                                 int k = e->property == "Color" ? 0 : e->property == "Color2" ? 1 : e->property == "Color3" ? 2 : -1;
                                 if (k >= 0) tint[k] = Vec4{e->value[0], e->value[1], e->value[2], e->value[3]};
                             }
-                        sm.texture = bake(main, uf.name() + "#" + std::to_string(tp->pathId), mask, maskKey, tint, uf.name());
+                        // The tint recipe is known before any pixels are decoded: a renderer that shares it with one
+                        // already baked (the same accessory texture and colours) reuses the scene texture instead of
+                        // decoding the main and mask textures again only to discard them.
+                        const PPtr* mp = m->texture("_ColorMask");
+                        const std::string mainKey = uf.name() + "#" + std::to_string(tp->pathId);
+                        const std::string maskKey = (mp && !mp->isNull() && mp->isLocal()) ? uf.name() + "#" + std::to_string(mp->pathId) : "-";
+                        char buf[160];
+                        std::snprintf(buf, sizeof buf, "|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f", tint[0].x, tint[0].y, tint[0].z, tint[1].x, tint[1].y, tint[1].z, tint[2].x, tint[2].y, tint[2].z);
+                        auto cached = bakedCache.find(mainKey + "|" + maskKey + buf);
+                        if (cached != bakedCache.end()) {
+                            sm.texture = cached->second;
+                        } else {
+                            auto main = decode(uf, *tp, partId);
+                            std::shared_ptr<unity::TextureData> mask;
+                            if (mp && !mp->isNull() && mp->isLocal()) mask = decode(uf, *mp, partId);
+                            sm.texture = bake(main, mainKey, mask, maskKey, tint, uf.name());
+                        }
                     } else {
                         sm.texture = textureFor(uf, *tp, partId);
                     }
@@ -1719,6 +1764,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         scene.parts.push_back(std::move(part));
         log("body: " + std::to_string(scene.parts.back().meshes.size()) + " mesh(es)");
+        LogMemory("assemble after body");
     }
 
     // --- card items ------------------------------------------------------
@@ -2604,6 +2650,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         scene.parts.push_back(std::move(part));
         log(logId + ": " + (logStatus.empty() ? std::string("ok") : logStatus) + ", " + std::to_string(logMeshes) + " mesh(es)");
     }
+    LogMemory("assemble after items");
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
     if (topCoversBra)
@@ -2735,8 +2782,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
     log("running " + std::to_string(scene.createJobs.size()) + " game create material(s)");
+    LogMemory("assemble before create jobs");
     exporter::RunCreateJobs(scene);
     log("create materials done");
+    LogMemory("assemble after create jobs");
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
             std::fprintf(stderr, "mat %s shader=%s idx=%d cull=%d two-sided=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex,
