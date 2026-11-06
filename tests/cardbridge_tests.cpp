@@ -373,6 +373,27 @@ void unitTests() {
         s.materials[0].shader = "Shader Forge/main_opaque";
         CHECK(!exporter::HasCutout(s, s.materials[0]));
     });
+    test("double-layered garment: MMD's edge would cover it, so it gets none; a single surface keeps its edge", [] {
+        using namespace assemble;
+        auto quad = [](bool doubled) {
+            Scene s;
+            SceneMaterial m; m.shader = "Shader Forge/main_alpha"; m.alpha = true;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            const float px[4] = {0, 1, 1, 0}, py[4] = {0, 0, 1, 1};
+            for (int i = 0; i < 4; ++i) { SceneVertex v; v.pos = {px[i], py[i], 0}; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+            SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3};
+            if (doubled) sub.indices.insert(sub.indices.end(), {0, 2, 1, 0, 3, 2});   // the inner layer, wound the other way
+            mesh.submeshes.push_back(sub);
+            s.meshes.push_back(mesh);
+            return s;
+        };
+        Scene dbl = quad(true), sgl = quad(false);
+        CHECK(exporter::HasInnerLayer(dbl, dbl.materials[0]));
+        CHECK(!exporter::HasInnerLayer(sgl, sgl.materials[0]));
+        CHECK((exporter::MmdMaterialLook(dbl, dbl.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer
+        CHECK((exporter::MmdMaterialLook(sgl, sgl.materials[0]).drawFlags & 0x10) != 0);   // the single surface keeps its edge
+    });
     test("KoiClothesOverlayX: overlays are read for the asked coordinate only, with the replace flag", [] {
         Bytes png = tinyPng();
         auto overlayFor = [&](int coordinate, bool replace) {   // {coordinate: {"ct_top_parts_B": [png, replace]}} as MessagePack
