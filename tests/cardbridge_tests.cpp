@@ -1029,7 +1029,9 @@ void unitTests() {
         };
         {   // the default export: breast jiggle on, the butt off
             pmx::Model m = count(make(true), true, false, 1.0f);
-            CHECK(m.rigidBodies.size() == 2 && m.joints.size() == 1);   // the jiggle chain became bodies
+            CHECK(m.rigidBodies.size() == 3 && m.joints.size() == 2);   // anchor body + the jiggle chain, and the anchor joint + the link joint
+            CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].bone == 1);   // the anchor: kinematic, on the parent (chest) bone
+            CHECK(m.joints[0].bodyA == 0 && m.joints[0].bodyB == 1 && m.joints[0].rotUpper.x == 0.0f && m.joints[0].springRot.x == 0.0f);   // rigid
             pmx::Model off = count(make(true), false, false, 1.0f);
             CHECK(off.rigidBodies.empty() && off.joints.empty());      // boobs off: the part stays rigid
             pmx::Model hair = count(make(false), false, false, 1.0f);
@@ -1038,13 +1040,13 @@ void unitTests() {
             pmx::Model plain = count(make(false), true, false, 1.0f);
             // the reference models' breast bodies: mode 2 (the body follows its bone with physics on top), heavy fixed damping, no
             // friction, no collider, no joint spring (the rotation limits are the jiggle), weight tapering toward the tip
-            CHECK(jig.rigidBodies[0].mode == 2 && jig.rigidBodies[1].mode == 2);
-            CHECK(jig.rigidBodies[1].moveDamping == 0.9f && jig.rigidBodies[1].rotDamping == 0.9f && jig.rigidBodies[1].friction == 0.0f);
-            CHECK(jig.rigidBodies[1].mask == 0);
-            CHECK(jig.rigidBodies[0].mass == 1.0f && jig.rigidBodies[1].mass == 0.5f);   // 1, 1/2, ...
-            CHECK(jig.joints.size() == 1 && jig.joints[0].springRot.x == 0.0f && jig.joints[0].rotUpper.x > 0.0f && jig.joints[0].rotUpper.x <= 0.45f);
+            CHECK(jig.rigidBodies[1].mode == 2 && jig.rigidBodies[2].mode == 2);
+            CHECK(jig.rigidBodies[2].moveDamping == 0.9f && jig.rigidBodies[2].rotDamping == 0.9f && jig.rigidBodies[2].friction == 0.0f);
+            CHECK(jig.rigidBodies[2].mask == 0);
+            CHECK(jig.rigidBodies[1].mass == 1.0f && jig.rigidBodies[2].mass == 0.5f);   // 1, 1/2, ...
+            CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x == 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.45f);
             pmx::Model loud = count(make(true), true, false, 2.0f);
-            CHECK(loud.joints[0].rotUpper.x > jig.joints[0].rotUpper.x);   // the intensity opens the envelope
+            CHECK(loud.joints[1].rotUpper.x > jig.joints[1].rotUpper.x);   // the intensity opens the envelope
             CHECK(plain.rigidBodies[1].mode == 1 && plain.rigidBodies[1].friction == 0.5f);   // hair keeps the strand conversion
             CHECK((plain.rigidBodies[1].mask & 0x0001) != 0);   // a hair strand still meets the colliders (group 0 here: this scene has none)
         }
@@ -1059,8 +1061,8 @@ void unitTests() {
             ch.characterOwn = true;
             s.chains.push_back(ch);
             CHECK(count(s, true, false, 1.0f).rigidBodies.empty());   // default off
-            CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 2); // on: bodies
-            CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 2); // independent of the boobs switch
+            CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 3); // on: anchor + chain bodies
+            CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 3); // independent of the boobs switch
         }
     });
 
