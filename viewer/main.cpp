@@ -116,6 +116,8 @@ struct Settings {
     std::string library, mods;
     std::string exportDir;   // where exports go without asking; empty = ask every time
     std::string layers;      // an extra folder of shader layers (.hlsl)
+    std::string gpu = "auto";   // "auto" (discrete GPU first), "hardware", "warp" (CPU), "software" (software renderer); next start
+    std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
 };
 Settings LoadSettings() {
@@ -126,6 +128,8 @@ Settings LoadSettings() {
         s.mods = j.value("mods", "");
         s.exportDir = j.value("exportDir", "");
         s.layers = j.value("layers", "");
+        s.gpu = j.value("gpu", "auto");
+        s.skin = j.value("skin", "gpu");
         s.noMods = j.value("noMods", false);
     } catch (...) {}
     return s;
@@ -138,6 +142,8 @@ void SaveSettings(const Settings& s) {
         j["mods"] = s.mods;
         j["exportDir"] = s.exportDir;
         j["layers"] = s.layers;
+        j["gpu"] = s.gpu;
+        j["skin"] = s.skin;
         j["noMods"] = s.noMods;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
@@ -276,7 +282,7 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
-              kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
+              kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011, kSetGpuNext = 20012, kSetSkinNext = 20013;
 void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
@@ -641,6 +647,12 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({4, 0, "extra folder: " + shown(g.settings.layers, "(none)"), "Layers"});
         rows.push_back({5, kSetLayers, "Choose a shader layers folder ...", "Layers"});
         rows.push_back({5, kSetLayersDefault, "Use only the default places", "Layers"});
+        rows.push_back({0, -1, "Graphics (GPU when there is one, CPU fallback otherwise)", "Graphics"});
+        rows.push_back({4, 0, "device: " + Shorten(g.gpu.adapter(), 44), "Graphics"});
+        rows.push_back({4, 0, "use: " + g.settings.gpu + "  (auto picks a discrete NVIDIA/AMD card first; takes effect next start)", "Graphics"});
+        rows.push_back({5, kSetGpuNext, "Change device (auto / hardware / warp / software) ...", "Graphics"});
+        rows.push_back({4, 0, "skin: " + g.settings.skin + (g.gpu.ready() && g.gpu.gpuSkin() ? "  (this card: GPU compute shader)" : g.gpu.ready() ? "  (this card: CPU loop)" : ""), "Graphics"});
+        rows.push_back({5, kSetSkinNext, "Skin with the GPU compute shader / the CPU loop ...", "Graphics"});
         rows.push_back({0, -1, "CardBridge", std::string("v") + CARDBRIDGE_VERSION});
         rows.push_back({5, kSetOpenFolder, "Open the settings folder in Explorer", "CardBridge"});
         rows.push_back({5, kSetForget, "Forget all settings (asked again next start)", "CardBridge"});
@@ -1590,9 +1602,12 @@ void DrawHeader(ui::Surface& s, const RECT& clip, const PanelLayout& l, const st
         size_t warn = 0, err = 0;
         for (const auto& i : L->scene.issues) (i.severity == "error" ? err : warn)++;
         s.Text(g.fontSmall, warn + err ? ui::kAmber : ui::kGood, tx, 68, std::to_string(err) + " errors, " + std::to_string(warn) + " warnings  [I]", &line);
-        std::string mode = g.showExp && g.expOk ? (g.expGrade ? "as exported, MMD look (graded)" : "as exported, MMD look") : g.gpuOk ? "Direct3D 11" : "software";
+        std::string mode;
+        if (g.showExp && g.expOk) mode = g.expGrade ? "as exported, MMD look (graded)" : "as exported, MMD look";
+        else if (g.gpuOk) mode = g.gpu.adapter() + (g.gpu.kind() == exporter::GpuKind::Warp ? " · CPU" : " · GPU" + std::string(g.gpu.gpuSkin() ? " · skin on GPU" : ""));
+        else mode = "software";
         mode += g.textured ? "" : "  ·  untextured";
-        s.TextRight(g.fontSmall, g.gpuOk ? ui::kAccent : ui::kSub, right, 68, mode);
+        s.TextRight(g.fontSmall, g.gpuOk ? ui::kAccent : ui::kSub, right, 68, Shorten(mode, 34));
     } else if (L) {
         // The assembly threw (unsupported card, broken container): show why instead of a row of zeros.
         s.Text(g.fontBold, ui::kBad, tx, 33, "could not assemble this card", &line);
@@ -2255,6 +2270,24 @@ void SettingsAction(int id) {
         SaveSettings(g.settings);
         ReloadLayers(true);
         break;
+    case kSetGpuNext: {
+        const char* order[] = {"auto", "hardware", "warp", "software"};
+        const char* next = "auto";
+        for (int i = 0; i < 4; ++i) if (g.settings.gpu == order[i]) next = order[(i + 1) % 4];
+        g.settings.gpu = next;
+        SaveSettings(g.settings);
+        Log(std::string("graphics device: ") + next + " (restart CardBridge to create the device; nothing changes until then)", LogKind::Good);
+        break;
+    }
+    case kSetSkinNext: {
+        g.settings.skin = g.settings.skin == "cpu" ? "gpu" : "cpu";
+        SaveSettings(g.settings);
+        g.gpu.SetSkinMode(g.settings.skin);
+        g.gpuExp.SetSkinMode(g.settings.skin);
+        if (g.gpu.ready() && !g.cardPath.empty() && Current()) StartLoad(g.cardPath, -1, true);
+        else Log("skin: " + g.settings.skin + (g.gpu.ready() ? " (next card)" : " (next start)"));
+        break;
+    }
     case kSetOpenFolder: {
         const std::string dir = SettingsPath().substr(0, SettingsPath().find_last_of('/'));
         fileio::CreateDirectories(dir);
@@ -2453,7 +2486,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         std::string why;
-        if (sc && (g.gpuExp.ready() || g.gpuExp.Init(&why))) {
+        exporter::GpuOptions go;
+        go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
+        go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
+        if (sc && (g.gpuExp.ready() || g.gpuExp.Init(go, &why))) {
             g.gpuExp.SetPlain(true);
             if (g.gpuExp.Load(*sc, &why)) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); Log("as exported: on (X switches back)", LogKind::Good); }
             else Log("export preview upload failed: " + why, LogKind::Warn);
@@ -3046,8 +3082,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g.fontLog = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Consolas");
     g.fontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     std::string gpuWhy;
-    if (g.gpu.Init(&gpuWhy)) Log("Direct3D 11 ready", LogKind::Good);
-    else Log("Direct3D 11 unavailable (" + gpuWhy + "); software renderer", LogKind::Warn);
+    exporter::GpuOptions go;
+    go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
+    go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
+    if (g.gpu.Init(go, &gpuWhy)) {
+        const char* what = g.gpu.kind() == exporter::GpuKind::Warp ? "WARP on the CPU (no real GPU found; the supported CPU fallback)" :
+                           g.gpu.kind() == exporter::GpuKind::Hardware ? "the real GPU" : "Direct3D 11";
+        Log("Direct3D 11 ready: " + g.gpu.adapter() + " (" + what + ")", LogKind::Good);
+    } else Log("Direct3D 11 unavailable (" + gpuWhy + "); software renderer (the CPU fallback)", LogKind::Warn);
     CoInitialize(nullptr);
     if (g.settings.library.empty() || !Exists(g.settings.library)) g.settings.library = FindLibrary();
     if (!g.settings.mods.empty()) g.settings.noMods = false;

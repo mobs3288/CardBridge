@@ -11,10 +11,23 @@
 
 namespace cardbridge::exporter {
 
+enum class GpuKind { Unknown, Hardware, Warp, Software };
+
+struct GpuOptions {
+    std::string preference = "auto";   // "auto", "hardware", "warp", "software"; CARDBRIDGE_GPU overrides it when set
+    std::string skin = "gpu";          // "gpu" (compute shader when a device can run it), "cpu" (always the CPU skin)
+};
+
 // The game's own compiled shaders run on the GPU: Direct3D 11 takes the DXBC programs straight out of the asset bundles (the
 // same bytecode the software interpreter runs), the material properties fill their constant buffers, and the scene is drawn
 // with the same orthographic framing as RenderView. Windows only (the whole tool is). Materials whose shader is not in the
 // bundle are not drawn; skippedMaterials() says how many were left out.
+//
+// When more than one adapter exists (a discrete NVIDIA/AMD card beside an integrated one), Init enumerates them and prefers
+// a discrete hardware adapter, so the viewer and the export bake use the real GPU instead of the integrated one wherever
+// it is. WARP (Direct3D running on the CPU) is the fallback when there is no usable hardware device, and when that is
+// gone too the callers keep the software interpreter renderer. That CPU fallback is the supported path on a machine
+// without a GPU; it is not a degraded second implementation.
 class GpuView {
 public:
     GpuView();
@@ -22,9 +35,17 @@ public:
     GpuView(const GpuView&) = delete;
     GpuView& operator=(const GpuView&) = delete;
 
-    // Creates the Direct3D device (hardware, else the software rasteriser WARP). False with `why` when none works.
+    // Creates the Direct3D device: by default the best hardware adapter (discrete before integrated), else WARP on the CPU.
+    // False with `why` when none works; kind() then says Software and the caller falls back to RenderView. The preference
+    // may be overridden by CARDBRIDGE_GPU (auto/hardware/warp/software) and CARDBRIDGE_GPU_ADAPTER=N (adapter index, 0-based
+    // over the enumerated adapters before any ordering).
     bool Init(std::string* why = nullptr);
+    bool Init(const GpuOptions& opt, std::string* why = nullptr);
     bool ready() const;
+    GpuKind kind() const;              // Hardware, Warp (CPU) or Software after Init
+    std::string adapter() const;       // short device name, e.g. "NVIDIA GeForce ..." or "WARP (CPU)"
+    void SetSkinMode(const std::string& mode);   // "gpu" asks for the compute shader, "cpu" forces the CPU skin (applies to the next Load)
+    bool gpuSkin() const;              // the current pose is skinned by the GPU compute shader (not the CPU loop)
 
     // Uploads the scene's meshes, textures and shader programs. Call again whenever the Scene changes; the Scene must outlive
     // the next Render calls.
