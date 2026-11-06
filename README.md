@@ -10,6 +10,42 @@ It is a standalone C++ Windows application built in the same style as the Projec
 
 > **Version 0.2.1-alpha. It is usable today, but it is not finished.** It works **100% only for the base game**: cards made with the stock Koikatsu items convert and look right. **Several modded cards also work**, but not all of them, and a mod can still break a conversion or a material. It is **still in development**: expect rough edges, wrong colours on some mod items, and missing pieces (see Known limitations). Every export also writes a `_preview.png` (front, side, back) so a result can be judged without a PMX viewer, and the viewer shows exactly what the game's shaders draw. The checklist at the bottom of this file is the source of truth for what is done. The version is in the [`VERSION`](VERSION) file; `cardbridge --version` and the viewer's header show it.
 
+## Video Demo
+
+Watch CardBridge's converted PMX models in action in MikuMikuDance (MMD).
+
+<p align="center">
+  <a href="https://youtu.be/z1WUHVzbCjQ">
+    <img src="image/thumb.jpg" alt="CardBridge – Koikatsu to MMD Tech Demo" width="1080">
+  </a>
+</p>
+
+<p align="center">
+  <em>Matou Sakura – Catch Catch | Koikatsu to MMD | CardBridge</em>
+</p>
+
+## Screenshots and examples
+
+The images below show example character cards, their appearance in CardBridge, and the exported models in MikuMikuDance.
+
+### Character cards
+
+| Example 1 | Example 2 |
+|---|---|
+| <img src="image/demo_card1.png" alt="Demo character card 1" width="400"> | <img src="image/demo_card2.png" alt="Demo character card 2" width="400"> |
+
+### CardBridge
+
+| Example 1 | Example 2 |
+|---|---|
+| <img src="image/demo_cardbridge1.png" alt="CardBridge demo 1" width="400"> | <img src="image/demo_cardbridge2.png" alt="CardBridge demo 2" width="400"> |
+
+### MikuMikuDance
+
+| Example 1 | Example 2 |
+|---|---|
+| <img src="image/demo_MMD_card1.png" alt="MMD export demo 1" width="400"> | <img src="image/demo_MMD_card2.png" alt="MMD export demo 2" width="400"> |
+
 ## Get it and run it
 
 The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the converter and exporter inside). No installer, no scripts, no extra files.

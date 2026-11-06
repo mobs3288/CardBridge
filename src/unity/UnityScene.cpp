@@ -100,6 +100,16 @@ std::vector<int64_t> UnityFile::findXformsByName(const std::string& goName) cons
     return out;
 }
 
+int64_t UnityFile::findPrefabRoot(const std::string& goName) const {
+    int64_t first = 0;
+    for (const auto& kv : xforms_) {
+        if (kv.second.name != goName) continue;
+        if (kv.second.parent == 0) return kv.first;   // the instantiated prefab's own root
+        if (!first) first = kv.first;
+    }
+    return first;
+}
+
 Mat4 UnityFile::worldMatrix(int64_t xformId, const std::map<int64_t, Mat4>* localOverride) const {
     std::vector<const Xform*> chain;
     for (const Xform* x = xform(xformId); x && chain.size() < 4096; x = xform(x->parent)) chain.push_back(x);
