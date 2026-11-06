@@ -99,7 +99,18 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
     return kept;
 }
 
-void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
+// Which of a character's own (characterOwn) jiggle chains this is: the breast chains carry the bnip / bust bones, the hip (butt) chains
+// the siri / kosi ones. Anything else of the body's own is left to the butt switch's side.
+bool IsBustJiggle(const assemble::Scene& scene, const assemble::SceneChain& ch) {
+    for (int b : ch.bones) {
+        if (b < 0 || static_cast<size_t>(b) >= scene.bones.size()) continue;
+        const std::string& n = scene.bones[static_cast<size_t>(b)].name;
+        if (n.find("bnip") != std::string::npos || n.find("bust") != std::string::npos) return true;
+    }
+    return false;
+}
+
+void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
     std::vector<Core> colliderCore;       // per collider body, in the order they were added
@@ -139,10 +150,16 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
-        // The body's own jiggle chains (breast, hip) are skin on the body, not cloth: whatever their limits, a light link carrying vertices of
-        // the body shivers in MikuMikuDance (tried again with a 7 degree swing: the bust shook visibly at rest). They stay rigid in the PMX; the
-        // game's jiggle is not carried.
-        if (ch.characterOwn) continue;
+        // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on, driven by
+        // the game's own parameters scaled by the intensity; a light, stiff link with a wide swing shivered at rest in MikuMikuDance, so the
+        // jiggle link is heavier and better damped than a hair strand's (see below) and rides the same stable conversion.
+        float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
+        if (ch.characterOwn) {
+            const bool bust = IsBustJiggle(scene, ch);
+            if (bust && jiggleBust) jiggle = jiggleIntensity;
+            else if (!bust && jiggleButt) jiggle = jiggleIntensity;
+            if (jiggle <= 0.0f) continue;   // switch off: the part stays rigid, following its bone
+        }
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (bones.size() < 2) continue;
         const std::set<int> inChain(bones.begin(), bones.end());
@@ -176,6 +193,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
+            if (jiggle > 0.0f) l.mass *= 2.0f;   // the jiggle link carries body skin: heavier than a hair strand, so the solver does not jitter it
             links[b] = l;
         }
 
@@ -202,7 +220,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             rb.mass = l.mass;
             // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
             // 60 * damping is the same decay in both, so the swing dies away at the same pace.
-            const float decay = std::max(0.6f, 60.0f * along(ch.boneDamping, ch.damping, l.bone));
+            float decay = std::max(0.6f, 60.0f * along(ch.boneDamping, ch.damping, l.bone));
+            if (jiggle > 0.0f) decay *= 1.5f;   // the jiggle settles faster than the game lets it, so it comes to rest instead of ringing on
             const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
             rb.moveDamping = damp;
             rb.rotDamping = damp;
@@ -229,7 +248,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale) {
             const int b = bones[k];
             const Link& self = links[b];
             // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
-            const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
+            float elast = along(ch.boneElasticity, ch.elasticity, b);
+            if (jiggle > 0.0f) elast *= jiggle;   // the intensity scales how briskly the part springs back, i.e. how hard it jiggles
+            const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, elast))));
             // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);

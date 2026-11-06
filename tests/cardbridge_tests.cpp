@@ -1006,6 +1006,55 @@ void unitTests() {
         CHECK(exporter::PhysicsChainBones(s, ch).size() == 5);
     });
 
+    test("physics: the body's own jiggle chains become bodies only when their switch is on (boobs on by default, the butt off)", [] {
+        auto make = [](bool bustOwn) {
+            assemble::Scene s;
+            s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+            s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+            s.bones.push_back({bustOwn ? "cf_s_bnip02_L" : "hair_a", 1, {0, 1.05f, 0.1f}, "rig"});
+            s.bones.push_back({bustOwn ? "cf_s_bnip02_L2" : "hair_b", 2, {0, 0.95f, 0.12f}, "rig"});
+            assemble::SceneChain ch;
+            ch.name = bustOwn ? "bust" : "hair";
+            ch.bones = {2, 3};
+            ch.characterOwn = bustOwn;
+            ch.damping = 0.1f; ch.elasticity = 0.1f; ch.stiffness = 0.1f;
+            s.chains.push_back(ch);
+            return s;
+        };
+        auto count = [](const assemble::Scene& s, bool bust, bool butt, float intensity) {
+            pmx::Model m;
+            for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+            exporter::AddPhysics(s, m, 10.0f, bust, butt, intensity);
+            return m;
+        };
+        {   // the default export: breast jiggle on, the butt off
+            pmx::Model m = count(make(true), true, false, 1.0f);
+            CHECK(m.rigidBodies.size() == 2 && m.joints.size() == 1);   // the jiggle chain became bodies
+            pmx::Model off = count(make(true), false, false, 1.0f);
+            CHECK(off.rigidBodies.empty() && off.joints.empty());      // boobs off: the part stays rigid
+            pmx::Model hair = count(make(false), false, false, 1.0f);
+            CHECK(hair.rigidBodies.size() == 2);                       // hair is not the body's own: always simulated
+            pmx::Model jig = count(make(true), true, false, 1.0f);
+            pmx::Model plain = count(make(false), true, false, 1.0f);
+            CHECK(jig.rigidBodies[1].mass > plain.rigidBodies[1].mass);            // the jiggle link carries body skin: heavier
+            CHECK(jig.rigidBodies[1].moveDamping > plain.rigidBodies[1].moveDamping);   // and settles faster
+        }
+        {   // the butt chain rides the butt switch
+            assemble::Scene s;
+            s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
+            s.bones.push_back({"cf_s_siri_L", 0, {0.05f, 0.95f, -0.05f}, "rig"});
+            s.bones.push_back({"cf_s_siri_L2", 1, {0.05f, 0.85f, -0.08f}, "rig"});
+            assemble::SceneChain ch;
+            ch.name = "butt";
+            ch.bones = {1, 2};
+            ch.characterOwn = true;
+            s.chains.push_back(ch);
+            CHECK(count(s, true, false, 1.0f).rigidBodies.empty());   // default off
+            CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 2); // on: bodies
+            CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 2); // independent of the boobs switch
+        }
+    });
+
     test("physics: garments hanging in front of the thighs turn with the legs, after them; the sides, the back and the hair do not", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});

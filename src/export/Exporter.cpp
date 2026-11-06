@@ -594,7 +594,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& [n, sh] : expressionShapes) std::fprintf(stderr, "expression %s = %s\n", n.c_str(), sh.c_str());
     const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model, expressionShapes) : std::vector<int>();
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
-    if (opt.physics) AddPhysics(scene, model, opt.scale);
+    if (opt.physics) AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggleIntensity);
     std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys
     std::vector<int> mmdExtraBones;
     if (opt.mmdNames) {

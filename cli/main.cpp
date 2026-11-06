@@ -109,6 +109,8 @@ void usage() {
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
         "                                             standard (Japanese) names so a motion (VMD) finds them\n"
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
+        "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-intensity F]\n"
+        "                                             breast jiggle is on by default, the butt off; the intensity scales the swing (1 = the game)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -500,6 +502,9 @@ int cmdConvert(const Args& a) {
     eo.overwrite = a.has("overwrite");
     eo.faceMinusZ = !a.has("unity-facing");
     eo.physics = !a.has("no-physics");
+    eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
+    eo.jiggleButt = a.has("jiggle-butt");              // default off
+    eo.jiggleIntensity = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 1.0f;
     eo.mmdNames = !a.has("no-mmd-names");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
@@ -530,7 +535,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "jiggle-butt"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
