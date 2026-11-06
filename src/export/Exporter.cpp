@@ -131,6 +131,33 @@ bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat)
     return false;
 }
 
+// The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid, the game's
+// way of drawing a see-through lining): the triangle winding of a large share of them runs opposite to their vertex normals.
+// A single surface (the skirt) has no such layer. `mat` must be one of `scene.materials`.
+bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
+    const int mi = static_cast<int>(&mat - &scene.materials.front());
+    size_t reversed = 0, total = 0;
+    for (const auto& mesh : scene.meshes)
+        for (const auto& sm : mesh.submeshes) {
+            if (sm.material != mi) continue;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const auto& a = mesh.vertices[sm.indices[i]];
+                const auto& b = mesh.vertices[sm.indices[i + 1]];
+                const auto& c = mesh.vertices[sm.indices[i + 2]];
+                // The triangle's geometric normal from its winding, against the vertex normals the game authored.
+                const Vec3 e1{b.pos.x - a.pos.x, b.pos.y - a.pos.y, b.pos.z - a.pos.z}, e2{c.pos.x - a.pos.x, c.pos.y - a.pos.y, c.pos.z - a.pos.z};
+                const Vec3 g{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+                if (g.x * g.x + g.y * g.y + g.z * g.z < 1e-24f) continue;   // degenerate: no direction either way
+                const Vec3 n{(a.normal.x + b.normal.x + c.normal.x) / 3.0f, (a.normal.y + b.normal.y + c.normal.y) / 3.0f,
+                             (a.normal.z + b.normal.z + c.normal.z) / 3.0f};
+                if ((g.x * n.x + g.y * n.y + g.z * n.z) < 0.0f) ++reversed;
+                ++total;
+            }
+        }
+    return total > 0 && reversed * 5 > total;   // over a fifth wound against the normals: a co-located inner layer
+}
+
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     MmdLook look;
     look.diffuse = mat.diffuse;
@@ -156,12 +183,20 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // shadow, casts and receives self-shadow and has an edge, as those models do (without the flags MMD drew no shadow at all).
     const bool overlay = mat.shader.find("toon_") != std::string::npos, lens = mat.shader.find("glasses") != std::string::npos;
     const bool tooth = IsTooth(mat);
+    // Transparent (alpha) materials blend over what is behind them: MikuMikuDance's ground shadow, shadow map and self-shadow on such a
+    // material draw it as a solid dark shape (the underpants / swimsuit / lace looked like a shadow), so they get none of those, like
+    // lenses.
+    const bool transparent = mat.alpha;
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
     // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
     const bool cutout = HasCutout(scene, mat);
-    if (!overlay && !lens) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
-    if (!overlay && !lens && !tooth && !cutout) look.drawFlags |= 0x10;
+    // A transparent garment modelled as two co-located layers: MikuMikuDance's edge draws back faces pushed outward, so it draws the inner
+    // layer pushed through the outer one and covers the whole garment in the edge colour (the underpants went flat grey). Such a garment
+    // gets no edge; its texture still shows. Single-layer garments (the skirt) keep theirs.
+    const bool innerLayer = mat.alpha && HasInnerLayer(scene, mat);
+    if (!overlay && !lens && !transparent) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
+    if (!overlay && !lens && !tooth && !cutout && !innerLayer) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
     // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
     // dark skin tone, never the white rim a light colour made round hair strands lying on the face).

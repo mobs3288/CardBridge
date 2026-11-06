@@ -59,6 +59,9 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.
 bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+// The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid), the triangle winding
+// of a large share of them running opposite to their vertex normals. `mat` must be one of `scene.materials`.
+bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
 // The sphere map image of a look (64 x 64, its name says kind and strength), the same for the PMX file and the viewer.
 assemble::SceneTexture MmdSphereImage(const MmdLook& look);
 
