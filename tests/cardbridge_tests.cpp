@@ -1665,29 +1665,111 @@ void integrationTests() {
                 auto uf = item.ok() ? resolver.openBundle(item, &rootedWhy) : nullptr;
                 CHECK(uf != nullptr);
                 if (uf) {
-                    auto roots = uf->findXformsByName(item.assetName());
+                    const int64_t hairRoot = uf->findPrefabRoot(item.assetName());
                     int64_t hairBone = 0;
-                    if (!roots.empty())
-                        for (int64_t id : uf->subtree(roots[0]))
+                    if (hairRoot)
+                        for (int64_t id : uf->subtree(hairRoot))
                             if (const unity::Xform* x = uf->xform(id); x && x->name == "cf_J_hairS_top") { hairBone = id; break; }
-                    CHECK(!roots.empty() && hairBone != 0);
+                    CHECK(hairRoot != 0 && hairBone != 0);
                     int bi = -1;
                     for (size_t i = 0; i < rootedScene.bones.size() && bi < 0; ++i)
                         if (rootedScene.bones[i].source == "hair.side" && rootedScene.bones[i].name == "cf_J_hairS_top") bi = static_cast<int>(i);
                     const int faceUp = rootedScene.boneIndex("cf_J_FaceUp_ty");
                     CHECK(bi >= 0 && faceUp >= 0);
-                    if (bi >= 0 && faceUp >= 0 && !roots.empty() && hairBone != 0) {
+                    if (bi >= 0 && faceUp >= 0 && hairRoot && hairBone != 0) {
                         const Mat4& parentWorld = rootedScene.bones[static_cast<size_t>(faceUp)].world;
                         const Mat4 expected = parentWorld * uf->worldMatrix(hairBone);
                         const Mat4& got = rootedScene.bones[static_cast<size_t>(bi)].world;
                         float worst = 0;
                         for (int i = 0; i < 16; ++i) worst = std::max(worst, std::fabs(got.m[i] - expected.m[i]));
-                        const Vec3 withoutRoot = (parentWorld * inverse(uf->worldMatrix(roots[0])) * uf->worldMatrix(hairBone)).translation();
+                        const Vec3 withoutRoot = (parentWorld * inverse(uf->worldMatrix(hairRoot)) * uf->worldMatrix(hairBone)).translation();
                         std::printf("  hair root: worst matrix delta %.6f; y with root %.4f, without it %.4f\n", worst, got.translation().y, withoutRoot.y);
                         CHECK(worst < 1e-4f);
                         CHECK(std::fabs(got.translation().y - withoutRoot.y) > 0.03f);   // the test would catch the old cancellation
                     }
                 }
+            }
+        }
+        {   // accessory physics: a hair accessory is skinned to its own DynamicBone chain, never pinned rigidly to the head, and a static
+            // piece hangs on the item's node (so a chain that moves it takes the mesh along)
+            std::map<std::string, std::set<int>> accChains;
+            for (const auto& ch : scene.chains) {
+                if (ch.part.find(".acc") == std::string::npos) continue;
+                bool owned = true;
+                for (int b : ch.bones)
+                    if (b < 0 || b >= static_cast<int>(scene.bones.size()) || scene.bones[static_cast<size_t>(b)].source != ch.part) owned = false;
+                if (!owned) continue;   // a garment worn through an accessory slot binds to the body skeleton; not an accessory chain
+                CHECK(ch.bones.size() >= 2);
+                std::set<int> bones;
+                for (int b : ch.bones) {
+                    CHECK(b == ch.bones[0] || bones.count(scene.bones[static_cast<size_t>(b)].parent) > 0);   // a chain, not a loose set
+                    bones.insert(b);
+                }
+                accChains[ch.part].insert(bones.begin(), bones.end());
+            }
+            CHECK(!accChains.empty());
+            std::map<std::string, std::set<int>> driven;
+            size_t deadChains = 0;
+            for (const auto& m : scene.meshes) {
+                if (m.part < 0 || m.part >= static_cast<int>(scene.parts.size())) continue;
+                const std::string& partId = scene.parts[static_cast<size_t>(m.part)].id;
+                auto ci = accChains.find(partId);
+                if (ci == accChains.end()) continue;
+                for (const auto& v : m.vertices)
+                    for (int k = 0; k < 4; ++k)
+                        if (v.weight[k] > 0.0f) driven[partId].insert(v.bone[k]);
+            }
+            for (const auto& [partId, chainBones] : accChains) {
+                bool used = false;
+                for (int b : chainBones) used = used || driven[partId].count(b) > 0;
+                if (!used) ++deadChains;
+            }
+            CHECK(deadChains == 0);   // every accessory chain moves some geometry
+            std::set<std::string> hairParts, skinnedHairParts;
+            size_t hairVerts = 0, onChain = 0, foreign = 0;
+            for (const auto& m : scene.meshes) {
+                if (m.part < 0 || m.part >= static_cast<int>(scene.parts.size())) continue;
+                const std::string& partId = scene.parts[static_cast<size_t>(m.part)].id;
+                if (partId.find(".acc") == std::string::npos || m.name.rfind("cf_hair", 0) != 0) continue;
+                hairParts.insert(partId);
+                bool skinnedMesh = false;
+                for (const auto& v : m.vertices) {
+                    int weights = 0;
+                    for (int k = 0; k < 4; ++k) {
+                        if (v.weight[k] <= 0.0f) continue;
+                        ++weights;
+                        ++hairVerts;
+                        if (v.bone[k] < 0 || v.bone[k] >= static_cast<int>(scene.bones.size())) { ++foreign; continue; }
+                        if (scene.bones[static_cast<size_t>(v.bone[k])].source != partId) ++foreign;
+                        auto ci = accChains.find(partId);
+                        if (ci != accChains.end() && ci->second.count(v.bone[k])) ++onChain;
+                    }
+                    if (weights > 1) skinnedMesh = true;
+                }
+                if (skinnedMesh) skinnedHairParts.insert(partId);
+            }
+            CHECK(!hairParts.empty());
+            CHECK(!skinnedHairParts.empty());
+            for (const auto& p : skinnedHairParts) CHECK(accChains.count(p) == 1);   // hair that swings in the game swings here
+            CHECK(onChain > 100);   // the strands are actually driven by their chains
+            CHECK(foreign == 0);    // no piece is left behind on the head bone
+            std::printf("  accessory hair: %zu parts (%zu skinned), %zu chains, %zu of %zu vertex weights on chains\n",
+                        hairParts.size(), skinnedHairParts.size(), accChains.size(), onChain, hairVerts);
+        }
+        {   // a prefab and a nested node can share a name: the prefab root is the parentless one (co_bra_00's p_o_top_swim02_low)
+            std::string prefabWhy;
+            auto bra = resolver.openBaseBundle("chara/co_bra_00.unity3d", &prefabWhy);
+            if (bra) {
+                const auto all = bra->findXformsByName("p_o_top_swim02_low");
+                CHECK(all.size() >= 2);
+                const int64_t root = bra->findPrefabRoot("p_o_top_swim02_low");
+                CHECK(root != 0 && bra->xform(root) && bra->xform(root)->parent == 0);
+                CHECK(std::find(all.begin(), all.end(), root) != all.end());
+                bool nested = false;
+                for (int64_t id : all) if (id != root && bra->xform(id) && bra->xform(id)->parent != 0) nested = true;
+                CHECK(nested);
+                CHECK(!all.empty() && all[0] != root);   // the old first-match lookup picks the nested node here
+                CHECK(bra->findPrefabRoot("p_o_top_swim02_low_not_there") == 0);
             }
         }
         {   // every transform of the body and head rig prefabs is a scene bone (by name; the face bones included)
@@ -1697,10 +1779,10 @@ void integrationTests() {
             if (base) {
                 std::set<std::string> rigNames;
                 for (const char* prefab : {"p_cf_body_bone", "p_cf_head_bone"}) {
-                    auto roots = base->findXformsByName(prefab);
-                    CHECK(!roots.empty());
-                    if (roots.empty()) continue;
-                    for (int64_t id : base->subtree(roots[0])) rigNames.insert(base->xform(id)->name);
+                    const int64_t rigRoot = base->findPrefabRoot(prefab);
+                    CHECK(rigRoot != 0);
+                    if (!rigRoot) continue;
+                    for (int64_t id : base->subtree(rigRoot)) rigNames.insert(base->xform(id)->name);
                 }
                 size_t missing = 0;
                 for (const auto& n : rigNames) if (scene.boneIndex(n) < 0) { ++missing; std::printf("  rig bone missing from the scene: %s\n", n.c_str()); }
@@ -1932,6 +2014,12 @@ void integrationTests() {
                 expectJoints += valid - 1;
             }
             CHECK(back.bodies.size() == expectBodies && back.joints.size() == expectJoints);
+            size_t accBodies = 0;
+            for (const auto& b : back.bodies)
+                if (b.bone >= 0 && b.bone < static_cast<int>(back.bones.size()) && back.bones[static_cast<size_t>(b.bone)].name.find(".acc") != std::string::npos)
+                    ++accBodies;
+            CHECK(accBodies > 0);   // the accessory hair's chains reach the PMX, not just the scene
+            std::printf("  accessory physics: %zu rigid bodies on accessory bones\n", accBodies);
             const auto findings = pmxPhysicsFindings(back);
             for (size_t i = 0; i < findings.size() && i < 10; ++i) std::printf("  physics finding: %s\n", findings[i].c_str());
             CHECK(findings.empty());

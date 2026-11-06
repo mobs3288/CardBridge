@@ -57,10 +57,10 @@ Quat quatMul(Quat a, Quat b) {
 // plugin writes (BoneModifier.Apply) from the bone's own values at that moment (the shape override when there is one).
 void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, const card::AbmxTable& table, int coordinate) {
     if (table.empty()) return;
-    auto roots = uf.findXformsByName(prefabName);
-    if (roots.empty()) return;
+    const int64_t root = uf.findPrefabRoot(prefabName);
+    if (!root) return;
     std::set<std::string> done;
-    for (int64_t id : uf.subtree(roots[0])) {
+    for (int64_t id : uf.subtree(root)) {
         const unity::Xform* x = uf.xform(id);
         if (!x || !done.insert(x->name).second) continue;
         const card::AbmxMod* m = table.find(x->name, coordinate);
@@ -83,9 +83,9 @@ void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, cons
 // own prefab, which carries them placed for that head (the pony node of the default head points its ponytail down the back; the generic
 // p_cf_head_bone only has placeholders). Local transforms by node name, for the nodes `ov` does not already replace.
 void headAttachOverrides(Overrides& ov, UnityFile& head, const std::string& prefabName) {
-    auto roots = head.findXformsByName(prefabName);
-    if (roots.empty()) return;
-    for (int64_t id : head.subtree(roots[0])) {
+    const int64_t root = head.findPrefabRoot(prefabName);
+    if (!root) return;
+    for (int64_t id : head.subtree(root)) {
         const unity::Xform* x = head.xform(id);
         if (!x || x->name.rfind("a_n_", 0) != 0 || ov.count(x->name)) continue;
         LocalOverride o;
@@ -101,9 +101,8 @@ void headAttachOverrides(Overrides& ov, UnityFile& head, const std::string& pref
 // (so a bone's shape override moves its whole subtree); returns false if the prefab root is missing.
 bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& prefabName, const Mat4& base,
                   int attachParent, const std::string& source, const Overrides* overrides = nullptr) {
-    auto roots = uf.findXformsByName(prefabName);
-    if (roots.empty()) return false;
-    int64_t rootId = roots[0];
+    const int64_t rootId = uf.findPrefabRoot(prefabName);
+    if (!rootId) return false;
     std::map<int64_t, int> idx;
     std::map<int64_t, Mat4> worlds;
     for (int64_t id : uf.subtree(rootId)) {
@@ -111,7 +110,8 @@ bool addRigPrefab(Scene& scene, Rig& rig, UnityFile& uf, const std::string& pref
         Mat4 w;
         int parent = attachParent;
         if (id == rootId) {
-            w = base;
+            // SetParent(parent, false): a rig prefab's own root transform stays under the node it is hung on.
+            w = base * Mat4::TRS(x->pos, x->rot, x->scl);
         } else {
             Vec3 pos = x->pos, scl = x->scl;
             Quat rot = x->rot;
@@ -186,9 +186,9 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
 
     // Local transforms of every rig bone, so partial assignments (only pos.x ...) keep the rest.
     std::map<std::string, shape::ShapeBone> bones;
-    auto roots = rigFile.findXformsByName(rigPrefab);
-    if (roots.empty()) return out;
-    for (int64_t id : rigFile.subtree(roots[0])) {
+    const int64_t rigRoot = rigFile.findPrefabRoot(rigPrefab);
+    if (!rigRoot) return out;
+    for (int64_t id : rigFile.subtree(rigRoot)) {
         const unity::Xform* x = rigFile.xform(id);
         if (bones.count(x->name)) continue;
         shape::ShapeBone sb;
@@ -281,16 +281,16 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     std::map<std::string, shape::ShapeBone> bones;
     std::map<std::string, std::string> parentOf;
     std::map<const shape::ShapeBone*, std::string> nameOf;
-    auto roots = rigFile.findXformsByName(rigPrefab);
-    if (roots.empty()) return out;
-    for (int64_t id : rigFile.subtree(roots[0])) {
+    const int64_t rigRoot = rigFile.findPrefabRoot(rigPrefab);
+    if (!rigRoot) return out;
+    for (int64_t id : rigFile.subtree(rigRoot)) {
         const unity::Xform* x = rigFile.xform(id);
         if (bones.count(x->name)) continue;
         shape::ShapeBone sb;
         sb.pos = x->pos;
         sb.scl = x->scl;
         bones[x->name] = sb;
-        if (id != roots[0]) if (const unity::Xform* par = rigFile.xform(x->parent)) parentOf[x->name] = par->name;
+        if (id != rigRoot) if (const unity::Xform* par = rigFile.xform(x->parent)) parentOf[x->name] = par->name;
     }
     for (auto& [n, b] : bones) nameOf[&b] = n;
 
@@ -1184,11 +1184,20 @@ struct Builder {
         }
 
         Mat4 staticM = placement * (rootInv * rendererW);
+        // Non-skinned geometry follows the node it hangs on, as it does in the game: a hair accessory's rigid pieces stay under N_move,
+        // a static child of a DynamicBone chain swings with that chain. Binding every such piece to the attach node instead would leave
+        // it behind the moment the chain moved. The item's own node becomes a scene bone, so it also follows the (possibly reshaped) body.
+        int staticBind = staticBone;
+        if (accessoryMode) {
+            const unity::Xform* rx = uf.xform(r.xformId);
+            if (rx && rx->parent && uf.xform(rx->parent))
+                staticBind = accessoryBone(uf, rx->parent, prefabRoot, placement, staticBone, partId);
+        }
         // Inverse rest worlds of the bones that move this mesh: a vertex is also stored in each bone's own frame (SceneVertex::local), so a
         // re-shape that moves the bones moves the vertices too. Taking the frame from the scene's bone makes the identity re-shape exact.
         std::vector<Mat4> invBone(boneIdx.size());
         for (size_t i = 0; i < boneIdx.size(); ++i) invBone[i] = inverse(scene.bones[static_cast<size_t>(boneIdx[i])].world);
-        const Mat4 invStatic = inverse(scene.bones[static_cast<size_t>(staticBone)].world);
+        const Mat4 invStatic = inverse(scene.bones[static_cast<size_t>(staticBind)].world);
         sm.reshapable = true;
         for (size_t v = 0; v < n; ++v) {
             SceneVertex& out = sm.vertices[v];
@@ -1230,7 +1239,7 @@ struct Builder {
             if (!placed) {
                 out.pos = staticM.point(p);
                 out.normal = normalize(staticM.dir(nrm));
-                out.bone[0] = staticBone;
+                out.bone[0] = staticBind;
                 out.weight[0] = 1.0f;
                 out.local[0] = invStatic.point(out.pos);
                 out.nlocal[0] = invStatic.dir(out.normal);
@@ -1410,8 +1419,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     {   // the colliders every DynamicBone of the character is given (ChaControl.LoadCharaFbxData: the body bone prefab's DynamicBoneColliders)
         std::map<int64_t, std::string> goName;
         for (const auto& [id, x] : base->xforms()) goName[x.goId] = x.name;
-        for (int64_t root : base->findXformsByName(opt.bodyRigPrefab))
-            for (const auto& mb : base->monoBehavioursUnder(root)) {
+        const int64_t bodyRigRoot = base->findPrefabRoot(opt.bodyRigPrefab);
+        if (bodyRigRoot)
+            for (const auto& mb : base->monoBehavioursUnder(bodyRigRoot)) {
                 if (mb.className != "DynamicBoneCollider") continue;
                 auto nm = goName.find(mb.goId);
                 if (nm == goName.end()) continue;
@@ -1445,7 +1455,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
         if (std::getenv("CARDBRIDGE_DEBUG_DB")) std::fprintf(stderr, "dbcolliders %zu\n", b.dbColliders.size());
-        for (int64_t root : base->findXformsByName(opt.bodyRigPrefab)) b.addChains(*base, root, "rig", false);   // the body's own jiggle chains
+        if (bodyRigRoot) b.addChains(*base, bodyRigRoot, "rig", false);   // the body's own jiggle chains
     }
     int headAttach = scene.boneIndex(opt.headAttachBone);
     Mat4 headBase;
@@ -1455,6 +1465,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     } else {
         scene.warn("", "bone '" + opt.headAttachBone + "' not found; the head rig is placed at the origin");
     }
+    // The head model is parented to the head rig prefab's root (objHeadBone). Keep that root's own transform, not only the
+    // cf_s_head world it hangs on (the base rig's root is identity, a replacement rig's need not be).
+    Mat4 headRoot = headBase;
+    if (const int64_t headRigRoot = base->findPrefabRoot(opt.headRigPrefab); headRigRoot)
+        if (const unity::Xform* hx = base->xform(headRigRoot))
+            headRoot = PrefabRootPlacement(headBase, hx->pos, hx->rot, hx->scl);
     Overrides headOv, attachOv;
     {
         resolve::ItemRef hr;
@@ -1466,7 +1482,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 std::string hwhy;
                 auto hb = resolver.openBundle(hi, &hwhy);
                 if (hb) {
-                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scene, opt);
+                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headRoot, scene, opt);
                     headAttachOverrides(attachOv, *hb, hi.assetName());
                     for (const auto& [name, o] : attachOv) headOv[name] = o;   // not slider-driven: the head model's own placement wins
                 }
@@ -1596,8 +1612,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.status = "resolved-base";
         part.bundle = "chara/oo_base.unity3d";
         int partIdx = static_cast<int>(scene.parts.size());
-        auto roots = base->findXformsByName(opt.bodyPrefab);
-        if (roots.empty()) {
+        const int64_t bodyRoot = base->findPrefabRoot(opt.bodyPrefab);
+        if (!bodyRoot) {
             scene.error("body", "prefab '" + opt.bodyPrefab + "' not found in oo_base.unity3d");
             part.status = "missing-bundle";
         } else {
@@ -1608,7 +1624,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                          static_cast<float>(sk.at(size_t(2)).asFloat()), 1.0f};
             std::vector<std::pair<std::string, int>> bodyOverlayTex;
             std::vector<std::pair<std::string, Vec4>> bodyOverlayColors;
-            for (const auto& r : base->renderersUnder(roots[0])) {
+            for (const auto& r : base->renderersUnder(bodyRoot)) {
                 if (!r.enabled) continue;
                 if (r.name != "o_body_a") {   // helpers, shadow casters, anatomy meshes that are hidden in the character maker
                     continue;
@@ -1692,7 +1708,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
                 b.extraTex = bodyOverlayTex;
                 b.runtime = bodyOverlayColors;
-                int mi = b.addRenderer(*base, r, roots[0], partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
+                int mi = b.addRenderer(*base, r, bodyRoot, partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
                 b.extraTex.clear();
                 b.runtime.clear();
                 if (mi >= 0) part.meshes.push_back(mi);
@@ -1784,8 +1800,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             continue;
         }
         part.bundle = item.bundleRel();
-        auto roots = uf->findXformsByName(item.assetName());
-        if (roots.empty()) {
+        const int64_t itemRoot = uf->findPrefabRoot(item.assetName());
+        if (!itemRoot) {
             part.status = "missing-bundle";
             part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel();
             scene.warn(ref.partId, part.detail);
@@ -1794,7 +1810,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
 
         // Accessories hang on a named body node; everything else is skinned.
-        const unity::Xform* rootXf = uf->xform(roots[0]);
+        const unity::Xform* rootXf = uf->xform(itemRoot);
         Mat4 placement;
         int staticBone = 0;
         if (ref.group == "Accessories" && !ref.attachNode.empty()) {
@@ -1813,7 +1829,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             // A garment prefab (cf_o_root with the body's own bone names) worn through an accessory slot is bound to the
             // character's skeleton by bone name like any garment; it does not hang on the slot's attach node, whose offset
             // would lift a vest authored in body space by the node's height.
-            for (int64_t xid : uf->subtree(roots[0]))
+            for (int64_t xid : uf->subtree(itemRoot))
                 if (const unity::Xform* x = uf->xform(xid); x && x->name == "cf_o_root") {
                     accessoryMode = false;
                     garmentAsAccessory = true;
@@ -1821,6 +1837,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     staticBone = 0;
                     break;
                 }
+        }
+        if ((ref.group == "Outfit" || ref.group == "Head") && rootXf) {
+            // A garment hangs on objTop (the body-space origin); the head model on the head rig root (objHeadBone). The game
+            // parents both with SetParent(parent, false). Their skinned meshes are retargeted to the character's bones by name
+            // (AssignedAnotherWeights), so the root transform moves the prefab's static geometry and own bones.
+            const Mat4 parent = ref.group == "Head" ? headRoot : Mat4{};
+            placement = PrefabRootPlacement(parent, rootXf->pos, rootXf->rot, rootXf->scl);
+            if (ref.group == "Head") staticBone = std::max(0, scene.boneIndex(opt.headRigPrefab));
         }
         // The game instantiates the item prefab and parents it with SetParent(parent, false), so the prefab root keeps its own
         // local transform under the parent (a cape authored facing back is turned 180 degrees by its root). `rootInv` cancels
@@ -1926,7 +1950,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (main1 && mask1) { look.tex1 = clothesTexture(main1, k1, mask1, k2); haveLook = true; }
             if (main2 && mask2) { look.tex2 = clothesTexture(main2, k3, mask2, k4); haveLook = true; }
             if (haveLook) {
-                for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+                for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                     if (mb.className != "ChaClothesComponent") continue;
                     auto collect = [&](const char* field, std::set<int64_t>& into) {
                         const Value& fv = mb.fields.at(field);
@@ -2160,7 +2184,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         // Hair length: a hair prefab's "_s" bones sit at baseLength + Lerp(0, addLength, lengthRate) along y (ChaCustomHairComponent.Update).
         // The rate is the hair part's length slider for a hair item and, for a hair accessory, the HairAccessoryCustomizer slot setting.
         if (accessoryMode || ref.group == "Hair") {
-            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+            for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "ChaCustomHairComponent") continue;
                 double rate = mb.fields.at("lengthRate").asFloat();
                 if (ref.group == "Hair") {
@@ -2226,7 +2250,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.blend = nullptr;
         if (ref.group == "Head") {
             std::map<int64_t, std::map<int, float>> sum;
-            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+            for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "FaceBlendShape") continue;
                 auto status = [&](const char* key, double def) { return card.status.at(key).asFloat(def); };
                 const float lookUp = static_cast<float>(mb.fields.at("EyeLookUpCorrect").asFloat(0.1));
@@ -2284,7 +2308,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     startPtr = &start;
                 }
             }
-            if (settleItem(*uf, roots[0], anchor, startPtr, b.dbColliders, b.localOv, simW)) { b.simW = &simW; scene.chainsSettled = true; }
+            if (settleItem(*uf, itemRoot, anchor, startPtr, b.dbColliders, b.localOv, simW)) { b.simW = &simW; scene.chainsSettled = true; }
         }
         b.meCoordinate = outfit;
         b.meType = -1;
@@ -2300,7 +2324,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem, rtHairAcs;
         bool haveAccComponent = false;
         bool useC[3] = {true, true, true};
-        for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+        for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
             auto ids = [&](const char* field, std::set<int64_t>& into) {
                 const Value& fv = mb.fields.at(field);
                 if (fv.isMap()) { if (fv.at("m_FileID").asInt() == 0 && fv.at("m_PathID").asInt() != 0) into.insert(fv.at("m_PathID").asInt()); return; }
@@ -2344,7 +2368,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::vector<int64_t> hiddenOptions;
         if (ref.group == "Outfit" && ref.outfit >= 0 && ref.slot >= 0) {
             const Value& hide = card.outfits[static_cast<size_t>(ref.outfit)].clothes.at("parts").at(static_cast<size_t>(ref.subKind >= 0 ? 0 : ref.slot)).at("hideOpt");
-            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+            for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "ChaClothesComponent") continue;
                 for (size_t k = 0; k < 2; ++k) {
                     if (!hide.at(k).asBool()) continue;
@@ -2354,7 +2378,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
         size_t before = scene.meshes.size();
-        for (const auto& r : uf->renderersUnder(roots[0])) {
+        for (const auto& r : uf->renderersUnder(itemRoot)) {
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
                 std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0);
             if (!r.enabled) continue;
@@ -2421,7 +2445,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 auto lerp = [](float a, float bb, float t) { return a + (bb - a) * t; };
                 auto F = [&](const char* k, double def) { return static_cast<float>(faceV.at(k).asFloat(def)); };
                 const Value* ctl = nullptr;
-                std::vector<unity::MonoInfo> mbs = uf->monoBehavioursUnder(roots[0]);
+                std::vector<unity::MonoInfo> mbs = uf->monoBehavioursUnder(itemRoot);
                 for (const auto& mb : mbs) if (mb.className == "EyeLookMaterialControll" && mb.goId == r.goId) { ctl = &mb.fields; break; }
                 int hlUp = -1, hlDown = -1;
                 if (auto t = rowTexture(410, faceV.at("hlUpId").asInt(), "ChaFileFace.hlUpId", "EyeHiUpTex", "highlight up")) { auto c2 = t->rgba; hlUp = b.addSceneTexture(t->name, "eye highlight", t->width, t->height, std::move(c2)); }
@@ -2491,12 +2515,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 b.runtime.emplace_back("_Color3", rawColor(hp.at("endColor")));
                 b.runtime.emplace_back("_LineColor", vec4Of(hp.at("outlineColor")));
             }
-            int mi = b.addRenderer(*uf, r, roots[0], partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
+            int mi = b.addRenderer(*uf, r, itemRoot, partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
             if (mi >= 0) part.meshes.push_back(mi);
         }
-        b.addItemBones(*uf, roots[0], ref.partId, placement, staticBone, accessoryMode);
+        b.addItemBones(*uf, itemRoot, ref.partId, placement, staticBone, accessoryMode);
         if (ref.group == "Head") {   // the expressions the face component can play: every pattern of brows, eyes and mouth, closed and open
-            for (const auto& mb : uf->monoBehavioursUnder(roots[0])) {
+            for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "FaceBlendShape") continue;
                 static const struct { const char* field; const char* label; int panel; } ctrls[3] = {{"EyebrowCtrl", "Brow", 1}, {"EyesCtrl", "Eyes", 2}, {"MouthCtrl", "Mouth", 3}};
                 for (const auto& c : ctrls) {
@@ -2738,6 +2762,11 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
     if (!addRigPrefab(scratch, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) return false;
     Mat4 headBase;
     if (auto hw = rig.world.find(opt.headAttachBone); hw != rig.world.end()) headBase = hw->second;
+    // The head model hangs on the head rig's own root, not only on cf_s_head (see Assemble).
+    Mat4 headRoot = headBase;
+    if (const int64_t headRigRoot = base->findPrefabRoot(opt.headRigPrefab); headRigRoot)
+        if (const unity::Xform* hx = base->xform(headRigRoot))
+            headRoot = PrefabRootPlacement(headBase, hx->pos, hx->rot, hx->scl);
     const int headAttach = scratch.boneIndex(opt.headAttachBone);
     Overrides headOv;
     {
@@ -2750,7 +2779,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
                 std::string hwhy;
                 auto hb = resolver.openBundle(hi, &hwhy);
                 if (hb) {
-                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headBase, scratch, opt);
+                    if (opt.applyShape) headOv = headShapeOverrides(card, resolver, hi, *hb, *base, opt.headRigPrefab, headRoot, scratch, opt);
                     Overrides attachOv;
                     headAttachOverrides(attachOv, *hb, hi.assetName());
                     for (const auto& [name, o] : attachOv) headOv[name] = o;   // not slider-driven: the head model's own placement wins
