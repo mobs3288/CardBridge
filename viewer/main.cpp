@@ -649,7 +649,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({5, kSetLayersDefault, "Use only the default places", "Layers"});
         rows.push_back({0, -1, "Graphics (GPU when there is one, CPU fallback otherwise)", "Graphics"});
         rows.push_back({4, 0, "device: " + Shorten(g.gpu.adapter(), 44), "Graphics"});
-        rows.push_back({4, 0, "use: " + g.settings.gpu + "  (auto picks a discrete NVIDIA/AMD card first; takes effect next start)", "Graphics"});
+        rows.push_back({4, 0, "use: " + g.settings.gpu + "  (auto picks a discrete NVIDIA/AMD card first; applies at once)", "Graphics"});
         rows.push_back({5, kSetGpuNext, "Change device (auto / hardware / warp / software) ...", "Graphics"});
         rows.push_back({4, 0, "skin: " + g.settings.skin + (g.gpu.ready() && g.gpu.gpuSkin() ? "  (this card: GPU compute shader)" : g.gpu.ready() ? "  (this card: CPU loop)" : ""), "Graphics"});
         rows.push_back({5, kSetSkinNext, "Skin with the GPU compute shader / the CPU loop ...", "Graphics"});
@@ -2212,6 +2212,66 @@ void ReloadLayers(bool announce) {
     g.dirty = true;
 }
 
+// Creates the Direct3D device again on the device the Setup tab now asks for, and re-uploads the current character on it,
+// so switching GPU / WARP / software takes effect at once without restarting. The baked "as exported" copy is re-uploaded
+// too when there is one. On failure the viewer keeps the CPU fallback (software renderer).
+void ReinitGpu() {
+    exporter::GpuOptions go;
+    go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
+    go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
+    if (const char* env = std::getenv("CARDBRIDGE_GPU"))
+        Log(std::string("CARDBRIDGE_GPU=") + env + " overrides the Setup choice; the device uses that value", LogKind::Warn);
+    const bool wasExp = g.expOk && g.expScene != nullptr && g.expFor == Current();
+    g.gpu.Shutdown();
+    g.gpuExp.Shutdown();
+    g.gpuOk = false;
+    g.gpuScene.reset();
+    g.lastGpu = nullptr;
+    g.expOk = false;
+    if (!wasExp) g.showExp = false;
+    std::string why;
+    const bool ok = g.gpu.Init(go, &why);
+    if (ok) {
+        const char* what = g.gpu.kind() == exporter::GpuKind::Warp ? "WARP on the CPU" : "the real GPU";
+        Log("graphics device: " + g.gpu.adapter() + " (" + what + ")", LogKind::Good);
+    } else {
+        Log("Direct3D 11 unavailable (" + why + "); software renderer (the CPU fallback)", LogKind::Warn);
+    }
+    ReloadLayers(false);
+    std::shared_ptr<Loaded> L = Current();
+    if (ok && L && !L->scene.parts.empty()) {
+        if (g.gpu.Load(L->scene, &why)) {
+            g.gpuScene = L;
+            g.gpuOk = true;
+            Log("game shaders uploaded to Direct3D 11", LogKind::Good);
+        } else {
+            Log("Direct3D 11 upload failed; using the software renderer", LogKind::Warn);
+        }
+    }
+    if (wasExp && g.expScene) {
+        std::string ewhy;
+        if (g.gpuExp.Init(go, &ewhy)) {
+            g.gpuExp.SetPlain(true);
+            if (g.gpuExp.Load(*g.expScene, &ewhy)) {
+                g.expOk = true;
+                g.showExp = true;
+            } else {
+                Log("export preview upload failed: " + ewhy, LogKind::Warn);
+                g.expOk = false;
+                g.showExp = false;
+                g.expFor.reset();
+                g.expScene.reset();
+            }
+        } else {
+            g.expOk = false;
+            g.showExp = false;
+        }
+    }
+    ApplyPoseLive();
+    g.dirty = true;
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+}
+
 // The Setup tab: what a person may need to change. Each saves to viewer.json at once.
 void SettingsAction(int id) {
     auto reloadCard = [] { g.resolver.reset(); if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true); };
@@ -2276,7 +2336,8 @@ void SettingsAction(int id) {
         for (int i = 0; i < 4; ++i) if (g.settings.gpu == order[i]) next = order[(i + 1) % 4];
         g.settings.gpu = next;
         SaveSettings(g.settings);
-        Log(std::string("graphics device: ") + next + " (restart CardBridge to create the device; nothing changes until then)", LogKind::Good);
+        Log(std::string("graphics device: ") + next, LogKind::Good);
+        ReinitGpu();
         break;
     }
     case kSetSkinNext: {

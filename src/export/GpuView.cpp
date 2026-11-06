@@ -366,9 +366,31 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         return true;
     }
 
-    ~Impl() { ClearLayers(); Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex); Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb); Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb); Rel(skCs); Clear(); Rel(samplerWrap); Rel(samplerClamp); Rel(raster); Rel(rasterCull); Rel(depth); Rel(depthOverlay); Rel(blend); Rel(blendOverlay); for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); } ReleaseTargets(); Rel(ctx); Rel(dev); }
-
     void ReleaseTargets() { Rel(rtv); Rel(dsv); Rel(msaa); Rel(resolve); Rel(staging); Rel(depthTex); rw = rh = 0; }
+
+    void ReleaseDevice() {
+        ClearLayers();
+        Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex);
+        Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb);
+        Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb);
+        Rel(skCs);
+        Clear();
+        Rel(samplerWrap); Rel(samplerClamp);
+        Rel(raster); Rel(rasterCull);
+        Rel(depth); Rel(depthOverlay);
+        Rel(blend); Rel(blendOverlay);
+        for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); }
+        ReleaseTargets();
+        Rel(ctx); Rel(dev);
+        scene = nullptr;
+        skinCopy.clear();
+        lastM[0] = 0;
+        lastW = lastH = 0;
+        kind = GpuKind::Software;
+        adapterName = "software (CPU)";
+    }
+
+    ~Impl() { ReleaseDevice(); }
 
     void Clear() {
         for (auto& m : meshes) {
@@ -471,6 +493,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 GpuView::GpuView() : impl_(new Impl()) {}
 GpuView::~GpuView() = default;
 bool GpuView::ready() const { return impl_->dev != nullptr; }
+void GpuView::Shutdown() { impl_->ReleaseDevice(); }
 GpuKind GpuView::kind() const { return impl_->kind; }
 std::string GpuView::adapter() const { return impl_->adapterName; }
 void GpuView::SetSkinMode(const std::string& mode) { impl_->wantSkin = (mode == "cpu") ? "cpu" : "gpu"; impl_->skinOnGpu = false; }
