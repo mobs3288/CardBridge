@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -318,8 +319,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             }
             // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
             // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
+            // A jiggle link is light and short, so that cap strangles its spring far below what gravity needs: the part then rests on its
+            // joint limit and twitches there. A jiggle spring is allowed to reach the droop stiffness instead (its heavier body and the
+            // fixed 0.9 damping keep the swing slow), so it holds its rest pose instead of hanging on the stop.
             const float own = self.mass * length(sub(self.centre, self.head)) * length(sub(self.centre, self.head)) + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
-            const float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), own * kMaxBodySwing * kMaxBodySwing);
+            const float capK = jiggle > 0.0f ? std::numeric_limits<float>::max() : own * kMaxBodySwing * kMaxBodySwing;
+            const float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             pmx::Joint j;
             j.name = ch.name + " " + std::to_string(k);
             j.bodyA = bodyA;
