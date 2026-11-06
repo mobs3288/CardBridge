@@ -1038,6 +1038,8 @@ void unitTests() {
             pmx::Model plain = count(make(false), true, false, 1.0f);
             CHECK(jig.rigidBodies[1].mass > plain.rigidBodies[1].mass);            // the jiggle link carries body skin: heavier
             CHECK(jig.rigidBodies[1].moveDamping > plain.rigidBodies[1].moveDamping);   // and settles faster
+            CHECK(jig.rigidBodies[1].mask == 0);   // the jiggle body meets no collider: the bust hit spheres would shove it for ever
+            CHECK((plain.rigidBodies[1].mask & 0x0001) != 0);   // a hair strand still meets the colliders (group 0 here: this scene has none)
         }
         {   // the butt chain rides the butt switch
             assemble::Scene s;
@@ -1599,6 +1601,38 @@ void unitTests() {
         const Vec3 tip = skin[3].point(s.bones[3].pos);
         const float d = std::sqrt((tip.x - 0.32f) * (tip.x - 0.32f) + (tip.y - 0.7f) * (tip.y - 0.7f) + tip.z * tip.z);
         CHECK(d > 0.04f);   // on the ball's surface, give or take the length the chain keeps
+    });
+
+    test("physics sim: the body's own jiggle chains follow their switches, like the export", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L", 1, {0, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L2", 2, {0, 0.95f, 0.12f}, "rig"});
+        SceneChain ch;
+        ch.name = "bust";
+        ch.bones = {2, 3};
+        ch.characterOwn = true;
+        ch.damping = 0.1f; ch.elasticity = 0.1f; ch.stiffness = 0.1f;
+        s.chains.push_back(ch);
+        Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        {   // the default (boobs on): the chain is simulated
+            PhysicsSim sim;
+            sim.Reset(s, pw);
+            CHECK(sim.particleCount() == 2);
+            std::vector<Mat4> skin(s.bones.size());
+            rest.edit(0).pos = {0.3f, 0, 0};
+            pw = BoneWorlds(s, rest);
+            sim.Step(s, pw, 1, skin);
+            CHECK(std::fabs(0.3f - skin[3].point(s.bones[3].pos).x) > 0.05f);   // the tip lags behind the jump
+        }
+        {   // boobs off: no particles at all
+            PhysicsSim sim;
+            sim.Reset(s, pw, false, false, 1.0f);
+            CHECK(sim.particleCount() == 0 && sim.empty());
+        }
     });
 
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {

@@ -151,6 +151,8 @@ struct SceneChain {
     Vec3 gravity, force;
 };
 
+// Which of a character's own (characterOwn) jiggle chains this is: see IsBustJiggleChain below (after Scene).
+
 // A DynamicBoneCollider the chains collide with: a sphere or capsule fixed to a body bone.
 struct SceneCollider {
     std::string name;
@@ -228,5 +230,16 @@ struct Scene {
     void warn(const std::string& part, const std::string& msg) { issues.push_back({"warning", part, msg}); }
     void error(const std::string& part, const std::string& msg) { issues.push_back({"error", part, msg}); }
 };
+
+// Which of a character's own (characterOwn) jiggle chains this is: the breast chains carry the bnip / bust bones, the hip (butt) chains
+// the siri / kosi ones. Anything else of the body's own is left to the butt switch's side.
+inline bool IsBustJiggleChain(const Scene& scene, const SceneChain& ch) {
+    for (int b : ch.bones) {
+        if (b < 0 || static_cast<size_t>(b) >= scene.bones.size()) continue;
+        const std::string& n = scene.bones[static_cast<size_t>(b)].name;
+        if (n.find("bnip") != std::string::npos || n.find("bust") != std::string::npos) return true;
+    }
+    return false;
+}
 
 } // namespace cardbridge::assemble

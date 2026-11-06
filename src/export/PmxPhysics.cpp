@@ -99,17 +99,6 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
     return kept;
 }
 
-// Which of a character's own (characterOwn) jiggle chains this is: the breast chains carry the bnip / bust bones, the hip (butt) chains
-// the siri / kosi ones. Anything else of the body's own is left to the butt switch's side.
-bool IsBustJiggle(const assemble::Scene& scene, const assemble::SceneChain& ch) {
-    for (int b : ch.bones) {
-        if (b < 0 || static_cast<size_t>(b) >= scene.bones.size()) continue;
-        const std::string& n = scene.bones[static_cast<size_t>(b)].name;
-        if (n.find("bnip") != std::string::npos || n.find("bust") != std::string::npos) return true;
-    }
-    return false;
-}
-
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
@@ -147,6 +136,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     }
     std::vector<Core> chainCore;   // per moving chain body
     std::vector<int> chainBody;
+    std::vector<char> chainJiggle;   // the same, per body: the body's own jiggle (skin, not a strand: it meets no collider)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -155,7 +145,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         // jiggle link is heavier and better damped than a hair strand's (see below) and rides the same stable conversion.
         float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
         if (ch.characterOwn) {
-            const bool bust = IsBustJiggle(scene, ch);
+            const bool bust = assemble::IsBustJiggleChain(scene, ch);
             if (bust && jiggleBust) jiggle = jiggleIntensity;
             else if (!bust && jiggleButt) jiggle = jiggleIntensity;
             if (jiggle <= 0.0f) continue;   // switch off: the part stays rigid, following its bone
@@ -233,6 +223,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
+                chainJiggle.push_back(jiggle > 0.0f ? 1 : 0);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
@@ -298,7 +289,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     // in the head) is thrown out of it the moment the simulation starts, and the whole model with it. So a body meets only the colliders
     // it does not overlap in the rest pose: colliders that overlap the same bodies share a group, and a body's mask lists the groups none
     // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
-    // takes any signature beyond them (so it excludes the union).
+    // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
+    // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — a jiggle body meets no collider at all (mask 0).
     const float margin = 0.02f * scale;
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
@@ -321,6 +313,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
+        if (chainJiggle[bi]) continue;   // the jiggle body keeps the mask 0 it was written with: skin that collides with nothing
         uint16_t mask = 0;
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
