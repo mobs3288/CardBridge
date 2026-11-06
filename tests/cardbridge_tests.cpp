@@ -373,11 +373,11 @@ void unitTests() {
         s.materials[0].shader = "Shader Forge/main_opaque";
         CHECK(!exporter::HasCutout(s, s.materials[0]));
     });
-    test("double-layered garment: MMD's edge would cover it, so it gets none; a single surface keeps its edge", [] {
+    test("double-layered mesh: MMD's edge would poke the inner layer through, so it gets none; a single surface keeps its edge", [] {
         using namespace assemble;
-        auto quad = [](bool doubled) {
+        auto quad = [](bool doubled, bool alpha) {
             Scene s;
-            SceneMaterial m; m.shader = "Shader Forge/main_alpha"; m.alpha = true;
+            SceneMaterial m; m.shader = alpha ? "Shader Forge/main_alpha" : "Shader Forge/main_hair"; m.alpha = alpha;
             s.materials.push_back(m);
             SceneMesh mesh;
             const float px[4] = {0, 1, 1, 0}, py[4] = {0, 0, 1, 1};
@@ -388,10 +388,11 @@ void unitTests() {
             s.meshes.push_back(mesh);
             return s;
         };
-        Scene dbl = quad(true), sgl = quad(false);
+        Scene dbl = quad(true, true), sgl = quad(false, true), hair = quad(true, false);
         CHECK(exporter::HasInnerLayer(dbl, dbl.materials[0]));
         CHECK(!exporter::HasInnerLayer(sgl, sgl.materials[0]));
-        CHECK((exporter::MmdMaterialLook(dbl, dbl.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer
+        CHECK((exporter::MmdMaterialLook(dbl, dbl.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (garment)
+        CHECK((exporter::MmdMaterialLook(hair, hair.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (hair: it would clip)
         CHECK((exporter::MmdMaterialLook(sgl, sgl.materials[0]).drawFlags & 0x10) != 0);   // the single surface keeps its edge
     });
     test("KoiClothesOverlayX: overlays are read for the asked coordinate only, with the replace flag", [] {
