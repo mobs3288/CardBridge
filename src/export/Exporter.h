@@ -18,7 +18,7 @@ struct ExportOptions {
     bool physics = true;           // rigid bodies and joints for hair, skirts and ribbons; false = a rigid PMX with no physics at all
     bool jiggleBust = true;        // breast jiggle physics (the body's own jiggle chains); default on
     bool jiggleButt = false;       // hip / butt jiggle physics; default off
-    float jiggleIntensity = 0.15f;  // how wide the jiggle swings; 0.15 = subtle (the game's own is 1)
+    float jiggleIntensity = 0.5f;  // how wide the jiggle swings; 0.5 = a gentle default (the game's own is 1)
     bool mmdNames = true;          // the body bones and the blink morph get MikuMikuDance's standard (Japanese) names, so a motion (VMD) finds them
     bool faceMinusZ = true;        // turn the model half a turn about Y so it faces -Z, where MikuMikuDance puts a PMX's front; false = as built (+Z, Unity)
     int outfit = 0;                // recorded in the manifest

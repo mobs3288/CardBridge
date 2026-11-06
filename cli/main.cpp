@@ -516,7 +516,7 @@ int cmdConvert(const Args& a) {
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
     eo.jiggleButt = a.has("jiggle-butt");              // default off
-    eo.jiggleIntensity = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.15f;
+    eo.jiggleIntensity = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
     eo.mmdNames = !a.has("no-mmd-names");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
