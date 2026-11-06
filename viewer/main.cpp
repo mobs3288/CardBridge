@@ -278,7 +278,7 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
@@ -422,6 +422,8 @@ struct App {
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
+    bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: boobs on by default, the butt off
+    float jiggleIntensity = 1.0f;                 // how hard it jiggles (1 = the game's own)
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
@@ -568,6 +570,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kNippleMm) { r.v = &g.tw.nippleMm; r.def = 0; r.lo = -15; r.hi = 15; r.step = 1; r.percent = false; return true; }
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
+    if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
         assemble::BonePose& e = g.boneEdits[g.selBoneName];
@@ -609,6 +612,10 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kAPoseDeg, "A-pose angle (degrees)", "Pose"});
         rows.push_back({0, -1, "Physics preview (Y; N shakes it)", "Physics"});
         rows.push_back({2, kPhysics, "Simulate hair, skirts and ribbons live", "Physics"});
+        rows.push_back({0, kJiggleBust, "Jiggle physics in the exported PMX (in MikuMikuDance)", "Jiggle"});
+        rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
+        rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
+        rows.push_back({1, kJiggleIntensity, "Jiggle intensity (1 = the game)", "Jiggle"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -647,6 +654,8 @@ bool TweakChanged(int id) {
     if (id == kNippleIn) return g.tw.nippleInside;
     if (id == kAPose) return g.aPose;
     if (id == kPhysics) return g.physics;
+    if (id == kJiggleBust) return g.jiggleBust;
+    if (id == kJiggleButt) return g.jiggleButt;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
 
@@ -660,6 +669,8 @@ void ResetTweak(int id) {
     SliderRef r;
     if (id == kNippleIn) g.tw.nippleInside = false;
     else if (id == kAPose) g.aPose = true;
+    else if (id == kJiggleBust) g.jiggleBust = true;
+    else if (id == kJiggleButt) g.jiggleButt = false;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 
@@ -956,6 +967,7 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
+    if (id == kJiggleBust || id == kJiggleButt || id == kJiggleIntensity) { InvalidatePanel(); return; }   // export-only: nothing to re-assemble
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kAreola && g.expOk) {   // the baked "as exported" copy has the old areola in its textures
         g.expOk = false;
@@ -1114,10 +1126,12 @@ void StartExport() {
     for (int n = 2; Exists(outDir) && n < 1000; ++n) outDir = parent + "/" + stem + " (" + std::to_string(n) + ")";
     const std::string library = g.settings.library, mods = g.settings.mods;
     const std::vector<char> hiddenNow = g.hidden;
+    const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
+    const float jiggleIntensity = g.jiggleIntensity;
     const assemble::Pose pose = BuildPose(*L);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, pose, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
@@ -1130,6 +1144,9 @@ void StartExport() {
             eo.outDir = outDir;
             eo.baseName = stem;
             eo.outfit = L->outfit;
+            eo.jiggleBust = jiggleBust;
+            eo.jiggleButt = jiggleButt;
+            eo.jiggleIntensity = jiggleIntensity;
             eo.assetLibrary = library;
             eo.modsFolder = mods;
             eo.log = [](const std::string& m) { Log("  " + m); };
@@ -1965,6 +1982,13 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         Log(std::string("A-pose: ") + (g.aPose ? "on" : "off"));
         ApplyPoseLive();
         InvalidatePanel();
+        return;
+    }
+    if (row.kind == 2 && (row.id == kJiggleBust || row.id == kJiggleButt)) {
+        bool& v = row.id == kJiggleBust ? g.jiggleBust : g.jiggleButt;
+        if (right) ResetTweak(row.id); else v = !v;
+        Log(row.label + ": " + (v ? "on" : "off") + " (exported PMX)");
+        TweakEdited(row.id, true);
         return;
     }
     if (row.kind == 2) {
