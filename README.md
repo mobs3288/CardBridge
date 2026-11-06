@@ -62,7 +62,9 @@ The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the con
 
 | Thing | What it is | Where it comes from |
 |---|---|---|
-| Windows 10 or 11, 64-bit | CardBridge is a Windows program | A graphics card with Direct3D 11 draws the viewer with the game's shaders; without it the viewer falls back to a slow software renderer |
+| Windows 10 or 11, 64-bit | CardBridge is a Windows program | A graphics card with Direct3D 11 draws the viewer with the game's shaders and skins the pose on the GPU (a discrete NVIDIA/AMD card is preferred over an integrated one). Without a real GPU it uses WARP on the CPU, and without Direct3D 11 it falls back to the software renderer: slower, same pictures |
+
+**Graphics.** The Setup tab's Graphics rows choose the device (auto picks a discrete GPU first; hardware insists on one; warp and software are the CPU fallbacks) and the skin (GPU compute shader or CPU loop). The header names the device actually in use. The environment variables `CARDBRIDGE_GPU` (auto/hardware/warp/software), `CARDBRIDGE_GPU_ADAPTER` (adapter index), and `CARDBRIDGE_SKIN` (gpu/cpu) override the settings, and `cardbridge convert --gpu-view --gpu auto|hardware|warp|software --gpu-skin gpu|cpu` does the same on the command line.
 | **Koikatsu or Koikatsu Party install** | The game's own data files, read **once** by the first-run setup and never again | Your own copy of the game (this is the game folder that contains `abdata`) |
 | **Your mods folder** (optional) | The `.zipmod` files (Sideloader mods: hair, clothes, accessories, textures) your cards use | Your Koikatsu `mods` folder (or any folder holding the `.zipmod` files). CardBridge reads it in place and never changes it |
 | **A card** | A Koikatsu character card, `.png` | Made in the Koikatsu character maker |

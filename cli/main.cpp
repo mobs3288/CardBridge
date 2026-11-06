@@ -112,6 +112,7 @@ void usage() {
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
         "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-intensity F]\n"
         "                                             breast jiggle is on by default, the butt off; the intensity scales the swing (1 = the game)\n"
+        "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu]  which device the --gpu-view picture and the skinning use (auto prefers a discrete NVIDIA/AMD card; warp and software are the CPU fallbacks)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -467,9 +468,13 @@ int cmdConvert(const Args& a) {
     if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
         exporter::GpuView gpu;
         std::string why;
-        if (!gpu.Init(&why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
+        exporter::GpuOptions go;
+        go.preference = a.get("gpu", "auto");
+        go.skin = a.get("gpu-skin", "gpu");
+        if (!gpu.Init(go, &why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
         else {
             if (!liveSkin.empty()) gpu.SetSkin(&liveSkin);
+            std::fprintf(stderr, "  gpu view: %s (%s, skin %s)\n", gpu.adapter().c_str(), gpu.kind() == exporter::GpuKind::Hardware ? "GPU" : "CPU fallback", gpu.gpuSkin() ? "on GPU" : "on CPU");
             if (a.opt.count("layers-dir")) {   // the extra shader layers in that folder, all switched on for the picture
                 std::string report;
                 auto defs = exporter::LoadShaderLayers({normalizeSlashes(a.get("layers-dir"))});

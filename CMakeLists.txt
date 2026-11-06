@@ -98,7 +98,7 @@ add_library(cardbridge_core STATIC
 target_include_directories(cardbridge_core PUBLIC src PRIVATE third_party/bc7decomp)
 target_link_libraries(cardbridge_core PUBLIC nlohmann_json::nlohmann_json PRIVATE stb_image cardbridge_stb_write)
 if(WIN32)
-    target_link_libraries(cardbridge_core PUBLIC d3d11)   # the GPU view runs the game's DXBC shaders
+    target_link_libraries(cardbridge_core PUBLIC d3d11 dxgi)   # the GPU view runs the game's DXBC shaders on the best adapter
 endif()
 if(MSVC)
     target_compile_options(cardbridge_core PRIVATE /W4)
