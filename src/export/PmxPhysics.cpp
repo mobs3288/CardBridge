@@ -140,9 +140,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
-        // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on, driven by
-        // the game's own parameters scaled by the intensity; a light, stiff link with a wide swing shivered at rest in MikuMikuDance, so the
-        // jiggle link is heavier and better damped than a hair strand's (see below) and rides the same stable conversion.
+        // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on, built
+        // like the hand-made MMD models' breast jiggle (mode-2 bodies tracking their bones, no joint spring, rotation limits as the
+        // envelope); a strand's spring conversion hung them from a light link and they vibrated at rest, so jiggle gets its own path below.
         float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
         if (ch.characterOwn) {
             const bool bust = assemble::IsBustJiggleChain(scene, ch);
@@ -183,7 +183,6 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
-            if (jiggle > 0.0f) l.mass *= 2.0f;   // the jiggle link carries body skin: heavier than a hair strand, so the solver does not jitter it
             links[b] = l;
         }
 
@@ -204,22 +203,26 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             rb.group = kPmxGroupChain;
             rb.mask = 0;   // set below: the colliders it does not already overlap
             rb.shape = l.cylinder > 1e-4f ? 2 : 0;
-            rb.size = {l.radius, l.cylinder, 0};
+            // The jiggle bodies are the reference models' breast bodies: fat capsules (about as wide as a link is long), weight tapering
+            // toward the tip, so the swing is a smooth body sway rather than a thin strand snapping.
+            const float jigRadius = std::max(l.radius, 0.6f * l.cylinder);
+            rb.size = {jiggle > 0.0f ? jigRadius : l.radius, l.cylinder, 0};
             rb.position = l.centre;
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(l.unit);
-            rb.mass = l.mass;
+            rb.mass = jiggle > 0.0f ? std::pow(0.5f, static_cast<float>(k)) : l.mass;   // 1, 1/2, 1/4, ... toward the tip
             // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
             // 60 * damping is the same decay in both, so the swing dies away at the same pace.
             float decay = std::max(0.6f, 60.0f * along(ch.boneDamping, ch.damping, l.bone));
-            if (jiggle > 0.0f) decay *= 1.5f;   // the jiggle settles faster than the game lets it, so it comes to rest instead of ringing on
-            const float damp = std::min(0.9995f, 1.0f - std::exp(-decay));
+            // Jiggle bodies take the reference models' fixed heavy damping, not the game's: their swing dies out the same way every time.
+            const float damp = jiggle > 0.0f ? 0.9f : std::min(0.9995f, 1.0f - std::exp(-decay));
             rb.moveDamping = damp;
             rb.rotDamping = damp;
-            rb.friction = 0.5f;
-            // The root follows its bone and collides with nothing: it is what the chain hangs from. (A moving root, MMD's "physics with the bone
-            // aligned" mode, fed back into the bone below it and shook the whole model, breasts and thighs included.)
-            rb.mode = k == 0 ? 0 : 1;
-            if (k == 0) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
+            rb.friction = jiggle > 0.0f ? 0.0f : 0.5f;
+            // The root follows its bone and collides with nothing: it is what the chain hangs from. (A moving root on a HAIR chain, in
+            // MMD's "physics with the bone aligned" mode, fed back into the bone below it and shook the whole model.) The jiggle bodies
+            // are the reference models' breast bodies instead: every one is that mode, the body following its bone with physics on top.
+            rb.mode = jiggle > 0.0f ? 2 : (k == 0 ? 0 : 1);
+            if (k == 0 && jiggle <= 0.0f) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
@@ -239,13 +242,31 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const int b = bones[k];
             const Link& self = links[b];
             // The component pulls a particle back by `elasticity` of its offset each update: a spring of about 60 * sqrt(elasticity) rad/s.
-            float elast = along(ch.boneElasticity, ch.elasticity, b);
-            if (jiggle > 0.0f) elast *= jiggle;   // the intensity scales how briskly the part springs back, i.e. how hard it jiggles
-            const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, elast))));
+            const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
             // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees.
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
             const float bend = std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+            // A jiggle joint has no spring at all, like the reference models' breast joints: the mode-2 body tracks its bone, its momentum
+            // swings it against the rotation limits, and the limits are the jiggle. They come from the game's stiffness, capped at the
+            // reference models' ~26 degrees a link, and the intensity opens them up.
+            if (jiggle > 0.0f) {
+                const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
+                auto pb = bodyOf.find(parentBone);
+                const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
+                const float range = std::min(0.9f, std::min(bend, 0.45f) * jiggle);
+                pmx::Joint j;
+                j.name = ch.name + " " + std::to_string(k);
+                j.bodyA = bodyA;
+                j.bodyB = bodyOf[b];
+                j.position = self.head;
+                j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
+                j.rotLower = {-range, -0.1f * range, -range};
+                j.rotUpper = {range, 0.1f * range, range};
+                j.springRot = {0, 0, 0};
+                model.joints.push_back(std::move(j));
+                continue;
+            }
             // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
             const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;

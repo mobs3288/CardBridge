@@ -13,7 +13,7 @@ namespace cardbridge::assemble {
 class PhysicsSim {
 public:
     // Starts every chain at rest under the pose (`poseWorld` = assemble::BoneWorlds). The body's own jiggle chains are simulated only
-    // when their switch is on (as the PMX export does), at the intensity's elasticity; the defaults match the export's.
+    // when their switch is on (as the PMX export does), with the intensity as the swing envelope; the defaults match the export's.
     void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 1.0f);
 
     // Runs `steps` updates (1/60 s each; 0 only refreshes the output after the anchors moved) and writes the skin matrices of the chain bones
@@ -42,7 +42,7 @@ private:
         std::vector<int> particles;
         Vec3 anchorPrev;
         bool primed = false;
-        float damping = 0.1f, elasticity = 0.1f;   // the chain's, with the jiggle intensity applied (see Reset)
+        float envelopeScale = 1.0f;   // a jiggle chain: how wide its swing is, the intensity (see Reset)
     };
     std::vector<Particle> particles_;
     std::vector<Chain> chains_;

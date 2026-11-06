@@ -59,12 +59,7 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
         }
         Chain chain;
         chain.scene = ci;
-        chain.damping = sc.damping;
-        chain.elasticity = sc.elasticity;
-        if (jiggle) {   // the same settling as the export: a little more damping, elasticity scaled by the intensity
-            chain.damping = 1.0f - std::pow(1.0f - std::min(1.0f, std::max(0.0f, sc.damping)), 1.5f);
-            chain.elasticity = sc.elasticity * jiggleIntensity;
-        }
+        if (jiggle) chain.envelopeScale = jiggleIntensity;   // the intensity opens the swing envelope, like the export's rotation limits
         std::map<int, int> byBone;
         for (size_t k = 0; k < sc.bones.size(); ++k) {
             const int b = sc.bones[k];
@@ -145,7 +140,7 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
                     const Vec3 v = sub(p.pos, p.prev);
                     const Vec3 rmove = objectMove * sc.inert;
                     p.prev = p.pos + rmove;
-                    p.pos = p.pos + v * (1.0f - std::min(1.0f, std::max(0.0f, chain.damping))) + force + rmove;
+                    p.pos = p.pos + v * (1.0f - std::min(1.0f, std::max(0.0f, sc.damping))) + force + rmove;
                 }
                 // step 2: spring back to the rest place under the parent, keep the length, collide
                 for (size_t k = 1; k < chain.particles.size(); ++k) {
@@ -155,11 +150,11 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
                     // to their rest turn before it runs, so what it springs back to does not depend on how the chain turned a moment ago)
                     const Vec3 restPos = par.pos + rotationPart(poseWorld[static_cast<size_t>(par.bone)]).dir(p.restLocal);
                     Vec3 d = sub(restPos, p.pos);
-                    p.pos = p.pos + d * chain.elasticity;
+                    p.pos = p.pos + d * sc.elasticity;
                     if (sc.stiffness > 0.0f) {
                         d = sub(restPos, p.pos);
                         const float len = length(d);
-                        const float maxLen = p.restLen * (1.0f - sc.stiffness) * 2.0f;
+                        const float maxLen = p.restLen * (1.0f - sc.stiffness) * 2.0f * chain.envelopeScale;
                         if (len > maxLen && len > 1e-9f) p.pos = p.pos + d * ((len - maxLen) / len);
                     }
                     for (const auto& c : colliders) collide(p.pos, sc.radius, c);
