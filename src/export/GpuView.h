@@ -41,6 +41,10 @@ public:
     // over the enumerated adapters before any ordering).
     bool Init(std::string* why = nullptr);
     bool Init(const GpuOptions& opt, std::string* why = nullptr);
+    // Tears the Direct3D device down completely, so the next Init builds a new one on a different adapter (the viewer hot-swaps
+    // the device from the Setup tab without restarting). After Shutdown the view is not ready until Init succeeds again, and
+    // any loaded scene is gone. Safe to call when no device exists.
+    void Shutdown();
     bool ready() const;
     GpuKind kind() const;              // Hardware, Warp (CPU) or Software after Init
     std::string adapter() const;       // short device name, e.g. "NVIDIA GeForce ..." or "WARP (CPU)"
