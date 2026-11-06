@@ -92,8 +92,11 @@ Value decodeCoordinate(const Bytes& blob, Outfit& out) {
     auto chunk = [&]() {
         int32_t n = r.i32();
         if (n < 0 || static_cast<size_t>(n) > r.remaining()) throw FormatError("coordinate section runs past its data");
-        Bytes b = r.bytes(static_cast<size_t>(n));
-        return MsgPackParse(b);
+        // Parsed in place: copying the chunk first held the section twice.
+        ByteReader sub(r.ptr(), static_cast<size_t>(n), false);
+        Value v = MsgPackRead(sub);
+        r.skip(static_cast<size_t>(n));
+        return v;
     };
     out.clothes = chunk();
     out.accessory = chunk();
@@ -222,43 +225,49 @@ Card LoadCard(const std::string& path) {
             return c;
         }
 
-        auto blockData = [&](const std::string& name) -> Bytes {
+        // Blocks are parsed in place from the file bytes: copying each block
+        // first held the whole card (and its embedded textures) twice more.
+        auto blockReader = [&](const std::string& name) -> ByteReader {
             for (const auto& b : c.blocks)
-                if (b.name == name) {
-                    ByteReader br(file.data() + end + dataStart + b.pos, static_cast<size_t>(b.size), false);
-                    return br.bytes(static_cast<size_t>(b.size));
-                }
-            return {};
+                if (b.name == name)
+                    return ByteReader(file.data() + end + dataStart + b.pos, static_cast<size_t>(b.size), false);
+            return ByteReader();
+        };
+        auto hasBlock = [&](const std::string& name) {
+            for (const auto& b : c.blocks) if (b.name == name && b.size > 0) return true;
+            return false;
         };
 
-        Bytes custom = blockData("Custom");
-        if (custom.empty()) throw FormatError("card has no Custom section");
-        ByteReader cr(custom, false);
-        Value* parts[3] = {&c.face, &c.body, &c.hair};
-        for (Value* p : parts) {
-            int32_t n = cr.i32();
-            if (n < 0 || static_cast<size_t>(n) > cr.remaining()) throw FormatError("Custom section runs past its data");
-            Bytes b = cr.bytes(static_cast<size_t>(n));
-            *p = MsgPackParse(b);
+        {
+            ByteReader cr = blockReader("Custom");
+            if (cr.size() == 0) throw FormatError("card has no Custom section");
+            Value* parts[3] = {&c.face, &c.body, &c.hair};
+            for (Value* p : parts) {
+                int32_t n = cr.i32();
+                if (n < 0 || static_cast<size_t>(n) > cr.remaining()) throw FormatError("Custom section runs past its data");
+                ByteReader sub(cr.ptr(), static_cast<size_t>(n), false);
+                *p = MsgPackRead(sub);
+                cr.skip(static_cast<size_t>(n));
+            }
         }
 
-        Bytes coord = blockData("Coordinate");
-        if (coord.empty()) throw FormatError("card has no Coordinate section");
-        Value arr = MsgPackParse(coord);
-        for (const auto& el : arr.asArray()) {
-            Outfit o;
-            decodeCoordinate(el.asBin(), o);
-            c.outfits.push_back(std::move(o));
+        {
+            ByteReader coord = blockReader("Coordinate");
+            if (coord.size() == 0) throw FormatError("card has no Coordinate section");
+            Value arr = MsgPackRead(coord);
+            for (const auto& el : arr.asArray()) {
+                Outfit o;
+                decodeCoordinate(el.asBin(), o);
+                c.outfits.push_back(std::move(o));
+            }
         }
 
-        Bytes param = blockData("Parameter");
-        if (!param.empty()) c.parameter = MsgPackParse(param);
-        Bytes status = blockData("Status");
-        if (!status.empty()) c.status = MsgPackParse(status);
+        if (hasBlock("Parameter")) { ByteReader r = blockReader("Parameter"); c.parameter = MsgPackRead(r); }
+        if (hasBlock("Status")) { ByteReader r = blockReader("Status"); c.status = MsgPackRead(r); }
 
-        Bytes kkex = blockData("KKEx");
-        if (!kkex.empty()) {
-            c.extended = MsgPackParse(kkex);
+        if (hasBlock("KKEx")) {
+            ByteReader r = blockReader("KKEx");
+            c.extended = MsgPackRead(r);
             const Value& uar = c.extended.at("com.bepis.sideloader.universalautoresolver");
             for (const auto& raw : uar.at(size_t(1)).at("info").asArray()) {
                 Value row = MsgPackParse(raw.asBin());

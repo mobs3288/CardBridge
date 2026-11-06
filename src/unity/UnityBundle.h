@@ -11,8 +11,10 @@ namespace cardbridge::unity {
 // A UnityFS asset bundle (format version 6 - what Unity 5.6 writes, verified
 // on the 297 bundles in abdata\chara: all LZ4HC, blocks-info combined with the
 // directory). Opening a bundle decompresses it fully into memory; the bundles
-// in this game are 0.1-25 MB each. LZMA blocks are reported as unsupported,
-// not guessed at.
+// in this game range from ~0.1 MB to 132 MB on disk (library_full\abdata\chara:
+// co_top_00 is 132 MB), so a bundle's decompressed data is a large allocation
+// and is accounted for by the resolver's bounded cache. LZMA blocks are
+// reported as unsupported, not guessed at.
 class UnityBundle {
 public:
     struct Node {
@@ -34,6 +36,9 @@ public:
     const uint8_t* nodeData(const Node& n) const { return data_.data() + n.offset; }
     // The serialized-file node (the one that is not a .resS), or null.
     const Node* serializedNode() const;
+    // Size of the decompressed data blob: the bundle's main cost, used to
+    // bound the resolver's bundle cache.
+    size_t dataSize() const { return data_.size(); }
 
 private:
     std::string name_;

@@ -50,16 +50,24 @@ namespace {
 struct Pt { float x, y, z; };
 
 // Box-filtered mip levels, so a 4096 atlas drawn a few hundred pixels tall does not alias into speckle.
+// Level 0 is NOT copied: `base` points into the SceneTexture's own pixels (the
+// scene owns them, and a ViewState is always reset before that scene is
+// destroyed - the viewer resets it on load, the bake/preview ViewStates are
+// locals of a call that holds the scene). Copying level 0 doubled every texture
+// a preview or bake touched: 316 MB of scene textures became another 316 MB
+// of mips. Levels 1.. are owned and are ~1/3 of level 0 between them.
 struct Mips {
-    std::vector<std::vector<uint8_t>> rgba;
+    std::vector<std::vector<uint8_t>> rgba;   // levels 1.. (rgba[0] empty)
     std::vector<int> w, h;
+    const uint8_t* base = nullptr;            // level 0 pixels, owned by the SceneTexture
 };
 
 Mips BuildMips(const assemble::SceneTexture& t) {
     Mips m;
-    m.rgba.push_back(t.rgba); m.w.push_back(t.width); m.h.push_back(t.height);
+    m.rgba.emplace_back(); m.w.push_back(t.width); m.h.push_back(t.height);
+    m.base = t.rgba.data();
     while (m.w.back() > 1 && m.h.back() > 1) {
-        const auto& src = m.rgba.back();
+        const uint8_t* src = m.rgba.size() > 1 ? m.rgba.back().data() : m.base;
         int sw = m.w.back(), sh = m.h.back(), dw = sw / 2, dh = sh / 2;
         std::vector<uint8_t> dst(static_cast<size_t>(dw) * dh * 4);
         for (int y = 0; y < dh; ++y)
@@ -78,10 +86,11 @@ Mips BuildMips(const assemble::SceneTexture& t) {
 // Bilinear, wrapping.
 void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4], bool clamp = false) {
     int w = m.w[lvl], h = m.h[lvl];
+    const uint8_t* px = lvl == 0 ? m.base : m.rgba[static_cast<size_t>(lvl)].data();
     float fx = u * w - 0.5f, fy = (1.0f - v) * h - 0.5f;
     int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
     float tx = fx - x0, ty = fy - y0;
-    auto at = [&](int x, int y, int c) { if (clamp) { x = std::min(w - 1, std::max(0, x)); y = std::min(h - 1, std::max(0, y)); } else { x = ((x % w) + w) % w; y = ((y % h) + h) % h; } return m.rgba[lvl][(static_cast<size_t>(y) * w + x) * 4 + c] / 255.0f; };
+    auto at = [&](int x, int y, int c) { if (clamp) { x = std::min(w - 1, std::max(0, x)); y = std::min(h - 1, std::max(0, y)); } else { x = ((x % w) + w) % w; y = ((y % h) + h) % h; } return px[(static_cast<size_t>(y) * w + x) * 4 + c] / 255.0f; };
     for (int c = 0; c < 4; ++c)
         out[c] = (at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx) * (1 - ty) + (at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx) * ty;
 }

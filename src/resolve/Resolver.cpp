@@ -171,16 +171,82 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     return r;
 }
 
+namespace {
+// Bundles in this library reach 132 MB on disk. Keeping a few of them is the
+// difference between decompressing the same bundle for every item and
+// keeping hundreds of megabytes for the whole session. 128 MB holds the
+// shared skeleton, face and create-material bundles that every character
+// reuses (each a few MB to ~10 MB decompressed) and evicts the rest
+// (re-read on demand): a single 132 MB bundle is kept while it is the only
+// entry, but it does not sit beside every other large bundle for the whole
+// conversion. With the scene's own textures this bounds the bundle cache's
+// contribution to the peak instead of letting it grow with every item.
+constexpr size_t kBundleCacheCap = 128ull * 1024 * 1024;
+size_t bundleBytes(const std::shared_ptr<unity::UnityFile>& f) {
+    // The decompressed blob dominates; the serialized file (type trees, object
+    // table) is accounted roughly on top so the cap is not understated.
+    return f ? f->serialized().bundle().dataSize() + f->serialized().objects().size() * 32 + 65536 : 0;
+}
+} // namespace
+
+std::shared_ptr<unity::UnityFile> Resolver::cacheFind(const std::string& key) {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    auto it = cacheByKey_.find(key);
+    if (it == cacheByKey_.end()) return nullptr;
+    cache_.splice(cache_.begin(), cache_, it->second);
+    return it->second->file;
+}
+
+void Resolver::cacheEvictLocked() {
+    while (cacheBytes_ > kBundleCacheCap && cache_.size() > 1) {
+        auto& back = cache_.back();
+        cacheBytes_ -= back.bytes;
+        cacheByKey_.erase(back.key);
+        cache_.pop_back();
+    }
+}
+
+void Resolver::cachePut(const std::string& key, const std::shared_ptr<unity::UnityFile>& file) {
+    if (!file) return;
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    auto old = cacheByKey_.find(key);
+    if (old != cacheByKey_.end()) {
+        cacheBytes_ -= old->second->bytes;
+        cache_.erase(old->second);
+        cacheByKey_.erase(old);
+    }
+    CacheEntry e;
+    e.key = key;
+    e.file = file;
+    e.bytes = bundleBytes(file);
+    cache_.push_front(e);
+    cacheByKey_[key] = cache_.begin();
+    cacheBytes_ += cache_.front().bytes;
+    cacheEvictLocked();
+}
+
+void Resolver::clearCaches() {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    cache_.clear();
+    cacheByKey_.clear();
+    cacheBytes_ = 0;
+    looseTextures_.clear();
+}
+
+size_t Resolver::cacheBytes() const {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    return cacheBytes_;
+}
+
 std::shared_ptr<unity::UnityFile> Resolver::openBaseBundle(const std::string& rel, std::string* why) {
     std::string key = "base:" + rel;
-    auto it = cache_.find(key);
-    if (it != cache_.end()) return it->second;
+    if (auto hit = cacheFind(key)) return hit;
     std::string path = fileio::Join(abdata_, rel);
     if (!fileio::Exists(path)) { if (why) *why = "bundle not found: " + path; return nullptr; }
     try {
         auto b = unity::UnityBundle::Open(fileio::ReadFile(path), rel);
         auto uf = std::make_shared<unity::UnityFile>(b);
-        cache_[key] = uf;
+        cachePut(key, uf);
         return uf;
     } catch (const std::exception& e) {
         if (why) *why = std::string(e.what());
@@ -261,8 +327,7 @@ std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& i
     if (auto pr = providers_.find(lowerOf(rel)); pr != providers_.end() && pr->second.size() > 1)
         modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
     std::string key = modPath + "|" + rel;
-    auto it = cache_.find(key);
-    if (it != cache_.end()) return it->second;
+    if (auto hit = cacheFind(key)) return hit;
     try {
         ZipArchive z(modPath);
         std::string want = "abdata/" + rel;
@@ -279,13 +344,13 @@ std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& i
             // Some mods point at a base-game bundle (a "no hair" item uses chara/etc.unity3d): use the library's.
             std::string whyBase;
             auto base = openBaseBundle(rel, &whyBase);
-            if (base) { cache_[key] = base; return base; }
+            if (base) { cachePut(key, base); return base; }
             if (why) *why = "bundle '" + want + "' is not inside " + item.modPath + " and not in the library (" + whyBase + ")";
             return nullptr;
         }
         auto b = unity::UnityBundle::Open(z.read(*found), rel);
         auto uf = std::make_shared<unity::UnityFile>(b);
-        cache_[key] = uf;
+        cachePut(key, uf);
         return uf;
     } catch (const std::exception& e) {
         if (why) *why = std::string(e.what());
@@ -301,8 +366,14 @@ std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedIte
     if (auto pr = providers_.find(lowerOf(ab)); pr != providers_.end() && pr->second.size() > 1)
         modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
     std::string key = "loose:" + modPath + "|" + stem + "/" + lowerOf(name);
-    auto hit = looseTextures_.find(key);
-    if (hit != looseTextures_.end()) return hit->second;
+    {
+        std::lock_guard<std::mutex> lk(cacheMutex_);
+        auto hit = looseTextures_.find(key);
+        if (hit != looseTextures_.end()) {
+            if (auto live = hit->second.lock()) return live;
+            looseTextures_.erase(hit);
+        }
+    }
     try {
         ZipArchive z(modPath);
         const std::string want = "abdata/" + stem + "/" + lowerOf(name) + ".png";
@@ -317,7 +388,10 @@ std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedIte
             t->height = h;
             t->unityFormat = 4;   // RGBA32
             t->rgba = std::move(rgba);
-            looseTextures_[key] = t;
+            {
+                std::lock_guard<std::mutex> lk(cacheMutex_);
+                looseTextures_[key] = t;
+            }
             return t;
         }
     } catch (const std::exception& e) {

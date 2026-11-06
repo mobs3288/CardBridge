@@ -29,6 +29,11 @@ public:
     // Uploads the scene's meshes, textures and shader programs. Call again whenever the Scene changes; the Scene must outlive
     // the next Render calls.
     bool Load(const assemble::Scene& scene, std::string* why = nullptr);
+    // Releases every uploaded mesh, texture, shader and the CPU mirror of the
+    // vertices (GpuMesh::rest), keeping the device and its shared states for
+    // the next Load. Call when the loaded scene is discarded so the previous
+    // character's GPU copy does not stay resident beside the new one.
+    void Unload();
 
     // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions (1 hides, 2 forces a default-hidden part on).
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.

@@ -981,6 +981,8 @@ void TweakEdited(int id, bool released) {
         g.expOk = false;
         g.showExp = false;
         g.expFor.reset();
+        g.expScene.reset();
+        g.gpuExp.Unload();
         Log("the areola size changed: press X to bake the as-exported view again");
     }
     if (IsShapeId(id)) { if (!ReshapeNow(released)) ScheduleApplyTweaks(); return; }
@@ -1060,6 +1062,11 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
         std::string err;
         try {
             if (!EnsureResolver(err)) throw std::runtime_error(err);
+            // The previous character's bundles are no longer needed (its
+            // scene holds copies of everything it extracted): drop them
+            // before this character's bundles allocate beside that scene
+            // and the new one being built.
+            if (g.resolver) g.resolver->clearCaches();
             Log("reading the card container");
             card::Card c = card::LoadCard(path);
             if (!c.supported) throw std::runtime_error(c.supportNote);
@@ -2438,6 +2445,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         g.expBusy = false;
         g.expOk = false;
+        if (sc && g.expFor != Current()) {   // the character changed while it baked: drop the stale copy instead of keeping it
+            g.expFor.reset();
+            g.gpuExp.Unload();
+            g.dirty = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         std::string why;
         if (sc && (g.gpuExp.ready() || g.gpuExp.Init(&why))) {
             g.gpuExp.SetPlain(true);
@@ -2470,6 +2484,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.gpuScene.reset();
         g.showExp = g.expOk = false;   // the baked copy belongs to the previous character
         g.expFor.reset();
+        // The baked "as exported" scene is a full second copy of the previous
+        // character (textures included) and its GPU copy is another. It used
+        // to stay resident after switching characters until the next X bake,
+        // so each character left its copy behind. Release both now.
+        g.expScene.reset();
+        g.expPending.reset();
+        g.expPendingFor.reset();
+        g.gpuExp.Unload();
         if (L && g.gpu.ready()) {
             if (g.gpu.Load(L->scene)) {
                 g.gpuScene = L;
