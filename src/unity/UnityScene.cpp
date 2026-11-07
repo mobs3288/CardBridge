@@ -324,6 +324,18 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
             }
         return true;
     };
+    if (std::getenv("CARDBRIDGE_DEBUG_CHANNELS")) {
+        std::fprintf(stderr, "mesh %s channels: %zu count %zu data %zu\n", m.name.c_str(), ch.size(), count, data.size());
+        for (size_t i = 0; i < ch.size(); ++i) std::fprintf(stderr, "  ch%zu stream %d off %d fmt %d dim %d\n", i, ch[i].stream, ch[i].offset, ch[i].format, ch[i].dim);
+        for (size_t ci = 3; ci < 7; ++ci) {
+            std::vector<float> tt;
+            if (readChannel(ci, 2, tt)) {
+                float mn[2] = {1e30f, 1e30f}, mx[2] = {-1e30f, -1e30f}; double sum[2] = {0, 0}; long long nz = 0;
+                for (size_t i = 0; i < count; ++i) { for (int d = 0; d < 2; ++d) { float f = tt[i * 2 + d]; mn[d] = std::min(mn[d], f); mx[d] = std::max(mx[d], f); sum[d] += f; } if (tt[i * 2] != 0.0f || tt[i * 2 + 1] != 0.0f) ++nz; }
+                std::fprintf(stderr, "  ch%zu: min=(%.3f %.3f) max=(%.3f %.3f) mean=(%.3f %.3f) nonzero=%lld\n", ci, mn[0], mn[1], mx[0], mx[1], sum[0] / count, sum[1] / count, nz);
+                } else std::fprintf(stderr, "  ch%zu: NO DATA\n", ci);
+        }
+    }
     try {
         std::vector<float> tmp;
         if (readChannel(0, 3, tmp)) {
@@ -345,6 +357,30 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
         if (readChannel(5, 2, tmp)) {
             m.uv2.resize(count);
             for (size_t i = 0; i < count; ++i) m.uv2[i] = {tmp[i * 2], tmp[i * 2 + 1]};
+        }
+        if (readChannel(6, 2, tmp)) {
+            m.uv3.resize(count);
+            for (size_t i = 0; i < count; ++i) m.uv3[i] = {tmp[i * 2], tmp[i * 2 + 1]};
+        }
+        if (std::getenv("CARDBRIDGE_DEBUG_CHANNELS") && m.name == "o_body_a") {
+            // the reported nipple-tip-ish vertices: highest y near the chest (the breast/nipple forward extreme, z most negative)
+            size_t tip = 0; float best = 1e30f;
+            for (size_t i = 0; i < count; ++i) {
+                float d = std::fabs(m.positions[i].y - 1.22f) + std::fabs(m.positions[i].x) * 8.0f;
+                if (d < best) { best = d; tip = i; }
+            }
+            std::fprintf(stderr, "  o_body tip v%zu pos=(%.2f %.2f %.2f) uv0=(%.3f %.3f) uv1=(%.3f %.3f) uv2=(%.3f %.3f) uv3=(%.3f %.3f)\n", tip, m.positions[tip].x, m.positions[tip].y, m.positions[tip].z, m.uv0[tip].x, m.uv0[tip].y, m.uv1[tip].x, m.uv1[tip].y, m.uv2[tip].x, m.uv2[tip].y, m.uv3[tip].x, m.uv3[tip].y);
+            // and the strongest uv1 vertex location summary
+            float py = 1e30f, py2 = -1e30f; long long nn = 0;
+            for (size_t i = 0; i < count; ++i)
+                if (std::fabs(m.uv1[i].x) > 0.01f || std::fabs(m.uv1[i].y) > 0.01f) { ++nn; py = std::min(py, m.positions[i].y); py2 = std::max(py2, m.positions[i].y); }
+            for (int which = 0; which < 3; ++which) {
+                const auto& uv = which == 0 ? m.uv1 : which == 1 ? m.uv2 : m.uv3;
+                float py3 = 1e30f, py4 = -1e30f; long long nn2 = 0;
+                for (size_t i = 0; i < count; ++i)
+                    if (std::fabs(uv[i].x) > 0.01f || std::fabs(uv[i].y) > 0.01f) { ++nn2; py3 = std::min(py3, m.positions[i].y); py4 = std::max(py4, m.positions[i].y); }
+                std::fprintf(stderr, "  o_body ch%d strong!=0: n=%lld y[%.2f %.2f]\n", which + 4, nn2, py3, py4);
+            }
         }
     } catch (const FormatError& e) {
         return fail(e.what());
@@ -436,6 +472,7 @@ std::optional<MaterialData> UnityFile::readMaterial(const PPtr& p, std::string* 
     Value v = sf_->read(*o);
     MaterialData m;
     m.name = v.at("m_Name").asStr();
+    m.renderQueue = static_cast<int>(v.at("m_CustomRenderQueue").asInt(-1));
     PPtr sp = toPPtr(v.at("m_Shader"));
     if (sp.isLocal() && !sp.isNull()) {
         m.shaderPathId = sp.pathId;
@@ -519,15 +556,15 @@ std::vector<std::pair<std::string, Vec4>> UnityFile::readShaderPropDefaults(int6
     return out;
 }
 
-int UnityFile::readShaderCulling(int64_t shaderPathId, std::string* property) const {
+bool UnityFile::readShaderRenderState(int64_t shaderPathId, ShaderRenderState& out) const {
     const ObjectInfo* o = sf_->find(shaderPathId);
-    if (!o) return -1;
+    if (!o) return false;
     try {
         Value v = sf_->read(*o);
         const auto& subs = v.at("m_ParsedForm").at("m_SubShaders").asArray();
-        if (subs.empty()) return -1;
+        if (subs.empty()) return false;
         const auto& passes = subs[0].at("m_Passes").asArray();
-        if (passes.empty()) return -1;
+        if (passes.empty()) return false;
         const Value* pick = &passes.front();
         for (const auto& pass : passes) {
             if (std::getenv("CARDBRIDGE_DEBUG_MAT")) {
@@ -545,14 +582,41 @@ int UnityFile::readShaderCulling(int64_t shaderPathId, std::string* property) co
             for (const auto& t : tags.asMap()) forward = forward || (lower(t.first.asStr()) == "lightmode" && lower(t.second.asStr()) == "forwardbase");
             if (forward) { pick = &pass; break; }
         }
-        const Value& c = pick->at("m_State").at("culling");
-        if (property) {
+        const Value& state = pick->at("m_State");
+        const Value& c = state.at("culling");
+        out.cull = static_cast<int>(c.at("val").asFloat());
+        {
             const std::string name = c.at("name").asStr();
-            *property = name == "<noninit>" ? std::string() : name;
+            out.cullProperty = name == "<noninit>" ? std::string() : name;
         }
-        return static_cast<int>(c.at("val").asFloat());
+        {   // ZWrite Off means the pass composites like the game's transparent queue: tested, not written.
+            // (A property-driven ZWrite - name set - keeps the safe default, depth written.)
+            const Value& zw = state.at("zWrite");
+            if (!zw.has("name") || zw.at("name").asStr() == "<noninit>") out.zWrite = zw.at("val").asFloat() != 0.0f;
+        }
+        {   // The QUEUE tag: a built-in name with an optional "+offset" (e.g. "Transparent+40")
+            auto lower2 = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); }); return s; };
+            const Value& tags = state.at("m_Tags").at("tags");
+            std::string q;
+            for (const auto& t : tags.asArray()) if (lower2(t.at("first").asStr()) == "queue") q = t.at("second").asStr();
+            for (const auto& t : tags.asMap()) if (lower2(t.first.asStr()) == "queue") q = t.second.asStr();
+            if (!q.empty()) {
+                std::string l = lower2(q);
+                int base = 2000;
+                if (l.rfind("background", 0) == 0) base = 1000;
+                else if (l.rfind("geometrylast", 0) == 0) base = 2500;
+                else if (l.rfind("geometry", 0) == 0) base = 2000;
+                else if (l.rfind("alphatest", 0) == 0) base = 2450;
+                else if (l.rfind("transparent", 0) == 0) base = 3000;
+                else if (l.rfind("overlay", 0) == 0) base = 4000;
+                const size_t plus = l.find('+');
+                if (plus != std::string::npos) base += std::stoi(l.substr(plus + 1));
+                out.queue = base;
+            }
+        }
+        return true;
     } catch (const std::exception&) {}
-    return -1;
+    return false;
 }
 
 std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* why) const {
@@ -569,6 +633,7 @@ std::optional<TextureData> UnityFile::readTexture(const PPtr& p, std::string* wh
     t.unityFormat = static_cast<int>(v.at("m_TextureFormat").asInt());
     t.colorSpace = static_cast<int>(v.at("m_ColorSpace").asInt(1));
     t.wrapMode = static_cast<int>(v.at("m_TextureSettings").at("m_WrapMode").asInt());
+    if (std::getenv("CARDBRIDGE_DEBUG_WRAP")) std::fprintf(stderr, "tex %s wrapMode=%d filter=%d fmt=%d cs=%d\n", v.at("m_Name").asStr().c_str(), t.wrapMode, static_cast<int>(v.at("m_TextureSettings").at("m_FilterMode").asInt()), t.unityFormat, t.colorSpace);
     const uint8_t* src = nullptr;
     size_t size = 0;
     const Bytes& inl = v.at("image data").asBin();

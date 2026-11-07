@@ -110,6 +110,13 @@ MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
                 if (img.isBin() && img.size() > 0) me.skinOverlays[static_cast<int>(kv.first.asInt())] = img.asBin();
             }
     }
+    // The older layout (three images instead of a Lookup): BodyOver, FaceUnder and EyeOver. EyeOver is the iris paint,
+    // one image laid over both eyes' iris textures. Without it the card's empty "no iris" pupil texture leaves blank eyes.
+    if (ksox.isMap() && ksox.at("EyeOver").isBin() && ksox.at("EyeOver").asBin().size() > 0) {
+        const Bytes& eye = ksox.at("EyeOver").asBin();
+        if (!me.skinOverlays.count(MaterialEdits::OverlayEyeL)) me.skinOverlays[MaterialEdits::OverlayEyeL] = eye;
+        if (!me.skinOverlays.count(MaterialEdits::OverlayEyeR)) me.skinOverlays[MaterialEdits::OverlayEyeR] = eye;
+    }
 
     const Value& entry = extended.at("com.deathweasel.bepinex.materialeditor");
     const Value& payload = entry.at(size_t(1));

@@ -28,6 +28,8 @@ std::vector<Vec3> ComputeMeshTangents(const assemble::SceneMesh& m);
 bool LinearLight();
 float ToLinear(float c);
 assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat);
+int RenderQueueOf(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
 }
 using detail::LinearLight;
 using detail::ToLinear;
@@ -38,10 +40,10 @@ template <class T> void Rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
 struct GVert {
     float pos[3], nrm[3], tan[4];
-    float uv[2], col[4], uv1[2], uv2[2];
+    float uv[2], col[4], uv1[2], uv2[2], uv3[2];
     int boneIdx[4];
     float boneW[4];
-};   // 112 bytes; boneIdx/boneW are read only by the skinning compute shader, the game shaders never see them
+};   // 120 bytes; boneIdx/boneW are read only by the skinning compute shader, the game shaders never see them
 
 struct GpuSub { ID3D11Buffer* ib = nullptr; UINT count = 0; int material = 0; };
 struct GpuMesh {
@@ -280,7 +282,7 @@ float4 ps(VO i) : SV_Target {
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
         if (!compile) return false;
         static const char src[] = R"HLSL(
-struct SVVert { float3 pos; float3 nrm; float4 tan; float2 uv; float4 col; float2 uv1; float2 uv2; int4 boneIdx; float4 boneW; };
+struct SVVert { float3 pos; float3 nrm; float4 tan; float2 uv; float4 col; float2 uv1; float2 uv2; float2 uv3; int4 boneIdx; float4 boneW; };
 StructuredBuffer<SVVert> g_in : register(t0);
 StructuredBuffer<float4> g_bones : register(t1);
 RWStructuredBuffer<SVVert> g_out : register(u0);
@@ -839,7 +841,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
             else if (in.semantic == "NORMAL") { e.Format = DXGI_FORMAT_R32G32B32_FLOAT; e.AlignedByteOffset = offsetof(GVert, nrm); }
             else if (in.semantic == "TANGENT") { e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; e.AlignedByteOffset = offsetof(GVert, tan); }
             else if (in.semantic == "COLOR") { e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; e.AlignedByteOffset = offsetof(GVert, col); }
-            else { e.Format = DXGI_FORMAT_R32G32_FLOAT; e.AlignedByteOffset = in.index == 1 ? offsetof(GVert, uv1) : in.index == 2 ? offsetof(GVert, uv2) : offsetof(GVert, uv); }   // TEXCOORD1 is the second UV set, the rest read the first
+            else { e.Format = DXGI_FORMAT_R32G32_FLOAT; e.AlignedByteOffset = in.index == 1 ? offsetof(GVert, uv1) : in.index == 2 ? offsetof(GVert, uv2) : in.index == 3 ? offsetof(GVert, uv3) : offsetof(GVert, uv); }   // TEXCOORD1..3 are the extra UV sets, the rest read the first
             el.push_back(e);
         }
         if (FAILED(I.dev->CreateInputLayout(el.data(), static_cast<UINT>(el.size()), vp.dxbc.data(), vp.dxbc.size(), &g.il))) { Rel(g.vs); Rel(g.ps); continue; }
@@ -872,7 +874,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
         std::vector<GVert> vb(m.vertices.size());
         for (size_t v = 0; v < vb.size(); ++v) {
             const auto& s = m.vertices[v];
-            vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}, {s.uv2.x, s.uv2.y}, {s.bone[0], s.bone[1], s.bone[2], s.bone[3]}, {s.weight[0], s.weight[1], s.weight[2], s.weight[3]}};
+            vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}, {s.uv2.x, s.uv2.y}, {s.uv3.x, s.uv3.y}, {s.bone[0], s.bone[1], s.bone[2], s.bone[3]}, {s.weight[0], s.weight[1], s.weight[2], s.weight[3]}};
         }
         const UINT bytes = static_cast<UINT>(vb.size() * sizeof(GVert));
         if (dual) {
@@ -1103,7 +1105,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
     I.skipped = 0;
     std::vector<char> matDone(scene.materials.size(), 0), matSkipped(scene.materials.size(), 0);
     std::vector<std::vector<std::vector<float>>> matVs(scene.materials.size()), matPs(scene.materials.size());
-    for (int pass = 0; pass < 2; ++pass)   // opaque materials first, then the alpha-flagged ones
+    for (int pass = 0; pass < 3; ++pass)   // opaque first, then the no-depth-write paint layers (like the game's transparent queue), then the alpha-flagged ones
         for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
             if (!visible(pi)) continue;
             for (int mi : scene.parts[pi].meshes) {
@@ -1111,7 +1113,15 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 if (!gm.vb) continue;
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
-                    if ((mat.alpha ? 1 : 0) != pass) continue;
+                    const int bucket = mat.alpha ? 2 : (!I.plain && detail::IsOverlayMaterial(scene, mat) ? 1 : 0);
+                    if (bucket != pass) continue;
+                    if (bucket == 1) {   // the game's transparent compositing: tested, not written, alpha-blended
+                        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+                        ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
+                    } else {
+                        ctx->OMSetDepthStencilState(I.depth, 0);
+                        ctx->OMSetBlendState(I.blend, bf, 0xFFFFFFFFu);
+                    }
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;

@@ -437,7 +437,7 @@ struct MatTextures : shader::ISm4Textures {
                 if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
                 const Mips& m = st->mips[ti];
                 int l = std::min(static_cast<int>(m.w.size()) - 1, std::max(0, static_cast<int>(lodIn >= 0 ? lodIn : lod)));
-                bool cl = scene->textures[ti].clamp;
+                bool cl = scene->textures[ti].clamp || std::getenv("CARDBRIDGE_CLAMP_ALL");
                 float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
                 SampleBilinear(m, l, u, v, out, cl);
                 if (decodeSrgb && scene->textures[ti].srgb)
