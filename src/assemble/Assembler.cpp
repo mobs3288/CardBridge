@@ -362,6 +362,7 @@ struct ItemLook {
     std::set<int64_t> use1, use2;         // renderer component ids that get tex1 / tex2 on material 0
     bool materialTint = false;            // accessories: tint each material's own texture by its _ColorMask
     std::set<int64_t> tintOnly;           // accessories: the renderers the game colours (rendNormal / rendHair); empty = all
+    bool bakedOutfitColors = false;       // the outfit's slot colours are already baked into the clothing texture
     Vec4 colors[3]{{1, 1, 1, 1}, {1, 1, 1, 1}, {1, 1, 1, 1}};
 };
 
@@ -546,7 +547,8 @@ struct Builder {
     int meCoordinate = 0, meType = -1, meSlot = 0;
     std::map<int, int> meTextures;   // embedded TexID -> scene texture (-1 when unreadable)
 
-    // `colour` = the image is colour data (a main texture, sRGB); the other maps (normal, line mask, ramp) are linear.
+    // The embedded images are linear dumps, not sRGB authoring images (the game displays them unconverted); `colour` picks the
+    // cache slot only (colour maps are the main textures the ME edit points at).
     int embeddedTexture(int texId, const std::string& partId, bool colour = true) {
         const int key = colour ? texId : texId + (1 << 20);
         auto it = meTextures.find(key);
@@ -554,8 +556,16 @@ struct Builder {
         card::MaterialEdits::Image img;
         int result = -1;
         if (edits && edits->decode(texId, img)) {
+            if (std::getenv("CARDBRIDGE_DEBUG_ME")) {
+                long double m[3] = {0, 0, 0}; size_t n = 0;
+                for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) { m[0] += img.rgba[i]; m[1] += img.rgba[i + 1]; m[2] += img.rgba[i + 2]; ++n; }
+                if (n) std::fprintf(stderr, "me-tex %d %dx%d mean=(%.1Lf %.1Lf %.1Lf) first=%d %d %d\n", texId, img.width, img.height, m[0] / n, m[1] / n, m[2] / n, img.rgba[0], img.rgba[1], img.rgba[2]);
+            }
             result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
-            scene.textures[static_cast<size_t>(result)].srgb = colour;
+            // The embedded images are linear dumps, not sRGB authoring images: the game displays them unconverted (the whole
+            // "colour", too, is what the editor's render produced in linear light), so they are stored linear like the masks.
+            scene.textures[static_cast<size_t>(result)].srgb = false;
+            if (std::getenv("CARDBRIDGE_ME_SRGB")) scene.textures[static_cast<size_t>(result)].srgb = true;
         } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
         meTextures[key] = result;
         return result;
@@ -642,7 +652,13 @@ struct Builder {
                 sh.blob = std::move(*blob);
                 sh.texDefaults = uf.readShaderTextureDefaults(pathId);
                 sh.propDefaults = uf.readShaderPropDefaults(pathId);
-                sh.cull = uf.readShaderCulling(pathId, &sh.cullProperty);
+                unity::ShaderRenderState rs;
+                if (uf.readShaderRenderState(pathId, rs)) {
+                    sh.cull = rs.cull;
+                    sh.cullProperty = rs.cullProperty;
+                    sh.zWrite = rs.zWrite;
+                    sh.queue = rs.queue;
+                }
                 scene.shaders.push_back(std::move(sh));
                 result = static_cast<int>(scene.shaders.size()) - 1;
             }
@@ -795,6 +811,7 @@ struct Builder {
         } else {
             sm.name = m->name;
             sm.shader = m->shaderName;
+            sm.renderQueue = m->renderQueue;
             if (m->shaderPathId) sm.shaderIndex = shaderFor(uf, m->shaderPathId, m->shaderName);
             for (const auto& c : m->colors) sm.props.emplace_back(c.first, c.second);
             for (const auto& rp : runtime) {
@@ -802,6 +819,20 @@ struct Builder {
                 for (auto& pr : sm.props) if (pr.first == rp.first) { pr.second = rp.second; found = true; }
                 if (!found) sm.props.push_back(rp);
                 if (rp.first == "_nipsize") sm.cardAreola = true;
+            }
+            // The outfit's slot colours are already baked into the clothing texture the create step built: applying them a
+            // second time through the prefab's stored _Color (the outfit's default colour) crushes the outfit to black.
+            if (look && look->bakedOutfitColors && matIndex == 0 && ((look->use1.count(r.componentId) && look->tex1 >= 0) || (look->use2.count(r.componentId) && look->tex2 >= 0)))
+                for (auto& pr : sm.props)
+                    if (pr.first == "_Color" || pr.first == "_Color2" || pr.first == "_Color3") pr.second = Vec4{1, 1, 1, 1};
+            if (fallbackColor && (sm.shader == "Shader Forge/main_hair" || sm.shader == "Shader Forge/main_hair_front")) {
+                // In the game the character maker's hair colour overwrites the _Color of every hair material (ChaController);
+                // our `fallbackColor` carries it (but was dropped for the named-loaded branch). Apply it here - the sign is
+                // the same for hair on any part (base hair, or a hair accessory wearing the character's colour).
+                bool set = false;
+                for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *fallbackColor; set = true; }
+                if (!set) sm.props.emplace_back("_Color", *fallbackColor);
+                sm.diffuse = {fallbackColor->x, fallbackColor->y, fallbackColor->z, 0.0f};
             }
             if (blushAlpha >= 0)
                 for (auto& pr : sm.props) if (pr.first == "_overcolor2") pr.second.w = blushAlpha;
@@ -933,7 +964,16 @@ struct Builder {
                 const std::string prop = "_" + e->property;
                 const bool main = e->property == "MainTex";
                 int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main) : -1;
-                if (main && t >= 0) { sm.texture = t; sm.diffuse = {1, 1, 1, 1}; }
+                if (main && t >= 0) {
+                    sm.texture = t;
+                    sm.diffuse = {1, 1, 1, 1};
+                    // The embedded image is the complete authored look; where the outfit colours are already composed
+                    // into the texture the same ones must not be applied again (same rule as the outfit create path).
+                    // Face paints keep their run-time colours (brow/lash), only outfit materials whiten here.
+                    if (look && look->bakedOutfitColors)
+                        for (auto& pr : sm.props)
+                            if (pr.first == "_Color" || pr.first == "_Color2" || pr.first == "_Color3") pr.second = Vec4{1, 1, 1, 1};
+                }
                 SceneTexBinding* bind = nullptr;
                 for (auto& tb : sm.texProps) if (tb.name == prop) bind = &tb;
                 if (!bind) {
@@ -1278,6 +1318,7 @@ struct Builder {
             out.uv = v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{};
             out.uv1 = v < mesh->uv1.size() ? mesh->uv1[v] : out.uv;
             out.uv2 = v < mesh->uv2.size() ? mesh->uv2[v] : out.uv;
+            out.uv3 = v < mesh->uv3.size() ? mesh->uv3[v] : out.uv;
             bool placed = false;
             if (skinned) {
                 const unity::BoneInfluence& bi = mesh->skin[v];
@@ -1596,6 +1637,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             return nullptr;
         }
         std::string texName = fi.listItem.get(texKey), ab = fi.listItem.get(abKey);
+        if (std::getenv("CARDBRIDGE_DEBUG_DB") && category == 423)
+            std::fprintf(stderr, "nip-row %s id=%lld texKey=%s texName=%s ab=%s\n", partId.c_str(), static_cast<long long>(id), texKey, texName.c_str(), ab.c_str());
         if (texName.empty() || texName == "0" || ab.empty() || ab == "0") return nullptr;   // "none"
         std::string w;
         auto tb = resolver.openItemBundle(fi, ab, &w);
@@ -1672,6 +1715,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         job.linear = CreateRunsInLinearLight(matName);
         job.width = job.height = size;
         job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
+        for (const auto& [name, td] : texs) if (td && name == "_MainTex") scene.textures[static_cast<size_t>(job.texture)].clamp = td->wrapMode == 1;
         scene.createJobs.push_back(std::move(job));
         return scene.createJobs.back().texture;
     };
@@ -2022,6 +2066,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             };
             if (main1 && mask1) { look.tex1 = clothesTexture(main1, k1, mask1, k2); haveLook = true; }
             if (main2 && mask2) { look.tex2 = clothesTexture(main2, k3, mask2, k4); haveLook = true; }
+            if (look.tex1 >= 0 || look.tex2 >= 0) look.bakedOutfitColors = true;
             if (haveLook) {
                 for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                     if (mb.className != "ChaClothesComponent") continue;
@@ -2197,7 +2242,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const std::string& prop, const char* key, const char* what, Vec4 col) {
                         auto t = rowTexture(category, id, prop, key, what);
                         int idx = -1;   // "none": the game clears the slot
-                        if (t) { auto copy = t->rgba; idx = b.addSceneTexture(t->name, "face overlay", t->width, t->height, std::move(copy)); }
+                        if (t) { auto copy = t->rgba; idx = b.addSceneTexture(t->name, "face overlay", t->width, t->height, std::move(copy));
+                            scene.textures[static_cast<size_t>(idx)].clamp = t->wrapMode == 1;
+                            scene.textures[static_cast<size_t>(idx)].srgb = t->colorSpace == 1; }
                         faceOverlayTex.emplace_back(texName, idx);
                         faceOverlayColors.emplace_back(colName, col);
                     };
@@ -2477,7 +2524,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (list.find("," + r.name + ",") != std::string::npos) { skipped.push_back(r.name + " (CARDBRIDGE_SKIP)"); continue; }
             }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
-            if (ref.group == "Hair") {   // hair items: the card's hair colour (shading and root-to-tip gradient are not modelled)
+            if (ref.group == "Hair" || ref.group == "Accessories") {   // hair items (and hair accessories): the card's hair colour
+                // (shading and root-to-tip gradient are not modelled; ChaController applies the same hair colour to accessories in the game)
                 size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
                 const Value& hp = card.hair.at("parts").at(kind);
                 if (hp.at("baseColor").size() >= 3) { hairColor = kkColor(vec4Of(hp.at("baseColor"))); fb = &hairColor; }
@@ -2551,8 +2599,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             // ChangeSettingEyebrow/Eyeline puts the card's colour there at run time; the bundle's value is white, which baked the
             // strokes white. Set it from the card so the bake (and the live shader) paint the strokes in the card's colour.
             if (ref.group == "Head") {
-                if (r.name == "cf_O_mayuge") b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyebrowColor"))));
-                else if (r.name == "cf_O_eyeline" || r.name == "cf_O_eyeline_low") b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyelineColor"))));
+                if (r.name == "cf_O_mayuge") { b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyebrowColor")))); if (std::getenv("CARDBRIDGE_DEBUG_FACE")) { Vec4 c = kkColor(vec4Of(faceV.at("eyebrowColor"))); std::fprintf(stderr, "face-runtime mayuge _Color=(%.2f %.2f %.2f)\n", c.x, c.y, c.z); } }
+                else if (r.name == "cf_O_eyeline" || r.name == "cf_O_eyeline_low") { b.runtime.emplace_back("_Color", kkColor(vec4Of(faceV.at("eyelineColor")))); if (std::getenv("CARDBRIDGE_DEBUG_FACE")) { Vec4 c = kkColor(vec4Of(faceV.at("eyelineColor"))); std::fprintf(stderr, "face-runtime %s _Color=(%.2f %.2f %.2f)\n", r.name.c_str(), c.x, c.y, c.z); } }
             }
             // The face material's _overcolor2 alpha is the blush of the character's emotion state: 0 at rate 0, 0.2 at rate 1.
             b.blushAlpha = (ref.group == "Head" && contains(r.name, "cf_O_face"))
@@ -2813,13 +2861,52 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     exporter::RunCreateJobs(scene);
     log("create materials done");
     LogMemory("assemble after create jobs");
+    if (std::getenv("CARDBRIDGE_DEBUG_BODY_UV")) {
+        for (const auto& part : scene.parts) for (int mi : part.meshes) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            for (const auto& sub : mesh.submeshes) if (scene.materials[static_cast<size_t>(sub.material)].name.find("cf_m_body") != std::string::npos) {
+                // the forwardmost, highest chest vertices (the breast eyelids...) approximate: scan for x near 0, y high
+                float best = 1e30f; size_t tip = 0;
+                for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+                    const auto& v = mesh.vertices[i];
+                    float d = std::fabs(v.pos.x) + std::fabs(v.pos.y - 1.22f);
+                    if (d < best) { best = d; tip = i; }
+                }
+                const auto& v = mesh.vertices[tip];
+                std::fprintf(stderr, "body tip v%zu pos=(%.2f %.2f %.2f) uv0=(%.3f %.3f) uv1=(%.3f %.3f) uv2=(%.3f %.3f) uv3=(%.3f %.3f) nverts=%zu\n", tip, v.pos.x, v.pos.y, v.pos.z, v.uv.x, v.uv.y, v.uv1.x, v.uv1.y, v.uv2.x, v.uv2.y, v.uv3.x, v.uv3.y, mesh.vertices.size());
+                // count vertices whose uv1 != (0,0) near the chest (y=1.1..1.3)
+                long long nn = 0;
+                for (const auto& w : mesh.vertices)
+                    if (std::fabs(w.uv1.x) > 0.01f || std::fabs(w.uv1.y) > 0.01f) { if (w.pos.y > 1.0f) ++nn; }
+                std::fprintf(stderr, "body verts with uv1!=0 & y>1.0: %lld\n", nn);
+            }
+        }
+    }
+    if (std::getenv("CARDBRIDGE_DEBUG_PART")) {
+        int want = std::atoi(std::getenv("CARDBRIDGE_DEBUG_PART"));
+        if (want >= 0 && want < static_cast<int>(scene.parts.size())) {
+            const auto& part = scene.parts[static_cast<size_t>(want)];
+            for (int mi : part.meshes) {
+                const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+                double mn[3] = {1e30, 1e30, 1e30}, mx[3] = {-1e30, -1e30, -1e30};
+                double mnu[2] = {1e30, 1e30}, mxu[2] = {-1e30, -1e30};
+                for (size_t show = 0; show < mesh.vertices.size(); ++show) {
+                }
+                for (const auto& v : mesh.vertices) {
+                    mn[0] = std::min(mn[0], (double)v.pos.x); mx[0] = std::max(mx[0], (double)v.pos.x); mn[1] = std::min(mn[1], (double)v.pos.y); mx[1] = std::max(mx[1], (double)v.pos.y); mn[2] = std::min(mn[2], (double)v.pos.z); mx[2] = std::max(mx[2], (double)v.pos.z);
+                    mnu[0] = std::min(mnu[0], (double)v.uv.x); mxu[0] = std::max(mxu[0], (double)v.uv.x); mnu[1] = std::min(mnu[1], (double)v.uv.y); mxu[1] = std::max(mxu[1], (double)v.uv.y);
+                }
+                std::fprintf(stderr, "part %d mesh mi=%d vertices: %zu pos x[%f %f] y[%f %f] z[%f %f] uv[%f %f - %f %f]\n", want, mi, mesh.vertices.size(), mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mnu[0], mnu[1], mxu[0], mxu[1]);
+            }
+        }
+    }
     if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
         for (const auto& m : scene.materials) {
             std::fprintf(stderr, "mat %s shader=%s idx=%d cull=%d two-sided=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex,
                          m.shaderIndex >= 0 ? scene.shaders[static_cast<size_t>(m.shaderIndex)].cull : -1, m.doubleSided ? 1 : 0);
             for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d", t.name.c_str(), t.texture);
             std::fprintf(stderr, " | props:");
-            for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
+            for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0 || pr.first.rfind("_overcolor", 0) == 0 || pr.first == "_nipsize" || pr.first.rfind("_paint", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
             std::fprintf(stderr, "\n");
         }
     return scene;
