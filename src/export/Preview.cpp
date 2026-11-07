@@ -43,6 +43,36 @@ assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat) {
         if (IsColourProp(pr.first)) { pr.second.x = ToLinear(pr.second.x); pr.second.y = ToLinear(pr.second.y); pr.second.z = ToLinear(pr.second.z); }
     return m;
 }
+
+// A material's effective render queue: its own m_CustomRenderQueue, else its shader's (Unity's rule).
+int RenderQueueOf(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.renderQueue >= 0) return mat.renderQueue;
+    if (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) return scene.shaders[static_cast<size_t>(mat.shaderIndex)].queue;
+    return 2000;
+}
+
+// The alpha cutout the game applies for this material (its _Cutoff), clamped to (0,1). Materials without one return 0.
+float CutoffOf(const assemble::SceneMaterial& mat) {
+    for (const auto& pr : mat.props) if (pr.first == "_Cutoff") return std::min(0.999f, std::max(0.001f, pr.second.x));
+    return 0.0f;
+}
+
+// Discard threshold a fragment must pass: the cutout materials discard at their _Cutoff, the true overlays blend at any alpha.
+float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
+    static const float forced = std::getenv("CARDBRIDGE_CUTOFF_MIN") ? std::atof(std::getenv("CARDBRIDGE_CUTOFF_MIN")) : -1.0f;
+    float cut = CutoffOf(mat);
+    float v = cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
+    if (forced >= 0.0f) v = std::max(v, forced);
+    return v;
+}
+
+// A material the game composites in its transparent queue with depth write off (the face's paint layers: eye white, iris,
+// brow, eyelines, nose line — their closeness is meaningless, the queue order is what keeps the iris over the white).
+// The software renderers draw these after the depth-writing materials, alpha-blended and without writing depth, like the game.
+bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.alpha || mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
+    return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && RenderQueueOf(scene, mat) >= 2500;
+}
 } // namespace detail
 
 namespace {
@@ -159,79 +189,109 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
             nz = nzz;
         };
 
+        // The game's transparent compositing: materials that run depth-test-only (the face's paint layers) are drawn after
+        // the depth-writing ones, alpha-blended and without writing depth, in render-queue order (the iris over the white).
+        struct Proj { std::vector<Pt> P; std::vector<float> NZ; };
+        std::vector<Proj> proj(scene.meshes.size());
+        std::vector<char> projDone(scene.meshes.size(), 0);
+        struct Item { int mi, sub, queue; bool overlay; };
+        std::vector<Item> items;
         for (const auto& part : scene.parts) {
             if (!part.includeInExport) continue;
             for (int mi : part.meshes) {
                 const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
-                std::vector<Pt> P(mesh.vertices.size());
-                std::vector<float> NZ(mesh.vertices.size());
-                for (size_t i = 0; i < mesh.vertices.size(); ++i) {
-                    float sx, sy, sz, nz;
-                    project(mesh.vertices[i], sx, sy, sz, nz);
-                    P[i] = {sx, sy, sz};
-                    NZ[i] = nz;
-                }
-                for (const auto& sub : mesh.submeshes) {
-                    const auto& mat = scene.materials[static_cast<size_t>(sub.material)];
-                    const assemble::SceneTexture* tex = mat.texture >= 0 ? &scene.textures[static_cast<size_t>(mat.texture)] : nullptr;
-                    for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
-                        uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
-                        const Pt &a = P[i0], &b = P[i1], &c = P[i2];
-                        float minx = std::floor(std::min({a.x, b.x, c.x})), maxx = std::ceil(std::max({a.x, b.x, c.x}));
-                        float miny = std::floor(std::min({a.y, b.y, c.y})), maxy = std::ceil(std::max({a.y, b.y, c.y}));
-                        int x0 = std::max(0, static_cast<int>(minx)), x1 = std::min(opt.viewWidth - 1, static_cast<int>(maxx));
-                        int y0 = std::max(0, static_cast<int>(miny)), y1 = std::min(opt.viewHeight - 1, static_cast<int>(maxy));
-                        float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
-                        if (std::fabs(den) < 1e-8f) continue;
-                        int lod = 0;
-                        const Mips* mp = nullptr;
-                        if (tex) {
-                            size_t ti = static_cast<size_t>(mat.texture);
-                            if (!mipsBuilt[ti]) { mips[ti] = BuildMips(*tex); mipsBuilt[ti] = true; }
-                            mp = &mips[ti];
-                            const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
-                            float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
-                            float scrArea = std::fabs(den) * 0.5f;
-                            if (scrArea > 1e-6f && uvArea > scrArea)
-                                lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
-                        }
-                        for (int y = y0; y <= y1; ++y)
-                            for (int x = x0; x <= x1; ++x) {
-                                float px = x + 0.5f, py = y + 0.5f;
-                                float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
-                                float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
-                                float l2 = 1.0f - l0 - l1;
-                                if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
-                                float z = l0 * a.z + l1 * b.z + l2 * c.z;
-                                size_t zi = static_cast<size_t>(y) * opt.viewWidth + x;
-                                if (z <= zbuf[zi]) continue;
-                                float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
-                                if (tex) {
-                                    const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
-                                    float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
-                                    u -= std::floor(u); v -= std::floor(v);
-                                    float tc[4];
-                                    SampleBilinear(*mp, lod, u, v, tc);
-                                    r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
-                                }
-                                if (al < 0.5f) continue;
-                                float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                                // Two-tone toon: lit side full colour, shade side tinted by the material's shadow colour.
-                                float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
-                                float shade = 1.0f;
-                                r *= (mat.shadow.x + (1.0f - mat.shadow.x) * lit);
-                                g *= (mat.shadow.y + (1.0f - mat.shadow.y) * lit);
-                                bl *= (mat.shadow.z + (1.0f - mat.shadow.z) * lit);
-                                zbuf[zi] = z;
-                                uint8_t* o = &img[(static_cast<size_t>(y) * W + ox + x) * 4];
-                                o[0] = static_cast<uint8_t>(std::min(255.0f, r * shade * 255.0f));
-                                o[1] = static_cast<uint8_t>(std::min(255.0f, g * shade * 255.0f));
-                                o[2] = static_cast<uint8_t>(std::min(255.0f, bl * shade * 255.0f));
-                            }
-                    }
+                for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
+                    const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                    items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
         }
+        auto drawSub = [&](int mi, int subIdx, bool blend) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            if (!projDone[static_cast<size_t>(mi)]) {
+                projDone[static_cast<size_t>(mi)] = 1;
+                auto& pj = proj[static_cast<size_t>(mi)];
+                pj.P.resize(mesh.vertices.size());
+                pj.NZ.resize(mesh.vertices.size());
+                for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+                    float sx, sy, sz, nz;
+                    project(mesh.vertices[i], sx, sy, sz, nz);
+                    pj.P[i] = {sx, sy, sz};
+                    pj.NZ[i] = nz;
+                }
+            }
+            const Proj& pj = proj[static_cast<size_t>(mi)];
+            const Pt* P = pj.P.data();
+            const float* NZ = pj.NZ.data();
+            const auto& sub = mesh.submeshes[static_cast<size_t>(subIdx)];
+            const auto& mat = scene.materials[static_cast<size_t>(sub.material)];
+            const assemble::SceneTexture* tex = mat.texture >= 0 ? &scene.textures[static_cast<size_t>(mat.texture)] : nullptr;
+            for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
+                uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
+                const Pt &a = P[i0], &b = P[i1], &c = P[i2];
+                float minx = std::floor(std::min({a.x, b.x, c.x})), maxx = std::ceil(std::max({a.x, b.x, c.x}));
+                float miny = std::floor(std::min({a.y, b.y, c.y})), maxy = std::ceil(std::max({a.y, b.y, c.y}));
+                int x0 = std::max(0, static_cast<int>(minx)), x1 = std::min(opt.viewWidth - 1, static_cast<int>(maxx));
+                int y0 = std::max(0, static_cast<int>(miny)), y1 = std::min(opt.viewHeight - 1, static_cast<int>(maxy));
+                float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+                if (std::fabs(den) < 1e-8f) continue;
+                int lod = 0;
+                const Mips* mp = nullptr;
+                if (tex) {
+                    size_t ti = static_cast<size_t>(mat.texture);
+                    if (!mipsBuilt[ti]) { mips[ti] = BuildMips(*tex); mipsBuilt[ti] = true; }
+                    mp = &mips[ti];
+                    const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
+                    float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
+                    float scrArea = std::fabs(den) * 0.5f;
+                    if (scrArea > 1e-6f && uvArea > scrArea)
+                        lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                }
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = x0; x <= x1; ++x) {
+                        float px = x + 0.5f, py = y + 0.5f;
+                        float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
+                        float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
+                        float l2 = 1.0f - l0 - l1;
+                        if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                        float z = l0 * a.z + l1 * b.z + l2 * c.z;
+                        size_t zi = static_cast<size_t>(y) * opt.viewWidth + x;
+                        if (z <= zbuf[zi]) continue;
+                        float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
+                        if (tex) {
+                            const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                            float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                            u -= std::floor(u); v -= std::floor(v);
+                            float tc[4];
+                            SampleBilinear(*mp, lod, u, v, tc);
+                            r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
+                        }
+                        if (al < detail::DiscardBelow(mat, blend)) continue;
+                        float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        // Two-tone toon: lit side full colour, shade side tinted by the material's shadow colour.
+                        float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                        float shade = 1.0f;
+                        r *= (mat.shadow.x + (1.0f - mat.shadow.x) * lit);
+                        g *= (mat.shadow.y + (1.0f - mat.shadow.y) * lit);
+                        bl *= (mat.shadow.z + (1.0f - mat.shadow.z) * lit);
+                        if (!blend) zbuf[zi] = z;
+                        uint8_t* o = &img[(static_cast<size_t>(y) * W + ox + x) * 4];
+                        if (blend) {
+                            const float a = std::min(1.0f, std::max(0.0f, al));
+                            o[0] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, r * a + (o[0] / 255.0f) * (1.0f - a)) * 255.0f));
+                            o[1] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, g * a + (o[1] / 255.0f) * (1.0f - a)) * 255.0f));
+                            o[2] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, bl * a + (o[2] / 255.0f) * (1.0f - a)) * 255.0f));
+                        } else {
+                            o[0] = static_cast<uint8_t>(std::min(255.0f, r * shade * 255.0f));
+                            o[1] = static_cast<uint8_t>(std::min(255.0f, g * shade * 255.0f));
+                            o[2] = static_cast<uint8_t>(std::min(255.0f, bl * shade * 255.0f));
+                        }
+                    }
+            }
+        };
+        for (const auto& it : items) if (!it.overlay) drawSub(it.mi, it.sub, false);
+        std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.queue < b.queue; });
+        for (const auto& it : items) if (it.overlay) drawSub(it.mi, it.sub, true);
     }
     Bytes out;
     stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); },
@@ -275,6 +335,28 @@ const ShaderRuntime* GetShader(const assemble::Scene& scene, ViewState& st, int 
                     if (in.semantic == o.semantic && in.index == o.index && in.semantic != "SV_IsFrontFace")
                         sr.links.push_back({o.reg, in.reg, in.mask & o.mask});
             sr.ok = true;
+            if (const char* dis = std::getenv("CARDBRIDGE_DEBUG_SHADER"))
+                if (std::string(dis) == scene.shaders[static_cast<size_t>(index)].name) {
+                    std::fprintf(stderr, "shader %s PS disassembly (%zu instr):\n%s\n", scene.shaders[static_cast<size_t>(index)].name.c_str(), sr.ps.code.size(), shader::DisassembleSm4(sr.ps).c_str());
+                    for (const auto& l : sr.links) std::fprintf(stderr, "  link vs r%u -> ps r%u mask %u\n", l.vsReg, l.psReg, l.mask);
+                }
+            if (const char* dis = std::getenv("CARDBRIDGE_DEBUG_SHADER"))
+                if (std::string(dis) == scene.shaders[static_cast<size_t>(index)].name) {
+                    std::fprintf(stderr, "shader %s PS resources/cbuffers:\n", scene.shaders[static_cast<size_t>(index)].name.c_str());
+                    for (const auto& cb : sr.programs[sr.pi].cbuffers)
+                        for (const auto& v : cb.params) std::fprintf(stderr, "  cb slot %d off %u : %s\n", cb.slot, v.offset, v.name.c_str());
+                    for (const auto& t : sr.programs[sr.pi].textures) std::fprintf(stderr, "  texture reg %u sampler %u : %s\n", t.reg, t.sampler, t.name.c_str());
+                    std::fprintf(stderr, "  ps inputs:\n");
+                    for (const auto& in : sr.programs[sr.pi].code.inputs) std::fprintf(stderr, "   %s%u r%u mask %u\n", in.semantic.c_str(), in.index, in.reg, in.mask);
+                }
+            if (const char* dis = std::getenv("CARDBRIDGE_DEBUG_SHADER"))
+                if (std::string(dis) == scene.shaders[static_cast<size_t>(index)].name)
+                    std::fprintf(stderr, "shader %s VS disassembly (%zu instr):\n%s\n", scene.shaders[static_cast<size_t>(index)].name.c_str(), sr.vs.code.size(), shader::DisassembleSm4(sr.vs).c_str());
+            if (const char* dis = std::getenv("CARDBRIDGE_DEBUG_SHADER"))
+                if (std::string(dis) == scene.shaders[static_cast<size_t>(index)].name) {
+                    std::fprintf(stderr, "  vs inputs:\n");
+                    for (const auto& in : sr.programs[sr.vi].code.inputs) std::fprintf(stderr, "   %s%u r%u mask %u\n", in.semantic.c_str(), in.index, in.reg, in.mask);
+                }
         }
     }
     return slot->ok ? slot.get() : nullptr;
@@ -437,7 +519,7 @@ bool RunVertexStage(const ShaderRuntime& sr, const assemble::SceneMaterial& mat,
             if (in.semantic == "POSITION") { r[0] = v.pos.x; r[1] = v.pos.y; r[2] = v.pos.z; r[3] = 1; }
             else if (in.semantic == "NORMAL") { r[0] = v.normal.x; r[1] = v.normal.y; r[2] = v.normal.z; r[3] = 0; }
             else if (in.semantic == "TANGENT") { r[0] = tangents[i].x; r[1] = tangents[i].y; r[2] = tangents[i].z; r[3] = 1; }
-            else if (in.semantic == "TEXCOORD") { const Vec2& t = in.index == 1 ? v.uv1 : in.index == 2 ? v.uv2 : v.uv; r[0] = t.x; r[1] = t.y; r[2] = 0; r[3] = 0; }
+            else if (in.semantic == "TEXCOORD") { const Vec2& t = in.index == 1 ? v.uv1 : in.index == 2 ? v.uv2 : in.index == 3 ? v.uv3 : v.uv; r[0] = t.x; r[1] = t.y; r[2] = 0; r[3] = 0; }
             else if (in.semantic == "COLOR") { r[0] = r[1] = r[2] = r[3] = 1; }
         }
         io.discarded = false;
@@ -501,160 +583,215 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
         g = g * 0.62f + 0.52f * 0.38f;
         b = b * 0.62f + 0.10f * 0.38f;
     };
+    // Projected meshes, kept between the two passes (posed when a pose is on), and the draw jobs in scene order.
+    struct VM { assemble::SceneMesh posed; std::vector<Pt> P; std::vector<float> NZ; std::vector<Vec3> tangents; bool done = false; };
+    std::vector<VM> vms(scene.meshes.size());
+    struct Job { int mi, sub, queue; bool overlay, highlight; };
+    std::vector<Job> jobs;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         if (!visible(pi)) continue;
         const bool highlight = static_cast<int>(pi) == opt.highlightPart;
         for (int mi : scene.parts[pi].meshes) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
+                const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
+            }
+        }
+    }
+    auto meshOf = [&](int mi) -> const assemble::SceneMesh& {
+        VM& vm = vms[static_cast<size_t>(mi)];
+        if (!vm.done) {
+            vm.done = true;
             const auto& restMesh = scene.meshes[static_cast<size_t>(mi)];
-            assemble::SceneMesh posedMesh;   // the vertices moved by the pose, when there is one (submeshes and shapes are not needed to draw)
             const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
             if (posed) {
-                posedMesh.name = restMesh.name;
-                posedMesh.vertices = restMesh.vertices;
-                posedMesh.submeshes = restMesh.submeshes;
-                for (auto& v : posedMesh.vertices) {
+                vm.posed = restMesh;
+                for (auto& v : vm.posed.vertices) {
                     v.pos = assemble::SkinPoint(v, *opt.skin);
                     v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
                 }
             }
-            const assemble::SceneMesh& mesh = posed ? posedMesh : restMesh;
-            std::vector<Pt> P(mesh.vertices.size());
-            std::vector<float> NZ(mesh.vertices.size());
-            for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], P[i], NZ[i]);
-            std::vector<Vec3> tangents;
-            for (const auto& sub : mesh.submeshes) {
-                const auto& mat = scene.materials[static_cast<size_t>(sub.material)];
-                const assemble::SceneTexture* tex = (opt.textured && mat.texture >= 0) ? &scene.textures[static_cast<size_t>(mat.texture)] : nullptr;
-                const ShaderRuntime* sr = opt.shaded ? GetShader(scene, st, mat.shaderIndex) : nullptr;
-                std::vector<PsIn> vsOut;
-                CbSet psCb;
-                MatTextures mt;
-                const bool linear = detail::LinearLight();
-                const assemble::SceneMaterial linearMat = (sr && linear) ? detail::LinearColours(mat) : assemble::SceneMaterial{};
-                if (sr) {
-                    if (tangents.empty()) tangents = ComputeTangents(mesh);
-                    if (!RunVertexStage(*sr, mat, mesh, tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
-                    else {
-                        FillConstants(sr->programs[sr->pi], linear ? linearMat : mat, L, camPos, psCb, &scene.globalProps);
-                        mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat;
-                        mt.decodeSrgb = linear;
-                    }
+            const auto& mesh = posed ? vm.posed : restMesh;
+            vm.P.resize(mesh.vertices.size());
+            vm.NZ.resize(mesh.vertices.size());
+            for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], vm.P[i], vm.NZ[i]);
+        }
+        const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
+        return posed ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
+    };
+    auto drawSub = [&](int mi, int subIdx, bool blend, bool highlight) {
+            const auto& mesh = meshOf(mi);
+            VM& vm = vms[static_cast<size_t>(mi)];
+            const auto& P = vm.P;
+            const auto& NZ = vm.NZ;
+            const auto& sub = mesh.submeshes[static_cast<size_t>(subIdx)];
+            const auto& mat = scene.materials[static_cast<size_t>(sub.material)];
+            const assemble::SceneTexture* tex = (opt.textured && mat.texture >= 0) ? &scene.textures[static_cast<size_t>(mat.texture)] : nullptr;
+            const ShaderRuntime* sr = opt.shaded ? GetShader(scene, st, mat.shaderIndex) : nullptr;
+            std::vector<PsIn> vsOut;
+            CbSet psCb;
+            MatTextures mt;
+            const bool linear = detail::LinearLight();
+            const assemble::SceneMaterial linearMat = (sr && linear) ? detail::LinearColours(mat) : assemble::SceneMaterial{};
+            if (sr) {
+                if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
+                if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
+                else {
+                    FillConstants(sr->programs[sr->pi], linear ? linearMat : mat, L, camPos, psCb, &scene.globalProps);
+                    mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat;
+                    mt.decodeSrgb = linear;
                 }
-                for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
-                    uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
-                    const Pt &a = P[i0], &b = P[i1], &c = P[i2];
-                    float minx = std::min({a.x, b.x, c.x}), maxx = std::max({a.x, b.x, c.x});
-                    float miny = std::min({a.y, b.y, c.y}), maxy = std::max({a.y, b.y, c.y});
-                    if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
-                    int x0 = std::max(0, static_cast<int>(std::floor(minx))), x1 = std::min(W - 1, static_cast<int>(std::ceil(maxx)));
-                    int y0 = std::max(0, static_cast<int>(std::floor(miny))), y1 = std::min(H - 1, static_cast<int>(std::ceil(maxy)));
-                    float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
-                    if (std::fabs(den) < 1e-8f) continue;
-                    int lod = 0;
-                    const Mips* mp = nullptr;
-                    if (tex) {
-                        size_t ti = static_cast<size_t>(mat.texture);
-                        if (!st.built[ti]) { st.mips[ti] = BuildMips(*tex); st.built[ti] = true; }
-                        mp = &st.mips[ti];
-                        const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
-                        float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
-                        float scrArea = std::fabs(den) * 0.5f;
-                        if (scrArea > 1e-6f && uvArea > scrArea)
-                            lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
-                    }
-                    for (int y = y0 - (y0 % step); y <= y1; y += step)
-                        for (int x = x0 - (x0 % step); x <= x1; x += step) {
-                            if (x < 0 || y < 0) continue;
-                            float px = x + 0.5f, py = y + 0.5f;
-                            float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
-                            float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
-                            float l2 = 1.0f - l0 - l1;
-                            if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
-                            float z = l0 * a.z + l1 * b.z + l2 * c.z;
-                            size_t zi = static_cast<size_t>(y) * W + x;
-                            if (z <= zbuf[zi]) continue;
-                            float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
-                            if (sr) {
-                                shader::Sm4Io io;
-                                io.constantBuffers = psCb.ptr;
-                                io.textures = &mt;
-                                mt.lod = static_cast<float>(lod);
-                                for (const auto& l : sr->links)
-                                    for (int ch = 0; ch < 4; ++ch)
-                                        io.input[l.psReg][ch] = l0 * vsOut[i0].r[l.psReg][ch] + l1 * vsOut[i1].r[l.psReg][ch] + l2 * vsOut[i2].r[l.psReg][ch];
-                                for (const auto& in : sr->programs[sr->pi].code.inputs) {
-                                    if (in.reg >= 32) continue;
-                                    if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = px; io.input[in.reg][1] = py; io.input[in.reg][2] = z; io.input[in.reg][3] = 1; }
-                                    else if (in.semantic == "SV_IsFrontFace") {
-                                        float nzf = l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2];
-                                        uint32_t bits = nzf >= 0 ? 0xFFFFFFFFu : 0u;
-                                        std::memcpy(&io.input[in.reg][0], &bits, 4);
-                                    }
+            }
+            for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
+                uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
+                const Pt &a = P[i0], &b = P[i1], &c = P[i2];
+                float minx = std::min({a.x, b.x, c.x}), maxx = std::max({a.x, b.x, c.x});
+                float miny = std::min({a.y, b.y, c.y}), maxy = std::max({a.y, b.y, c.y});
+                if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
+                int x0 = std::max(0, static_cast<int>(std::floor(minx))), x1 = std::min(W - 1, static_cast<int>(std::ceil(maxx)));
+                int y0 = std::max(0, static_cast<int>(std::floor(miny))), y1 = std::min(H - 1, static_cast<int>(std::ceil(maxy)));
+                float den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+                if (std::fabs(den) < 1e-8f) continue;
+                int lod = 0;
+                const Mips* mp = nullptr;
+                if (tex) {
+                    size_t ti = static_cast<size_t>(mat.texture);
+                    if (!st.built[ti]) { st.mips[ti] = BuildMips(*tex); st.built[ti] = true; }
+                    mp = &st.mips[ti];
+                    const auto &t0 = mesh.vertices[i0].uv, &t1 = mesh.vertices[i1].uv, &t2 = mesh.vertices[i2].uv;
+                    float uvArea = std::fabs((t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y)) * 0.5f * tex->width * tex->height;
+                    float scrArea = std::fabs(den) * 0.5f;
+                    if (scrArea > 1e-6f && uvArea > scrArea)
+                        lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                }
+                for (int y = y0 - (y0 % step); y <= y1; y += step)
+                    for (int x = x0 - (x0 % step); x <= x1; x += step) {
+                        if (x < 0 || y < 0) continue;
+                        float px = x + 0.5f, py = y + 0.5f;
+                        float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
+                        float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
+                        float l2 = 1.0f - l0 - l1;
+                        if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
+                        float z = l0 * a.z + l1 * b.z + l2 * c.z;
+                        size_t zi = static_cast<size_t>(y) * W + x;
+                        if (z <= zbuf[zi]) continue;
+                        float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
+                        if (sr) {
+                            shader::Sm4Io io;
+                            io.constantBuffers = psCb.ptr;
+                            io.textures = &mt;
+                            mt.lod = static_cast<float>(lod);
+                            for (const auto& l : sr->links)
+                                for (int ch = 0; ch < 4; ++ch)
+                                    io.input[l.psReg][ch] = l0 * vsOut[i0].r[l.psReg][ch] + l1 * vsOut[i1].r[l.psReg][ch] + l2 * vsOut[i2].r[l.psReg][ch];
+                            for (const auto& in : sr->programs[sr->pi].code.inputs) {
+                                if (in.reg >= 32) continue;
+                                if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = px; io.input[in.reg][1] = py; io.input[in.reg][2] = z; io.input[in.reg][3] = 1; }
+                                else if (in.semantic == "SV_IsFrontFace") {
+                                    float nzf = l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2];
+                                    uint32_t bits = nzf >= 0 ? 0xFFFFFFFFu : 0u;
+                                    std::memcpy(&io.input[in.reg][0], &bits, 4);
                                 }
-                                std::string why;
-                                static const char* traceMat = std::getenv("CARDBRIDGE_TRACE_MAT");
-                                static bool traced = false;
-                                {
-                                    static const char* tpx = std::getenv("CARDBRIDGE_TRACE_PX");
-                                    int wx = -1, wy = -1;
-                                    if (tpx) std::sscanf(tpx, "%d,%d", &wx, &wy);
-                                    mt.trace = traceMat && !traced && mat.name == traceMat && (!tpx || (x == wx && y == wy));
-                                }
-                                if (mt.trace) std::fprintf(stderr, "trace %s (shader %s) at %d,%d\n", mat.name.c_str(), mat.shader.c_str(), x, y);
-                                if (mt.trace) for (uint32_t vi2 : {i0, i1, i2}) std::fprintf(stderr, "  vertex pos %.3f %.3f %.3f normal %.3f %.3f %.3f uv %.3f %.3f\n", mesh.vertices[vi2].pos.x, mesh.vertices[vi2].pos.y, mesh.vertices[vi2].pos.z, mesh.vertices[vi2].normal.x, mesh.vertices[vi2].normal.y, mesh.vertices[vi2].normal.z, mesh.vertices[vi2].uv.x, mesh.vertices[vi2].uv.y);
-                                if (mt.trace) for (const auto& in : sr->programs[sr->pi].code.inputs) if (in.reg < 32) std::fprintf(stderr, "  in %s%u r%u = %.3f %.3f %.3f %.3f\n", in.semantic.c_str(), in.index, in.reg, io.input[in.reg][0], io.input[in.reg][1], io.input[in.reg][2], io.input[in.reg][3]);
-                                io.trace = mt.trace && std::getenv("CARDBRIDGE_TRACE_INSTR");
-                                bool okRun = shader::RunSm4(sr->ps, io, &why);
-                                if (mt.trace) { std::fprintf(stderr, "  result %s %.3f %.3f %.3f %.3f %s\n", okRun ? "ok" : why.c_str(), io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3], io.discarded ? "DISCARDED" : ""); traced = true; mt.trace = false; }
-                                if (!okRun || io.discarded) continue;
-                                r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
-                                if (al < 0.5f) continue;
-                                if (highlight) highlightTint(r, g, bl);
-                                zbuf[zi] = z;
-                                auto q2 = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return static_cast<uint32_t>(f * 255.0f + 0.5f); };
-                                uint32_t shadedPx = 0xFF000000u | (q2(r) << 16) | (q2(g) << 8) | q2(bl);
-                                for (int dy = 0; dy < step && y + dy < H; ++dy)
-                                    for (int dx = 0; dx < step && x + dx < W; ++dx) {
-                                        size_t zj = static_cast<size_t>(y + dy) * W + (x + dx);
-                                        bgra[zj] = shadedPx;
-                                        zbuf[zj] = z;
-                                    }
-                                continue;
                             }
-                            if (mp) {
-                                const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
-                                float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
-                                u -= std::floor(u); v -= std::floor(v);
-                                float tc[4];
-                                SampleBilinear(*mp, lod, u, v, tc);
-                                r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
+                            std::string why;
+                            static const char* traceMat = std::getenv("CARDBRIDGE_TRACE_MAT");
+                            static bool traced = false;
+                            if (std::getenv("CARDBRIDGE_TRACE_FRAG_x")) {
+                                int wx = std::atoi(std::getenv("CARDBRIDGE_TRACE_FRAG_x"));
+                                int wy = std::atoi(std::getenv("CARDBRIDGE_TRACE_FRAG_y"));
+                                if (x == wx && y == wy)
+                                    std::fprintf(stderr, "frag (%d,%d): mat='%s' shader='%s' queue=%d\n", x, y, mat.name.c_str(), mat.shader.c_str(), detail::RenderQueueOf(scene, mat));
                             }
-                            if (al < 0.5f) continue;
-                            float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                            if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
-                                const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
-                                r *= rr.x; g *= rr.y; bl *= rr.z;
-                            } else {
-                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
-                                r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
-                                g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
-                                bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            {
+                                static const char* tpx = std::getenv("CARDBRIDGE_TRACE_PX");
+                                int wx = -1, wy = -1;
+                                if (tpx) std::sscanf(tpx, "%d,%d", &wx, &wy);
+                                mt.trace = traceMat && !traced && mat.name == traceMat && (!tpx || (x == wx && y == wy));
                             }
+                            if (mt.trace) std::fprintf(stderr, "trace %s (shader %s) at %d,%d\n", mat.name.c_str(), mat.shader.c_str(), x, y);
+                            if (mt.trace) for (uint32_t vi2 : {i0, i1, i2}) std::fprintf(stderr, "  vertex pos %.3f %.3f %.3f normal %.3f %.3f %.3f uv %.3f %.3f uv1 %.3f %.3f uv2 %.3f %.3f uv3 %.3f %.3f\n", mesh.vertices[vi2].pos.x, mesh.vertices[vi2].pos.y, mesh.vertices[vi2].pos.z, mesh.vertices[vi2].normal.x, mesh.vertices[vi2].normal.y, mesh.vertices[vi2].normal.z, mesh.vertices[vi2].uv.x, mesh.vertices[vi2].uv.y, mesh.vertices[vi2].uv1.x, mesh.vertices[vi2].uv1.y, mesh.vertices[vi2].uv2.x, mesh.vertices[vi2].uv2.y, mesh.vertices[vi2].uv3.x, mesh.vertices[vi2].uv3.y);
+                            if (mt.trace) for (const auto& in : sr->programs[sr->pi].code.inputs) if (in.reg < 32) std::fprintf(stderr, "  in %s%u r%u = %.3f %.3f %.3f %.3f\n", in.semantic.c_str(), in.index, in.reg, io.input[in.reg][0], io.input[in.reg][1], io.input[in.reg][2], io.input[in.reg][3]);
+                            if (mt.trace) {
+                                for (const auto& cb : sr->programs[sr->pi].cbuffers)
+                                    if (cb.slot < static_cast<int>(psCb.data.size()))
+                                        for (const auto& pm : cb.params)
+                                            std::fprintf(stderr, "  cb slot %d off %u %-22s x %.4f w %.4f\n", cb.slot, pm.offset, pm.name.c_str(), psCb.data[static_cast<size_t>(cb.slot)][pm.offset / 4], psCb.data[static_cast<size_t>(cb.slot)][pm.offset / 4 + 3]);
+                                for (const auto& tb : mat.texProps) std::fprintf(stderr, "  texprop %s = %d\n", tb.name.c_str(), tb.texture);
+                            }
+                            io.trace = mt.trace && [] { static const bool t = std::getenv("CARDBRIDGE_TRACE_INSTR") != nullptr; return t; }();
+                            bool okRun = shader::RunSm4(sr->ps, io, &why);
+                            if (mt.trace) { std::fprintf(stderr, "  result %s %.3f %.3f %.3f %.3f %s\n", okRun ? "ok" : why.c_str(), io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3], io.discarded ? "DISCARDED" : ""); traced = true; mt.trace = false; }
+                            if (!okRun || io.discarded) continue;
+                            r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
+                            if (al < detail::DiscardBelow(mat, blend)) continue;
                             if (highlight) highlightTint(r, g, bl);
-                            zbuf[zi] = z;
-                            auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
-                            uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
+                            if (!blend) zbuf[zi] = z;
+                            auto q2f = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return f; };
+                            const float a = std::min(1.0f, std::max(0.0f, al));
+                            const float sr2 = q2f(r), sg2 = q2f(g), sb2 = q2f(bl);
+                            auto q2 = [q2f](float f) { return static_cast<uint32_t>(q2f(f) * 255.0f + 0.5f); };
+                            uint32_t shadedPx = 0xFF000000u | (q2(r) << 16) | (q2(g) << 8) | q2(bl);
                             for (int dy = 0; dy < step && y + dy < H; ++dy)
                                 for (int dx = 0; dx < step && x + dx < W; ++dx) {
                                     size_t zj = static_cast<size_t>(y + dy) * W + (x + dx);
+                                    if (blend) {
+                                        uint32_t d = bgra[zj];
+                                        float cr = sr2 * a + (((d >> 16) & 255u) / 255.0f) * (1.0f - a);
+                                        float cg = sg2 * a + (((d >> 8) & 255u) / 255.0f) * (1.0f - a);
+                                        float cb = sb2 * a + ((d & 255u) / 255.0f) * (1.0f - a);
+                                        bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f + 0.5f) << 16) | (static_cast<uint32_t>(cg * 255.0f + 0.5f) << 8) | static_cast<uint32_t>(cb * 255.0f + 0.5f);
+                                    } else {
+                                        bgra[zj] = shadedPx;
+                                        zbuf[zj] = z;
+                                    }
+                                }
+                            continue;
+                        }
+                        if (mp) {
+                            const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                            float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                            u -= std::floor(u); v -= std::floor(v);
+                            float tc[4];
+                            SampleBilinear(*mp, lod, u, v, tc);
+                            r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
+                        }
+                        if (al < detail::DiscardBelow(mat, blend)) continue;
+                        float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
+                            const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
+                            r *= rr.x; g *= rr.y; bl *= rr.z;
+                        } else {
+                            float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                            r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
+                            g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
+                            bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                        }
+                        if (highlight) highlightTint(r, g, bl);
+                        if (!blend) zbuf[zi] = z;
+                        auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
+                        uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
+                        const float a2 = std::min(1.0f, std::max(0.0f, al));
+                        for (int dy = 0; dy < step && y + dy < H; ++dy)
+                            for (int dx = 0; dx < step && x + dx < W; ++dx) {
+                                size_t zj = static_cast<size_t>(y + dy) * W + (x + dx);
+                                if (blend) {
+                                    uint32_t d = bgra[zj];
+                                    float cr = std::min(1.0f, std::max(0.0f, r)) * a2 + (((d >> 16) & 255u) / 255.0f) * (1.0f - a2);
+                                    float cg = std::min(1.0f, std::max(0.0f, g)) * a2 + (((d >> 8) & 255u) / 255.0f) * (1.0f - a2);
+                                    float cb = std::min(1.0f, std::max(0.0f, bl)) * a2 + ((d & 255u) / 255.0f) * (1.0f - a2);
+                                    bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f) << 16) | (static_cast<uint32_t>(cg * 255.0f) << 8) | static_cast<uint32_t>(cb * 255.0f);
+                                } else {
                                     bgra[zj] = px32;
                                     zbuf[zj] = z;
                                 }
-                        }
-                }
+                            }
+                    }
             }
-        }
-    }
+    };
+    for (const auto& job : jobs) if (!job.overlay) drawSub(job.mi, job.sub, false, job.highlight);
+    std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.queue < b.queue; });
+    for (const auto& job : jobs) if (job.overlay) drawSub(job.mi, job.sub, true, job.highlight);
     if (opt.shaded) ApplyColourGrade(bgra, 0xFFE2E4E8u);   // the game's own colour grading, like the Direct3D view
 }
 
@@ -919,7 +1056,15 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         bt.source = "shader bake (" + mat.shader + ")";
         bt.width = W; bt.height = H;
         bt.rgba.resize(static_cast<size_t>(W) * H * 4);
-        for (size_t i = 0; i < bt.rgba.size(); ++i) bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, img[i] * 255.0f + 0.5f)));
+        // Materials whose colour lives in a linear-stored texture (an embedded MaterialEditor image) compute in linear
+        // light: encode the result to sRGB bytes, like the framebuffer does, or the grading toe crushes it.
+        const bool encode = detail::LinearLight() && mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
+                            !scene.textures[static_cast<size_t>(mat.texture)].srgb;
+        for (size_t i = 0; i < bt.rgba.size(); ++i) {
+            float v = img[i];
+            if (encode && (i % 4) < 3) v = detail::ToSrgb(v);
+            bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f)));
+        }
         if (grade) {   // the same look-up the preview applies to its frame; alpha stays
             std::vector<uint32_t> px(static_cast<size_t>(W) * H);
             for (size_t i = 0; i < px.size(); ++i)
@@ -962,6 +1107,7 @@ void RunCreateJobs(assemble::Scene& scene) {
             v.uv = uv;
             v.uv1 = uv;
             v.uv2 = uv;
+            v.uv3 = uv;
             quad.vertices.push_back(v);
         }
         for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
