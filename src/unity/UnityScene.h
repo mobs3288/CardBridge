@@ -21,7 +21,7 @@ struct PPtr {
 struct BoneInfluence { int idx[4] = {0, 0, 0, 0}; float w[4] = {0, 0, 0, 0}; };
 
 // A decoded Unity Mesh: float vertex streams plus triangle lists per submesh.
-// Only the channels CardBridge uses are kept (position, normal, uv0, colour,
+// Only the channels CardBridge uses are kept (position, normal, uv0..uv3, colour,
 // skin weights, bind poses).
 struct MeshData {
     std::string name;
@@ -30,6 +30,7 @@ struct MeshData {
     std::vector<Vec2> uv0;
     std::vector<Vec2> uv1;                // second UV set, empty when absent
     std::vector<Vec2> uv2;                // third UV set, empty when absent
+    std::vector<Vec2> uv3;                // fourth UV set, empty when absent (the skin shader's _overtex3 placement)
     std::vector<BoneInfluence> skin;      // empty if the mesh is not skinned
     std::vector<Mat4> bindPoses;
     std::vector<std::vector<uint32_t>> subMeshTriangles;   // 3 indices per triangle
@@ -59,6 +60,7 @@ struct MaterialData {
     std::vector<std::pair<std::string, Vec4>> colors;
     std::vector<std::pair<std::string, float>> floats;
     std::vector<std::pair<std::string, Vec4>> texST;        // texture property -> (scale.xy, offset.xy)
+    int renderQueue = -1;                             // m_CustomRenderQueue, -1 = the shader's own queue
     int64_t shaderPathId = 0;                               // the Shader object in the same bundle, 0 if external
     const PPtr* texture(const std::string& prop) const {
         for (auto& t : textures) if (t.first == prop) return &t.second;
@@ -98,6 +100,14 @@ struct MonoInfo {
     std::string className;     // from the MonoScript, e.g. "ChaClothesComponent"
     int64_t goId = 0;
     Value fields;              // the MonoBehaviour's serialized fields
+};
+
+// A shader's forward-pass render state: what decides where and how it is drawn.
+struct ShaderRenderState {
+    int cull = -1;                // face culling: 0 off (both sides drawn), 1 front, 2 back; -1 not known
+    std::string cullProperty;     // the material float that sets the culling instead, when the shader reads it from one
+    bool zWrite = true;           // whether the forward pass writes depth
+    int queue = 2000;             // the shader's render queue (m_Tags QUEUE: Background 1000 .. Overlay 4000), 2000 when unreadable
 };
 
 // The loaded view of one bundle: its GameObject/Transform graph and typed
@@ -148,9 +158,9 @@ public:
     std::vector<std::pair<std::string, std::string>> readShaderTextureDefaults(int64_t shaderPathId) const;
     // The declared default of every colour, vector and float property of a shader (floats in .x).
     std::vector<std::pair<std::string, Vec4>> readShaderPropDefaults(int64_t shaderPathId) const;
-    // The face culling of the shader's forward pass (the pass tagged LightMode ForwardBase, else the first): 0 off, 1 front, 2 back, -1 when
-    // unreadable. `property` gets the material float that sets it when the shader reads it from one ("[_Cull]"), else empty.
-    int readShaderCulling(int64_t shaderPathId, std::string* property = nullptr) const;
+    // The render state of the shader's forward pass (the pass tagged LightMode ForwardBase, else the first): culling, depth
+    // write and render queue. False when the shader cannot be read (out keeps its defaults: cull -1, depth written, queue 2000).
+    bool readShaderRenderState(int64_t shaderPathId, ShaderRenderState& out) const;
 
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;

@@ -62,4 +62,7 @@ struct Sm4Io {
 // Runs a decoded program once. Returns false (with `why`) on an operation the interpreter does not know.
 bool RunSm4(const Sm4Program& prog, Sm4Io& io, std::string* why);
 
+// Debug helper: human-readable instruction list (opcode names + operand registers), for inspecting what a shader does.
+std::string DisassembleSm4(const Sm4Program& prog);
+
 } // namespace cardbridge::shader

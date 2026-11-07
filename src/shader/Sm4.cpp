@@ -313,4 +313,35 @@ bool RunSm4(const Sm4Program& prog, Sm4Io& io, std::string* why) {
     return m.Run();
 }
 
+std::string DisassembleSm4(const Sm4Program& prog) {
+    const char* names[128] = {};
+    auto N = [&](uint16_t op, const char* s) { if (op < 128) names[op] = s; };
+    N(OP_ADD, "add"); N(OP_AND, "and"); N(OP_DISCARD, "discard"); N(OP_DIV, "div"); N(OP_DP2, "dp2"); N(OP_DP3, "dp3");
+    N(OP_DP4, "dp4"); N(OP_ELSE, "else"); N(OP_ENDIF, "endif"); N(OP_EQ, "eq"); N(OP_EXP, "exp"); N(OP_FRC, "frc");
+    N(OP_GE, "ge"); N(OP_IF, "if"); N(OP_LOG, "log"); N(OP_LT, "lt"); N(OP_MAD, "mad"); N(OP_MIN, "min"); N(OP_MAX, "max");
+    N(OP_CUSTOMDATA, "customdata"); N(OP_MOV, "mov"); N(OP_MOVC, "movc"); N(OP_MUL, "mul"); N(OP_NE, "ne"); N(OP_NOP, "nop");
+    N(OP_OR, "or"); N(OP_RET, "ret"); N(OP_ROUND_NE, "round_ne"); N(OP_ROUND_NI, "round_ni"); N(OP_ROUND_PI, "round_pi");
+    N(OP_ROUND_Z, "round_z"); N(OP_RSQ, "rsq"); N(OP_SAMPLE, "sample"); N(OP_SAMPLE_C, "sample_c"); N(OP_SAMPLE_C_LZ, "sample_c_lz");
+    N(OP_SAMPLE_L, "sample_l"); N(OP_SQRT, "sqrt"); N(OP_SINCOS, "sincos"); N(OP_DCL_FIRST, "dcl"); N(OP_DCL_TEMPS, "dcl_temps");
+    auto regOf = [](const Sm4Operand& o) {
+        std::string s = o.type == 0 ? "r" : o.type == 1 ? "v" : o.type == 2 ? "o" : o.type == 4 ? "imm" : o.type == 8 ? "cb" : "t";
+        s += std::to_string(o.type == 8 ? o.index1 * 16 + o.index0 : o.index0);
+        return s;
+    };
+    std::string out;
+    for (size_t i = 0; i < prog.code.size(); ++i) {
+        const Sm4Instr& in = prog.code[i];
+        out += std::to_string(i) + ") " + (in.op < 128 && names[in.op] ? names[in.op] : ("op" + std::to_string(in.op)));
+        if (in.saturate) out += "_sat";
+        for (const Sm4Operand& o : in.operands) {
+            out += " " + regOf(o);
+            if (o.type == 4) { float f[4]; for (int c = 0; c < 4; ++c) std::memcpy(&f[c], &o.imm[c], 4); out += "("; for (int c = 0; c < 4; ++c) { char buf[16]; std::snprintf(buf, 16, "%.3f", f[c]); out += buf; if (c < 3) out += ","; } out += ")"; }
+            if (o.modifier) out += (o.modifier == 1 ? "-x" : o.modifier == 2 ? "|x|" : "-|x|");
+        }
+        if (in.jump >= 0) out += " -> " + std::to_string(in.jump);
+        out += "\n";
+    }
+    return out;
+}
+
 } // namespace cardbridge::shader

@@ -26,6 +26,7 @@ struct SceneVertex {
     Vec2 uv;                  // Unity convention (v up); the PMX writer flips v
     Vec2 uv1;                 // the second UV set (TEXCOORD1: the body's nipple placement); equals uv when the mesh has none
     Vec2 uv2;                 // the third UV set (TEXCOORD2: the body's underhair placement); equals uv when the mesh has none
+    Vec2 uv3;                 // the fourth UV set (TEXCOORD3: the face's eye-shadow placement); equals uv when the mesh has none
     int bone[4] = {0, 0, 0, 0};
     float weight[4] = {1, 0, 0, 0};
     // The vertex and its normal in the frame of each bone that moves it (pos = sum of weight * bone world * local), so new bone worlds
@@ -58,6 +59,7 @@ struct SceneMaterial {
     Vec4 diffuse{1, 1, 1, 1};
     bool doubleSided = false;
     bool alpha = false;
+    int renderQueue = -1;         // m_CustomRenderQueue, -1 = the shader's own queue
     // The game's toon look, from the Shader Forge material: the colour a surface turns in shade, its highlight and its outline.
     Vec3 shadow{0.5f, 0.5f, 0.5f};           // _ShadowColor (per-channel multiplier of the lit colour)
     Vec3 specular{0, 0, 0};                  // _SpecularColor scaled by its power
@@ -99,6 +101,8 @@ struct SceneShader {
     std::vector<std::pair<std::string, std::string>> texDefaults;   // texture property -> default ("white", "black", "bump", "gray")
     int cull = -1;                // the forward pass's face culling: 0 off (both sides drawn), 1 front, 2 back; -1 not known
     std::string cullProperty;     // the material float that sets the culling instead, when the shader reads it from one
+    bool zWrite = true;           // whether the forward pass writes depth (false = the game's transparent compositing)
+    int queue = 2000;             // the shader's render queue (m_Tags QUEUE)
 };
 
 struct SceneSubmesh {
