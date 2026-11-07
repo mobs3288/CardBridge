@@ -556,16 +556,10 @@ struct Builder {
         card::MaterialEdits::Image img;
         int result = -1;
         if (edits && edits->decode(texId, img)) {
-            if (std::getenv("CARDBRIDGE_DEBUG_ME")) {
-                long double m[3] = {0, 0, 0}; size_t n = 0;
-                for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) { m[0] += img.rgba[i]; m[1] += img.rgba[i + 1]; m[2] += img.rgba[i + 2]; ++n; }
-                if (n) std::fprintf(stderr, "me-tex %d %dx%d mean=(%.1Lf %.1Lf %.1Lf) first=%d %d %d\n", texId, img.width, img.height, m[0] / n, m[1] / n, m[2] / n, img.rgba[0], img.rgba[1], img.rgba[2]);
-            }
             result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
             // The embedded images are linear dumps, not sRGB authoring images: the game displays them unconverted (the whole
             // "colour", too, is what the editor's render produced in linear light), so they are stored linear like the masks.
             scene.textures[static_cast<size_t>(result)].srgb = false;
-            if (std::getenv("CARDBRIDGE_ME_SRGB")) scene.textures[static_cast<size_t>(result)].srgb = true;
         } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
         meTextures[key] = result;
         return result;
@@ -2879,24 +2873,6 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 for (const auto& w : mesh.vertices)
                     if (std::fabs(w.uv1.x) > 0.01f || std::fabs(w.uv1.y) > 0.01f) { if (w.pos.y > 1.0f) ++nn; }
                 std::fprintf(stderr, "body verts with uv1!=0 & y>1.0: %lld\n", nn);
-            }
-        }
-    }
-    if (std::getenv("CARDBRIDGE_DEBUG_PART")) {
-        int want = std::atoi(std::getenv("CARDBRIDGE_DEBUG_PART"));
-        if (want >= 0 && want < static_cast<int>(scene.parts.size())) {
-            const auto& part = scene.parts[static_cast<size_t>(want)];
-            for (int mi : part.meshes) {
-                const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
-                double mn[3] = {1e30, 1e30, 1e30}, mx[3] = {-1e30, -1e30, -1e30};
-                double mnu[2] = {1e30, 1e30}, mxu[2] = {-1e30, -1e30};
-                for (size_t show = 0; show < mesh.vertices.size(); ++show) {
-                }
-                for (const auto& v : mesh.vertices) {
-                    mn[0] = std::min(mn[0], (double)v.pos.x); mx[0] = std::max(mx[0], (double)v.pos.x); mn[1] = std::min(mn[1], (double)v.pos.y); mx[1] = std::max(mx[1], (double)v.pos.y); mn[2] = std::min(mn[2], (double)v.pos.z); mx[2] = std::max(mx[2], (double)v.pos.z);
-                    mnu[0] = std::min(mnu[0], (double)v.uv.x); mxu[0] = std::max(mxu[0], (double)v.uv.x); mnu[1] = std::min(mnu[1], (double)v.uv.y); mxu[1] = std::max(mxu[1], (double)v.uv.y);
-                }
-                std::fprintf(stderr, "part %d mesh mi=%d vertices: %zu pos x[%f %f] y[%f %f] z[%f %f] uv[%f %f - %f %f]\n", want, mi, mesh.vertices.size(), mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mnu[0], mnu[1], mxu[0], mxu[1]);
             }
         }
     }
