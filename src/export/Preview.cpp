@@ -59,11 +59,8 @@ float CutoffOf(const assemble::SceneMaterial& mat) {
 
 // Discard threshold a fragment must pass: the cutout materials discard at their _Cutoff, the true overlays blend at any alpha.
 float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
-    static const float forced = std::getenv("CARDBRIDGE_CUTOFF_MIN") ? std::atof(std::getenv("CARDBRIDGE_CUTOFF_MIN")) : -1.0f;
     float cut = CutoffOf(mat);
-    float v = cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
-    if (forced >= 0.0f) v = std::max(v, forced);
-    return v;
+    return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
 
 // A material the game composites in its transparent queue with depth write off (the face's paint layers: eye white, iris,
@@ -697,12 +694,6 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             std::string why;
                             static const char* traceMat = std::getenv("CARDBRIDGE_TRACE_MAT");
                             static bool traced = false;
-                            if (std::getenv("CARDBRIDGE_TRACE_FRAG_x")) {
-                                int wx = std::atoi(std::getenv("CARDBRIDGE_TRACE_FRAG_x"));
-                                int wy = std::atoi(std::getenv("CARDBRIDGE_TRACE_FRAG_y"));
-                                if (x == wx && y == wy)
-                                    std::fprintf(stderr, "frag (%d,%d): mat='%s' shader='%s' queue=%d\n", x, y, mat.name.c_str(), mat.shader.c_str(), detail::RenderQueueOf(scene, mat));
-                            }
                             {
                                 static const char* tpx = std::getenv("CARDBRIDGE_TRACE_PX");
                                 int wx = -1, wy = -1;
