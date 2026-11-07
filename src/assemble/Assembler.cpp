@@ -1709,7 +1709,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         job.linear = CreateRunsInLinearLight(matName);
         job.width = job.height = size;
         job.texture = b.addSceneTexture(std::string(matName) + "_result", std::string("create material ") + matName, 1, 1, std::vector<uint8_t>{255, 255, 255, 255});
-        for (const auto& [name, td] : texs) if (td && name == "_MainTex") scene.textures[static_cast<size_t>(job.texture)].clamp = td->wrapMode == 1;
+        for (const auto& [name, td] : texs) if (td && name == "_MainTex") scene.textures[static_cast<size_t>(job.texture)].clamp = true;
         scene.createJobs.push_back(std::move(job));
         return scene.createJobs.back().texture;
     };
@@ -2880,7 +2880,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         for (const auto& m : scene.materials) {
             std::fprintf(stderr, "mat %s shader=%s idx=%d cull=%d two-sided=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex,
                          m.shaderIndex >= 0 ? scene.shaders[static_cast<size_t>(m.shaderIndex)].cull : -1, m.doubleSided ? 1 : 0);
-            for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d", t.name.c_str(), t.texture);
+            for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d(clamp=%d,name=%s)", t.name.c_str(), t.texture, t.texture >= 0 ? (int)scene.textures[static_cast<size_t>(t.texture)].clamp : -1, t.texture >= 0 ? scene.textures[static_cast<size_t>(t.texture)].name.c_str() : "none");
             std::fprintf(stderr, " | props:");
             for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0 || pr.first.rfind("_overcolor", 0) == 0 || pr.first == "_nipsize" || pr.first.rfind("_paint", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
             std::fprintf(stderr, "\n");
