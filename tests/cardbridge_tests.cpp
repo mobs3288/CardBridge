@@ -2309,6 +2309,46 @@ void unitTests() {
         for (const auto& b : e.bones) CHECK(std::isfinite(b.pos.x) && std::isfinite(b.pos.y) && std::isfinite(b.pos.z));
         CHECK(exporter::ValidateScene(e).empty());
     });
+
+    test("heel pose: vertical stack still pitches to flush sole (contact, not stack lean)", [] {
+        using namespace assemble;
+        Scene s = makeBareRig();
+        // Vertical heel column under the rear sole: top and bottom share the same z, so a
+        // stack-lean estimate reads ~0 and would skip. The sole must still be pitched so the
+        // heel block and the toe ball sit on the same ground plane ("straight to the
+        // bottom plane" — toe and heel contacts flush, not one floating).
+        for (int i = 0; i < 10; ++i) {
+            SceneVertex top; top.pos = {-0.08f, -0.01f, 0.01f}; top.normal = {0, 1, 0};
+            top.bone[0] = 2; top.weight[0] = 1;
+            SceneVertex bot; bot.pos = {-0.08f, -0.03f, 0.01f}; bot.normal = {0, 1, 0};
+            bot.bone[0] = 2; bot.weight[0] = 1;
+            s.meshes[0].vertices.push_back(top);
+            s.meshes[0].vertices.push_back(bot);
+        }
+        // Representative contact vertices as in production: heel = global lowest,
+        // toe = lowest in the front band. Track them through the pose.
+        float heelY0 = 1e30f, toeY0 = 1e30f;
+        size_t heelIdx = 0, toeIdx = 0;
+        float maxZ = 0;
+        for (const auto& v : s.meshes[0].vertices) maxZ = std::max(maxZ, v.pos.z);
+        for (size_t i = 0; i < s.meshes[0].vertices.size(); ++i) {
+            const auto& v = s.meshes[0].vertices[i];
+            if (v.pos.y < heelY0) { heelY0 = v.pos.y; heelIdx = i; }
+            if (v.pos.z > 0.6f * maxZ && v.pos.y < toeY0) { toeY0 = v.pos.y; toeIdx = i; }
+        }
+        CHECK(heelIdx < s.meshes[0].vertices.size() && toeIdx < s.meshes[0].vertices.size() && heelIdx != toeIdx);
+        SettleHeels(s);
+        CHECK(!s.issues.empty());
+        CHECK(s.issues[0].message.find("sole contact") != std::string::npos);
+        const auto& after = s.meshes[0].vertices;
+        float heelY = after[heelIdx].pos.y;
+        float toeY = after[toeIdx].pos.y;
+        float lo = 1e30f;
+        for (const auto& v : after) lo = std::min(lo, v.pos.y);
+        CHECK(std::fabs(lo) < 1e-5f);   // lifted onto the ground plane
+        CHECK(std::fabs(heelY - toeY) < 0.003f);   // both contacts flush
+        CHECK(heelY > -1e-5f && toeY > -1e-5f);
+    });
 }
 
 void integrationTests() {

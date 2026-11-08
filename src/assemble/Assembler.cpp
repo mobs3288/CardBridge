@@ -1614,6 +1614,7 @@ void settleHeels(Scene& scene) {
             std::string from;  // "zipmod ..." / "known ..." / "geometry"
             int verts = 0;     // geometry confidence: shoe verts counted (0 for config)
             bool wedge = false;   // geometry: insole-slope path taken (diagonal strut)
+            bool contact = false;   // geometry: sole-contact pitch solved (heel/toe flush)
         };
         HeelCandidate chosen;
         for (const auto& part : scene.parts) {
@@ -1643,13 +1644,23 @@ void settleHeels(Scene& scene) {
                     }
                 if (shoe.size() < 50 || maxZ <= 0) continue;
                 float toeLow0 = 1e30f, heelLow0 = 1e30f;
+                const SceneVertex* toeLowVert = nullptr;
+                const SceneVertex* heelLowVert = nullptr;
                 for (const SceneVertex* v : shoe) {
                     float z = v->pos.z - ankle.z;
-                    if (z > 0.6f * maxZ) toeLow0 = std::min(toeLow0, v->pos.y);
-                    else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
+                    // Heel contact is the shoe's lowest point overall (the heel post under the
+                    // arch, not the rear-most sole edge): a stiletto tip sits ~0.3-0.5 maxZ
+                    // forward of the ankle, so a rear-only cut misses it and under-reads the heel.
+                    if (v->pos.y < heelLow0) { heelLow0 = v->pos.y; heelLowVert = v; }
+                    if (z > 0.6f * maxZ) {
+                        if (v->pos.y < toeLow0) { toeLow0 = v->pos.y; toeLowVert = v; }
+                    }
                 }
                 float height = toeLow0 - heelLow0;
-                if (!std::isfinite(height) || height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
+                if (dbg)
+                    std::fprintf(stderr, "    geom side %s part %s verts=%zu maxZ=%.4f toeLow=%.4f heelLow=%.4f height=%.4f ankle=(%.3f,%.3f,%.3f) ball=(%.3f,%.3f,%.3f)\n",
+                                 side, part.id.c_str(), shoe.size(), maxZ, toeLow0, heelLow0, height, ankle.x, ankle.y, ankle.z, ball.x, ball.y, ball.z);
+                if (!std::isfinite(height) || height < 0.002f) continue;   // no heel (2 mm: below sole noise)
                 const float soleY = toeLow0;
                 // The angle: the shoe is modelled for the pose it is worn in, so its heel stack
                 // leans forward by the foot's pointing angle. Pointing the foot by that much stands
@@ -1661,34 +1672,73 @@ void settleHeels(Scene& scene) {
                     if (v->pos.y > soleY - 0.015f) { topZ += v->pos.z; topY += v->pos.y; ++topN; }
                     else if (v->pos.y < heelLow0 + 0.01f) { botZ += v->pos.z; botY += v->pos.y; ++botN; }
                 }
+                // Pitch that puts the sole flush with the ground plane (both contact points at the
+                // same height after the pose, before the global lift). The heel-stack lean alone
+                // is not this angle for flat-modelled shoes: a vertical stack has lean ~0 but still
+                // needs ~15-25deg of foot pitch to bring its heel block to the toe's level, and a
+                // slanted stiletto over-reads to 50deg. So the pitch is solved from the contact
+                // points themselves (heel lowest vs toe lowest, through the same leg/ankle/toe
+                // blend the pose uses). The stack lean / insole slope below stay as a fallback when
+                // a contact point is missing.
                 float best = 0;
-                if (topN > 3 && botN > 3) {
-                    float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
-                    if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
-                }
-                // Wedges and platforms: the heel strut is diagonal by design, so its lean is not the
-                // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
-                // instead: the footbed just above the outsole, rear higher than front by the heel
-                // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
                 bool wedge = false;
-                if (best > 35.0f * 3.14159265f / 180.0f) {
-                    float fY = 0, fZ = 0, rY = 0, rZ = 0;
-                    int fN = 0, rN = 0;
-                    for (const SceneVertex* v : shoe) {
-                        float z = v->pos.z - ankle.z;
-                        if (v->pos.y < soleY - 0.001f || v->pos.y > soleY + 0.05f) continue;   // just above the outsole: the insole
-                        if (z > 0.5f * maxZ) { fY += v->pos.y; fZ += v->pos.z; ++fN; }
-                        else if (z < 0.3f * maxZ) { rY += v->pos.y; rZ += v->pos.z; ++rN; }
+                bool contact = false;
+                float contactTheta = 0;
+                if (heelLowVert && toeLowVert) {
+                    float bestGap = 1e30f;
+                    for (int deg10 = 0; deg10 <= 550; ++deg10) {
+                        float th = deg10 * 0.1f * 3.14159265f / 180.0f;
+                        Vec3 hy = blend3(*heelLowVert, heelLowVert->pos, 0, th, -th);
+                        Vec3 ty = blend3(*toeLowVert, toeLowVert->pos, 0, th, -th);
+                        float gap = std::fabs(ty.y - hy.y);
+                        if (gap < bestGap) { bestGap = gap; contactTheta = th; }
                     }
-                    if (fN > 10 && rN > 10) {
-                        float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
-                        if (dz > 0.02f && dy > 0.0f) {
-                            float slope = std::atan2(dy, dz);
-                            if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) { best = slope; wedge = true; }
+                    // Refine at 0.01deg around the coarse best (contact must be sub-mm to look closed).
+                    float c = contactTheta;
+                    for (int k = -20; k <= 20; ++k) {
+                        float th = c + k * 0.01f * 3.14159265f / 180.0f;
+                        if (th < 0) continue;
+                        Vec3 hy = blend3(*heelLowVert, heelLowVert->pos, 0, th, -th);
+                        Vec3 ty = blend3(*toeLowVert, toeLowVert->pos, 0, th, -th);
+                        float gap = std::fabs(ty.y - hy.y);
+                        if (gap < bestGap) { bestGap = gap; contactTheta = th; }
+                    }
+                    if (dbg)
+                        std::fprintf(stderr, "    geom side %s part %s contact theta=%.2f gap=%.4f\n",
+                                     side, part.id.c_str(), contactTheta * 180.0f / 3.14159265f, bestGap);
+                    if (bestGap < 0.006f && contactTheta > 1e-6f) { best = contactTheta; contact = true; }
+                }
+                if (!contact) {
+                    if (topN > 3 && botN > 3) {
+                        float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
+                        if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
+                    }
+                    // Wedges and platforms: the heel strut is diagonal by design, so its lean is not the
+                    // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
+                    // instead: the footbed just above the outsole, rear higher than front by the heel
+                    // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
+                    if (best > 35.0f * 3.14159265f / 180.0f) {
+                        float fY = 0, fZ = 0, rY = 0, rZ = 0;
+                        int fN = 0, rN = 0;
+                        for (const SceneVertex* v : shoe) {
+                            float z = v->pos.z - ankle.z;
+                            if (v->pos.y < soleY - 0.001f || v->pos.y > soleY + 0.05f) continue;   // just above the outsole: the insole
+                            if (z > 0.5f * maxZ) { fY += v->pos.y; fZ += v->pos.z; ++fN; }
+                            else if (z < 0.3f * maxZ) { rY += v->pos.y; rZ += v->pos.z; ++rN; }
+                        }
+                        if (fN > 10 && rN > 10) {
+                            float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
+                            if (dz > 0.02f && dy > 0.0f) {
+                                float slope = std::atan2(dy, dz);
+                                if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) { best = slope; wedge = true; }
+                            }
                         }
                     }
                 }
-                if (!std::isfinite(best) || best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
+                if (dbg)
+                    std::fprintf(stderr, "    geom side %s part %s stack topN=%d botN=%d best=%.2f wedge=%d\n",
+                                 side, part.id.c_str(), topN, botN, best * 180.0f / 3.14159265f, (int)wedge);
+                if (!std::isfinite(best) || best < 2.0f * 3.14159265f / 180.0f) continue;   // the sole already stands flat
                 cand.height = height;
                 cand.ankle = best;
                 cand.leg = 0.0f;
@@ -1696,6 +1746,7 @@ void settleHeels(Scene& scene) {
                 cand.from = "geometry";
                 cand.verts = static_cast<int>(shoe.size());
                 cand.wedge = wedge;
+                cand.contact = contact;
             }
             if (cand.height > chosen.height) chosen = cand;
         }
@@ -1753,12 +1804,18 @@ void settleHeels(Scene& scene) {
                       legRad * 180.0f / 3.14159265f, ankleRad * 180.0f / 3.14159265f, toeRad * 180.0f / 3.14159265f);
         std::string msg = buf;
         if (chosen.from == "geometry") {
-            msg += ", geometry from " + std::to_string(chosen.verts) + " shoe verts" + (chosen.wedge ? ", wedge insole slope" : ", heel-stack lean");
+            msg += ", geometry from " + std::to_string(chosen.verts) + " shoe verts" +
+                   (chosen.contact ? ", sole contact" : chosen.wedge ? ", wedge insole slope" : ", heel-stack lean");
         }
         scene.warn("", msg);
         posed = true;
     }
     if (!posed) return;
+    if (dbg) {
+        float lo2 = 1e30f;
+        for (const auto& mesh : scene.meshes) for (const auto& v : mesh.vertices) lo2 = std::min(lo2, v.pos.y);
+        std::fprintf(stderr, "  settleHeels: lowest before lift = %.4f\n", lo2);
+    }
     float lowest = 1e30f;
     for (const auto& mesh : scene.meshes)
         for (const auto& v : mesh.vertices) lowest = std::min(lowest, v.pos.y);
