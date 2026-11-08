@@ -403,15 +403,15 @@ std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedIte
     return nullptr;
 }
 
-Bytes Resolver::openModText(const ResolvedItem& item, const std::string& path) {
-    if (item.status != ItemStatus::ResolvedMod || item.modPath.empty()) return {};
+std::optional<Bytes> Resolver::openModText(const ResolvedItem& item, const std::string& path) {
+    if (item.status != ItemStatus::ResolvedMod || item.modPath.empty()) return std::nullopt;
     try {
         ZipArchive z(item.modPath);
         std::string want = lowerOf(path);
         for (const auto& e : z.entries())
             if (lowerOf(e.name) == want) return z.read(e);
     } catch (...) {}
-    return {};
+    return std::nullopt;
 }
 
 } // namespace cardbridge::resolve

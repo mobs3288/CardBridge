@@ -335,6 +335,15 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
         if (!p.modGuid.empty())
             jp["mod"] = {{"guid", p.modGuid}, {"name", p.modName}, {"version", p.modVersion}, {"author", p.modAuthor},
                          {"file", fileio::FileName(p.modPath)}};
+        if (p.id.find(".shoes") != std::string::npos) {
+            // Provenance for Stiletto heel reconstruction (section 4): which config, which
+            // slot and which list-name it matched, or "geometry" when no config supplied it.
+            jp["heel"] = {{"list_name", p.listName}, {"has_config", p.hasHeelConfig}, {"source", p.heelConfigSource},
+                          {"ankle_deg", p.heelAnkleDeg}, {"leg_deg", p.heelLegDeg}, {"toe_deg", p.heelToeDeg},
+                          {"height_m", p.heelHeightMeters}, {"shoe_scale", {p.heelShoeScaleX, p.heelShoeScaleY, p.heelShoeScaleZ}},
+                          {"shoe_angle_deg", p.heelShoeAngleDeg}, {"shoe_translate_y", p.heelShoeTranslateY},
+                          {"shoe_translate_z", p.heelShoeTranslateZ}, {"shoe_shear_y", p.heelShoeShearY}, {"shoe_shear_z", p.heelShoeShearZ}};
+        }
         size_t verts = 0, tris = 0;
         for (int mi : p.meshes) {
             verts += scene.meshes[static_cast<size_t>(mi)].vertices.size();

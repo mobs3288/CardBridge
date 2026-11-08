@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -81,9 +82,10 @@ public:
     // MainTex "01"). Null when the mod has no such file.
     std::shared_ptr<unity::TextureData> openLooseTexture(const ResolvedItem& item, const std::string& ab, const std::string& name, std::string* why);
     // A text file a mod ships (e.g. a Stiletto heel "BepInEx/Stiletto/<Name>.txt"): bytes of the
-    // entry `<path>` inside the mod's zip (case-insensitive), empty when absent. No caching: heel
-    // configs are a few hundred bytes and read once per shoe.
-    Bytes openModText(const ResolvedItem& item, const std::string& path);
+    // entry `<path>` inside the mod's zip (case-insensitive). Nullopt when absent, empty value
+    // when present-but-empty (Stiletto defaults all to 0, i.e. flat). No caching: heel configs
+    // are a few hundred bytes and read once per shoe.
+    std::optional<Bytes> openModText(const ResolvedItem& item, const std::string& path);
     std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
     // Drops every cached bundle and loose texture. Callers that hold a
     // shared_ptr to a bundle keep it alive, so this only releases the

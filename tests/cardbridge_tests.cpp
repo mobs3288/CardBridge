@@ -2017,6 +2017,108 @@ void unitTests() {
         for (const auto& [n, v] : KnownHeelTable()) CHECK(!n.empty() && v.hasConfig);
     });
 
+    test("shoe warp: identity, uniform/non-uniform scale, rotation, translate, shear (Stiletto order)", [] {
+        using namespace assemble;
+        auto near = [](Vec3 a, Vec3 b, float eps = 1e-4f) { return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps; };
+        HeelConfig id;
+        CHECK(ShoeWarpIsIdentity(id));
+        CHECK(near(ShoeWarpMatrix(id).point({1, 2, 3}), {1, 2, 3}));
+        // Ankle pitch alone cancels in the warp (R(-a)*I*I*I*R(a) = I): pose is separate.
+        HeelConfig pitched; pitched.ankleDeg = 10;
+        CHECK(ShoeWarpIsIdentity(pitched));   // warp fields identity: the ankle cancels out
+        CHECK(near(ShoeWarpMatrix(pitched).point({1, 2, 3}), {1, 2, 3}, 1e-4f));
+        HeelConfig uni; uni.shoeScaleX = uni.shoeScaleY = uni.shoeScaleZ = 2;
+        CHECK(!ShoeWarpIsIdentity(uni) && near(ShoeWarpMatrix(uni).point({1, 1, 1}), {2, 2, 2}));
+        HeelConfig non; non.shoeScaleX = 2; non.shoeScaleY = 3; non.shoeScaleZ = 4;
+        CHECK(near(ShoeWarpMatrix(non).point({1, 1, 1}), {2, 3, 4}));
+        HeelConfig rot; rot.shoeAngleDeg = 90;
+        CHECK(near(ShoeWarpMatrix(rot).point({0, 1, 0}), {0, 0, 1}, 1e-4f));   // +90 about X: +Y -> +Z
+        HeelConfig tr; tr.shoeTranslateY = 0.5f; tr.shoeTranslateZ = -0.25f;
+        CHECK(near(ShoeWarpMatrix(tr).point({1, 1, 1}), {1, 1.5f, 0.75f}));
+        HeelConfig shy; shy.shoeShearY = 45;   // tan(45)=1: Y += Z
+        CHECK(near(ShoeWarpMatrix(shy).point({0, 0, 1}), {0, 1, 1}, 1e-4f));
+        HeelConfig shz; shz.shoeShearZ = 45;   // tan(45)=1: Z += Y
+        CHECK(near(ShoeWarpMatrix(shz).point({0, 1, 0}), {0, 1, 1}, 1e-4f));
+        // Combined: S then R2 (scale before rotation in bind space): scale X by 2, rotate 90.
+        HeelConfig comb; comb.shoeScaleX = 2; comb.shoeAngleDeg = 90;
+        // (1,0,0) scaled -> (2,0,0), rotated about X by 90 -> (2,0,0) (on axis).
+        CHECK(near(ShoeWarpMatrix(comb).point({1, 0, 0}), {2, 0, 0}, 1e-4f));
+        // (0,1,0) scaled -> (0,1,0), rotated -> (0,0,1).
+        CHECK(near(ShoeWarpMatrix(comb).point({0, 1, 0}), {0, 0, 1}, 1e-4f));
+    });
+
+    test("heel config: parser edge cases (BOM, trim, duplicates, malformed, non-finite, shoe* not folded)", [] {
+        using namespace assemble;
+        HeelConfig c;
+        // UTF-8 BOM, spaces around key/value, \r-only separators, duplicate key (last wins, as in the original Trim+SetValue).
+        std::string bom = "\xEF\xBB\xBF"; bom += " angleAnkle = 5\ragleWanted=1\nangleAnkle=20\nheight=  0.02 ";
+        CHECK(ParseStilettoHeel(bom, c));
+        CHECK(std::fabs(c.ankleDeg - 20) < 1e-5f && std::fabs(c.heightMeters - 0.02f) < 1e-6f);
+        // Zero scale means 1 (Setup), malformed numeric leaves the field at default without failing the file.
+        CHECK(ParseStilettoHeel("shoeScaleX=0\nangleAnkle=abc\nheight=0.01", c));
+        CHECK(std::fabs(c.shoeScaleX - 1) < 1e-5f && std::fabs(c.ankleDeg) < 1e-5f && std::fabs(c.heightMeters - 0.01f) < 1e-6f);
+        // Non-finite values are rejected, never stored.
+        CHECK(!ParseStilettoHeel("angleAnkle=inf\nheight=nan", c));
+        // shoeAngle / shoeShear are raw degrees in the original (no GetAngleInRange): 350 stays 350, shear 350 stays 350.
+        CHECK(ParseStilettoHeel("shoeAngle=350\nshoeShearY=350", c));
+        CHECK(std::fabs(c.shoeAngleDeg - 350) < 1e-4f && std::fabs(c.shoeShearY - 350) < 1e-4f);
+        // Angle folding itself: only ankle/toe/leg fold.
+        CHECK(ParseStilettoHeel("angleToes=350", c) && std::fabs(c.toeDeg + 10) < 1e-4f);
+    });
+
+    test("heel angles: folding boundaries and warp finiteness at extremes", [] {
+        using namespace assemble;
+        auto nearf = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+        CHECK(nearf(HeelAngleInRange(0), 0));
+        CHECK(nearf(HeelAngleInRange(60), 60));            // boundary: not folded (60.001 threshold)
+        CHECK(nearf(HeelAngleInRange(60.001f), 60.001f));
+        CHECK(nearf(HeelAngleInRange(61), -299));           // -(360-61)
+        CHECK(nearf(HeelAngleInRange(90), -270));
+        CHECK(nearf(HeelAngleInRange(180), -180));
+        CHECK(nearf(HeelAngleInRange(270), -90));
+        CHECK(nearf(HeelAngleInRange(350), -10));           // folds to the equivalent negative pitch
+        CHECK(nearf(HeelAngleInRange(360), 0));
+        CHECK(nearf(HeelAngleInRange(-90), -90));           // negative: never folded (original behaviour)
+        CHECK(nearf(HeelAngleInRange(-350), -350));         // trig-equivalent to +10; not folded
+        // Every finite input stays finite through the warp trig.
+        for (float d : {0.0f, 60.0f, 180.0f, 270.0f, 360.0f, -180.0f, 720.0f, 350.0f}) {
+            HeelConfig h; h.ankleDeg = d; h.legDeg = d; h.shoeAngleDeg = d;
+            auto m = ShoeWarpMatrix(h);
+            for (float v : m.m) CHECK(std::isfinite(v));
+        }
+        // Shear at 90 degrees: tan is huge but finite (no NaN/inf at the pole).
+        HeelConfig she; she.shoeShearY = 90; she.shoeShearZ = -90;
+        for (float v : ShoeWarpMatrix(she).m) CHECK(std::isfinite(v));
+    });
+
+    test("shoe warp: skinned deformation and single application", [] {
+        using namespace assemble;
+        auto near = [](Vec3 a, Vec3 b, float eps = 1e-4f) { return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps; };
+        // Simulate the skinning stage: bone world is identity, bindpose moves a bind-space vertex.
+        // Identity warp must be exactly the unwarped result (no regression, PMX bytes unchanged).
+        HeelConfig id;
+        Mat4 bind = Mat4::TRS({0.1f, 0.2f, 0.3f}, Quat{0, 0, 0, 1}, {1, 1, 1});
+        Vec3 pt{0.5f, -0.25f, 1.0f};
+        Vec3 unwarped = bind.point(pt);
+        Vec3 warped = (ShoeWarpMatrix(id) * bind).point(pt);
+        CHECK(near(warped, unwarped, 1e-5f));
+        // Non-identity scale visibly deforms and stays finite (bind-space warp, then skinning).
+        HeelConfig sc; sc.shoeScaleY = 2;
+        Vec3 scaled = (ShoeWarpMatrix(sc) * bind).point(pt);
+        CHECK(!near(scaled, unwarped) && std::isfinite(scaled.y));
+        // Applying the warp twice is not the same as once: the pipeline must bake it once (into locals).
+        HeelConfig tr; tr.shoeTranslateY = 0.5f;
+        Mat4 once = ShoeWarpMatrix(tr);
+        Mat4 twice = once * once;
+        CHECK(!near(twice.point({0, 0, 0}), once.point({0, 0, 0}), 1e-3f));
+        CHECK(near(once.point({0, 0, 0}), {0, 0.5f, 0}));
+        CHECK(near(twice.point({0, 0, 0}), {0, 1.0f, 0}));
+        // Ankle pitch cancels in the warp itself (pose is separate): warp with pitch + scale is scale-only for Y-from-origin.
+        HeelConfig ps; ps.ankleDeg = 20; ps.shoeScaleX = 3;
+        // (1,0,0) is on the X axis: warp leaves it at (3,0,0) regardless of the ankle pitch.
+        CHECK(near(ShoeWarpMatrix(ps).point({1, 0, 0}), {3, 0, 0}, 1e-3f));
+    });
+
     test("heel pose: flat shoe geometry triggers nothing, heeled geometry lifts and pitches", [] {
         // Direct settleHeels is exercised end-to-end (Assemble path); here check detection
         // thresholds via a tiny synthetic shoe: a level sole with no drop must not warn, and
@@ -2071,6 +2173,141 @@ void unitTests() {
         assemble::SettleHeels(s);
         CHECK(std::fabs(s.bones[2].pos.x - poseOnce.x) < 1e-6f && std::fabs(s.bones[2].pos.y - poseOnce.y) < 1e-6f);
         CHECK(std::fabs(s.meshes[0].vertices[0].pos.y - yOnce) < 1e-6f);
+    });
+
+    // Tiny rig + flat sole: reused by the following pose cases.
+    static auto makeBareRig = [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_leg01_L", -1, {0, 0.5f, 0}, "rig"});
+        s.bones.push_back({"cf_j_leg03_L", 0, {0, 0.1f, 0}, "rig"});
+        s.bones.push_back({"cf_j_foot_L", 1, {0, 0.05f, 0}, "rig"});
+        s.bones.push_back({"cf_j_toes_L", 2, {0, 0.04f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_j_leg01_R", -1, {0.1f, 0.5f, 0}, "rig"});
+        s.bones.push_back({"cf_j_leg03_R", 4, {0.1f, 0.1f, 0}, "rig"});
+        s.bones.push_back({"cf_j_foot_R", 5, {0.1f, 0.05f, 0}, "rig"});
+        s.bones.push_back({"cf_j_toes_R", 6, {0.1f, 0.04f, 0.12f}, "rig"});
+        SceneMesh flat;
+        flat.name = "flatshoes";
+        for (int i = 0; i < 60; ++i) {
+            SceneVertex v;
+            v.pos = {i % 2 ? 0.08f : -0.08f, 0.0f, (i / 10) * 0.02f};
+            v.normal = {0, 1, 0};
+            v.bone[0] = 2; v.weight[0] = 1;
+            if (i % 3 == 0) v.bone[0] = 3;
+            flat.vertices.push_back(v);
+        }
+        s.meshes.push_back(flat);
+        ScenePart p;
+        p.id = "outfit0.shoes_outer"; p.group = "Outfit"; p.includeInExport = true; p.visibleInPreview = true;
+        p.meshes = {0};
+        s.parts.push_back(p);
+        return s;
+    };
+
+    test("heel pose: barefoot, height-only platform, flat-config suppression and hidden shoe", [] {
+        using namespace assemble;
+        // Barefoot: no shoe part at all -> nothing happens.
+        {
+            Scene s;
+            s.bones.push_back({"cf_j_leg01_L", -1, {0, 0.5f, 0}, "rig"});
+            s.bones.push_back({"cf_j_leg03_L", 0, {0, 0.1f, 0}, "rig"});
+            s.bones.push_back({"cf_j_foot_L", 1, {0, 0.05f, 0}, "rig"});
+            s.bones.push_back({"cf_j_toes_L", 2, {0, 0.04f, 0.12f}, "rig"});
+            s.bones.push_back({"cf_j_leg01_R", -1, {0.1f, 0.5f, 0}, "rig"});
+            s.bones.push_back({"cf_j_leg03_R", 4, {0.1f, 0.1f, 0}, "rig"});
+            s.bones.push_back({"cf_j_foot_R", 5, {0.1f, 0.05f, 0}, "rig"});
+            s.bones.push_back({"cf_j_toes_R", 6, {0.1f, 0.04f, 0.12f}, "rig"});
+            SettleHeels(s);
+            CHECK(s.issues.empty());
+        }
+        // Height-only platform (Geta 0/0/30mm): lifts the whole model to y=0, no pitch.
+        {
+            Scene s = makeBareRig();
+            s.bones[1].pos = {0, 0.1f, 0};   // leg03 pivot (L) raised; foot stays
+            s.parts[0].hasHeelConfig = true;
+            s.parts[0].heelAnkleDeg = 0; s.parts[0].heelLegDeg = 0; s.parts[0].heelToeDeg = 0;
+            s.parts[0].heelHeightMeters = 0.03f;
+            s.parts[0].heelConfigSource = "zipmod test (Stiletto)";
+            auto footBefore = s.bones[2].pos;
+            SettleHeels(s);
+            CHECK(std::fabs(s.bones[2].pos.x - footBefore.x) < 1e-5f);   // no pitch about the ankle
+            CHECK(std::fabs(s.bones[2].pos.z - footBefore.z) < 1e-5f);
+            // Ground contact: lowest vertex at y=0 after the lift.
+            float lo = 1e30f;
+            for (const auto& v : s.meshes[0].vertices) lo = std::min(lo, v.pos.y);
+            CHECK(std::fabs(lo) < 1e-5f);
+            CHECK(s.issues.size() == 2);   // one per side
+            for (const auto& v : s.meshes[0].vertices) CHECK(std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z));
+        }
+        // Flat in config (0/0/0) suppresses geometry: even a heeled shape does not pose.
+        {
+            Scene s = makeBareRig();
+            for (int i = 0; i < 10; ++i) {
+                SceneVertex top; top.pos = {-0.08f, -0.01f, 0.01f + i * 0.001f}; top.normal = {0, 1, 0};
+                top.bone[0] = 2; top.weight[0] = 1;
+                SceneVertex bot; bot.pos = {-0.08f, -0.03f, 0.03f + i * 0.001f}; bot.normal = {0, 1, 0};
+                bot.bone[0] = 2; bot.weight[0] = 1;
+                s.meshes[0].vertices.push_back(top);
+                s.meshes[0].vertices.push_back(bot);
+            }
+            s.parts[0].hasHeelConfig = true;   // zeros: explicitly flat
+            s.parts[0].heelHeightMeters = 0;
+            s.parts[0].heelConfigSource = "known test (flat)";
+            auto yBefore = s.meshes[0].vertices[0].pos.y;
+            SettleHeels(s);
+            CHECK(s.issues.empty());
+            CHECK(std::fabs(s.meshes[0].vertices[0].pos.y - yBefore) < 1e-6f);
+        }
+        // Hidden heeled shoe is ignored: hiding the shoe goes flat again on the re-pose.
+        {
+            Scene s = makeBareRig();
+            for (int i = 0; i < 10; ++i) {
+                SceneVertex top; top.pos = {-0.08f, -0.01f, 0.01f + i * 0.001f}; top.normal = {0, 1, 0};
+                top.bone[0] = 2; top.weight[0] = 1;
+                SceneVertex bot; bot.pos = {-0.08f, -0.03f, 0.03f + i * 0.001f}; bot.normal = {0, 1, 0};
+                bot.bone[0] = 2; bot.weight[0] = 1;
+                s.meshes[0].vertices.push_back(top);
+                s.meshes[0].vertices.push_back(bot);
+            }
+            s.parts[0].visibleInPreview = false;
+            auto yBefore = s.meshes[0].vertices[0].pos.y;
+            SettleHeels(s);
+            CHECK(s.issues.empty());
+            CHECK(std::fabs(s.meshes[0].vertices[0].pos.y - yBefore) < 1e-6f);
+        }
+    });
+
+    test("heel pose: inner flat + outer heeled picks the outer only; extreme config stays finite", [] {
+        using namespace assemble;
+        Scene s = makeBareRig();
+        // Heeled stack on the L side (same shape as the earlier threshold test).
+        for (int i = 0; i < 10; ++i) {
+            SceneVertex top; top.pos = {-0.08f, -0.01f, 0.01f + i * 0.001f}; top.normal = {0, 1, 0};
+            top.bone[0] = 2; top.weight[0] = 1;
+            SceneVertex bot; bot.pos = {-0.08f, -0.03f, 0.03f + i * 0.001f}; bot.normal = {0, 1, 0};
+            bot.bone[0] = 2; bot.weight[0] = 1;
+            s.meshes[0].vertices.push_back(top);
+            s.meshes[0].vertices.push_back(bot);
+        }
+        // Inner slot explicitly flat, outer slot geometry -> outer still poses.
+        ScenePart inner; inner.id = "outfit0.shoes_inner"; inner.group = "Outfit"; inner.includeInExport = true; inner.visibleInPreview = true;
+        inner.meshes = {0}; inner.hasHeelConfig = true; inner.heelHeightMeters = 0; inner.heelConfigSource = "known flat";
+        s.parts.push_back(inner);
+        SettleHeels(s);
+        CHECK(s.issues.size() == 1);
+        CHECK(s.issues[0].message.find("outfit0.shoes_outer") != std::string::npos);
+        // Extreme config pitch (350 -> -10 after folding) stays finite end to end.
+        Scene e = makeBareRig();
+        e.parts[0].hasHeelConfig = true;
+        e.parts[0].heelAnkleDeg = 350;
+        e.parts[0].heelHeightMeters = 0.02f;
+        e.parts[0].heelConfigSource = "zipmod test";
+        SettleHeels(e);
+        for (const auto& m : e.meshes) for (const auto& v : m.vertices)
+            CHECK(std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z));
+        for (const auto& b : e.bones) CHECK(std::isfinite(b.pos.x) && std::isfinite(b.pos.y) && std::isfinite(b.pos.z));
+        CHECK(exporter::ValidateScene(e).empty());
     });
 }
 

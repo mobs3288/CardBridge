@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Math.h"
 #include "core/Bytes.h"
 #include <map>
 #include <string>
@@ -41,5 +42,11 @@ bool KnownHeelConfig(const std::string& shoeName, HeelConfig& out);
 
 // All known entries (for tests: every Name round-trips).
 const std::map<std::string, HeelConfig>& KnownHeelTable();
+
+// The UpdateShoeWarp bindpose multiplier R(-ankle-leg) * Shear * T * S *
+// R(ankle+leg+shoeAngle) for cf_j_foot binds. Identity when the warp fields are
+// identity (all shipped data). Defined in HeelConfig.cpp.
+Mat4 ShoeWarpMatrix(const HeelConfig& c);
+bool ShoeWarpIsIdentity(const HeelConfig& c);
 
 } // namespace cardbridge::assemble

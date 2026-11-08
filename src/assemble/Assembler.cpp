@@ -574,6 +574,9 @@ struct Builder {
     const card::MaterialEdits* edits = nullptr;
     int meCoordinate = 0, meType = -1, meSlot = 0;
     std::map<int, int> meTextures;   // embedded TexID -> scene texture (-1 when unreadable)
+    // Stiletto shoe warp for the footwear item being added (bind delta for cf_j_foot binds).
+    HeelConfig heelWarp;
+    bool heelWarpOn = false;
 
     // The embedded images are linear dumps, not sRGB authoring images (the game displays them unconverted); `colour` picks the
     // cache slot only (colour maps are the main textures the ME edit points at).
@@ -1314,14 +1317,28 @@ struct Builder {
             scene.warn(partId, "renderer '" + r.name + "' has bones but no usable skin data; placed rigidly");
 
         // Per bone: the PMX bone index and the matrix that takes bind-pose vertices to model space.
+        // Stiletto UpdateShoeWarp: foot binds pre-multiply by R(-ankle-leg)*Shear*T*S*R(ankle+leg+
+        // shoeAngle) in bind space, so the same warp lands in SceneVertex::local and survives
+        // Reshape without double application.
+        bool warpOn = heelWarpOn && !ShoeWarpIsIdentity(heelWarp);
+        Mat4 warpMat;
+        if (warpOn) {
+            warpMat = ShoeWarpMatrix(heelWarp);
+            for (float f : warpMat.m)
+                if (!std::isfinite(f)) { warpOn = false; break; }   // never let NaN/inf reach PMX
+        }
         std::vector<int> boneIdx;
         std::vector<Mat4> boneMat;
         if (skinned && accessoryMode) {
             for (size_t i = 0; i < r.boneXforms.size(); ++i) {
                 int64_t bid = r.boneXforms[i];
                 if (!uf.xform(bid)) { boneIdx.push_back(staticBone); boneMat.push_back(placement * (rootInv * rendererW)); continue; }
+                const unity::Xform* bx = uf.xform(bid);
+                const bool isFoot = bx && (bx->name == "cf_j_foot_L" || bx->name == "cf_j_foot_R");
                 boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
-                boneMat.push_back(placement * (rootInv * Wp(uf, bid)) * mesh->bindPoses[i]);
+                Mat4 bp = mesh->bindPoses[i];
+                if (warpOn && isFoot) bp = warpMat * bp;
+                boneMat.push_back(placement * (rootInv * Wp(uf, bid)) * bp);
             }
         } else if (skinned) {
             for (size_t i = 0; i < r.boneXforms.size(); ++i) {
@@ -1336,7 +1353,9 @@ struct Builder {
                 const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, r.boneXforms[i], prefabRoot, placement);
                 if (bi < 0) bi = 0;
                 boneIdx.push_back(bi);
-                boneMat.push_back(bw * mesh->bindPoses[i]);
+                Mat4 bp = mesh->bindPoses[i];
+                if (warpOn && (bname == "cf_j_foot_L" || bname == "cf_j_foot_R")) bp = warpMat * bp;
+                boneMat.push_back(bw * bp);
             }
         }
 
@@ -1593,6 +1612,8 @@ void settleHeels(Scene& scene) {
             float ankle = 0, leg = 0, toe = 0;   // radians
             std::string partId;
             std::string from;  // "zipmod ..." / "known ..." / "geometry"
+            int verts = 0;     // geometry confidence: shoe verts counted (0 for config)
+            bool wedge = false;   // geometry: insole-slope path taken (diagonal strut)
         };
         HeelCandidate chosen;
         for (const auto& part : scene.parts) {
@@ -1607,6 +1628,7 @@ void settleHeels(Scene& scene) {
                 cand.leg = part.heelLegDeg * 3.14159265f / 180.0f;
                 cand.toe = part.heelToeDeg * 3.14159265f / 180.0f;
                 cand.from = part.heelConfigSource;
+                if (!std::isfinite(cand.height) || !std::isfinite(cand.ankle) || !std::isfinite(cand.leg) || !std::isfinite(cand.toe)) continue;
                 // Height-only platforms (Geta 0/0/30mm): lift without pitching.
                 bool heeled = cand.height >= 0.004f || std::fabs(cand.ankle) > 1e-6f || std::fabs(cand.leg) > 1e-6f || std::fabs(cand.toe) > 1e-6f;
                 if (!heeled) continue;   // explicitly flat in config (most base shoes)
@@ -1627,7 +1649,7 @@ void settleHeels(Scene& scene) {
                     else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
                 }
                 float height = toeLow0 - heelLow0;
-                if (height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
+                if (!std::isfinite(height) || height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
                 const float soleY = toeLow0;
                 // The angle: the shoe is modelled for the pose it is worn in, so its heel stack
                 // leans forward by the foot's pointing angle. Pointing the foot by that much stands
@@ -1648,6 +1670,7 @@ void settleHeels(Scene& scene) {
                 // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
                 // instead: the footbed just above the outsole, rear higher than front by the heel
                 // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
+                bool wedge = false;
                 if (best > 35.0f * 3.14159265f / 180.0f) {
                     float fY = 0, fZ = 0, rY = 0, rZ = 0;
                     int fN = 0, rN = 0;
@@ -1661,16 +1684,18 @@ void settleHeels(Scene& scene) {
                         float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
                         if (dz > 0.02f && dy > 0.0f) {
                             float slope = std::atan2(dy, dz);
-                            if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) best = slope;
+                            if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) { best = slope; wedge = true; }
                         }
                     }
                 }
-                if (best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
+                if (!std::isfinite(best) || best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
                 cand.height = height;
                 cand.ankle = best;
                 cand.leg = 0.0f;
                 cand.toe = -best;   // geometry fallback: forefoot flat (Stiletto default toe is 0 when data exists)
                 cand.from = "geometry";
+                cand.verts = static_cast<int>(shoe.size());
+                cand.wedge = wedge;
             }
             if (cand.height > chosen.height) chosen = cand;
         }
@@ -1709,8 +1734,7 @@ void settleHeels(Scene& scene) {
             else continue;
             c.axis = normalize(rotDir(c.axis, total));
         }
-        // Shoe warp (Stiletto UpdateShoeWarp): non-identity values would reshape the
-        // foot-weighted shoe mesh. All shipped files are identity; warn instead of ignoring.
+        // Shoe warp is baked in addRenderer (bind space) before this pose; note it here for provenance.
         {
             const ScenePart* src = nullptr;
             for (const auto& p : scene.parts) if (p.id == chosen.partId) { src = &p; break; }
@@ -1719,15 +1743,19 @@ void settleHeels(Scene& scene) {
                               src->heelShoeAngleDeg != 0 || src->heelShoeTranslateY != 0 || src->heelShoeTranslateZ != 0 ||
                               src->heelShoeShearY != 0 || src->heelShoeShearZ != 0;
                 if (warped)
-                    scene.warn("", "foot " + std::string(side) + " shoe warp from " + src->heelConfigSource +
-                                    " (scale/angle/translate/shear) is parsed but not baked; the pose uses ankle/leg/toe/height only");
+                    scene.warn("", "foot " + std::string(side) + " shoe warp baked from " + src->heelConfigSource +
+                                    " (scale/angle/translate/shear in bind space)");
             }
         }
         char buf[340];
         std::snprintf(buf, sizeof buf, "foot %s posed for a %.1f cm heel from %s (%s): leg %.1f, ankle %.1f, toe %.1f degrees", side,
                       chosen.height * 100.0f, chosen.partId.c_str(), chosen.from.c_str(),
                       legRad * 180.0f / 3.14159265f, ankleRad * 180.0f / 3.14159265f, toeRad * 180.0f / 3.14159265f);
-        scene.warn("", buf);
+        std::string msg = buf;
+        if (chosen.from == "geometry") {
+            msg += ", geometry from " + std::to_string(chosen.verts) + " shoe verts" + (chosen.wedge ? ", wedge insole slope" : ", heel-stack lean");
+        }
+        scene.warn("", msg);
         posed = true;
     }
     if (!posed) return;
@@ -2222,18 +2250,43 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         part.bundle = item.bundleRel();
         // Heel configuration (priority 1: the mod's own Stiletto txt; priority 2: the known
-        // table). The txt lives next to the bundle as BepInEx/Stiletto/<Name>.txt, where Name
-        // is the list row's display Name (the game's heelName). Only footwear slots carry it;
+        // table). The txt lives in the mod as BepInEx/config/Stiletto/Heels/<Name>.txt
+        // (Stiletto v2.4.2) or BepInEx/Stiletto/<Name>.txt (legacy installs / shipped mods),
+        // where Name is the list row's display Name (the game's heelName, trailing spaces and
+        // unicode preserved, lookup case-insensitive). Only footwear slots carry it;
         // hasHeelConfig stays false otherwise so settleHeels uses geometry.
         part.listName = item.listItem.get("Name");
         if (ref.slot == 7 || ref.slot == 8) {
             HeelConfig hc;
             bool found = false;
-            if (item.status == resolve::ItemStatus::ResolvedMod) {
-                Bytes txt = resolver.openModText(item, "BepInEx/Stiletto/" + part.listName + ".txt");
-                if (!txt.empty() && ParseStilettoHeel(std::string(txt.begin(), txt.end()), hc)) {
-                    hc.source = "zipmod " + item.modGuid;
-                    found = true;
+            if (item.status == resolve::ItemStatus::ResolvedMod && !part.listName.empty()) {
+                auto txt = resolver.openModText(item, "BepInEx/config/Stiletto/Heels/" + part.listName + ".txt");
+                std::string entry;
+                if (txt) entry = "config/Stiletto/Heels";
+                else {
+                    txt = resolver.openModText(item, "BepInEx/Stiletto/" + part.listName + ".txt");
+                    if (txt) entry = "Stiletto";
+                }
+                if (txt) {
+                    std::string text(txt->begin(), txt->end());
+                    if (ParseStilettoHeel(text, hc)) {
+                        hc.source = "zipmod " + item.modGuid + " (" + entry + ")";
+                        found = true;
+                    } else {
+                        // A present file with no recognized heel keys reads as an all-zero
+                        // config in DynamicFileProvider, i.e. an explicit flat: it suppresses
+                        // the known table and geometry (issue #4 separation).
+                        HeelConfig flat;
+                        flat.hasConfig = true;
+                        flat.source = "zipmod " + item.modGuid + " (" + entry + " flat: empty/no heel keys)";
+                        hc = flat;
+                        found = true;
+                        bool nonEmpty = false;
+                        for (unsigned char c : text) if (c != ' ' && c != '\t' && c != '\r' && c != '\n' && !(c == 0xEF || c == 0xBB || c == 0xBF)) { nonEmpty = true; break; }
+                        if (nonEmpty)
+                            scene.warn(ref.partId, "Stiletto heel file BepInEx/" + entry + "/" + part.listName +
+                                                   ".txt from zipmod " + item.modGuid + " has no recognized heel keys; treated as flat");
+                    }
                 }
             }
             if (!found && KnownHeelConfig(part.listName, hc)) found = true;
@@ -2769,6 +2822,16 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             b.meType = card::MaterialEdits::Hair;
             b.meSlot = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
         } else if (ref.group == "Head") { b.meType = card::MaterialEdits::Character; }
+        // Shoe warp for this item's foot binds (Stiletto UpdateShoeWarp). Identity for all
+        // shipped data; set from the preloaded config so addRenderer can warp bindposes.
+        b.heelWarpOn = part.hasHeelConfig;
+        b.heelWarp.ankleDeg = part.heelAnkleDeg; b.heelWarp.legDeg = part.heelLegDeg;
+        b.heelWarp.toeDeg = part.heelToeDeg; b.heelWarp.heightMeters = part.heelHeightMeters;
+        b.heelWarp.shoeScaleX = part.heelShoeScaleX; b.heelWarp.shoeScaleY = part.heelShoeScaleY;
+        b.heelWarp.shoeScaleZ = part.heelShoeScaleZ; b.heelWarp.shoeAngleDeg = part.heelShoeAngleDeg;
+        b.heelWarp.shoeTranslateY = part.heelShoeTranslateY; b.heelWarp.shoeTranslateZ = part.heelShoeTranslateZ;
+        b.heelWarp.shoeShearY = part.heelShoeShearY; b.heelWarp.shoeShearZ = part.heelShoeShearZ;
+        b.heelWarp.hasConfig = part.hasHeelConfig; b.heelWarp.source = part.heelConfigSource;
 
         // Which renderers get which run-time colours (ChaAccessoryComponent: rendNormal/rendAlpha/rendHair; ChaCustomHairComponent: rendHair).
         std::set<int64_t> rtNormal, rtAlpha, rtHair, rtHairItem, rtHairAcs;
