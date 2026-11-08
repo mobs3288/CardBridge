@@ -267,6 +267,34 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     }
     // Step touches only the jiggle chain bones: anything it displaced is real sag, so bake it in.
     if (anyMoved) BakeSkin(scene, skin);
+    // The jiggle chain cannot finish the job on its own: the breast tip bone sits at the anchor position (restLen 0),
+    // so even with a downward force the spring clamps it to the anchor and no droop develops in the scene. The sag a
+    // viewer expects is the breast group itself hanging down, which the static pose shows directly as the balls jutting
+    // straight out of the chest. Tilt every bust / nipple bone down about its own pivot by a moderate angle, baked the
+    // same way as the settle above (both previews and the exported PMX). The intensity ties to the jiggle it derives from.
+    if (!std::getenv("CARDBRIDGE_NO_SAG")) {
+        const float tilt = std::min(0.30f, jiggleBust && !jiggleButt ? 0.30f : 0.20f) * (0.5f + jiggleIntensity);
+        const Pose rest2;
+        std::vector<Mat4> droop = SkinMatrices(scene, rest2);
+        bool any = false;
+        for (size_t i = 0; i < droop.size(); ++i) {
+            const std::string& n = scene.bones[i].name;
+            if (n.find("bust") == std::string::npos && n.find("bnip") == std::string::npos) continue;
+            any = true;
+            const Vec3 pivot = scene.bones[i].pos;
+            const Mat4 rot = RotationBetween({0, 0, 1}, normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)}));
+            Mat4 toPivot;
+            toPivot.m[3] = -pivot.x;
+            toPivot.m[7] = -pivot.y;
+            toPivot.m[11] = -pivot.z;
+            Mat4 aboutPivot = rot;
+            aboutPivot.m[3] = pivot.x;
+            aboutPivot.m[7] = pivot.y;
+            aboutPivot.m[11] = pivot.z;
+            droop[i] = aboutPivot * toPivot * droop[i];
+        }
+        if (any) BakeSkin(scene, droop);
+    }
 }
 
 std::string PoseFileToJson(const PoseFile& file) {

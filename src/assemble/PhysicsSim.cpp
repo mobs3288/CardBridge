@@ -124,7 +124,7 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
             if (simulate) {
                 const Vec3 objectMove = sub(anchorPos, chain.anchorPrev);
                 chain.anchorPrev = anchorPos;
-                // gravity as the component has it: what the rest pose already hangs under is left out, the rest of it acts
+                // gravity as the component has it: what the rest pose already hangs under is left out, the rest of it acts.
                 Vec3 force = sc.gravity;
                 const float gl = length(sc.gravity);
                 if (gl > 1e-12f) {
