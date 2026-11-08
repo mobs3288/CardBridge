@@ -1169,6 +1169,7 @@ void StartExport() {
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
+            assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity);   // the bust/hips as they hang under gravity
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
