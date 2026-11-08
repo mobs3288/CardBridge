@@ -102,12 +102,13 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     }
 
     // The item by its raw list id among the installed mods' lists. A card saved without Sideloader's resolve information names its mod
-    // items this way, and Sideloader falls back to it when the named mod (or its installed version) does not define the slot. With
-    // several mods defining the id, the one loaded first (by path) keeps it: Sideloader gives the later ones a new id.
+    // items this way, and Sideloader falls back to it when the named mod (or its installed version) does not define the slot.
+    // Several installed files can claim the id (typically two versions of the same GUID): Sideloader's unpacker copies them over
+    // each other in path order, so the last one the game sees wins and we take the newest by path, as the named branch below does.
     auto byRawId = [&]() {
         auto owners = mods_.findByListId(ref.category, ref.id);
         if (owners.empty()) return false;
-        const ModEntry& m = **std::min_element(owners.begin(), owners.end(), [](const ModEntry* a, const ModEntry* b) { return a->path < b->path; });
+        const ModEntry& m = **std::max_element(owners.begin(), owners.end(), [](const ModEntry* a, const ModEntry* b) { return a->path < b->path; });
         if (!modListsLoaded_[m.path]) {
             modListsLoaded_[m.path] = true;
             lists_.addMod(m.path, m.guid, nullptr);
