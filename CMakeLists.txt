@@ -74,6 +74,7 @@ add_library(cardbridge_core STATIC
     src/resolve/ListTable.cpp
     src/resolve/Resolver.cpp
     src/assemble/Assembler.cpp
+    src/assemble/HeelConfig.cpp
     src/assemble/DynamicBone.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp

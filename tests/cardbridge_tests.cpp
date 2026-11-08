@@ -11,6 +11,7 @@
 
 #include "assemble/Assembler.h"
 #include "assemble/DynamicBone.h"
+#include "assemble/HeelConfig.h"
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
@@ -1927,6 +1928,86 @@ void unitTests() {
         Vec3 p = SkinPoint(v, flipped);
         CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
         CHECK(std::fabs(p.x - 1.0f) < 1e-4f && std::fabs(p.y + 2.0f) < 1e-4f && std::fabs(p.z + 3.0f) < 1e-4f);
+    });
+
+    test("heel config: Stiletto text parses, angles fold past 60, missing keys default to 0", [] {
+        using namespace assemble;
+        HeelConfig c;
+        CHECK(ParseStilettoHeel("angleAnkle=15\r\nangleLeg=0\r\nheight=0.028\r\n", c));
+        CHECK(std::fabs(c.ankleDeg - 15) < 1e-5f && std::fabs(c.legDeg) < 1e-5f && std::fabs(c.heightMeters - 0.028f) < 1e-6f);
+        CHECK(std::fabs(c.toeDeg) < 1e-5f && std::fabs(c.shoeScaleX - 1) < 1e-5f);   // absent -> 0 / 1
+        CHECK(ParseStilettoHeel("angleAnkle=350\nheight=0.01", c));   // 350 -> -(360-350) = -10
+        CHECK(std::fabs(c.ankleDeg + 10) < 1e-4f);
+        HeelConfig none;
+        CHECK(!ParseStilettoHeel("hello\nworld=1", none));   // no heel keys
+        CHECK(std::fabs(HeelAngleInRange(45) - 45) < 1e-6f && std::fabs(HeelAngleInRange(350) + 10) < 1e-4f);
+    });
+
+    test("heel config: known-table names round-trip, flat shoes stay flat", [] {
+        using namespace assemble;
+        HeelConfig hc;
+        CHECK(KnownHeelConfig("HM25", hc) && std::fabs(hc.ankleDeg - 15) < 1e-5f && std::fabs(hc.heightMeters - 0.028f) < 1e-6f);
+        CHECK(KnownHeelConfig("High Heeled Gal Sandals", hc) && std::fabs(hc.ankleDeg - 30) < 1e-5f && std::fabs(hc.legDeg - 16) < 1e-5f);
+        CHECK(KnownHeelConfig("Middle Heel Pumps", hc) && std::fabs(hc.ankleDeg) < 1e-5f && std::fabs(hc.heightMeters - 0.018f) < 1e-6f);   // height-only
+        CHECK(!KnownHeelConfig("no such shoe", hc));
+        CHECK(KnownHeelTable().size() == 50);
+        for (const auto& [n, v] : KnownHeelTable()) CHECK(!n.empty() && v.hasConfig);
+    });
+
+    test("heel pose: flat shoe geometry triggers nothing, heeled geometry lifts and pitches", [] {
+        // Direct settleHeels is exercised end-to-end (Assemble path); here check detection
+        // thresholds via a tiny synthetic shoe: a level sole with no drop must not warn, and
+        // a shoe with a 2 cm heel stack must warn once per foot. The full pose maths are
+        // covered by the MMD audit + conversion validation in the session notes.
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_leg01_L", -1, {0, 0.5f, 0}, "rig"});
+        s.bones.push_back({"cf_j_leg03_L", 0, {0, 0.1f, 0}, "rig"});
+        s.bones.push_back({"cf_j_foot_L", 1, {0, 0.05f, 0}, "rig"});
+        s.bones.push_back({"cf_j_toes_L", 2, {0, 0.04f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_j_leg01_R", -1, {0.1f, 0.5f, 0}, "rig"});
+        s.bones.push_back({"cf_j_leg03_R", 4, {0.1f, 0.1f, 0}, "rig"});
+        s.bones.push_back({"cf_j_foot_R", 5, {0.1f, 0.05f, 0}, "rig"});
+        s.bones.push_back({"cf_j_toes_R", 6, {0.1f, 0.04f, 0.12f}, "rig"});
+        // Flat sole at Y=0 (level): toeLow == heelLow -> height 0 -> no pose, no warning.
+        SceneMesh flat;
+        flat.name = "flatshoes";
+        for (int i = 0; i < 60; ++i) {
+            SceneVertex v;
+            v.pos = {i % 2 ? 0.08f : -0.08f, 0.0f, (i / 10) * 0.02f};
+            v.normal = {0, 1, 0};
+            v.bone[0] = 2; v.weight[0] = 1;
+            if (i % 3 == 0) { v.bone[0] = 3; }
+            flat.vertices.push_back(v);
+        }
+        s.meshes.push_back(flat);
+        ScenePart p;
+        p.id = "outfit0.shoes_outer"; p.group = "Outfit"; p.includeInExport = true; p.visibleInPreview = true;
+        p.meshes = {0};
+        s.parts.push_back(p);
+        assemble::SettleHeels(s);
+        CHECK(s.issues.empty());
+        // Heeled version: a heel stack under the rear sole on the L side (x<0 is L):
+        // top of the stack just below the sole, bottom 2 cm lower.
+        for (int i = 0; i < 10; ++i) {
+            SceneVertex top; top.pos = {-0.08f, -0.01f, 0.01f + i * 0.001f}; top.normal = {0, 1, 0};
+            top.bone[0] = 2; top.weight[0] = 1;
+            SceneVertex bot; bot.pos = {-0.08f, -0.03f, 0.03f + i * 0.001f}; bot.normal = {0, 1, 0};
+            bot.bone[0] = 2; bot.weight[0] = 1;
+            s.meshes[0].vertices.push_back(top);
+            s.meshes[0].vertices.push_back(bot);
+        }
+        assemble::SettleHeels(s);
+        CHECK(s.issues.size() == 1);   // one side (L only: X side selection)
+        float lo = 1e30f;
+        for (const auto& v : s.meshes[0].vertices) lo = std::min(lo, v.pos.y);
+        CHECK(std::fabs(lo) < 1e-5f);
+        // Repeated calls without a re-shape must not accumulate (toe/heel already aligned).
+        auto poseOnce = s.bones[2].pos;
+        float yOnce = s.meshes[0].vertices[0].pos.y;
+        assemble::SettleHeels(s);
+        CHECK(std::fabs(s.bones[2].pos.x - poseOnce.x) < 1e-6f && std::fabs(s.bones[2].pos.y - poseOnce.y) < 1e-6f);
+        CHECK(std::fabs(s.meshes[0].vertices[0].pos.y - yOnce) < 1e-6f);
     });
 }
 

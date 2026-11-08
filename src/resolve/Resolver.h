@@ -80,6 +80,10 @@ public:
     // abdata/<bundle path without .unity3d>/<texture name>.png (e.g. abdata/sideloader/mt_nose_00/01.png for MainAB "sideloader/mt_nose_00.unity3d",
     // MainTex "01"). Null when the mod has no such file.
     std::shared_ptr<unity::TextureData> openLooseTexture(const ResolvedItem& item, const std::string& ab, const std::string& name, std::string* why);
+    // A text file a mod ships (e.g. a Stiletto heel "BepInEx/Stiletto/<Name>.txt"): bytes of the
+    // entry `<path>` inside the mod's zip (case-insensitive), empty when absent. No caching: heel
+    // configs are a few hundred bytes and read once per shoe.
+    Bytes openModText(const ResolvedItem& item, const std::string& path);
     std::shared_ptr<unity::UnityFile> openByCab(const std::string& externalName, std::string* why);
     // Drops every cached bundle and loose texture. Callers that hold a
     // shared_ptr to a bundle keep it alive, so this only releases the

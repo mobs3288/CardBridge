@@ -192,6 +192,16 @@ struct ScenePart {
     bool nudeSwitch = false;                // the "Nude body" checkbox: no geometry, switches every under piece on
     // Export: the part's PMX materials start fully transparent (the viewer sets this from its checkboxes); the PMX morphs bring them back.
     bool startHidden = false;
+    // Footwear: the list row's display Name (Stiletto's heelName) and the resolved heel
+    // configuration (zipmod Stiletto txt, else the known table). settleHeels reads these;
+    // hasHeelConfig false = geometry fallback.
+    std::string listName;
+    bool hasHeelConfig = false;
+    float heelAnkleDeg = 0, heelLegDeg = 0, heelToeDeg = 0, heelHeightMeters = 0;
+    float heelShoeScaleX = 1, heelShoeScaleY = 1, heelShoeScaleZ = 1;
+    float heelShoeAngleDeg = 0, heelShoeTranslateY = 0, heelShoeTranslateZ = 0;
+    float heelShoeShearY = 0, heelShoeShearZ = 0;
+    std::string heelConfigSource;   // "zipmod <guid>" / "known <Name>" for the manifest
 };
 
 // What BakePose wrote into the scene as its new rest pose, for the manifest.

@@ -1,5 +1,6 @@
 #include "assemble/Assembler.h"
 #include "assemble/DynamicBone.h"
+#include "assemble/HeelConfig.h"
 
 #include "core/Bytes.h"
 #include "shape/Shape.h"
@@ -1544,17 +1545,37 @@ void settleHeels(Scene& scene) {
             float cs = std::cos(ang), sn = std::sin(ang);
             return Vec3{d.x, d.y * cs - d.z * sn, d.z * cs + d.y * sn};
         };
-        auto footM = [&](Vec3 p, float th) { return rot(p, ankle, th); };
-        // Stiletto poses the foot about the ankle and the toes back at the ball (ToesAngle is
-        // set to the negative of the ankle pitch in the game data files for closed heels, so
-        // the forefoot stays flat on the floor): the midfoot pitches, the forefoot does not.
-        auto toesM = [&](Vec3 p, float th) { return footM(rot(p, ball, -th), th); };
-        auto blend = [&](const SceneVertex& v, Vec3 p, float th) {
-            float wf, wt;
-            weights(v, wf, wt);
-            Vec3 f = footM(p, th), t = toesM(p, th);
-            float wr = 1.0f - wf - wt;
-            return Vec3{p.x * wr + f.x * wf + t.x * wt, p.y * wr + f.y * wf + t.y * wt, p.z * wr + f.z * wf + t.z * wt};
+        // Stiletto chain (HeelInfoAnimation): leg about cf_j_leg03, ankle about cf_j_foot,
+        // toe about cf_j_toes, each as a local X-rotation on top of its parent (hierarchy).
+        // Baked here as rest-pose rotations about the rest pivots: leg first, then ankle
+        // about the moved foot pivot, then toe about the moved ball. IKCorrect/FrameCorrect
+        // do not touch cf_s/cf_d/cf_j leg bones (Assembly-CSharp verified), so cf_s_leg02/03
+        // stay with the leg by hierarchy only - no PMX append is added (it would deviate).
+        int leg03 = scene.boneIndex(std::string("cf_j_leg03_") + side);
+        const Vec3 leg03Pos = leg03 >= 0 ? scene.bones[static_cast<size_t>(leg03)].pos : ankle;
+        auto legM = [&](Vec3 p, float legRad) { return rot(p, leg03Pos, legRad); };
+        auto footM = [&](Vec3 p, float legRad, float ankleRad) {
+            return legM(rot(p, ankle, ankleRad), legRad);
+        };
+        auto toesM = [&](Vec3 p, float legRad, float ankleRad, float toeRad) {
+            return legM(rot(rot(p, ball, toeRad), ankle, ankleRad), legRad);
+        };
+        auto weights3 = [&](const SceneVertex& v, float& wLeg, float& wFoot, float& wToes) {
+            wLeg = wFoot = wToes = 0;
+            for (int k = 0; k < 4; ++k) {
+                if (v.weight[k] <= 0 || v.bone[k] < 0) continue;
+                char c = set[static_cast<size_t>(v.bone[k])];
+                if (c == 1) wFoot += v.weight[k];
+                else if (c == 2) wToes += v.weight[k];
+                else if (v.bone[k] == leg03) wLeg += v.weight[k];   // cf_j_leg03 joint itself (cf_s_leg03 stays with the leg)
+            }
+        };
+        auto blend3 = [&](const SceneVertex& v, Vec3 p, float legRad, float ankleRad, float toeRad) {
+            float wl, wf, wt;
+            weights3(v, wl, wf, wt);
+            Vec3 l = legM(p, legRad), f = footM(p, legRad, ankleRad), t = toesM(p, legRad, ankleRad, toeRad);
+            float wr = 1.0f - wl - wf - wt;
+            return Vec3{p.x * wr + l.x * wl + f.x * wf + t.x * wt, p.y * wr + l.y * wl + f.y * wf + t.y * wt, p.z * wr + l.z * wl + f.z * wf + t.z * wt};
         };
 
         // Inner and outer shoes differ: evaluate each shoe part on its own and pose for the
@@ -1564,96 +1585,144 @@ void settleHeels(Scene& scene) {
         // the taller one wins (the worn, outer shoe is taller in practice); a flat slot is
         // ignored. Hidden or excluded parts are skipped (the viewer's hide/show updates
         // visibleInPreview, so hiding the heeled shoe goes flat again on the next re-shape).
-        struct HeelCandidate { float height = 0, angle = 0; std::string partId; };
+        // Priority (per part): Stiletto config (zipmod txt, known table) > geometry > flat.
+        struct HeelCandidate {
+            float height = 0;   // metres
+            float ankle = 0, leg = 0, toe = 0;   // radians
+            std::string partId;
+            std::string from;  // "zipmod ..." / "known ..." / "geometry"
+        };
         HeelCandidate chosen;
         for (const auto& part : scene.parts) {
             if (!part.includeInExport || !part.visibleInPreview || part.group != "Outfit" || part.id.find(".shoes") == std::string::npos) continue;
-            std::vector<const SceneVertex*> shoe;
-            float maxZ = -1e30f;
-            for (int mi : part.meshes)
-                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
-                    float wf, wt;
-                    weights(v, wf, wt);
-                    if (wf + wt > 0.5f && sideOf(v.pos)) { shoe.push_back(&v); maxZ = std::max(maxZ, v.pos.z - ankle.z); }
-                }
-            if (shoe.size() < 50 || maxZ <= 0) continue;
-            float toeLow0 = 1e30f, heelLow0 = 1e30f;
-            for (const SceneVertex* v : shoe) {
-                float z = v->pos.z - ankle.z;
-                if (z > 0.6f * maxZ) toeLow0 = std::min(toeLow0, v->pos.y);
-                else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
-            }
-            float height = toeLow0 - heelLow0;
-            if (height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
-            const float soleY = toeLow0;
-            // The angle: the shoe is modelled for the pose it is worn in, so its heel stack
-            // leans forward by the foot's pointing angle. Pointing the foot by that much stands
-            // the stack upright, which is what a worn heel does.
-            float topZ = 0, topY = 0, botZ = 0, botY = 0;
-            int topN = 0, botN = 0;
-            for (const SceneVertex* v : shoe) {
-                if (v->pos.z - ankle.z > 0.4f * maxZ || v->pos.y > soleY - 0.003f) continue;   // the stack: below the sole, behind the arch
-                if (v->pos.y > soleY - 0.015f) { topZ += v->pos.z; topY += v->pos.y; ++topN; }
-                else if (v->pos.y < heelLow0 + 0.01f) { botZ += v->pos.z; botY += v->pos.y; ++botN; }
-            }
-            float best = 0;
-            if (topN > 3 && botN > 3) {
-                float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
-                if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
-            }
-            // Wedges and platforms: the heel strut is diagonal by design, so its lean is not the
-            // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
-            // instead: the footbed just above the outsole, rear higher than front by the heel
-            // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
-            if (best > 35.0f * 3.14159265f / 180.0f) {
-                float fY = 0, fZ = 0, rY = 0, rZ = 0;
-                int fN = 0, rN = 0;
+            HeelCandidate cand;
+            cand.partId = part.id;
+            if (part.hasHeelConfig) {
+                cand.height = part.heelHeightMeters;
+                cand.ankle = part.heelAnkleDeg * 3.14159265f / 180.0f;
+                cand.leg = part.heelLegDeg * 3.14159265f / 180.0f;
+                cand.toe = part.heelToeDeg * 3.14159265f / 180.0f;
+                cand.from = part.heelConfigSource;
+                // Height-only platforms (Geta 0/0/30mm): lift without pitching.
+                bool heeled = cand.height >= 0.004f || std::fabs(cand.ankle) > 1e-6f || std::fabs(cand.leg) > 1e-6f || std::fabs(cand.toe) > 1e-6f;
+                if (!heeled) continue;   // explicitly flat in config (most base shoes)
+            } else {
+                std::vector<const SceneVertex*> shoe;
+                float maxZ = -1e30f;
+                for (int mi : part.meshes)
+                    for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                        float wf, wt;
+                        weights(v, wf, wt);
+                        if (wf + wt > 0.5f && sideOf(v.pos)) { shoe.push_back(&v); maxZ = std::max(maxZ, v.pos.z - ankle.z); }
+                    }
+                if (shoe.size() < 50 || maxZ <= 0) continue;
+                float toeLow0 = 1e30f, heelLow0 = 1e30f;
                 for (const SceneVertex* v : shoe) {
                     float z = v->pos.z - ankle.z;
-                    if (v->pos.y < soleY - 0.001f || v->pos.y > soleY + 0.05f) continue;   // just above the outsole: the insole
-                    if (z > 0.5f * maxZ) { fY += v->pos.y; fZ += v->pos.z; ++fN; }
-                    else if (z < 0.3f * maxZ) { rY += v->pos.y; rZ += v->pos.z; ++rN; }
+                    if (z > 0.6f * maxZ) toeLow0 = std::min(toeLow0, v->pos.y);
+                    else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
                 }
-                if (fN > 10 && rN > 10) {
-                    float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
-                    if (dz > 0.02f && dy > 0.0f) {
-                        float slope = std::atan2(dy, dz);
-                        if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) best = slope;
+                float height = toeLow0 - heelLow0;
+                if (height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
+                const float soleY = toeLow0;
+                // The angle: the shoe is modelled for the pose it is worn in, so its heel stack
+                // leans forward by the foot's pointing angle. Pointing the foot by that much stands
+                // the stack upright, which is what a worn heel does.
+                float topZ = 0, topY = 0, botZ = 0, botY = 0;
+                int topN = 0, botN = 0;
+                for (const SceneVertex* v : shoe) {
+                    if (v->pos.z - ankle.z > 0.4f * maxZ || v->pos.y > soleY - 0.003f) continue;   // the stack: below the sole, behind the arch
+                    if (v->pos.y > soleY - 0.015f) { topZ += v->pos.z; topY += v->pos.y; ++topN; }
+                    else if (v->pos.y < heelLow0 + 0.01f) { botZ += v->pos.z; botY += v->pos.y; ++botN; }
+                }
+                float best = 0;
+                if (topN > 3 && botN > 3) {
+                    float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
+                    if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
+                }
+                // Wedges and platforms: the heel strut is diagonal by design, so its lean is not the
+                // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
+                // instead: the footbed just above the outsole, rear higher than front by the heel
+                // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
+                if (best > 35.0f * 3.14159265f / 180.0f) {
+                    float fY = 0, fZ = 0, rY = 0, rZ = 0;
+                    int fN = 0, rN = 0;
+                    for (const SceneVertex* v : shoe) {
+                        float z = v->pos.z - ankle.z;
+                        if (v->pos.y < soleY - 0.001f || v->pos.y > soleY + 0.05f) continue;   // just above the outsole: the insole
+                        if (z > 0.5f * maxZ) { fY += v->pos.y; fZ += v->pos.z; ++fN; }
+                        else if (z < 0.3f * maxZ) { rY += v->pos.y; rZ += v->pos.z; ++rN; }
+                    }
+                    if (fN > 10 && rN > 10) {
+                        float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
+                        if (dz > 0.02f && dy > 0.0f) {
+                            float slope = std::atan2(dy, dz);
+                            if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) best = slope;
+                        }
                     }
                 }
+                if (best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
+                cand.height = height;
+                cand.ankle = best;
+                cand.leg = 0.0f;
+                cand.toe = -best;   // geometry fallback: forefoot flat (Stiletto default toe is 0 when data exists)
+                cand.from = "geometry";
             }
-            if (best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
-            if (height > chosen.height) { chosen.height = height; chosen.angle = best; chosen.partId = part.id; }
+            if (cand.height > chosen.height) chosen = cand;
         }
         if (chosen.height == 0) continue;   // no heeled shoe on this side
-        float best = chosen.angle;
+        float legRad = chosen.leg, ankleRad = chosen.ankle, toeRad = chosen.toe;
         for (auto& mesh : scene.meshes)
             for (auto& v : mesh.vertices) {
-                float wf, wt;
-                weights(v, wf, wt);
-                if (wf + wt <= 0) continue;
-                Vec3 np = blend(v, v.pos, best);
+                float wl, wf, wt;
+                weights3(v, wl, wf, wt);
+                if (wl + wf + wt <= 0) continue;
+                Vec3 np = blend3(v, v.pos, legRad, ankleRad, toeRad);
                 SceneVertex nv = v;
                 nv.pos = {v.pos.x + v.normal.x, v.pos.y + v.normal.y, v.pos.z + v.normal.z};
-                Vec3 tip = blend(nv, nv.pos, best);
-                Vec3 base = blend(v, v.pos, best);
+                Vec3 tip = blend3(nv, nv.pos, legRad, ankleRad, toeRad);
+                Vec3 base = blend3(v, v.pos, legRad, ankleRad, toeRad);
                 Vec3 n{tip.x - base.x, tip.y - base.y, tip.z - base.z};
                 float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
                 if (len > 1e-6f) v.normal = {n.x / len, n.y / len, n.z / len};
                 v.pos = np;
             }
         for (size_t i = 0; i < scene.bones.size(); ++i) {
-            if (set[i] == 1 && static_cast<int>(i) != foot) scene.bones[i].pos = footM(scene.bones[i].pos, best);
-            else if (set[i] == 2) scene.bones[i].pos = toesM(scene.bones[i].pos, best);
+            if (static_cast<int>(i) == foot) continue;   // pivot: the origin itself stays (rotation about it)
+            if (set[i] == 1) scene.bones[i].pos = footM(scene.bones[i].pos, legRad, ankleRad);
+            else if (set[i] == 2) scene.bones[i].pos = toesM(scene.bones[i].pos, legRad, ankleRad, toeRad);
+            else if (static_cast<int>(i) == leg03 && std::fabs(legRad) > 1e-9f) scene.bones[i].pos = legM(scene.bones[i].pos, legRad);
         }
+        // cf_j_foot itself moves with the leg rotation (its pivot for the ankle is stationary).
+        if (std::fabs(legRad) > 1e-9f) scene.bones[static_cast<size_t>(foot)].pos = legM(ankle, legRad);
         for (auto& c : scene.colliders) {
-            if (c.bone < 0 || static_cast<size_t>(c.bone) >= set.size() || !set[static_cast<size_t>(c.bone)]) continue;
-            c.center = footM(c.center, best);
-            c.axis = normalize(rotDir(c.axis, best));
+            if (c.bone < 0 || static_cast<size_t>(c.bone) >= set.size()) continue;
+            char s = set[static_cast<size_t>(c.bone)];
+            float total = 0;
+            if (s == 1) { c.center = footM(c.center, legRad, ankleRad); total = legRad + ankleRad; }
+            else if (s == 2) { c.center = toesM(c.center, legRad, ankleRad, toeRad); total = legRad + ankleRad + toeRad; }
+            else if (c.bone == leg03 && std::fabs(legRad) > 1e-9f) { c.center = legM(c.center, legRad); total = legRad; }
+            else continue;
+            c.axis = normalize(rotDir(c.axis, total));
         }
-        char buf[260];
-        std::snprintf(buf, sizeof buf, "foot %s posed for a %.1f cm heel from %s: ankle pointed %.1f degrees", side,
-                      chosen.height * 100.0f, chosen.partId.c_str(), best * 180.0f / 3.14159265f);
+        // Shoe warp (Stiletto UpdateShoeWarp): non-identity values would reshape the
+        // foot-weighted shoe mesh. All shipped files are identity; warn instead of ignoring.
+        {
+            const ScenePart* src = nullptr;
+            for (const auto& p : scene.parts) if (p.id == chosen.partId) { src = &p; break; }
+            if (src && src->hasHeelConfig) {
+                bool warped = src->heelShoeScaleX != 1 || src->heelShoeScaleY != 1 || src->heelShoeScaleZ != 1 ||
+                              src->heelShoeAngleDeg != 0 || src->heelShoeTranslateY != 0 || src->heelShoeTranslateZ != 0 ||
+                              src->heelShoeShearY != 0 || src->heelShoeShearZ != 0;
+                if (warped)
+                    scene.warn("", "foot " + std::string(side) + " shoe warp from " + src->heelConfigSource +
+                                    " (scale/angle/translate/shear) is parsed but not baked; the pose uses ankle/leg/toe/height only");
+            }
+        }
+        char buf[340];
+        std::snprintf(buf, sizeof buf, "foot %s posed for a %.1f cm heel from %s (%s): leg %.1f, ankle %.1f, toe %.1f degrees", side,
+                      chosen.height * 100.0f, chosen.partId.c_str(), chosen.from.c_str(),
+                      legRad * 180.0f / 3.14159265f, ankleRad * 180.0f / 3.14159265f, toeRad * 180.0f / 3.14159265f);
         scene.warn("", buf);
         posed = true;
     }
@@ -1671,6 +1740,8 @@ void settleHeels(Scene& scene) {
 
 
 } // namespace
+
+void SettleHeels(Scene& scene) { settleHeels(scene); }
 
 bool CreateRunsInLinearLight(const std::string& materialName) {
     return materialName == "cf_m_clothesN_create" || materialName == "cf_m_eye_create" || materialName == "cf_m_eyewhite_create";
@@ -2146,6 +2217,32 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             continue;
         }
         part.bundle = item.bundleRel();
+        // Heel configuration (priority 1: the mod's own Stiletto txt; priority 2: the known
+        // table). The txt lives next to the bundle as BepInEx/Stiletto/<Name>.txt, where Name
+        // is the list row's display Name (the game's heelName). Only footwear slots carry it;
+        // hasHeelConfig stays false otherwise so settleHeels uses geometry.
+        part.listName = item.listItem.get("Name");
+        if (ref.slot == 7 || ref.slot == 8) {
+            HeelConfig hc;
+            bool found = false;
+            if (item.status == resolve::ItemStatus::ResolvedMod) {
+                Bytes txt = resolver.openModText(item, "BepInEx/Stiletto/" + part.listName + ".txt");
+                if (!txt.empty() && ParseStilettoHeel(std::string(txt.begin(), txt.end()), hc)) {
+                    hc.source = "zipmod " + item.modGuid;
+                    found = true;
+                }
+            }
+            if (!found && KnownHeelConfig(part.listName, hc)) found = true;
+            if (found) {
+                part.hasHeelConfig = true;
+                part.heelAnkleDeg = hc.ankleDeg; part.heelLegDeg = hc.legDeg;
+                part.heelToeDeg = hc.toeDeg; part.heelHeightMeters = hc.heightMeters;
+                part.heelShoeScaleX = hc.shoeScaleX; part.heelShoeScaleY = hc.shoeScaleY; part.heelShoeScaleZ = hc.shoeScaleZ;
+                part.heelShoeAngleDeg = hc.shoeAngleDeg; part.heelShoeTranslateY = hc.shoeTranslateY;
+                part.heelShoeTranslateZ = hc.shoeTranslateZ; part.heelShoeShearY = hc.shoeShearY;
+                part.heelShoeShearZ = hc.shoeShearZ; part.heelConfigSource = hc.source;
+            }
+        }
         const int64_t itemRoot = uf->findPrefabRoot(item.assetName());
         if (!itemRoot) {
             part.status = "missing-bundle";

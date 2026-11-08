@@ -40,6 +40,13 @@ bool CreateRunsInLinearLight(const std::string& materialName);
 // matrix; the prefab root's local transform comes from the bundle.
 Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale);
 
+// Bakes the heeled-footwear rest pose (Stiletto: foot pitched about cf_j_foot,
+// toes about cf_j_toes, lift onto y=0) for the heeled shoe(s) in the scene.
+// Runs at the end of Assemble/Reshape; exported for tests so the flat/heeled
+// thresholds can be exercised without game files. CARDBRIDGE_NO_HEEL_POSE=1
+// makes it a no-op (before/after comparison).
+void SettleHeels(Scene& scene);
+
 // Builds the scene for one outfit: the shared skeleton from the base game,
 // the body mesh, then every card item that resolves (head, hair, clothing,
 // accessories) skinned onto that skeleton by bone name. An item that cannot be
