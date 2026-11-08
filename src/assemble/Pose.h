@@ -48,6 +48,10 @@ void BakePose(Scene& scene, const Pose& pose);
 // height editor (cm) and the CLI --height-cm scale from/to.
 float SceneHeightMeters(const Scene& scene);
 
+// The sag slider's starting value for this card (0..2, 1 = its intended hang): loose chains and larger busts start
+// higher, stiff / small ones start lower, so the default differs per card instead of being one fixed number.
+float CardSagDefault(const Scene& scene, float bustSize = 0.5f);
+
 // Cosmetically finishes a posed (or rest) scene exactly as the character is seen: the body's own jiggle (bust and, when on, hips) is
 // simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The exported PMX starts
 // with the breast as it hangs in the game instead of pulled straight out of the chest. `intensity` is the same jiggle-intensity

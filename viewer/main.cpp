@@ -440,6 +440,7 @@ struct App {
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
+    float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
@@ -587,7 +588,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
     if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
-    if (id == kSag) { r.v = &g.sag; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kSag) { r.v = &g.sag; r.def = g.sagDefault; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
@@ -1027,6 +1028,8 @@ bool ReshapeNow(bool final) {
     // The body sliders move the rest height: the height editor stays an absolute target, so the scale factor
     // re-targets itself to keep the displayed cm where the user put it.
     g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;
+    const float bustSize = g.tw.body.size() > 4 ? g.tw.body[4] : 0.5f;
+    g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);  // reset target follows the new shape; the slider itself stays put
     if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
     ApplyPoseLive();
     return true;
@@ -2697,6 +2700,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (L && !L->scene.bones.empty()) {
             g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;   // metres to centimetres
             g.heightCm = g.baseHeightCm;
+            const float bustSize = g.tw.bodyCard.size() > 4 ? g.tw.bodyCard[4] : 0.5f;
+            g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);
+            g.sag = g.sagDefault;   // follow the card: each card starts at its own hang
         }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         if (L && g.applyKeep)

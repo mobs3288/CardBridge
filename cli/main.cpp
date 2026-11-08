@@ -562,7 +562,9 @@ int cmdConvert(const Args& a) {
         // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.
         const bool settleBust = !a.has("no-jiggle-bust"), settleButt = !a.has("no-jiggle-butt");
         const float settleInt = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
-        const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str())) : 1.0f;
+        const float bustSize = ao.bodyShape.size() > 4 ? ao.bodyShape[4] : 0.5f;
+        const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
+                                                     : assemble::CardSagDefault(scene, bustSize);
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt, settleSag);
     }
 

@@ -255,6 +255,22 @@ float SceneHeightMeters(const Scene& scene) {
     return hi >= lo ? hi - lo : 0.0f;
 }
 
+float CardSagDefault(const Scene& scene, float bustSize) {
+    float stiff = 0.1f, n = 0.0f;
+    for (const auto& ch : scene.chains) {
+        if (!ch.characterOwn) continue;
+        if (!IsBustJiggleChain(scene, ch)) continue;
+        const float s = ch.boneStiffness.empty() ? ch.stiffness
+            : [&] { float x = 0; for (float v : ch.boneStiffness) x += v; return x / (float)ch.boneStiffness.size(); }();
+        stiff += s; n += 1.0f;
+    }
+    if (n > 0.0f) stiff /= n; else return 1.0f;   // no body chains: the old fixed default
+    const float loose = std::max(0.0f, 1.0f - std::min(1.0f, std::max(0.0f, stiff)));
+    const float size = 0.5f + std::min(1.0f, std::max(0.0f, bustSize));   // 0.5..1.5
+    // loose + medium size -> ~1.0; stiff + small -> near 0; loose + large -> past 1.3
+    return std::min(2.0f, std::max(0.0f, loose * size * 1.11f));
+}
+
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
     if (scene.bones.empty() || (!jiggleBust && !jiggleButt)) return;
     const Pose rest;
