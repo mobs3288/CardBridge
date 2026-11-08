@@ -76,6 +76,7 @@ struct SceneMaterial {
     std::vector<Vec3> toon;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
     bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
+    bool hairTinted = false;                 // _Color holds the card's measured hair tint (sRGB): the standard views linearise it like any colour, the bake feeds it to the shader as-is (see BakeShaderTextures)
 };
 
 // A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and

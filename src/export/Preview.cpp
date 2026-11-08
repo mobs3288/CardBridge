@@ -905,12 +905,22 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
 
         // The shader over the uses' UV layouts at W x H with the light Lv: img gets rgba, cov the texels a triangle reached.
+        // A hair-tinted material (SceneMaterial::hairTinted) carries its sRGB tint: the standard views linearise it like any
+        // colour, so the bake must do the same for _Color, or it would double-brighten the PMX texture. Only _Color moves:
+        // _Color2/_Color3 and the textures keep the bake's old reading, which the PMX export already matches.
+        assemble::SceneMaterial bakeMat = mat;
+        if (mat.hairTinted)
+            for (auto& pr : bakeMat.props) if (pr.first == "_Color") {
+                pr.second.x = detail::ToLinear(pr.second.x);
+                pr.second.y = detail::ToLinear(pr.second.y);
+                pr.second.z = detail::ToLinear(pr.second.z);
+            }
         auto render = [&](int W, int H, const float* Lv, std::vector<float>& img, std::vector<uint8_t>& cov) -> bool {
         CbSet psCb;
-        FillConstants(sr->programs[sr->pi], mat, Lv, camPos, psCb, &scene.globalProps);
+        FillConstants(sr->programs[sr->pi], bakeMat, Lv, camPos, psCb, &scene.globalProps);
         std::vector<std::vector<PsIn>> vsOut(flats.size());
         bool ok = true;
-        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], ComputeTangents(flats[f]), scene.globalProps, Lv, camPos, vsOut[f]);
+        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, bakeMat, flats[f], ComputeTangents(flats[f]), scene.globalProps, Lv, camPos, vsOut[f]);
         if (!ok) return false;
 
         img.assign(static_cast<size_t>(W) * H * 4, 0.0f);

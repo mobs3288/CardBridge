@@ -44,8 +44,10 @@ Vec4 kkColor(Vec4 c) { return c; }
 // A card's hair tint multiplies a light, almost flat hair texture (the game's hair shader draws the strand pattern
 // through _ColorMask). A base colour near black multiplies that texture to flat black and loses both the strands and
 // the shade the card picture shows, so lift the tint to a visible brightness while keeping the hue of the card's own
-// darkest hair colour (the start/end colours when the base carries none). 0.42 lands the baked strands at the ~65/255
-// mean the card portraits measure (the shader's toon terms add their own brightness on top of the texture multiply).
+// darkest hair colour (the start/end colours when the base carries none). The value is sRGB: the standard views
+// linearise it (0.68 -> 0.42 linear), which lands the finish at the ~65/255 mean the card portraits measure. The bake
+// feeds it to the shader as 0.42 (see SceneMaterial::hairTinted), so both views agree instead of the standard one
+// crushing the strands through the grading toe.
 Vec4 hairTint(Vec4 base, Vec4 start, Vec4 end) {
     auto peakOf = [](const Vec4& c) { return std::max(c.x, std::max(c.y, c.z)); };
     Vec4 hue = base;
@@ -53,7 +55,7 @@ Vec4 hairTint(Vec4 base, Vec4 start, Vec4 end) {
     if (peak < 0.02f) { hue = end; peak = peakOf(hue); }
     if (peak < 0.02f) { hue = start; peak = peakOf(hue); }
     if (peak < 0.02f) { hue = {1, 1, 1, 1}; peak = 1; }
-    const float target = std::getenv("CARDBRIDGE_HAIR_TINT") ? static_cast<float>(std::atof(std::getenv("CARDBRIDGE_HAIR_TINT"))) : 0.42f;   // test aid
+    const float target = std::getenv("CARDBRIDGE_HAIR_TINT") ? static_cast<float>(std::atof(std::getenv("CARDBRIDGE_HAIR_TINT"))) : 0.68f;   // test aid
     if (peak < target) {
         const float s = target / peak;
         hue.x *= s;
@@ -854,6 +856,7 @@ struct Builder {
                 for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *tint; set = true; }
                 if (!set) sm.props.emplace_back("_Color", *tint);
                 sm.diffuse = {tint->x, tint->y, tint->z, 0.0f};
+                sm.hairTinted = true;
             }
             if (blushAlpha >= 0)
                 for (auto& pr : sm.props) if (pr.first == "_overcolor2") pr.second.w = blushAlpha;
