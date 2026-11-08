@@ -573,9 +573,14 @@ struct Builder {
 
     // The embedded images are linear dumps, not sRGB authoring images (the game displays them unconverted); `colour` picks the
     // cache slot only (colour maps are the main textures the ME edit points at).
-    int embeddedTexture(int texId, const std::string& partId, bool colour = true) {
+    // `forceSrgb` overrides the default (linear): an edit on `MainTex` that replaces a texture the prefab material
+    // already binds inherits that texture's colour space, because the game restores the editor's texture with it.
+    // A replaced albedo (sRGB in the bundle) must decode on sample and round-trip in the frame; treating it as a
+    // linear dump brightens it to a wash. -1 = keep the linear default (no original to inherit from, or a data map).
+    int embeddedTexture(int texId, const std::string& partId, bool colour = true, int forceSrgb = -1) {
         const int key = colour ? texId : texId + (1 << 20);
-        auto it = meTextures.find(key);
+        const int slot = key * 4 + (forceSrgb + 1);   // forceSrgb -1/0/1 stay separate cache entries
+        auto it = meTextures.find(slot);
         if (it != meTextures.end()) return it->second;
         card::MaterialEdits::Image img;
         int result = -1;
@@ -583,9 +588,11 @@ struct Builder {
             result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
             // The embedded images are linear dumps, not sRGB authoring images: the game displays them unconverted (the whole
             // "colour", too, is what the editor's render produced in linear light), so they are stored linear like the masks.
-            scene.textures[static_cast<size_t>(result)].srgb = false;
+            // A replaced main texture instead keeps its original's colour space (see the call site): an sRGB albedo would
+            // otherwise be encoded like a linear dump and wash out.
+            scene.textures[static_cast<size_t>(result)].srgb = forceSrgb > 0;
         } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
-        meTextures[key] = result;
+        meTextures[slot] = result;
         return result;
     }
 
@@ -987,7 +994,17 @@ struct Builder {
             for (const auto* e : edits->texEditsFor(meCoordinate, meType, meSlot, sm.name)) {
                 const std::string prop = "_" + e->property;
                 const bool main = e->property == "MainTex";
-                int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main) : -1;
+                int orig = -1, forceSrgb = -1;   // MainTex edits inheriting an sRGB original: round-trip, don't encode like a linear dump
+                for (auto& tb : sm.texProps) if (tb.name == prop) orig = tb.texture;
+                if (main && orig >= 0 && static_cast<size_t>(orig) < scene.textures.size() && scene.textures[static_cast<size_t>(orig)].srgb)
+                    forceSrgb = 1;
+                if (std::getenv("CARDBRIDGE_DEBUG_ME"))
+                    std::fprintf(stderr, "ME %s %s prop=%s texId=%d origTex=%d name=%s srgb=%d force=%d\n",
+                                 partId.c_str(), sm.name.c_str(), prop.c_str(), e->texId, orig,
+                                 (orig >= 0 && static_cast<size_t>(orig) < scene.textures.size()) ? scene.textures[static_cast<size_t>(orig)].name.c_str() : "-",
+                                 (orig >= 0 && static_cast<size_t>(orig) < scene.textures.size()) ? (scene.textures[static_cast<size_t>(orig)].srgb ? 1 : 0) : -1,
+                                 forceSrgb);
+                int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main, forceSrgb) : -1;
                 if (main && t >= 0) {
                     sm.texture = t;
                     sm.diffuse = {1, 1, 1, 1};
