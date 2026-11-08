@@ -306,6 +306,7 @@ Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed)
 > Why spend hours writing code when I can spend those hours reviewing AI-generated code, debugging it, reverse-engineering Unity AssetBundles, and questioning every life decision that led me here?
 >
 > **Work smarter, not harder.** Or at least make the computer do the hard part.
+> 
 > And yes, when I'm not using Claude—or the budget runs out—I'll do it myself.
 > — Thanos
 
