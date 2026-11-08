@@ -48,10 +48,13 @@ Vec4 kkColor(Vec4 c) { return c; }
 // linearise it (0.68 -> 0.42 linear), which lands the finish at the ~65/255 mean the card portraits measure. The bake
 // feeds it to the shader as 0.42 (see SceneMaterial::hairTinted), so both views agree instead of the standard one
 // crushing the strands through the grading toe.
+// Only a near-black base is lifted: a card whose base is already visible must keep it raw, or _Color ends up brighter
+// than the untouched _Color2/_Color3 and the _ColorMask's R regions fade against the G/B regions (Megumin's crown).
 Vec4 hairTint(Vec4 base, Vec4 start, Vec4 end) {
     auto peakOf = [](const Vec4& c) { return std::max(c.x, std::max(c.y, c.z)); };
     Vec4 hue = base;
     float peak = peakOf(hue);
+    if (peak >= 0.10f) return hue;   // visible card colour: keep it, so it agrees with _Color2/_Color3
     if (peak < 0.02f) { hue = end; peak = peakOf(hue); }
     if (peak < 0.02f) { hue = start; peak = peakOf(hue); }
     if (peak < 0.02f) { hue = {1, 1, 1, 1}; peak = 1; }
