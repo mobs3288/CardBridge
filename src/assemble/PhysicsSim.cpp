@@ -118,6 +118,19 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
         const Vec3 axis = normalize(m.dir(c.axis));
         colliders.push_back({sub(centre, axis * half), centre + axis * half, c.radius});
     }
+    // The arms are not in the game's collider list, but the breast clipping into them is the classic break:
+    // add an upper-arm + forearm capsule per arm so the jiggle particles slide off the arm instead of through it.
+    for (const char* side : {"_L", "_R"}) {
+        const int shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);
+        const int arm = scene.boneIndex(std::string("cf_j_arm00") + side);
+        const int forearm = scene.boneIndex(std::string("cf_j_forearm01") + side);
+        auto addArmSeg = [&](int a, int b, float r) {
+            if (a < 0 || b < 0 || static_cast<size_t>(a) >= poseWorld.size() || static_cast<size_t>(b) >= poseWorld.size()) return;
+            colliders.push_back({poseWorld[static_cast<size_t>(a)].translation(), poseWorld[static_cast<size_t>(b)].translation(), r});
+        };
+        addArmSeg(shoulder, arm, 0.040f);
+        addArmSeg(arm, forearm, 0.032f);
+    }
 
     float moved = 0.0f;
     for (int s = 0; s < std::max(1, steps); ++s) {

@@ -360,7 +360,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     // it does not overlap in the rest pose: colliders that overlap the same bodies share a group, and a body's mask lists the groups none
     // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
     // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
-    // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — a jiggle body meets no collider at all (mask 0).
+    // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
     const float margin = 0.02f * scale;
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
@@ -383,11 +383,54 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
-        if (chainJiggle[bi]) continue;   // the jiggle body keeps the mask 0 it was written with: skin that collides with nothing
+        if (chainJiggle[bi]) continue;   // jiggle masks are set with the arm colliders below (arm only, never the bust spheres)
         uint16_t mask = 0;
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
+    }
+    // Generated arm colliders, so the breast slides off the arm instead of clipping through it. The bust's own hit
+    // spheres are deliberately not met (they shove the jiggle forever); these arms are clear of the breast at rest,
+    // so the jiggle can meet them safely. Group 15 is the arms alone.
+    {
+        constexpr uint8_t kArmGroup = 15;
+        bool hasArm = false;
+        auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
+        for (const char* side : {"_L", "_R"}) {
+            const int shoulder = findBone(std::string("cf_j_shoulder") + side);
+            const int arm = findBone(std::string("cf_j_arm00") + side);
+            const int forearm = findBone(std::string("cf_j_forearm01") + side);
+            auto addSeg = [&](int a, int b, float radius) {
+                if (a < 0 || b < 0 || static_cast<size_t>(a) >= scene.bones.size() || static_cast<size_t>(b) >= scene.bones.size()) return;
+                const Vec3 pa = scene.bones[static_cast<size_t>(a)].pos * scale;
+                const Vec3 pb = scene.bones[static_cast<size_t>(b)].pos * scale;
+                const Vec3 dir = sub(pb, pa);
+                const float len3d = length(dir);
+                if (len3d < 1e-5f) return;
+                const Vec3 axis = normalize(dir);
+                pmx::RigidBody rb;
+                rb.name = std::string("arm collider ") + side + " " + (a == shoulder ? "upper" : "forearm");
+                rb.bone = a;
+                rb.group = kArmGroup;
+                rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);
+                rb.mode = 0;
+                rb.shape = (len3d - 2.0f * radius * scale) > 1e-4f ? 2 : 0;
+                rb.size = {radius * scale, std::max(0.0f, len3d - 2.0f * radius * scale), 0};
+                rb.position = (pa + pb) * 0.5f;
+                if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(axis);
+                rb.mass = 1.0f;
+                model.rigidBodies.push_back(std::move(rb));
+                hasArm = true;
+            };
+            addSeg(shoulder, arm, 0.040f);
+            addSeg(arm, forearm, 0.032f);
+        }
+        if (hasArm) {
+            for (size_t bi = 0; bi < chainBody.size(); ++bi) {
+                if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kArmGroup);
+                else model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask |= static_cast<uint16_t>(1u << kArmGroup);
+            }
+        }
     }
     AddLegFollow(scene, model);
 }

@@ -223,6 +223,19 @@ void BakePose(Scene& scene, const Pose& pose) {
     for (const auto& q : pose.base) if (q.x != 0 || q.y != 0 || q.z != 0) scene.aposeApplied = true;
 }
 
+float SceneHeightMeters(const Scene& scene) {
+    float lo = 1e30f, hi = -1e30f;
+    auto eat = [&](const SceneMesh& m) {
+        for (const auto& v : m.vertices) { lo = std::min(lo, v.pos.y); hi = std::max(hi, v.pos.y); }
+    };
+    for (const auto& p : scene.parts) {
+        if (p.group != "Body" && p.group != "Head" && p.group != "Face") continue;
+        for (int mi : p.meshes) if (mi >= 0 && static_cast<size_t>(mi) < scene.meshes.size()) eat(scene.meshes[static_cast<size_t>(mi)]);
+    }
+    if (hi < lo) for (const auto& m : scene.meshes) eat(m);   // no body/head parts: whole-model bounds
+    return hi >= lo ? hi - lo : 0.0f;
+}
+
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
     if (scene.bones.empty() || (!jiggleBust && !jiggleButt)) return;
     const Pose rest;
@@ -279,10 +292,16 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
 }
 
 float SagTiltRad(bool bust, float jiggleIntensity) {
-    // At the default 0.5 the bust hangs ~26 degrees, climbing to ~32 at 1.0 and capping there so max intensity
-    // stays natural instead of pointing at the floor.
-    const float base = bust ? 0.45f : 0.30f;
-    return std::min(0.55f, base * (0.5f + jiggleIntensity));
+    return SagTiltRad(bust, jiggleIntensity, 0.1f, 0.1f, 1.0f);
+}
+// (kept for compatibility: a typical loose chain)
+float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale) {
+    // Per-card hang: stiffness 1 = perky (no droop), 0 = loose (full hang); elasticity pulls back a little;
+    // no downward force (gravityScale 0) means no hang at all. Capped so max intensity stays natural.
+    const float maxTilt = bust ? 0.55f : 0.40f;
+    const float loose = std::max(0.0f, 1.0f - std::min(1.0f, std::max(0.0f, stiffness)));
+    const float elastFactor = 1.0f - 0.4f * std::min(1.0f, std::max(0.0f, elasticity));
+    return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale * (0.5f + jiggleIntensity));
 }
 
 void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
@@ -292,10 +311,41 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
     auto isButt = [](const std::string& n) {
         return n.find("siri") != std::string::npos || n.find("kosi") != std::string::npos;
     };
+    // The card's own jiggle data, per side: average stiffness / elasticity / downward force over the body's own chains.
+    // No chain = the card has no jiggle there to respect, so no tilt.
+    auto sideParams = [&](bool bustSide, float& stiff, float& elast, float& grav, bool& found) {
+        found = false; stiff = 0.0f; elast = 0.0f; grav = 0.0f;
+        int n = 0;
+        for (const auto& ch : scene.chains) {
+            if (!ch.characterOwn) continue;
+            if (IsBustJiggleChain(scene, ch) != bustSide) continue;
+            auto avg = [](const std::vector<float>& perBone, float whole) {
+                if (perBone.empty()) return whole;
+                float s = 0.0f; for (float v : perBone) s += v;
+                return s / static_cast<float>(perBone.size());
+            };
+            stiff += avg(ch.boneStiffness, ch.stiffness);
+            elast += avg(ch.boneElasticity, ch.elasticity);
+            grav += len(ch.gravity) + len(ch.force);
+            ++n; found = true;
+        }
+        if (n > 0) { stiff /= n; elast /= n; grav /= n; }
+    };
+    float bustStiff = 0.1f, bustElast = 0.1f, bustGrav = 1.0f, buttStiff = 0.1f, buttElast = 0.1f, buttGrav = 1.0f;
+    bool hasBust = false, hasButt = false;
+    sideParams(true, bustStiff, bustElast, bustGrav, hasBust);
+    sideParams(false, buttStiff, buttElast, buttGrav, hasButt);
+    auto clamp01f = [](float v) { return std::min(1.0f, std::max(0.0f, v)); };
+    // Any downward force counts; the residual games use is small but never exactly zero. A flat zero means the card
+    // intends no hang at all.
+    const float bustGravScale = bustGrav < 1e-4f ? 0.0f : 1.0f;
+    const float buttGravScale = buttGrav < 1e-4f ? 0.0f : 1.0f;
     for (size_t i = 0; i < scene.bones.size(); ++i) {
         const std::string& name = scene.bones[i].name;
         const bool bust = isBust(name), butt = isButt(name);
         if ((bust && !jiggleBust) || (butt && !jiggleButt) || !(bust || butt)) continue;
+        if (bust && !hasBust) continue;
+        if (butt && !hasButt) continue;
         // The bust chain has ~6 bones in a row (bust01 > 02 > 03 > bnip ...). Tilting every one stacks to 100+ degrees
         // and collapses the breast to the belly. Tilt only the root of each side: the whole breast then hangs as one
         // piece by the single tilt, with the children inheriting it hierarchically.
@@ -307,7 +357,10 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
         }
         // A bone the user already moved keeps its edit.
         if (i < pose.bones.size() && !IsIdentity(pose.bones[i])) continue;
-        const float tilt = SagTiltRad(bust, jiggleIntensity);
+        const float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
+                                : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
+        if (tilt < 0.01f) continue;   // stiff / perky card: leave it as it is
+        (void)clamp01f;
         // Forward for the bust, backward for the butt, both tipped toward straight down.
         const Vec3 from = bust ? Vec3{0, 0, 1} : Vec3{0, 0, -1};
         const Vec3 to = bust ? normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)})

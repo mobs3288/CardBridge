@@ -112,6 +112,7 @@ void usage() {
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
         "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-intensity F]\n"
         "                                             breast and butt jiggle are on by default (both bounce); the intensity scales the swing (1 = the game)\n"
+        "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu]  which device the --gpu-view picture and the skinning use (auto prefers a discrete NVIDIA/AMD card; warp and software are the CPU fallbacks)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
@@ -434,6 +435,23 @@ int cmdConvert(const Args& a) {
         if (!poseFile.bones.empty()) std::fprintf(stderr, "  pose: %zu bone edit(s) from %s\n", poseFile.bones.size() - unknown.size(), a.get("pose").c_str());
     }
     if (!std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) {
+        if (a.opt.count("height-cm")) {
+            const float targetCm = static_cast<float>(std::atof(a.get("height-cm").c_str()));
+            const float baseCm = assemble::SceneHeightMeters(scene) * 100.0f;
+            if (baseCm > 1e-4f && targetCm > 1e-4f) {
+                const float f = targetCm / baseCm;
+                if (std::fabs(f - 1.0f) > 1e-4f) {
+                    assemble::Pose hp;
+                    for (size_t i = 0; i < scene.bones.size(); ++i) {
+                        if (scene.bones[i].parent != -1) continue;
+                        auto& e = hp.edit(i);
+                        e.scl = {f, f, f};
+                    }
+                    assemble::BakePose(scene, hp);
+                    std::fprintf(stderr, "  height: %.1f cm -> %.1f cm (x%.3f)\n", baseCm, targetCm, f);
+                }
+            }
+        }
         // Settle the body's own jiggle (breast and, when on, hips) under gravity, so the exported and previewed pose shows the
         // bust as it hangs in the game instead of pulled straight out of the chest; the game draw's live sim settles again
         // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.

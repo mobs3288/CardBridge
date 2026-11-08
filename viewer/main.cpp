@@ -285,7 +285,7 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
@@ -431,6 +431,7 @@ struct App {
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
+    float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
@@ -577,6 +578,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kNippleMm) { r.v = &g.tw.nippleMm; r.def = 0; r.lo = -15; r.hi = 15; r.step = 1; r.percent = false; return true; }
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
+    if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
     if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
@@ -594,7 +596,7 @@ bool SliderFor(int id, SliderRef& r) {
 }
 
 // Pose controls change the picture at once, no re-assembly.
-bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
+bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
 
 std::string Shorten(const std::string& s, size_t maxChars);
 
@@ -610,6 +612,8 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
     if (tab == TabBody) addSliders(shape::BodySliders(), 0, g.tw.body.size());
     else if (tab == TabFace) addSliders(shape::FaceSliders(), kFaceBase, g.tw.face.size());
     else if (tab == TabLook) {
+        rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
+        rows.push_back({1, kHeightCm, "Height (cm)", "Height"});
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
@@ -699,7 +703,10 @@ void ScheduleApplyTweaks() {
 }
 
 // ---- posing ---------------------------------------------------------------------------------------------------------
-assemble::Pose BuildPose(const Loaded& L) {
+// includeSag: the live preview (and the physics anchors) start from the sagged pose. The export passes false:
+// BakePose bakes A-pose + edits only, then BakeSettledPhysics adds the settle + sag once, so MMD and the viewer
+// show the same single hang instead of the export sagging twice.
+assemble::Pose BuildPose(const Loaded& L, bool includeSag = true) {
     assemble::Pose p;
     for (const auto& [name, e] : g.boneEdits) {
         if (assemble::IsIdentity(e)) continue;
@@ -709,7 +716,19 @@ assemble::Pose BuildPose(const Loaded& L) {
     if (g.aPose) assemble::MakeAPose(L.scene, g.aPoseDeg, p.base);
     // The static preview sags the same way the export does, so the viewer shows the hang even with physics off.
     // A bone the user drags herself keeps its own edit (AddSagPose skips those).
-    assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    // Height: scale everything uniformly about the roots (feet) so the model's standing height is heightCm.
+    // A root the user scaled herself keeps that scale multiplied by this factor.
+    if (g.baseHeightCm > 1e-4f && g.heightCm > 1e-4f) {
+        const float f = g.heightCm / g.baseHeightCm;
+        if (std::fabs(f - 1.0f) > 1e-4f) {
+            for (size_t i = 0; i < L.scene.bones.size(); ++i) {
+                if (L.scene.bones[i].parent != -1) continue;
+                auto& e = p.edit(i);
+                e.scl.x *= f; e.scl.y *= f; e.scl.z *= f;
+            }
+        }
+    }
     return p;
 }
 
@@ -994,6 +1013,9 @@ bool ReshapeNow(bool final) {
         assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
         g.gpuExp.Refresh(final);
     }
+    // The body sliders move the rest height: the height editor stays an absolute target, so the scale factor
+    // re-targets itself to keep the displayed cm where the user put it.
+    g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;
     if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
     ApplyPoseLive();
     return true;
@@ -1180,7 +1202,7 @@ void StartExport() {
     const std::vector<char> hiddenNow = g.hidden;
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
     const float jiggleIntensity = g.jiggleIntensity;
-    const assemble::Pose pose = BuildPose(*L);
+    const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
     std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, pose, sceneCopy = std::move(sceneCopy)]() mutable {
@@ -2588,6 +2610,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LOADED: {
         std::shared_ptr<Loaded> L = Current();
+        if (L && !L->scene.bones.empty()) {
+            g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;   // metres to centimetres
+            g.heightCm = g.baseHeightCm;
+        }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         if (L && g.applyKeep)
             for (size_t i = 0; i < L->scene.parts.size(); ++i) {

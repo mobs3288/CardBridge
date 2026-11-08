@@ -44,18 +44,26 @@ void BakeSkin(Scene& scene, const std::vector<Mat4>& skin);
 // where the skin matrices put them. The bone table keeps its names and order. Afterwards `scene.pose` says what was applied.
 void BakePose(Scene& scene, const Pose& pose);
 
+// The model's standing height in metres (head top to feet on the Body / Head meshes, at rest, no pose). What the
+// height editor (cm) and the CLI --height-cm scale from/to.
+float SceneHeightMeters(const Scene& scene);
+
 // Cosmetically finishes a posed (or rest) scene exactly as the character is seen: the body's own jiggle (bust and, when on, hips) is
 // simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The exported PMX starts
 // with the breast as it hangs in the game instead of pulled straight out of the chest. `intensity` is the same jiggle-intensity
 // the export writes as the joint swing limits.
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
 
-// How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). A real breast hangs
-// with its tip below its base: about 25-30 degrees at the default intensity, more when the slider goes up.
+// How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
+// respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,
+// perky rig hangs almost not at all while a loose one hangs ~25-30 degrees at the default intensity. `jiggleIntensity`
+// scales how wide it swings, as the PMX joints do.
 float SagTiltRad(bool bust, float jiggleIntensity);
+float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale);
 // Adds that hang to a pose (the viewer calls this so the static preview already sags; the bake above uses the same pose).
-// Bust bones (bust / bnip) droop down-forward; butt bones (siri / kosi) droop down-back (less). A bone the user already edited
-// keeps its own edit.
+// Bust bones (bust / bnip) droop down-forward; butt bones (siri / kosi) droop down-back (less). Only the root of each
+// side is tilted, so the whole breast hangs as one piece. A side with no body jiggle chain, or with a stiff chain, gets
+// no (or barely any) tilt: the card is left as it is. A bone the user already edited keeps its own edit.
 void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
 
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
