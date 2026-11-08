@@ -102,7 +102,12 @@ void usage() {
         "cardbridge " CARDBRIDGE_VERSION " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
-        "             [--outfit N] [--scale F] [--overwrite] [--no-bake | --bake-lit] [--no-grade] [--no-toon-ramp] [--mod-cache <file>]\n"
+        "             [--outfit N]                    which outfit of the card to convert (default: the card's current one)\n"
+        "             [--clothes <file.png>]          an outfit file (KKCLOTHING) applied to that outfit in memory for this\n"
+        "                                             export only; the card on disk is never saved. Hair worn as accessories\n"
+        "                                             is kept (see --replace-accessories)\n"
+        "             [--replace-accessories]         replace the outfit's accessories wholesale (may delete hair carried\n"
+        "                                             as accessories; off by default, hair is always kept)\n"
         "             [--apose-degrees N] [--tpose]   the rest pose has the arms N degrees down from the T-pose (40 by default,\n"
         "                                             what a MikuMikuDance motion expects); --tpose keeps the T-pose\n"
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
@@ -224,11 +229,85 @@ bool loadCard(const std::string& path, card::Card& c, int& code) {
     return false;
 }
 
+bool loadClothing(const std::string& path, card::ClothingFile& c, int& code) {
+    try {
+        c = card::LoadClothingFile(path);
+        return true;
+    } catch (const card::CardError& e) {
+        std::fprintf(stderr, "%s: %s [%s]\n", path.c_str(), e.what(), card::ErrorKindName(e.kind));
+        code = 2;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "%s: %s\n", path.c_str(), e.what());
+        code = 3;
+    }
+    return false;
+}
+
+// Applies an outfit file to a character in memory (never writes a card file).
+// Returns the merged outfit index, or -1 with `code` set.
+int applyClothes(const Args& a, card::Card& c) {
+    if (a.get("clothes").empty()) return -1;
+    card::ClothingFile cl;
+    int code = 0;
+    if (!loadClothing(normalizeSlashes(a.get("clothes")), cl, code)) throw std::runtime_error("clothing file failed");
+    if (!cl.supported) throw std::runtime_error(cl.supportNote);
+    card::ApplyClothingOptions opt;
+    if (a.opt.count("outfit")) opt.outfit = std::atoi(a.get("outfit").c_str());
+    opt.keepHairAccessories = !a.has("replace-accessories");
+    auto rep = card::ApplyClothing(c, cl, opt);
+    std::fprintf(stderr, "  clothing: %s -> outfit %d (%d clothes slot(s) replaced, %d accessory(ies) added%s, %d hair accessories kept)\n",
+                 cl.displayName().c_str(), rep.outfit, rep.clothesReplaced, rep.accessoriesAdded,
+                 rep.accessoriesRelocated ? (", " + std::to_string(rep.accessoriesRelocated) + " moved to keep hair").c_str() : "",
+                 rep.hairPreserved);
+    return rep.outfit;
+}
+
 int cmdInspect(const Args& a) {
     if (a.positional.size() < 2) { usage(); return 1; }
+    // An outfit file inspects as an outfit (name, ids, resolver rows), not as
+    // "not a supported card": --clothes is the merge spelling elsewhere.
+    if (a.get("clothes").empty()) {
+        try {
+            card::ClothingFile cl = card::LoadClothingFile(normalizeSlashes(a.positional[1]));
+            nlohmann::json j;
+            j["file"] = fileio::FileName(cl.path);
+            j["sha256"] = cl.sha256;
+            j["kind"] = "outfit";
+            j["marker"] = cl.marker;
+            j["format_version"] = cl.formatVersion;
+            j["outfit_name"] = cl.name;
+            j["supported"] = cl.supported;
+            if (!cl.supportNote.empty()) j["note"] = cl.supportNote;
+            if (cl.supported) {
+                j["resolver_rows"] = cl.rows.size();
+                std::set<std::string> guids;
+                for (const auto& r : cl.rows) guids.insert(r.modId);
+                j["mods_named_by_outfit"] = guids.size();
+                j["clothes_ids"] = nlohmann::json::array();
+                for (const auto& p : cl.outfit.clothes.at("parts").asArray()) j["clothes_ids"].push_back(p.at("id").asInt());
+                j["sub_parts"] = nlohmann::json::array();
+                for (const auto& e : cl.outfit.clothes.at("subPartsId").asArray()) j["sub_parts"].push_back(e.asInt());
+                j["accessories"] = nlohmann::json::array();
+                for (const auto& p : cl.outfit.accessory.at("parts").asArray()) {
+                    if (p.at("type").asInt() == 120 || p.at("id").asInt() == 0) continue;
+                    j["accessories"].push_back({{"type", p.at("type").asInt()}, {"id", p.at("id").asInt()}, {"parent", p.at("parentKey").asStr()}});
+                }
+            }
+            std::puts(j.dump(2).c_str());
+            return 0;
+        } catch (const card::CardError&) {
+            // Not an outfit file: fall through to the character path below.
+        } catch (const std::exception&) {
+            // Not an outfit file either.
+        }
+    }
     card::Card c;
     int code = 0;
     if (!loadCard(normalizeSlashes(a.positional[1]), c, code)) return code;
+    if (!a.get("clothes").empty()) {
+        try { applyClothes(a, c); }
+        catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return 3; }
+    }
 
     nlohmann::json j;
     j["file"] = fileio::FileName(c.path);
@@ -363,6 +442,12 @@ int cmdConvert(const Args& a) {
 
     assemble::AssembleOptions ao;
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
+    if (!a.get("clothes").empty()) {
+        try {
+            const int target = applyClothes(a, c);
+            if (target >= 0) ao.outfit = target;
+        } catch (const std::exception& e) { std::fprintf(stderr, "clothing: %s\n", e.what()); return 3; }
+    }
     // --body "4=0.8,13=0.1" / --face "..." set sliders (index=value, 0..1 is the maker's range); --nipple-inside pushes the nipples in.
     for (const char* which : {"body", "face"}) {
         std::string spec = a.get(which);
@@ -579,7 +664,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

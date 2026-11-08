@@ -1,9 +1,11 @@
 // CardBridge viewer: opens a Koikatsu card, assembles it exactly as the exporter does, and shows it in a window so every
 // card can be checked against its picture without exporting. Windows only (plain Win32 + GDI, no extra dependencies).
 //
-//   cardbridge-viewer [card.png] [--library <dir>] [--mods <dir>] [--outfit N]
+//   cardbridge-viewer [card.png] [--library <dir>] [--mods <dir>] [--outfit N] [--clothes <outfit.png>]
 //
 // Library and mods folders are remembered in %LOCALAPPDATA%\CardBridge\viewer.json. Drop a card on the window to open it.
+// Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the current outfit in memory only
+// (hair worn as accessories is kept; the card on disk is never saved).
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
@@ -257,6 +259,7 @@ struct Loaded {
     int outfit = 0, outfits = 0;
     std::vector<size_t> partTriangles;
     std::vector<std::string> notes;   // card-level problems
+    std::string clothing;             // the outfit file applied in memory, if any (never saved)
 };
 
 constexpr int kPanel = 380;
@@ -347,6 +350,10 @@ struct App {
     HWND hwnd = nullptr;
     Settings settings;
     std::string cardPath;
+    // An outfit file applied in memory only (never saved as a card): the path
+    // of the clothing file and the outfit slot it overwrote. Empty = none.
+    std::string clothingPath, clothingName;
+    int clothingOutfit = -1;
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up
@@ -1104,6 +1111,13 @@ bool EnsureResolver(std::string& err) {
 void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     g.cardPath = path;
+    std::string clothingPath;
+    int clothingOutfit = -1;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        clothingPath = g.clothingPath;
+        clothingOutfit = g.clothingOutfit;
+    }
     g.applyKeep = keepTweaks;
     g.keepHidden.clear();
     if (keepTweaks)   // the same card again (another outfit, a re-shape): keep the part checkboxes
@@ -1115,7 +1129,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     g.status = "loading " + fileio::FileName(path) + " ...";   // the full path is in the log
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks]() {
+    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -1133,6 +1147,25 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             // out-of-range slot falls back to the first, the way Assembler does.
             int shown = outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt());
             if (shown < 0 || shown >= static_cast<int>(c.outfits.size())) shown = 0;
+            if (!clothingPath.empty()) {
+                try {
+                    card::ClothingFile cl = card::LoadClothingFile(clothingPath);
+                    if (!cl.supported) throw std::runtime_error(cl.supportNote);
+                    card::ApplyClothingOptions opt;
+                    opt.outfit = clothingOutfit >= 0 ? clothingOutfit : shown;
+                    if (opt.outfit < 0 || opt.outfit >= static_cast<int>(c.outfits.size())) opt.outfit = shown;
+                    auto rep = card::ApplyClothing(c, cl, opt);
+                    out->clothing = cl.displayName();
+                    Log("clothing: " + cl.displayName() + " -> outfit " + std::to_string(rep.outfit) +
+                        " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " +
+                        std::to_string(rep.accessoriesAdded) + " accessory(ies) added" +
+                        (rep.accessoriesRelocated ? ", " + std::to_string(rep.accessoriesRelocated) + " moved to keep hair" : "") +
+                        ", " + std::to_string(rep.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
+                } catch (const std::exception& e) {
+                    out->notes.push_back(e.what());
+                    Log(std::string("clothing failed: ") + e.what(), LogKind::Error);
+                }
+            }
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;
@@ -2009,7 +2042,40 @@ void ExportFolderIfNeeded() {
 
 void OpenCard() {
     std::string c = PickCard(g.hwnd);
-    if (!c.empty()) { g.cam = {}; StartLoad(c, -1); }
+    if (!c.empty()) {
+        g.cam = {};
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.clothingPath.clear();
+            g.clothingName.clear();
+            g.clothingOutfit = -1;
+        }
+        StartLoad(c, -1);
+    }
+}
+
+// An outfit file dropped on a loaded character: it overwrites the current
+// outfit in memory only (never saved). Hair worn as accessories stays.
+void ApplyClothingFile(const std::string& path) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.cardPath.empty()) { Log("open a character first, then drop the outfit file", LogKind::Warn); return; }
+    if (g.busy) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    card::ClothingFile cl;
+    try {
+        cl = card::LoadClothingFile(path);
+        if (!cl.supported) { Log(cl.supportNote, LogKind::Error); return; }
+    } catch (const std::exception& e) {
+        Log(std::string("not a valid outfit file: ") + e.what(), LogKind::Error);
+        return;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        g.clothingPath = path;
+        g.clothingName = cl.displayName();
+        g.clothingOutfit = L->outfit;   // the outfit on screen
+    }
+    g.cam = {};
+    StartLoad(g.cardPath, L->outfit, true);
 }
 
 // Picking a slot is the same reload Left/Right does, just aimed.
@@ -2683,7 +2749,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DROPFILES: {
         wchar_t buf[1024];
-        if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) { g.cam = {}; StartLoad(Slashes(WideToUtf8(buf)), -1); }
+        if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) {
+            const std::string dropped = Slashes(WideToUtf8(buf));
+            bool isClothing = false;
+            try {
+                card::ClothingFile probe = card::LoadClothingFile(dropped);
+                (void)probe;
+                isClothing = true;
+            } catch (const card::CardError& e) {
+                isClothing = e.kind == card::CardErrorKind::ClothesFile;
+            } catch (const std::exception&) {
+                isClothing = false;
+            }
+            if (isClothing) {
+                ApplyClothingFile(dropped);
+            } else {
+                g.cam = {};
+                {
+                    std::lock_guard<std::recursive_mutex> lk(g.mu);
+                    g.clothingPath.clear();
+                    g.clothingName.clear();
+                    g.clothingOutfit = -1;
+                }
+                StartLoad(dropped, -1);
+            }
+        }
         DragFinish(reinterpret_cast<HDROP>(wp));
         return 0;
     }
@@ -3171,6 +3261,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == "--mods" && i + 1 < argc) g.settings.mods = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--pose" && i + 1 < argc) g.wantPose = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--outfit" && i + 1 < argc) g.wantOutfit = std::atoi(WideToUtf8(argvw[++i]).c_str());
+        else if (a == "--clothes" && i + 1 < argc) g.clothingPath = Slashes(WideToUtf8(argvw[++i]));
+        else if (a.rfind("--", 0) == 0) continue;
         else card = Slashes(a);
     }
     LocalFree(argvw);

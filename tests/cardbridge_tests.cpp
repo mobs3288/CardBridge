@@ -1678,6 +1678,143 @@ void unitTests() {
         m2.vertices.resize(10);
         CHECK(exporter::AddExpressionMorphs(s, m2, {-1}, 2.0f) == 0);
     });
+    test("clothing: the outfit replaces clothes but never deletes hair carried as accessories", [] {
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Array empty;
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        auto clothPart = [](int64_t id) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](std::initializer_list<int64_t> ids) {
+            Value::Array parts;
+            for (int64_t id : ids) parts.push_back(clothPart(id));
+            while (parts.size() < 9) parts.push_back(clothPart(0));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        auto mkAcc = [&](std::initializer_list<Value> parts) {
+            Value::Array arr(parts.begin(), parts.end());
+            while (arr.size() < 20) arr.push_back(accPart(120, 0, ""));
+            Value::Map m;
+            m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+            m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+            return Value(std::move(m));
+        };
+
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{2})}});
+        Value::Array hairParts;
+        {
+            Value::Map p;
+            p.emplace_back(Value(std::string("id")), Value(int64_t{500}));
+            hairParts.push_back(Value(std::move(p)));
+            hairParts.push_back(Value(Value::Map{}));
+        }
+        c.hair = Value(Value::Map{{Value(std::string("parts")), Value(std::move(hairParts))}});
+        c.outfits.resize(7);
+        // Outfit 2: top 56, hair accessories in slots 8 (type 123) and 9 (type 122).
+        c.outfits[2].clothes = mkClothes({56, 0, 203, 0, 0, 0, 0, 6, 6});
+        c.outfits[2].accessory = mkAcc({accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                        accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                        accPart(123, 568, "a_n_headside"), accPart(122, 15, "a_n_headside")});
+        c.rows = {
+            {"yamadamod.acchairF2", 568, 100018882, "outfit2.accessory8.ChaFileAccessory.PartsInfo.id", 123},
+            {"com.DeathWeasel.AccessoryHairBack", 15, 100002206, "outfit2.accessory9.ChaFileAccessory.PartsInfo.id", 122},
+        };
+
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Test Outfit";
+        // Clothing stores mod ids as locals: top local 100019615 -> slot 1, necklace local 100011501 -> slot 801.
+        cl.outfit.clothes = mkClothes({100019615, 100020035, 0, 7, 0, 100007362, 0, 100027702, 100027702});
+        cl.outfit.accessory = mkAcc({accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(124, 100011501, "a_n_neck")});
+        cl.outfit.enableMakeup = false;
+        cl.rows = {
+            {"M2M.NurseOutfit", 1, 100019615, "ChaFileClothes.ClothesTop", 105},
+            {"Mint_E403.SuperMiniTightSkirt", 2822, 100020035, "ChaFileClothes.ClothesBot", 106},
+            {"com.Blanketman.NonLightStockings", 1486, 100007362, "ChaFileClothes.ClothesPants", 110},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesInner", 112},
+            {"cream002", 801, 100011501, "accessory8.ChaFileAccessory.PartsInfo.id", 124},
+        };
+
+        card::ApplyClothingOptions opt;
+        auto rep = card::ApplyClothing(c, cl, opt);
+        CHECK(rep.outfit == 2);
+        const auto& parts = c.outfits[2].clothes.at("parts").asArray();
+        CHECK(parts[0].at("id").asInt() == 1 && parts[1].at("id").asInt() == 2822 && parts[5].at("id").asInt() == 1486);
+        CHECK(parts[7].at("id").asInt() == 11 && parts[3].at("id").asInt() == 7);   // the base id stays
+        const auto& acc = c.outfits[2].accessory.at("parts").asArray();
+        // Hair stays in its slots; the necklace moved to the first empty slot (0).
+        CHECK(acc[8].at("type").asInt() == 123 && acc[8].at("id").asInt() == 568);
+        CHECK(acc[9].at("type").asInt() == 122 && acc[9].at("id").asInt() == 15);
+        CHECK(acc[0].at("type").asInt() == 124 && acc[0].at("id").asInt() == 801);
+        CHECK(c.hair.at("parts").at(size_t(0)).at("id").asInt() == 500);   // the hair slot is untouched
+        bool hasTopRow = false;
+        for (const auto& r : c.rows) if (r.property == "outfit2.ChaFileClothes.ClothesTop" && r.slot == 1) hasTopRow = true;
+        CHECK(hasTopRow);
+        bool hairRowKept = false;
+        for (const auto& r : c.rows) if (r.property == "outfit2.accessory8.ChaFileAccessory.PartsInfo.id" && r.slot == 568) hairRowKept = true;
+        CHECK(hairRowKept);   // the resolver still finds the hair
+    });
+    test("clothing: a non-hair accessory in the way is replaced, and an empty outfit slot never clears the character", [] {
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        auto clothPart = [](int64_t id) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](int64_t top) {
+            Value::Array parts;
+            for (int i = 0; i < 9; ++i) parts.push_back(clothPart(i == 0 ? top : 0));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        auto mkAcc = [&](std::initializer_list<Value> parts) {
+            Value::Array arr(parts.begin(), parts.end());
+            while (arr.size() < 20) arr.push_back(accPart(120, 0, ""));
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+            return Value(std::move(m));
+        };
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})}});
+        c.outfits.resize(7);
+        c.outfits[0].clothes = mkClothes(56);
+        c.outfits[0].accessory = mkAcc({accPart(121, 10, "a_n_headside")});   // a hat, not hair
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Hat only";
+        cl.outfit.clothes = mkClothes(56);
+        cl.outfit.accessory = mkAcc({accPart(121, 99, "a_n_headside"), accPart(120, 0, "")});
+        auto rep = card::ApplyClothing(c, cl, card::ApplyClothingOptions{});
+        const auto& acc = c.outfits[0].accessory.at("parts").asArray();
+        CHECK(acc[0].at("id").asInt() == 99);   // the hat slot is taken by the outfit
+        CHECK(rep.hairPreserved == 0);
+    });
 }
 
 void integrationTests() {
