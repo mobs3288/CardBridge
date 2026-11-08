@@ -233,10 +233,37 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     // PhysicsSim exposes its emptiness through Step's contract: a fresh sim with no chains writes nothing.
     std::vector<Mat4> skin = SkinMatrices(scene, rest);
     bool anyMoved = false;
+    int ran = 0;
     for (int step = 0; step < 600; ++step) {
+        ++ran;
         const bool moved = sim.Step(scene, poseWorld, 1, skin);
         anyMoved = anyMoved || moved;
         if (!moved) break;
+    }
+    if (std::getenv("CARDBRIDGE_DEBUG_SETTLE")) {
+        float maxMove = 0.0f;
+        for (size_t i = 0; i < skin.size() && i < scene.bones.size(); ++i) {
+            const Vec3 a = poseWorld[i].translation(), b = skin[i].point(scene.bones[i].pos);
+            const float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+            if (d > maxMove) maxMove = d;
+        }
+        std::fprintf(stderr, "settle: %d steps, max jiggle bone move %.4f m, moved=%s\n", ran, maxMove, anyMoved ? "yes" : "no");
+        for (const auto& ch : scene.chains) {
+            if (!ch.characterOwn) continue;
+            std::fprintf(stderr, "settle chain %s damp=%.3f elas=%.3f stiff=%.3f inert=%.3f rad=%.3f grav(%.3f %.3f %.3f) force(%.3f %.3f %.3f) bones", ch.name.c_str(),
+                         ch.damping, ch.elasticity, ch.stiffness, ch.inert, ch.radius, ch.gravity.x, ch.gravity.y, ch.gravity.z, ch.force.x, ch.force.y, ch.force.z);
+            for (int b : ch.bones) {
+                const Vec3 a = poseWorld[static_cast<size_t>(b)].translation();
+                const Vec3 c = skin[static_cast<size_t>(b)].point(scene.bones[static_cast<size_t>(b)].pos);
+                const Vec3 r0 = poseWorld[static_cast<size_t>(b)].dir({0, 0, 1});
+                const Mat4 wr = skin[static_cast<size_t>(b)];
+                const Vec3 r1 = wr.dir({0, 0, 1});
+                std::fprintf(stderr, " [%s rest(%.3f %.3f %.3f) settled(%.3f %.3f %.3f) z dir rest(%.3f %.3f %.3f) settled(%.3f %.3f %.3f)]",
+                             scene.bones[static_cast<size_t>(b)].name.c_str(),
+                             a.x, a.y, a.z, c.x, c.y, c.z, r0.x, r0.y, r0.z, r1.x, r1.y, r1.z);
+            }
+            std::fprintf(stderr, "\n");
+        }
     }
     // Step touches only the jiggle chain bones: anything it displaced is real sag, so bake it in.
     if (anyMoved) BakeSkin(scene, skin);
