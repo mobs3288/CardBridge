@@ -1499,6 +1499,8 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
 // before/after comparison.
 void settleHeels(Scene& scene) {
     if (std::getenv("CARDBRIDGE_NO_HEEL_POSE")) return;
+    const bool dbg = std::getenv("CARDBRIDGE_DEBUG_HEELS") != nullptr;
+    if (dbg) std::fprintf(stderr, "settleHeels: bones=%zu parts=%zu meshes=%zu\n", scene.bones.size(), scene.parts.size(), scene.meshes.size());
     // A re-shape (viewer slider drag, CLI --hide re-pose) re-derives the pitch from the flat
     // locals: drop the previous heel-pose notes so the manifest states the current pose only.
     scene.issues.erase(std::remove_if(scene.issues.begin(), scene.issues.end(), [](const SceneIssue& is) {
@@ -1594,6 +1596,8 @@ void settleHeels(Scene& scene) {
         };
         HeelCandidate chosen;
         for (const auto& part : scene.parts) {
+            if (dbg && part.id.find(".shoes") != std::string::npos)
+                std::fprintf(stderr, "  side %s part %s include=%d visible=%d group=%s hasCfg=%d listName=[%s] meshes=%zu\n", side, part.id.c_str(), (int)part.includeInExport, (int)part.visibleInPreview, part.group.c_str(), (int)part.hasHeelConfig, part.listName.c_str(), part.meshes.size());
             if (!part.includeInExport || !part.visibleInPreview || part.group != "Outfit" || part.id.find(".shoes") == std::string::npos) continue;
             HeelCandidate cand;
             cand.partId = part.id;

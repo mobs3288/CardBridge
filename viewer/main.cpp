@@ -1146,6 +1146,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
     std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit]() {
+        (void)clothingOutfit;   // the file follows the outfit on screen (shown below)
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -1168,9 +1169,18 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     card::ClothingFile cl = card::LoadClothingFile(clothingPath);
                     if (!cl.supported) throw std::runtime_error(cl.supportNote);
                     card::ApplyClothingOptions opt;
-                    opt.outfit = clothingOutfit >= 0 ? clothingOutfit : shown;
+                    // The outfit file lives on the outfit on screen (README), not on the
+                    // index it was first dragged onto. Capturing the stale clothingOutfit
+                    // here pinned the file to the old slot: after an outfit switch the
+                    // assembled shoes were the character's own (flat), so the file's
+                    // heels never reached settleHeels. Always target the shown outfit.
+                    opt.outfit = shown;
                     if (opt.outfit < 0 || opt.outfit >= static_cast<int>(c.outfits.size())) opt.outfit = shown;
                     auto rep = card::ApplyClothing(c, cl, opt);
+                    {
+                        std::lock_guard<std::recursive_mutex> lk(g.mu);
+                        g.clothingOutfit = rep.outfit;
+                    }
                     out->clothing = cl.displayName();
                     Log("clothing: " + cl.displayName() + " -> outfit " + std::to_string(rep.outfit) +
                         " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " +

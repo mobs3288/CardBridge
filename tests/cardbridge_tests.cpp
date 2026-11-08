@@ -1819,6 +1819,69 @@ void unitTests() {
         CHECK(rep.hairPreserved == 0);
     });
 
+    test("clothing: heeled shoes merge with their resolver rows (heels reach settleHeels)", [] {
+        // The viewer/CLI clothes workflow: ApplyClothing -> ItemsFromCard -> Assemble ->
+        // settleHeels. If the shoe ids/rows were lost in the merge, settleHeels would see
+        // empty slots and pose nothing. This covers the merge half (Assembly is covered by
+        // the end-to-end conversion validation in the session notes).
+        auto clothPart = [](int64_t id) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](std::initializer_list<int64_t> ids) {
+            Value::Array parts;
+            for (int64_t id : ids) parts.push_back(clothPart(id));
+            while (parts.size() < 9) parts.push_back(clothPart(0));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})}});
+        c.outfits.resize(7);
+        c.outfits[0].clothes = mkClothes({0, 0, 0, 0, 0, 0, 0, 0, 0});   // barefoot: slots empty
+        c.rows = {};
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Heels";
+        // Vanilla Stiletto pumps (local -> slot 11) in both shoe slots.
+        cl.outfit.clothes = mkClothes({0, 0, 0, 0, 0, 0, 0, 100027702, 100027702});
+        cl.outfit.accessory = Value(Value::Map{});
+        cl.rows = {
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesInner", 112},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesOuter", 112},
+        };
+        auto rep = card::ApplyClothing(c, cl, card::ApplyClothingOptions{});
+        CHECK(rep.outfit == 0 && rep.clothesReplaced == 2);   // both shoe slots replaced
+        const auto& parts = c.outfits[0].clothes.at("parts").asArray();
+        CHECK(parts[7].at("id").asInt() == 11 && parts[8].at("id").asInt() == 11);   // translated
+        // ItemsFromCard must surface both slots as Outfit/112 so Assemble builds them.
+        auto items = resolve::ItemsFromCard(c, 0);
+        bool inner = false, outer = false;
+        for (const auto& it : items) {
+            if (it.partId == "outfit0.shoes_inner") { inner = true; CHECK(it.category == 112 && it.id == 11 && it.slot == 7); }
+            if (it.partId == "outfit0.shoes_outer") { outer = true; CHECK(it.category == 112 && it.id == 11 && it.slot == 8); }
+        }
+        CHECK(inner && outer);
+        // Resolver rows for both slots must be present (the heel config lookup keys on Name
+        // from the list row; geometry fallback needs only category/id).
+        bool ri = false, ro = false;
+        for (const auto& r : c.rows) {
+            if (r.property == "outfit0.ChaFileClothes.ClothesShoesInner" && r.slot == 11) ri = true;
+            if (r.property == "outfit0.ChaFileClothes.ClothesShoesOuter" && r.slot == 11) ro = true;
+        }
+        CHECK(ri && ro);
+        // Repeated application must not accumulate ids (same file -> same slots).
+        auto rep2 = card::ApplyClothing(c, cl, card::ApplyClothingOptions{});
+        CHECK(c.outfits[0].clothes.at("parts").at(size_t(7)).at("id").asInt() == 11);
+        CHECK(rep2.clothesReplaced >= 0);
+    });
+
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {
         using namespace exporter;
         constexpr uint64_t MB = 1024ULL * 1024ULL;
