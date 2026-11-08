@@ -1484,6 +1484,191 @@ bool onlyHelperMaterials(UnityFile& uf, const RendererInfo& r) {
     return true;
 }
 
+// Heeled footwear (see Stiletto "HeelInfo" in the game): shoes are modelled for a flat foot
+// (level sole, heel stack hanging below it), but when worn the foot points down at the ankle
+// and the whole character is lifted by the heel height, so the toes and the heel stack stand
+// on the same floor and the stack's own forward lean stands upright. This bakes that pose into
+// the rest pose: the foot (cf_j_foot) is pitched about its own origin by the stack's lean angle
+// and the toes bend back by the same angle at the ball, so the forefoot stays flat on the floor
+// (closed heels stand on the ball, not on pointed toes), verts weighted to the leg bones stay
+// with the leg, and the character is lifted onto y = 0. The angle and the height come from the shoe's own geometry
+// (the retargeting bind keeps the source weights: rear heel/stack verts are 100% cf_j_foot,
+// forefoot verts are cf_j_toes, shaft verts are cf_s_leg02/03), so flat shoes (level sole,
+// upright stack, heel below 4 mm) are left alone. CARDBRIDGE_NO_HEEL_POSE=1 disables it for
+// before/after comparison.
+void settleHeels(Scene& scene) {
+    if (std::getenv("CARDBRIDGE_NO_HEEL_POSE")) return;
+    // A re-shape (viewer slider drag, CLI --hide re-pose) re-derives the pitch from the flat
+    // locals: drop the previous heel-pose notes so the manifest states the current pose only.
+    scene.issues.erase(std::remove_if(scene.issues.begin(), scene.issues.end(), [](const SceneIssue& is) {
+                           return is.part.empty() && is.message.find("posed for a") != std::string::npos && is.message.find("heel") != std::string::npos;
+                       }), scene.issues.end());
+    bool posed = false;
+    for (const char* side : {"L", "R"}) {
+        int foot = scene.boneIndex(std::string("cf_j_foot_") + side);
+        int toes = scene.boneIndex(std::string("cf_j_toes_") + side);
+        if (foot < 0 || toes < 0) continue;
+        const int other = scene.boneIndex(std::string("cf_j_foot_") + (side[0] == 'L' ? "R" : "L"));
+        std::vector<char> set(scene.bones.size(), 0);   // 1 = under the foot, 2 = under the toes
+        set[static_cast<size_t>(foot)] = 1;
+        set[static_cast<size_t>(toes)] = 2;
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t i = 0; i < scene.bones.size(); ++i) {
+                int par = scene.bones[i].parent;
+                if (!set[i] && par >= 0 && set[static_cast<size_t>(par)]) { set[i] = set[static_cast<size_t>(par)]; changed = true; }
+            }
+        }
+        const Vec3 ankle = scene.bones[static_cast<size_t>(foot)].pos;
+        const Vec3 ball = scene.bones[static_cast<size_t>(toes)].pos;
+        const Vec3 otherAnkle = other >= 0 ? scene.bones[static_cast<size_t>(other)].pos : Vec3{1000.0f, 1000.0f, 1000.0f};
+        auto weights = [&](const SceneVertex& v, float& wFoot, float& wToes) {
+            wFoot = wToes = 0;
+            for (int k = 0; k < 4; ++k) {
+                if (v.weight[k] <= 0 || v.bone[k] < 0) continue;
+                char c = set[static_cast<size_t>(v.bone[k])];
+                if (c == 1) wFoot += v.weight[k];
+                else if (c == 2) wToes += v.weight[k];
+            }
+        };
+        auto sideOf = [&](Vec3 p) {
+            float d0 = (p.x - ankle.x) * (p.x - ankle.x) + (p.z - ankle.z) * (p.z - ankle.z);
+            float d1 = (p.x - otherAnkle.x) * (p.x - otherAnkle.x) + (p.z - otherAnkle.z) * (p.z - otherAnkle.z);
+            return d0 <= d1;
+        };
+        auto rot = [](Vec3 p, Vec3 c, float ang) {   // about the X axis through c; positive points +Z (the toes) down
+            float cs = std::cos(ang), sn = std::sin(ang), dy = p.y - c.y, dz = p.z - c.z;
+            return Vec3{p.x, c.y + dy * cs - dz * sn, c.z + dz * cs + dy * sn};
+        };
+        auto rotDir = [](Vec3 d, float ang) {
+            float cs = std::cos(ang), sn = std::sin(ang);
+            return Vec3{d.x, d.y * cs - d.z * sn, d.z * cs + d.y * sn};
+        };
+        auto footM = [&](Vec3 p, float th) { return rot(p, ankle, th); };
+        // Stiletto poses the foot about the ankle and the toes back at the ball (ToesAngle is
+        // set to the negative of the ankle pitch in the game data files for closed heels, so
+        // the forefoot stays flat on the floor): the midfoot pitches, the forefoot does not.
+        auto toesM = [&](Vec3 p, float th) { return footM(rot(p, ball, -th), th); };
+        auto blend = [&](const SceneVertex& v, Vec3 p, float th) {
+            float wf, wt;
+            weights(v, wf, wt);
+            Vec3 f = footM(p, th), t = toesM(p, th);
+            float wr = 1.0f - wf - wt;
+            return Vec3{p.x * wr + f.x * wf + t.x * wt, p.y * wr + f.y * wf + t.y * wt, p.z * wr + f.z * wf + t.z * wt};
+        };
+
+        // Inner and outer shoes differ: evaluate each shoe part on its own and pose for the
+        // heeled one(s) only, so a flat shoe (e.g. an uwabaki worn under a heeled outer) never
+        // triggers or dilutes the pose, and a changed shoe (new outfit, hidden heeled part)
+        // re-evaluates at once. The foot carries a single pitch, so when both slots are heeled
+        // the taller one wins (the worn, outer shoe is taller in practice); a flat slot is
+        // ignored. Hidden or excluded parts are skipped (the viewer's hide/show updates
+        // visibleInPreview, so hiding the heeled shoe goes flat again on the next re-shape).
+        struct HeelCandidate { float height = 0, angle = 0; std::string partId; };
+        HeelCandidate chosen;
+        for (const auto& part : scene.parts) {
+            if (!part.includeInExport || !part.visibleInPreview || part.group != "Outfit" || part.id.find(".shoes") == std::string::npos) continue;
+            std::vector<const SceneVertex*> shoe;
+            float maxZ = -1e30f;
+            for (int mi : part.meshes)
+                for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                    float wf, wt;
+                    weights(v, wf, wt);
+                    if (wf + wt > 0.5f && sideOf(v.pos)) { shoe.push_back(&v); maxZ = std::max(maxZ, v.pos.z - ankle.z); }
+                }
+            if (shoe.size() < 50 || maxZ <= 0) continue;
+            float toeLow0 = 1e30f, heelLow0 = 1e30f;
+            for (const SceneVertex* v : shoe) {
+                float z = v->pos.z - ankle.z;
+                if (z > 0.6f * maxZ) toeLow0 = std::min(toeLow0, v->pos.y);
+                else if (z < 0.15f * maxZ) heelLow0 = std::min(heelLow0, v->pos.y);
+            }
+            float height = toeLow0 - heelLow0;
+            if (height < 0.004f) continue;   // no heel (scene units are metres: 4 mm)
+            const float soleY = toeLow0;
+            // The angle: the shoe is modelled for the pose it is worn in, so its heel stack
+            // leans forward by the foot's pointing angle. Pointing the foot by that much stands
+            // the stack upright, which is what a worn heel does.
+            float topZ = 0, topY = 0, botZ = 0, botY = 0;
+            int topN = 0, botN = 0;
+            for (const SceneVertex* v : shoe) {
+                if (v->pos.z - ankle.z > 0.4f * maxZ || v->pos.y > soleY - 0.003f) continue;   // the stack: below the sole, behind the arch
+                if (v->pos.y > soleY - 0.015f) { topZ += v->pos.z; topY += v->pos.y; ++topN; }
+                else if (v->pos.y < heelLow0 + 0.01f) { botZ += v->pos.z; botY += v->pos.y; ++botN; }
+            }
+            float best = 0;
+            if (topN > 3 && botN > 3) {
+                float dz = botZ / botN - topZ / topN, dy = topY / topN - botY / botN;   // forward lean, drop
+                if (dy > 0.005f) best = std::min(std::atan2(dz, dy), 50.0f * 3.14159265f / 180.0f);
+            }
+            // Wedges and platforms: the heel strut is diagonal by design, so its lean is not the
+            // pitch (it would read as 50 degrees for a wedge). Their pitch is the insole slope
+            // instead: the footbed just above the outsole, rear higher than front by the heel
+            // height. Use it when the stack lean is implausible for an ankle (>35 degrees).
+            if (best > 35.0f * 3.14159265f / 180.0f) {
+                float fY = 0, fZ = 0, rY = 0, rZ = 0;
+                int fN = 0, rN = 0;
+                for (const SceneVertex* v : shoe) {
+                    float z = v->pos.z - ankle.z;
+                    if (v->pos.y < soleY - 0.001f || v->pos.y > soleY + 0.05f) continue;   // just above the outsole: the insole
+                    if (z > 0.5f * maxZ) { fY += v->pos.y; fZ += v->pos.z; ++fN; }
+                    else if (z < 0.3f * maxZ) { rY += v->pos.y; rZ += v->pos.z; ++rN; }
+                }
+                if (fN > 10 && rN > 10) {
+                    float dz = fZ / fN - rZ / rN, dy = rY / rN - fY / fN;
+                    if (dz > 0.02f && dy > 0.0f) {
+                        float slope = std::atan2(dy, dz);
+                        if (slope > 2.0f * 3.14159265f / 180.0f && slope < 35.0f * 3.14159265f / 180.0f) best = slope;
+                    }
+                }
+            }
+            if (best < 2.0f * 3.14159265f / 180.0f) continue;   // the stack already stands upright
+            if (height > chosen.height) { chosen.height = height; chosen.angle = best; chosen.partId = part.id; }
+        }
+        if (chosen.height == 0) continue;   // no heeled shoe on this side
+        float best = chosen.angle;
+        for (auto& mesh : scene.meshes)
+            for (auto& v : mesh.vertices) {
+                float wf, wt;
+                weights(v, wf, wt);
+                if (wf + wt <= 0) continue;
+                Vec3 np = blend(v, v.pos, best);
+                SceneVertex nv = v;
+                nv.pos = {v.pos.x + v.normal.x, v.pos.y + v.normal.y, v.pos.z + v.normal.z};
+                Vec3 tip = blend(nv, nv.pos, best);
+                Vec3 base = blend(v, v.pos, best);
+                Vec3 n{tip.x - base.x, tip.y - base.y, tip.z - base.z};
+                float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                if (len > 1e-6f) v.normal = {n.x / len, n.y / len, n.z / len};
+                v.pos = np;
+            }
+        for (size_t i = 0; i < scene.bones.size(); ++i) {
+            if (set[i] == 1 && static_cast<int>(i) != foot) scene.bones[i].pos = footM(scene.bones[i].pos, best);
+            else if (set[i] == 2) scene.bones[i].pos = toesM(scene.bones[i].pos, best);
+        }
+        for (auto& c : scene.colliders) {
+            if (c.bone < 0 || static_cast<size_t>(c.bone) >= set.size() || !set[static_cast<size_t>(c.bone)]) continue;
+            c.center = footM(c.center, best);
+            c.axis = normalize(rotDir(c.axis, best));
+        }
+        char buf[260];
+        std::snprintf(buf, sizeof buf, "foot %s posed for a %.1f cm heel from %s: ankle pointed %.1f degrees", side,
+                      chosen.height * 100.0f, chosen.partId.c_str(), best * 180.0f / 3.14159265f);
+        scene.warn("", buf);
+        posed = true;
+    }
+    if (!posed) return;
+    float lowest = 1e30f;
+    for (const auto& mesh : scene.meshes)
+        for (const auto& v : mesh.vertices) lowest = std::min(lowest, v.pos.y);
+    if (lowest < 1e29f && std::fabs(lowest) > 1e-5f) {
+        for (auto& mesh : scene.meshes)
+            for (auto& v : mesh.vertices) v.pos.y -= lowest;
+        for (auto& b : scene.bones) b.pos.y -= lowest;
+        for (auto& c : scene.colliders) c.center.y -= lowest;
+    }
+}
+
 
 } // namespace
 
@@ -2974,6 +3159,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0 || pr.first.rfind("_overcolor", 0) == 0 || pr.first == "_nipsize" || pr.first.rfind("_paint", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
             std::fprintf(stderr, "\n");
         }
+    settleHeels(scene);
     return scene;
 }
 
@@ -3084,6 +3270,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
         scene.bones[i].world = nw[i];
         scene.bones[i].pos = nw[i].translation();
     }
+    settleHeels(scene);
     return true;
 }
 
