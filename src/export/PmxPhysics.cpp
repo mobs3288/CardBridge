@@ -295,12 +295,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
             // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
-            // chain gets the reference models' envelope: the bust about 26 degrees a link, the butt less.
+            // chain gets a wider envelope so the part can hang: the bust ~34 degrees a link, the butt less.
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
-            const float bendCap = jiggle > 0.0f ? (jigBust ? 0.45f : 0.20f) : 0.6f;
+            const float bendCap = jiggle > 0.0f ? (jigBust ? 0.60f : 0.30f) : 0.6f;
             const float bend = std::min(bendCap, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
-            const float droop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
+            // A jiggle chain droops more: the hanging breast is allowed to lean well past halfway, so gravity shows.
+            const float baseDroop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
+            const float droop = jiggle > 0.0f ? std::min(bend * 0.85f, baseDroop * 2.0f) : baseDroop;
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
             auto pb = bodyOf.find(parentBone);
             const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
@@ -324,7 +326,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // fixed 0.9 damping keep the swing slow), so it holds its rest pose instead of hanging on the stop.
             const float own = self.mass * length(sub(self.centre, self.head)) * length(sub(self.centre, self.head)) + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
             const float capK = jiggle > 0.0f ? std::numeric_limits<float>::max() : own * kMaxBodySwing * kMaxBodySwing;
-            const float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
+            float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
+            // A jiggle spring is softer than the droop calc alone gives: it has to let the part hang and swing, not pin it
+            // to the rest pose. The baked rest itself already hangs (AddSagPose), so a weaker spring still settles there,
+            // and the fixed 0.9 damping keeps the swing slow instead of shivering on the joint limit.
+            if (jiggle > 0.0f) stiffnessK *= 0.5f;
             pmx::Joint j;
             j.name = ch.name + " " + std::to_string(k);
             j.bodyA = bodyA;

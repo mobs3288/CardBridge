@@ -228,7 +228,7 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     const Pose rest;
     const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
     PhysicsSim sim;
-    sim.Reset(scene, poseWorld, jiggleBust, jiggleButt, jiggleIntensity);
+    sim.Reset(scene, poseWorld, jiggleBust, jiggleButt, jiggleIntensity, true);
     // Empty sim means no jiggle chains were found (Reset left nothing): nothing to settle.
     // PhysicsSim exposes its emptiness through Step's contract: a fresh sim with no chains writes nothing.
     std::vector<Mat4> skin = SkinMatrices(scene, rest);
@@ -267,33 +267,53 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     }
     // Step touches only the jiggle chain bones: anything it displaced is real sag, so bake it in.
     if (anyMoved) BakeSkin(scene, skin);
-    // The jiggle chain cannot finish the job on its own: the breast tip bone sits at the anchor position (restLen 0),
-    // so even with a downward force the spring clamps it to the anchor and no droop develops in the scene. The sag a
-    // viewer expects is the breast group itself hanging down, which the static pose shows directly as the balls jutting
-    // straight out of the chest. Tilt every bust / nipple bone down about its own pivot by a moderate angle, baked the
-    // same way as the settle above (both previews and the exported PMX). The intensity ties to the jiggle it derives from.
+    // The jiggle chain cannot finish the job on its own: the breast tip bones sit close to the chest, so the particle sim
+    // alone barely moves them. The sag a viewer expects is the breast group itself hanging down. Tilt the bust / butt bones
+    // down as a pose (hierarchical, so the PMX bodies authored from the bones hang the same way as the baked mesh does),
+    // baked the same way as the settle above (both previews and the exported PMX).
     if (!std::getenv("CARDBRIDGE_NO_SAG")) {
-        const float tilt = std::min(0.30f, jiggleBust && !jiggleButt ? 0.30f : 0.20f) * (0.5f + jiggleIntensity);
-        const Pose rest2;
-        std::vector<Mat4> droop = SkinMatrices(scene, rest2);
-        bool any = false;
-        for (size_t i = 0; i < droop.size(); ++i) {
-            const std::string& n = scene.bones[i].name;
-            if (n.find("bust") == std::string::npos && n.find("bnip") == std::string::npos) continue;
-            any = true;
-            const Vec3 pivot = scene.bones[i].pos;
-            const Mat4 rot = RotationBetween({0, 0, 1}, normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)}));
-            Mat4 toPivot;
-            toPivot.m[3] = -pivot.x;
-            toPivot.m[7] = -pivot.y;
-            toPivot.m[11] = -pivot.z;
-            Mat4 aboutPivot = rot;
-            aboutPivot.m[3] = pivot.x;
-            aboutPivot.m[7] = pivot.y;
-            aboutPivot.m[11] = pivot.z;
-            droop[i] = aboutPivot * toPivot * droop[i];
+        Pose droop;
+        AddSagPose(scene, droop, jiggleBust, jiggleButt, jiggleIntensity);
+        if (!droop.empty()) BakeSkin(scene, SkinMatrices(scene, droop));
+    }
+}
+
+float SagTiltRad(bool bust, float jiggleIntensity) {
+    // At the default 0.5 the bust hangs ~26 degrees, climbing to ~32 at 1.0 and capping there so max intensity
+    // stays natural instead of pointing at the floor.
+    const float base = bust ? 0.45f : 0.30f;
+    return std::min(0.55f, base * (0.5f + jiggleIntensity));
+}
+
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+    auto isBust = [](const std::string& n) {
+        return n.find("bust") != std::string::npos || n.find("bnip") != std::string::npos;
+    };
+    auto isButt = [](const std::string& n) {
+        return n.find("siri") != std::string::npos || n.find("kosi") != std::string::npos;
+    };
+    for (size_t i = 0; i < scene.bones.size(); ++i) {
+        const std::string& name = scene.bones[i].name;
+        const bool bust = isBust(name), butt = isButt(name);
+        if ((bust && !jiggleBust) || (butt && !jiggleButt) || !(bust || butt)) continue;
+        // The bust chain has ~6 bones in a row (bust01 > 02 > 03 > bnip ...). Tilting every one stacks to 100+ degrees
+        // and collapses the breast to the belly. Tilt only the root of each side: the whole breast then hangs as one
+        // piece by the single tilt, with the children inheriting it hierarchically.
+        const int parent = scene.bones[i].parent;
+        if (parent >= 0 && static_cast<size_t>(parent) < scene.bones.size()) {
+            const std::string& pname = scene.bones[static_cast<size_t>(parent)].name;
+            if (bust && isBust(pname)) continue;
+            if (butt && isButt(pname)) continue;
         }
-        if (any) BakeSkin(scene, droop);
+        // A bone the user already moved keeps its edit.
+        if (i < pose.bones.size() && !IsIdentity(pose.bones[i])) continue;
+        const float tilt = SagTiltRad(bust, jiggleIntensity);
+        // Forward for the bust, backward for the butt, both tipped toward straight down.
+        const Vec3 from = bust ? Vec3{0, 0, 1} : Vec3{0, 0, -1};
+        const Vec3 to = bust ? normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)})
+                              : normalize(Vec3{0, -std::sin(tilt), -std::cos(tilt)});
+        const Mat4 turn = RotationBetween(from, to);
+        pose.edit(i).rot = TurnBone(scene, pose, i, turn);
     }
 }
 

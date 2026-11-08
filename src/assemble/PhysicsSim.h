@@ -14,7 +14,10 @@ class PhysicsSim {
 public:
     // Starts every chain at rest under the pose (`poseWorld` = assemble::BoneWorlds). The body's own jiggle chains are simulated only
     // when their switch is on (as the PMX export does), with the intensity as the swing envelope; the defaults match the export's.
-    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 0.5f);
+    // `jiggleOnly` (the static settle, Pose::BakeSettledPhysics) limits the sim to the body's own jiggle chains: hair and accessory
+    // chains keep their authored pose, which is how the game displays them anyway.
+    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = true, float jiggleIntensity = 0.5f,
+               bool jiggleOnly = false);
 
     // Runs `steps` updates (1/60 s each; 0 only refreshes the output after the anchors moved) and writes the skin matrices of the chain bones
     // (every bone of a chain but its first, which follows the pose) into `skin`, sized like the scene's bones. Returns true while any
@@ -42,6 +45,7 @@ private:
         std::vector<int> particles;
         Vec3 anchorPrev;
         bool primed = false;
+        bool jiggle = false;       // the body's own bust / butt chain: a shake hits it harder than hair
         float envelopeScale = 1.0f;   // a jiggle chain: how wide its swing is, the intensity (see Reset)
     };
     std::vector<Particle> particles_;

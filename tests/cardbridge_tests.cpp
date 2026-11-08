@@ -1006,7 +1006,7 @@ void unitTests() {
         CHECK(exporter::PhysicsChainBones(s, ch).size() == 5);
     });
 
-    test("physics: the body's own jiggle chains become bodies only when their switch is on (boobs on by default, the butt off)", [] {
+    test("physics: the body's own jiggle chains become bodies only when their switch is on (bust and butt both on by default)", [] {
         auto make = [](bool bustOwn) {
             assemble::Scene s;
             s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
@@ -1027,7 +1027,7 @@ void unitTests() {
             exporter::AddPhysics(s, m, 10.0f, bust, butt, intensity);
             return m;
         };
-        {   // the default export: breast jiggle on, the butt off
+        {   // the default export: breast jiggle on, the butt off (explicit args; both defaults are on)
             pmx::Model m = count(make(true), true, false, 1.0f);
             CHECK(m.rigidBodies.size() == 3 && m.joints.size() == 2);   // anchor body + the jiggle chain, and the anchor joint + the link joint
             CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].bone == 1);   // the anchor: kinematic, on the parent (chest) bone
@@ -1044,7 +1044,7 @@ void unitTests() {
             CHECK(jig.rigidBodies[2].moveDamping == 0.9f && jig.rigidBodies[2].rotDamping == 0.9f && jig.rigidBodies[2].friction == 0.0f);
             CHECK(jig.rigidBodies[2].mask == 0);
             CHECK(jig.rigidBodies[1].mass == 1.0f && jig.rigidBodies[2].mass == 0.5f);   // 1, 1/2, ...
-            CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x > 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.45f);
+            CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x > 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.60f);
             CHECK(jig.joints[1].rotUpper.y == 0.6f * jig.joints[1].rotUpper.x);   // the reference models' narrow axes: sway 0.6, twist 0.4
             CHECK(jig.joints[1].rotUpper.z == 0.4f * jig.joints[1].rotUpper.x);
             pmx::Model loud = count(make(true), true, false, 2.0f);
@@ -1066,7 +1066,7 @@ void unitTests() {
             CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 3); // on: anchor + chain bodies
             CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 3); // independent of the boobs switch
             const pmx::Model butt = count(s, true, true, 1.0f);
-            CHECK(butt.joints[1].rotUpper.x > 0.0f && butt.joints[1].rotUpper.x <= 0.20f);   // the butt's envelope is smaller than the bust's
+            CHECK(butt.joints[1].rotUpper.x > 0.0f && butt.joints[1].rotUpper.x <= 0.30f);   // the butt's envelope is smaller than the bust's
         }
     });
 

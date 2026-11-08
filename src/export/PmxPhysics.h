@@ -28,7 +28,7 @@ constexpr uint8_t kPmxGroupChain = 1;
 // the spring). The body's own jiggle is built like the hand-made MMD models' breast jiggle (mode-2 bodies, fixed 0.9 damping, fat
 // capsules with weight tapering toward the tip, no collider - see the mask note above) plus a joint spring, which the reference models lack
 // but which pulls the part back to its rest pose instead of letting it hang displaced like jelly.
-void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false, float jiggleIntensity = 1.0f);
+void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = true, float jiggleIntensity = 1.0f);
 
 // Skirts and coat tails turn with the legs (called by AddPhysics). Most links of a garment chain are locked to hold its rest shape, so a
 // thigh swung forward cannot push them aside and passes through the cloth. Instead a chain tied around the hips and hanging over the legs

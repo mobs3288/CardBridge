@@ -44,13 +44,14 @@ void collide(Vec3& p, float r, const WorldCollider& c) {
 
 } // namespace
 
-void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust, bool jiggleButt, float jiggleIntensity, bool jiggleOnly) {
     particles_.clear();
     chains_.clear();
     speed_ = 0.0f;
     if (poseWorld.size() != scene.bones.size()) return;
     for (size_t ci = 0; ci < scene.chains.size(); ++ci) {
         const SceneChain& sc = scene.chains[ci];
+        if (jiggleOnly && !sc.characterOwn) continue;   // the static settle moves the body's jiggle only; hair keeps its authored pose
         if (sc.bones.size() < 2) continue;
         bool jiggle = false;
         if (sc.characterOwn) {   // the body's own jiggle: skipped while its switch is off, like the PMX export
@@ -59,7 +60,10 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
         }
         Chain chain;
         chain.scene = ci;
-        if (jiggle) chain.envelopeScale = jiggleIntensity;   // the intensity opens the swing envelope, like the export's rotation limits
+        chain.jiggle = jiggle;
+        // The intensity opens the swing envelope, like the export's rotation limits. The +0.5 keeps the gentle default (0.5)
+        // lively enough to see the hanging swing instead of a clamped wobble.
+        if (jiggle) chain.envelopeScale = 0.5f + jiggleIntensity;
         std::map<int, int> byBone;
         for (size_t k = 0; k < sc.bones.size(); ++k) {
             const int b = sc.bones[k];
@@ -91,11 +95,14 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
 }
 
 void PhysicsSim::Nudge(Vec3 impulse) {
-    for (const Chain& chain : chains_)
+    for (const Chain& chain : chains_) {
+        // The bust / butt chains are heavy skin, not hair strands: a shake needs a bigger hit to show, so it gets 2.5x.
+        const Vec3 hit = chain.jiggle ? impulse * 2.5f : impulse;
         for (size_t k = 1; k < chain.particles.size(); ++k) {
             Particle& p = particles_[static_cast<size_t>(chain.particles[k])];
-            p.prev = sub(p.prev, impulse);   // the next update sees this much more velocity
+            p.prev = sub(p.prev, hit);   // the next update sees this much more velocity
         }
+    }
     speed_ = 1.0f;
 }
 

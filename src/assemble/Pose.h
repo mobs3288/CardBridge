@@ -50,6 +50,14 @@ void BakePose(Scene& scene, const Pose& pose);
 // the export writes as the joint swing limits.
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
 
+// How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). A real breast hangs
+// with its tip below its base: about 25-30 degrees at the default intensity, more when the slider goes up.
+float SagTiltRad(bool bust, float jiggleIntensity);
+// Adds that hang to a pose (the viewer calls this so the static preview already sags; the bake above uses the same pose).
+// Bust bones (bust / bnip) droop down-forward; butt bones (siri / kosi) droop down-back (less). A bone the user already edited
+// keeps its own edit.
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
+
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
 // (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit
 // so that the bone moves by `worldDelta` in the world.

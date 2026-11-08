@@ -429,7 +429,7 @@ struct App {
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
-    bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: boobs on by default, the butt off
+    bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
@@ -688,7 +688,7 @@ void ResetTweak(int id) {
     if (id == kNippleIn) g.tw.nippleInside = false;
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
-    else if (id == kJiggleButt) g.jiggleButt = false;
+    else if (id == kJiggleButt) g.jiggleButt = true;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 
@@ -707,6 +707,9 @@ assemble::Pose BuildPose(const Loaded& L) {
         if (i >= 0) p.edit(static_cast<size_t>(i)) = e;
     }
     if (g.aPose) assemble::MakeAPose(L.scene, g.aPoseDeg, p.base);
+    // The static preview sags the same way the export does, so the viewer shows the hang even with physics off.
+    // A bone the user drags herself keeps its own edit (AddSagPose skips those).
+    assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
     return p;
 }
 
@@ -870,6 +873,22 @@ void SetPhysics(bool on) {
         Log("physics: off");
     }
     ApplyPoseLive();
+}
+
+// N: turn the whole demo on (physics + breast + butt) and give it a shove, so a shake always shows bust and ass moving.
+void ShakePhysics() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return;
+    if (!g.jiggleBust || !g.jiggleButt || !g.physics) {
+        g.jiggleBust = true;
+        g.jiggleButt = true;
+        InvalidatePanel();
+        SetPhysics(true);
+    }
+    if (!g.physics) return;
+    g.sim.Nudge({0.010f, 0.004f, 0.005f});   // 2.5x stronger again inside for the body chains
+    g.physicsKick = g.physicsMoving = true;
+    Log("physics: shake (bust + butt)");
 }
 
 // One step of the physics preview (Frame calls it every picture while the switch is on): as many 1/60 s updates as the time asks for
@@ -2959,7 +2978,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'X') ToggleAsExported();
         else if (wp == 'K') { g.showBones = !g.showBones; Log(g.showBones ? "skeleton: on (click a bone to select it)" : "skeleton: off"); g.dirty = true; }
         else if (wp == 'Y') { SetPhysics(!g.physics); InvalidatePanel(); }
-        else if (wp == 'N') { if (g.physics) { g.sim.Nudge({0.004f, 0.0f, 0.002f}); g.physicsKick = g.physicsMoving = true; Log("physics: shake"); } else Log("physics is off (Y)", LogKind::Warn); }
+        else if (wp == 'N') { ShakePhysics(); InvalidatePanel(); }
         else if (wp == 'P') { const PoseState before = CapturePose(); g.aPose = !g.aPose; Log(std::string("A-pose: ") + (g.aPose ? "on" : "off")); ApplyPoseLive(); PoseChanged(before); }
         else if (wp == 'R') ResetView(0);
         else if (wp == 'F') ResetView(0);
