@@ -395,6 +395,10 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     ~Impl() { ReleaseDevice(); }
 
     void Clear() {
+        // Quiesce queued skin dispatches / copies before releasing their buffers: without a flush the old card's
+        // dispatches can still be in flight while the new card's Load reallocates the same buffers, drawing that
+        // frame with garbage (the black/white leg rectangles after switching cards).
+        if (dev && ctx) ctx->Flush();
         for (auto& m : meshes) {
             // vb borrows restBuf/posedBuf when the compute shader is in use; only a lone CPU vertex buffer owns itself.
             if (m.vb != m.restBuf && m.vb != m.posedBuf) Rel(m.vb);
@@ -848,15 +852,22 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
         g.ok = true;
     }
 
-    // Textures the shaders can read.
+    // Textures the shaders can read. A failed upload must fail the Load
+    // (the caller falls back to the software renderer) instead of leaving the
+    // view null and drawing the white/black shader defaults as rectangles.
     I.textures.assign(scene.textures.size(), GpuTex{});
+    bool texFailed = false;
     auto upload = [&](int ti) {
         if (ti < 0 || static_cast<size_t>(ti) >= scene.textures.size() || I.textures[static_cast<size_t>(ti)].srv) return;
         const auto& t = scene.textures[static_cast<size_t>(ti)];
-        if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * t.height * 4) I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true, LinearLight() && t.srgb);
+        if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * t.height * 4) {
+            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true, LinearLight() && t.srgb))
+                texFailed = true;
+        }
     };
     for (const auto& m : scene.materials) { for (const auto& tb : m.texProps) upload(tb.texture); upload(m.texture); }
     for (const auto& tb : scene.globalTextures) upload(tb.texture);
+    if (texFailed) { I.Clear(); I.scene = nullptr; return fail("a texture upload failed"); }
 
     I.cutout.assign(scene.materials.size(), 0);
     for (size_t m = 0; m < scene.materials.size(); ++m) I.cutout[m] = HasCutout(scene, scene.materials[m]) ? 1 : 0;

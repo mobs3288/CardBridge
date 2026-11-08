@@ -2711,6 +2711,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.state = exporter::NewViewState();
         g.gpuOk = false;
         g.gpuScene.reset();
+        g.gpu.Unload();   // flush + release the previous card's GPU copy before reloading, so an in-flight skin dispatch cannot bleed into the new buffers
         g.showExp = g.expOk = false;   // the baked copy belongs to the previous character
         g.expFor.reset();
         // The baked "as exported" scene is a full second copy of the previous
@@ -2721,6 +2722,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.expPending.reset();
         g.expPendingFor.reset();
         g.gpuExp.Unload();
+        // No pose or physics may carry over from the previous card (bone counts and names differ).
+        g.skin.clear();
+        g.boneWorld.clear();
+        g.poseWorld.clear();
+        g.sim = assemble::PhysicsSim{};
         if (L && g.gpu.ready()) {
             if (g.gpu.Load(L->scene)) {
                 g.gpuScene = L;
