@@ -23,6 +23,7 @@
 #include <stb_image_write.h>
 
 #include "export/GpuView.h"
+#include "export/SkinBench.h"
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
 #include "library/Library.h"
@@ -119,7 +120,9 @@ void usage() {
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
-        "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu]  which device the --gpu-view picture and the skinning use (auto prefers a discrete NVIDIA/AMD card; warp and software are the CPU fallbacks)\n"
+        "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
+        "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
+        "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -473,7 +476,23 @@ int cmdConvert(const Args& a) {
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
     LogMemory("after assemble");
-    std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0);
+    // --hide / --nude hide parts for the export: hiding the heeled shoe must drop the foot
+    // pitch at once (the viewer's hide/show does the same live). Sync the shoes' preview
+    // visibility so the heel check sees the export state, then re-shape (which re-poses).
+    {
+        std::string list = "," + a.get("hide") + ",";
+        bool shoeHidden = false;
+        for (size_t i = 0; i < scene.parts.size(); ++i) {
+            bool hid = list.find("," + scene.parts[i].id + ",") != std::string::npos;
+            if (scene.parts[i].nudeSwitch) hid = a.has("nude") ? false : true;
+            if (scene.parts[i].id.find(".shoes") != std::string::npos && hid) {
+                scene.parts[i].visibleInPreview = false;
+                shoeHidden = true;
+            }
+        }
+        if (shoeHidden) { std::fprintf(stderr, "  (heel re-pose after --hide: reshaping...)\n"); fflush(stderr); if (!assemble::Reshape(scene, c, *ctx.resolver, ao)) std::fprintf(stderr, "  (heel re-pose after --hide needs a re-assemble)\n"); std::fprintf(stderr, "  (heel re-pose done)\n"); fflush(stderr); }
+    }
+    std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0); fflush(stderr);
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {
         if (p.underPiece || p.nudeSwitch) continue;   // derived from other parts
@@ -584,6 +603,7 @@ int cmdConvert(const Args& a) {
         exporter::GpuOptions go;
         go.preference = a.get("gpu", "auto");
         go.skin = a.get("gpu-skin", "gpu");
+        if (a.opt.count("skin-threshold")) go.skinThresholdVerts = static_cast<size_t>(std::atoll(a.get("skin-threshold").c_str()));
         if (!gpu.Init(go, &why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
         else {
             if (!liveSkin.empty()) gpu.SetSkin(&liveSkin);
@@ -676,6 +696,13 @@ int main(int argc, char** argv) {
         if (cmd == "library") return cmdLibrary(a);
         if (cmd == "shader") return cmdShader(a);
         if (cmd == "shader-run") return cmdShaderRun(a);
+        if (cmd == "skin-bench") {
+            const int repeats = a.opt.count("repeats") ? std::atoi(a.get("repeats").c_str()) : 30;
+            std::string summary;
+            exporter::RunSkinBenchmark(repeats, &summary, a.get("gpu", "auto"));
+            if (!summary.empty()) std::printf("(workloads are synthetic; see SkinBench for counts/distributions)\n");
+            return 0;
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 3;

@@ -77,6 +77,7 @@ add_library(cardbridge_core STATIC
     src/assemble/DynamicBone.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
+    src/export/SkinBench.cpp
     src/assemble/Pose.cpp
     src/assemble/PhysicsSim.cpp
     src/export/BoneLabels.cpp

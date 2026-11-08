@@ -286,7 +286,7 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
-constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017;
+constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
@@ -672,6 +672,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({5, kSetGpuSoftware, pick(g.settings.gpu == "software", "software renderer (CPU fallback)"), "Graphics"});
         rows.push_back({4, 0, "skin: " + g.settings.skin + (g.gpu.ready() && g.gpu.gpuSkin() ? "  (this card: GPU compute shader)" : g.gpu.ready() ? "  (this card: CPU loop)" : ""), "Graphics"});
         rows.push_back({5, kSetSkinGpu, pick(g.settings.skin == "gpu", "skin on GPU (compute shader)"), "Graphics"});
+        rows.push_back({5, kSetSkinAuto, pick(g.settings.skin == "auto", "skin auto (CPU for small meshes, GPU for large)"), "Graphics"});
         rows.push_back({5, kSetSkinCpu, pick(g.settings.skin == "cpu", "skin on CPU"), "Graphics"});
         rows.push_back({0, -1, "CardBridge", std::string("v") + CARDBRIDGE_VERSION});
         rows.push_back({5, kSetOpenFolder, "Open the settings folder in Explorer", "CardBridge"});
@@ -2035,6 +2036,10 @@ void ResetView(float yaw) { g.cam = {}; g.cam.yawDeg = yaw; g.dirty = true; Inva
 void ShowAll() {
     g.hidden.assign(g.hidden.size(), 0);
     g.soloPart = -1;
+    for (auto L = Current(); L; L = nullptr)
+        for (size_t i = 0; i < L->scene.parts.size(); ++i)
+            if (L->scene.parts[i].id.find(".shoes") != std::string::npos) L->scene.parts[i].visibleInPreview = true;
+    ReshapeNow(true);
     g.dirty = true;
     Log("showing every part");
     InvalidateRect(g.hwnd, nullptr, FALSE);
@@ -2466,8 +2471,8 @@ void SettingsAction(int id) {
         ReinitGpu();
         break;
     }
-    case kSetSkinGpu: case kSetSkinCpu: {
-        const std::string value = id == kSetSkinGpu ? "gpu" : "cpu";
+    case kSetSkinGpu: case kSetSkinCpu: case kSetSkinAuto: {
+        const std::string value = id == kSetSkinGpu ? "gpu" : id == kSetSkinAuto ? "auto" : "cpu";
         if (g.settings.skin == value) { Log("skin: already on " + value); break; }
         g.settings.skin = value;
         SaveSettings(g.settings);
@@ -2842,6 +2847,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         g.hidden[static_cast<size_t>(row.part)] ^= 1;
                         g.soloPart = -1;
                         Log(std::string(g.hidden[static_cast<size_t>(row.part)] ? "hide " : "show ") + L->scene.parts[static_cast<size_t>(row.part)].id);
+                        // Heels: hiding/showing a shoe re-drives the foot pitch at once (settleHeels
+                        // reads visibleInPreview), otherwise a hidden heeled shoe leaves the foot
+                        // pitched over a flat shoe. ReshapeNow re-skins from the flat locals and
+                        // re-poses, so the change is live on the click.
+                        {
+                            const std::string& pid = L->scene.parts[static_cast<size_t>(row.part)].id;
+                            if (pid.find(".shoes") != std::string::npos) {
+                                for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
+                                    if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
+                                        L->scene.parts[i].visibleInPreview = !g.hidden[i];
+                                ReshapeNow(true);
+                            }
+                        }
                         g.dirty = true;
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
@@ -2889,6 +2907,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         g.soloPart = part;
                         Log("solo: " + L->scene.parts[static_cast<size_t>(part)].id);
                     }
+                    // Solo changes which shoes are on screen: keep the heel pose honest.
+                    for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
+                        if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
+                            L->scene.parts[i].visibleInPreview = !g.hidden[i];
+                    ReshapeNow(true);
                     g.dirty = true;
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }

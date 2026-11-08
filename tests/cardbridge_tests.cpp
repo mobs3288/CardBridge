@@ -22,6 +22,7 @@
 #include "core/MsgPack.h"
 #include "core/Sha256.h"
 #include "core/ZipArchive.h"
+#include "export/AdapterSelect.h"
 #include "export/BoneLabels.h"
 #include "export/Exporter.h"
 #include "export/MmdNames.h"
@@ -47,6 +48,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <cstdlib>
 #include <functional>
@@ -1814,6 +1816,117 @@ void unitTests() {
         const auto& acc = c.outfits[0].accessory.at("parts").asArray();
         CHECK(acc[0].at("id").asInt() == 99);   // the hat slot is taken by the outfit
         CHECK(rep.hairPreserved == 0);
+    });
+
+    test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {
+        using namespace exporter;
+        constexpr uint64_t MB = 1024ULL * 1024ULL;
+        constexpr uint64_t GB = 1024ULL * MB;
+        AdapterDesc nvidiaD = {0x10DE, 0x1234, "NVIDIA GeForce RTX 4070", 8 * GB, 0, 0, 0, 0};
+        AdapterDesc amdD = {0x1002, 0x1234, "AMD Radeon RX 7800 XT", 16 * GB, 0, 0, 0, 1};
+        AdapterDesc amdI = {0x1002, 0x1234, "AMD Radeon Graphics (integrated)", 512 * MB, 0, 8 * GB, 0, 2};
+        AdapterDesc arcD = {0x8086, 0x1234, "Intel Arc A770", 16 * GB, 0, 0, 0, 3};
+        AdapterDesc intelI = {0x8086, 0x1234, "Intel UHD Graphics 620", 128 * MB, 0, 16 * GB, 0, 4};
+        AdapterDesc basic = {0x1414, 0x8C, "Microsoft Basic Render Driver", MB, 0, 0, 0, 5};
+        AdapterDesc warp = {0x1414, 0, "WARP", 0, 0, 0, kAdapterFlagSoftware, 6};
+        AdapterDesc soft = {0x10DE, 0x1234, "NVIDIA (WARP)", 8 * GB, 0, 0, kAdapterFlagSoftware, 7};
+        // Scores: discrete cards win, integrated stay suitable but lose, software/virtual are unsuitable.
+        CHECK(ScoreAdapter(nvidiaD).suitable && ScoreAdapter(amdD).suitable && ScoreAdapter(arcD).suitable);
+        CHECK(ScoreAdapter(amdI).suitable && ScoreAdapter(intelI).suitable);
+        CHECK(!ScoreAdapter(basic).suitable && !ScoreAdapter(warp).suitable && !ScoreAdapter(soft).suitable);
+        CHECK(ScoreAdapter(nvidiaD).score > ScoreAdapter(intelI).score);
+        CHECK(ScoreAdapter(amdD).score > ScoreAdapter(amdI).score);
+        // Intel Arc discrete competes fairly: same memory, same score as AMD/NVIDIA discrete (vendor has no
+        // discrete bonus; the memory signal orders them, not the vendor).
+        CHECK(std::abs(ScoreAdapter(arcD).score - ScoreAdapter(amdD).score) < 200);
+        CHECK(std::abs(ScoreAdapter(arcD).score - ScoreAdapter(nvidiaD).score) < 2200);
+        // No automatic Intel penalty: Intel integrated equals AMD integrated with the same memory.
+        AdapterDesc amdILow = {0x1002, 0x1234, "AMD Radeon Graphics (integrated)", 128 * MB, 0, 16 * GB, 0, 0};
+        CHECK(ScoreAdapter(amdILow).score == ScoreAdapter(intelI).score);
+        CHECK(ScoreAdapter(intelI).cls == AdapterClass::IntegratedLikely);
+        CHECK(ScoreAdapter(nvidiaD).cls == AdapterClass::DiscreteLikely);
+        // Multi-GPU: discrete beats integrated regardless of vendor; Arc beats AMD integrated.
+        {
+            std::vector<AdapterDesc> v = {intelI, nvidiaD};
+            CHECK(SelectBestAdapter(v) == 1);
+            std::vector<AdapterDesc> v2 = {amdI, arcD};
+            CHECK(SelectBestAdapter(v2) == 1);
+            std::vector<AdapterDesc> v3 = {intelI};
+            CHECK(SelectBestAdapter(v3) == 0);   // alone, integrated is usable
+            std::vector<AdapterDesc> v4 = {basic, warp};
+            CHECK(SelectBestAdapter(v4) == -1);  // no hardware: fallback, not a software pick
+            CHECK(SelectBestAdapter(v4, true) >= 0);  // explicit software fallback allowed
+            std::vector<AdapterDesc> v5 = {basic, intelI};
+            CHECK(SelectBestAdapter(v5) == 1);
+        }
+        // Description heuristic catches a basic driver without the flag.
+        AdapterDesc basicNoFlag = {0x1414, 0x8C, "Microsoft Basic Render Driver", 0, 0, 0, 0, 0};
+        CHECK(!ScoreAdapter(basicNoFlag).suitable);
+    });
+
+    test("skinning: bone-index and weight validation matches on CPU (GPU shader mirrors it)", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"b0", -1, {0, 0, 0}, "rig"});
+        s.bones.push_back({"b1", 0, {1, 0, 0}, "rig"});
+        const std::vector<Mat4> skin = {Mat4::TRS({1, 0, 0}, Quat{}, {1, 1, 1}), Mat4::TRS({0, 2, 0}, Quat{}, {1, 1, 1})};
+        auto vert = [](int b0, float w0, int b1, float w1, int b2, float w2, int b3, float w3) {
+            SceneVertex v;
+            v.pos = {0, 0, 0};
+            v.normal = {0, 0, 1};
+            v.bone[0] = b0; v.weight[0] = w0;
+            v.bone[1] = b1; v.weight[1] = w1;
+            v.bone[2] = b2; v.weight[2] = w2;
+            v.bone[3] = b3; v.weight[3] = w3;
+            return v;
+        };
+        auto finite = [](Vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        // Valid bone index: normal skinning (identity-ish offset applied).
+        {
+            Vec3 p = SkinPoint(vert(0, 1, 0, 0, 0, 0, 0, 0), skin);
+            CHECK(finite(p) && std::fabs(p.x - 1.0f) < 1e-5f);
+        }
+        // Negative, equal-to-count and greater-than-count indices are rejected, never accessed.
+        CHECK(SkinPoint(vert(-1, 1, 0, 0, 0, 0, 0, 0), skin).x == 0.0f);   // no valid influence: rest fallback
+        CHECK(SkinPoint(vert(2, 1, 0, 0, 0, 0, 0, 0), skin).x == 0.0f);    // == count rejected
+        CHECK(SkinPoint(vert(99, 1, 0, 0, 0, 0, 0, 0), skin).x == 0.0f);   // > count rejected
+        // One valid + one invalid: the valid influence is preserved (both implementations do this).
+        {
+            Vec3 p = SkinPoint(vert(0, 1, 99, 1, 0, 0, 0, 0), skin);
+            CHECK(finite(p) && std::fabs(p.x - 1.0f) < 1e-5f);
+        }
+        // Zero-weight, negative, NaN and infinite weights are all rejected; no NaN/inf is produced.
+        CHECK(SkinPoint(vert(0, 0, 0, 0, 0, 0, 0, 0), skin).x == 0.0f);
+        CHECK(SkinPoint(vert(0, -1, 0, 0, 0, 0, 0, 0), skin).x == 0.0f);
+        CHECK(finite(SkinPoint(vert(0, std::numeric_limits<float>::quiet_NaN(), 0, 0, 0, 0, 0, 0), skin)));
+        CHECK(SkinPoint(vert(0, std::numeric_limits<float>::quiet_NaN(), 0, 0, 0, 0, 0, 0), skin).x == 0.0f);
+        CHECK(SkinPoint(vert(0, std::numeric_limits<float>::infinity(), 0, 0, 0, 0, 0, 0), skin).x == 0.0f);
+        CHECK(SkinPoint(vert(0, -std::numeric_limits<float>::infinity(), 0, 0, 0, 0, 0, 0), skin).x == 0.0f);
+        // No valid influences: the rest position (existing fallback behaviour).
+        CHECK(SkinPoint(vert(-5, 1, 7, 1, 100, 1, -1, 1), skin).x == 0.0f && SkinPoint(vert(-5, 1, 7, 1, 100, 1, -1, 1), skin).y == 0.0f);
+        // Directions follow the same rule.
+        CHECK(finite(SkinDirection(vert(0, 1, 0, 0, 0, 0, 0, 0), skin)));
+        CHECK(SkinDirection(vert(-1, 1, 0, 0, 0, 0, 0, 0), skin).z == 1.0f);
+        CHECK(finite(SkinDirection(vert(0, std::numeric_limits<float>::quiet_NaN(), 0, 0, 0, 0, 0, 0), skin)));
+    });
+
+    test("skinning: rest pose and extreme rotations stay finite (CPU/GPU numerical parity in SkinBench)", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneVertex v;
+        v.pos = {1, 2, 3};
+        v.normal = {0, 0, 1};
+        v.bone[0] = 0;
+        v.weight[0] = 1;
+        const std::vector<Mat4> rest = {Mat4{}};
+        Vec3 atRest = SkinPoint(v, rest);
+        CHECK(std::fabs(atRest.x - 1.0f) < 1e-5f && std::fabs(atRest.y - 2.0f) < 1e-5f);
+        // Extreme rotation: 180 degrees about x (point goes to x, -y, -z).
+        const std::vector<Mat4> flipped = {Mat4::TRS({0, 0, 0}, shape::EulerToQuat({180, 0, 0}), {1, 1, 1})};
+        Vec3 p = SkinPoint(v, flipped);
+        CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+        CHECK(std::fabs(p.x - 1.0f) < 1e-4f && std::fabs(p.y + 2.0f) < 1e-4f && std::fabs(p.z + 3.0f) < 1e-4f);
     });
 }
 

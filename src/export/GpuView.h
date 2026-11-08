@@ -4,6 +4,7 @@
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -15,7 +16,30 @@ enum class GpuKind { Unknown, Hardware, Warp, Software };
 
 struct GpuOptions {
     std::string preference = "auto";   // "auto", "hardware", "warp", "software"; CARDBRIDGE_GPU overrides it when set
-    std::string skin = "gpu";          // "gpu" (compute shader when a device can run it), "cpu" (always the CPU skin)
+    std::string skin = "gpu";          // "gpu" (compute shader when a device can run it), "cpu" (always the CPU skin),
+                                       // "auto" (CPU below skinThresholdVerts, GPU above; CARDBRIDGE_SKIN overrides)
+    size_t skinThresholdVerts = 0;     // "auto" mode only: meshes with fewer vertices use the CPU loop. 0 = follow the
+                                       // benchmark suggestion (CARDBRIDGE_SKIN_THRESHOLD, else a conservative default).
+};
+
+// Calculated GPU resource allocation for skinning (bytes, from D3D11 buffer
+// byte widths: element count * stride). Physical GPU memory (driver
+// reservations, fragmentation) is not obtainable exactly through D3D11 and
+// is not included; QueryVideoMemoryInfo when available reports the process
+// budget separately. See AdapterSelect.h for the adapter policy and
+// docs/GPU_SKINNING_HARDENING.md for the buffer layout.
+struct SkinMemoryStats {
+    size_t restBytes = 0;      // rest vertex buffers (plain VB, drawn at rest)
+    size_t skinInBytes = 0;    // structured input buffers (shader SRV copy of the rest vertices)
+    size_t skinOutBytes = 0;   // structured output buffers (shader UAV, copied to posed)
+    size_t posedBytes = 0;     // posed vertex buffers (plain VB, drawn when posed)
+    size_t boneBytes = 0;      // bone matrix structured buffer
+    size_t totalGpuBytes = 0;  // rest + input + output + posed + bones
+    size_t cpuMirrorBytes = 0; // CPU-side rest vertex copy (per vertex, kept for re-skinning)
+    size_t cpuStagingBytes = 0; // transient CPU scratch for one CPU-skin update (posedVerts)
+    size_t vertexCount = 0;
+    size_t boneCount = 0;
+    size_t bufferCount = 0;    // persistent GPU buffers (4 per mesh + bones)
 };
 
 // The game's own compiled shaders run on the GPU: Direct3D 11 takes the DXBC programs straight out of the asset bundles (the
@@ -23,11 +47,12 @@ struct GpuOptions {
 // with the same orthographic framing as RenderView. Windows only (the whole tool is). Materials whose shader is not in the
 // bundle are not drawn; skippedMaterials() says how many were left out.
 //
-// When more than one adapter exists (a discrete NVIDIA/AMD card beside an integrated one), Init enumerates them and prefers
-// a discrete hardware adapter, so the viewer and the export bake use the real GPU instead of the integrated one wherever
-// it is. WARP (Direct3D running on the CPU) is the fallback when there is no usable hardware device, and when that is
-// gone too the callers keep the software interpreter renderer. That CPU fallback is the supported path on a machine
-// without a GPU; it is not a degraded second implementation.
+// When more than one adapter exists (a discrete card beside an integrated one), Init enumerates them and prefers
+// the hardware adapter best suited to CardBridge's workload (see AdapterSelect.h: dedicated memory and capability,
+// software/virtual adapters excluded, vendor only an equal tie-breaker), so the viewer and the export bake use the
+// real GPU instead of the integrated one wherever it is. WARP (Direct3D running on the CPU) is the fallback when there
+// is no usable hardware device, and when that is gone too the callers keep the software interpreter renderer. That CPU
+// fallback is the supported path on a machine without a GPU; it is not a degraded second implementation.
 class GpuView {
 public:
     GpuView();
@@ -35,7 +60,7 @@ public:
     GpuView(const GpuView&) = delete;
     GpuView& operator=(const GpuView&) = delete;
 
-    // Creates the Direct3D device: by default the best hardware adapter (discrete before integrated), else WARP on the CPU.
+    // Creates the Direct3D device: by default the best-suited hardware adapter (AdapterSelect.h), else WARP on the CPU.
     // False with `why` when none works; kind() then says Software and the caller falls back to RenderView. The preference
     // may be overridden by CARDBRIDGE_GPU (auto/hardware/warp/software) and CARDBRIDGE_GPU_ADAPTER=N (adapter index, 0-based
     // over the enumerated adapters before any ordering).
@@ -48,8 +73,19 @@ public:
     bool ready() const;
     GpuKind kind() const;              // Hardware, Warp (CPU) or Software after Init
     std::string adapter() const;       // short device name, e.g. "NVIDIA GeForce ..." or "WARP (CPU)"
-    void SetSkinMode(const std::string& mode);   // "gpu" asks for the compute shader, "cpu" forces the CPU skin (applies to the next Load)
+    void SetSkinMode(const std::string& mode);   // "gpu" asks for the compute shader, "cpu" forces the CPU skin, "auto" picks per mesh
+                                                 // by vertex count (applies to the next Load; SetSkin itself follows the mode at load time)
+    void SetSkinThreshold(size_t verts);         // "auto" mode: meshes with fewer vertices use the CPU loop
     bool gpuSkin() const;              // the current pose is skinned by the GPU compute shader (not the CPU loop)
+    SkinMemoryStats SkinMemory() const;  // calculated skinning allocations for the loaded scene (see SkinMemoryStats)
+
+    // Benchmark hooks (off by default, no cost when off). With queries on, each skin dispatch is bracketed by
+    // timestamp/disjoint queries; LastGpuDispatchMs() returns the GPU execution time of the last dispatch
+    // (not CPU submission time). ReadbackPosed copies the posed buffer to the CPU for equivalence checks.
+    void SetBenchQueries(bool on);
+    bool BenchQueries() const;
+    double LastGpuDispatchMs() const;  // -1 when unavailable (queries off, disjoint, or timed out)
+    bool ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vector<std::array<float, 3>>* outNrm = nullptr);
 
     // Uploads the scene's meshes, textures and shader programs. Call again whenever the Scene changes; the Scene must outlive
     // the next Render calls.

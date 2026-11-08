@@ -77,22 +77,36 @@ Vec3 SkinPoint(const SceneVertex& v, const std::vector<Mat4>& skin) {
     Vec3 out{};
     float sum = 0;
     for (int k = 0; k < 4; ++k) {
-        if (v.weight[k] <= 0 || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
-        out = out + skin[static_cast<size_t>(v.bone[k])].point(v.pos) * v.weight[k];
-        sum += v.weight[k];
+        // Reject negative/out-of-range bone indices and non-finite, zero or
+        // negative weights (NaN fails w > 0; +/-inf fails isfinite). This
+        // matches the skinning compute shader in GpuView.cpp.
+        if (v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
+        const float w = v.weight[k];
+        if (!(w > 0.0f) || !std::isfinite(w)) continue;
+        out = out + skin[static_cast<size_t>(v.bone[k])].point(v.pos) * w;
+        sum += w;
     }
-    return sum > 1e-6f ? out * (1.0f / sum) : v.pos;
+    if (!(sum > 1e-6f) || !std::isfinite(sum)) return v.pos;   // no valid influence: keep the rest position
+    const Vec3 r = out * (1.0f / sum);
+    if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.z)) return v.pos;   // never emit NaN/inf
+    return r;
 }
 
 Vec3 SkinDirection(const SceneVertex& v, const std::vector<Mat4>& skin) {
     Vec3 out{};
     float sum = 0;
     for (int k = 0; k < 4; ++k) {
-        if (v.weight[k] <= 0 || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
-        out = out + skin[static_cast<size_t>(v.bone[k])].dir(v.normal) * v.weight[k];
-        sum += v.weight[k];
+        if (v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
+        const float w = v.weight[k];
+        if (!(w > 0.0f) || !std::isfinite(w)) continue;
+        out = out + skin[static_cast<size_t>(v.bone[k])].dir(v.normal) * w;
+        sum += w;
     }
-    return sum > 1e-6f ? normalize(out) : v.normal;
+    if (!(sum > 1e-6f) || !std::isfinite(sum)) return v.normal;
+    if (!std::isfinite(out.x) || !std::isfinite(out.y) || !std::isfinite(out.z)) return v.normal;
+    const Vec3 n = normalize(out);
+    if (!std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z)) return v.normal;
+    return n;
 }
 
 bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base) {
@@ -193,11 +207,16 @@ void BakeSkin(Scene& scene, const std::vector<Mat4>& skin) {
                 Vec3 acc{};
                 float sum = 0;
                 for (int k = 0; k < 4; ++k) {
-                    if (v.weight[k] <= 0 || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
-                    acc = acc + skin[static_cast<size_t>(v.bone[k])].dir(d) * v.weight[k];
-                    sum += v.weight[k];
+                    if (v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= skin.size()) continue;
+                    const float w = v.weight[k];
+                    if (!(w > 0.0f) || !std::isfinite(w)) continue;
+                    acc = acc + skin[static_cast<size_t>(v.bone[k])].dir(d) * w;
+                    sum += w;
                 }
-                if (sum > 1e-6f) d = acc * (1.0f / sum);
+                if (sum > 1e-6f && std::isfinite(sum)) {
+                    const Vec3 r = acc * (1.0f / sum);
+                    if (std::isfinite(r.x) && std::isfinite(r.y) && std::isfinite(r.z)) d = r;
+                }
             }
         for (auto& v : mesh.vertices) {
             const Vec3 p = SkinPoint(v, skin), n = SkinDirection(v, skin);

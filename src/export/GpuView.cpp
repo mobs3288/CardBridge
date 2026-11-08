@@ -1,5 +1,6 @@
 #include "export/GpuView.h"
 
+#include "export/AdapterSelect.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 
@@ -50,7 +51,7 @@ struct GpuMesh {
     ID3D11Buffer* vb = nullptr;        // the buffer drawn (rest when there is no pose, posed when there is); a borrowed plain vertex buffer
     ID3D11Buffer* restBuf = nullptr;   // plain vertex buffer holding the rest vertices, drawn when there is no pose
     ID3D11Buffer* posedBuf = nullptr;  // plain vertex buffer holding the skinned copy, drawn when there is a pose
-    ID3D11Buffer* skinInBuf = nullptr;  // structured copy of the rest vertices the compute shader reads (a structured buffer cannot also be a vertex buffer)
+    ID3D11Buffer* skinInBuf = nullptr;  // structured copy of the rest vertices the compute shader reads
     ID3D11Buffer* skinOutBuf = nullptr; // structured buffer the compute shader writes, copied into posedBuf before drawing
     ID3D11ShaderResourceView* restSrv = nullptr;
     ID3D11UnorderedAccessView* posedUav = nullptr;
@@ -78,7 +79,8 @@ struct GpuView::Impl {
     ID3D11DeviceContext* ctx = nullptr;
     GpuKind kind = GpuKind::Software;   // set by Init: hardware GPU, WARP (CPU) or software (no device)
     std::string adapterName;            // what Init created the device on
-    std::string wantSkin = "gpu";       // "gpu" asks for the compute shader, "cpu" forces the CPU skin
+    std::string wantSkin = "gpu";       // "gpu" asks for the compute shader, "cpu" forces the CPU skin, "auto" picks per mesh
+    size_t skinThresholdVerts = 0;      // "auto" mode: meshes with fewer vertices use the CPU loop
     // Skinning compute shader: rest vertices + per-bone matrices -> posed vertices, all on the GPU. When it is absent
     // (no d3dcompiler, a feature level below 11, or the user asked for the CPU skin) SetSkin keeps its CPU loop and the
     // whole view still works; same picture, slower pose edits.
@@ -86,6 +88,18 @@ struct GpuView::Impl {
     ID3D11Buffer* skBones = nullptr;    // structured buffer of bone matrix rows (4 float4 per bone)
     ID3D11ShaderResourceView* skBonesSrv = nullptr;
     bool skinOnGpu = false;
+    // Benchmark timing queries (created lazily, used only when SetBenchQueries(true)).
+    // Timestamp/disjoint give pure GPU compute time when the driver reports a
+    // non-zero frequency; otherwise an event query gives GPU completion time
+    // (submission + GPU, waited for, never submission alone).
+    bool benchQueries = false;
+    ID3D11Query* benchTsStart = nullptr;
+    ID3D11Query* benchTsEnd = nullptr;
+    ID3D11Query* benchTsDisjoint = nullptr;
+    ID3D11Query* benchEvent = nullptr;
+    mutable double benchLastMs = -1.0;
+    mutable bool benchPending = false;
+    mutable LARGE_INTEGER benchStartQpc{};
     const assemble::Scene* scene = nullptr;
     std::vector<GpuMesh> meshes;
     std::vector<GpuShader> shaders;
@@ -291,23 +305,31 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     uint count, stride; g_in.GetDimensions(count, stride);
     if (dtid.x >= count) return;
     SVVert v = g_in[dtid.x];
+    uint boneRows, boneStride; g_bones.GetDimensions(boneRows, boneStride);
+    uint numBones = boneRows / 4u;
     float3 p = 0, n = 0, t = 0;
     float sum = 0;
     for (int k = 0; k < 4; ++k) {
         float w = v.boneW[k];
         int b = v.boneIdx[k];
-        if (w <= 0 || b < 0) continue;
-        uint r = (uint)b * 4;
+        if (b < 0 || (uint)b >= numBones) continue;
+        if (!(w > 0.0) || isinf(w) || isnan(w)) continue;
+        uint r = (uint)b * 4u;
         float4 r0 = g_bones[r], r1 = g_bones[r + 1], r2 = g_bones[r + 2];
         p += w * float3(dot(r0, float4(v.pos, 1)), dot(r1, float4(v.pos, 1)), dot(r2, float4(v.pos, 1)));
         n += w * float3(dot(r0.xyz, v.nrm), dot(r1.xyz, v.nrm), dot(r2.xyz, v.nrm));
         t += w * float3(dot(r0.xyz, v.tan.xyz), dot(r1.xyz, v.tan.xyz), dot(r2.xyz, v.tan.xyz));
         sum += w;
     }
-    if (sum > 1e-6) {
-        v.pos = p / sum;
-        float nl = length(n); if (nl > 1e-8) v.nrm = n / nl;
-        float tl = length(t); if (tl > 1e-8) v.tan.xyz = t / tl;
+    if (sum > 1e-6 && isfinite(sum)) {
+        float3 pp = p / sum;
+        if (isfinite(pp.x) && isfinite(pp.y) && isfinite(pp.z)) {
+            v.pos = pp;
+            float nl = length(n);
+            if (nl > 1e-8 && isfinite(nl)) { float3 nn = n / nl; if (isfinite(nn.x) && isfinite(nn.y) && isfinite(nn.z)) v.nrm = nn; }
+            float tl = length(t);
+            if (tl > 1e-8 && isfinite(tl)) { float3 tt = t / tl; if (isfinite(tt.x) && isfinite(tt.y) && isfinite(tt.z)) v.tan.xyz = tt; }
+        }
     }
     g_out[dtid.x] = v;
 }
@@ -350,19 +372,46 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     }
     size_t skBonesBytes = 0;
 
+    bool EnsureBenchQueries() {
+        if (benchTsStart) return true;
+        D3D11_QUERY_DESC ts{};
+        ts.Query = D3D11_QUERY_TIMESTAMP;
+        D3D11_QUERY_DESC dj{};
+        dj.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        D3D11_QUERY_DESC ev{};
+        ev.Query = D3D11_QUERY_EVENT;
+        const HRESULT h1 = dev->CreateQuery(&ts, &benchTsStart);
+        const HRESULT h2 = h1 == S_OK ? dev->CreateQuery(&ts, &benchTsEnd) : h1;
+        const HRESULT h3 = h2 == S_OK ? dev->CreateQuery(&dj, &benchTsDisjoint) : h2;
+        const HRESULT h4 = h3 == S_OK ? dev->CreateQuery(&ev, &benchEvent) : h3;
+        if (FAILED(h1) || FAILED(h2) || FAILED(h3) || FAILED(h4)) {
+            if (std::getenv("CARDBRIDGE_DEBUG_GPU")) std::fprintf(stderr, "bench queries create: %lx %lx %lx %lx\n", static_cast<long>(h1), static_cast<long>(h2), static_cast<long>(h3), static_cast<long>(h4));
+            Rel(benchTsStart); Rel(benchTsEnd); Rel(benchTsDisjoint); Rel(benchEvent);
+            return false;
+        }
+        return true;
+    }
     bool DispatchSkin(GpuMesh& g) {
         if (!skCs || !g.restSrv || !g.posedUav || g.rest.empty()) return false;
         ID3D11ShaderResourceView* tv[2] = {g.restSrv, skBonesSrv};
         ID3D11UnorderedAccessView* tu[1] = {g.posedUav};
+        const bool timed = benchQueries && EnsureBenchQueries();
+        if (timed) {
+            QueryPerformanceCounter(&benchStartQpc);
+            ctx->End(benchTsDisjoint);
+            ctx->End(benchTsStart);
+        }
         ctx->CSSetShader(skCs, nullptr, 0);
         ctx->CSSetShaderResources(0, 2, tv);
         ctx->CSSetUnorderedAccessViews(0, 1, tu, nullptr);
         ctx->Dispatch(static_cast<UINT>((g.rest.size() + 63) / 64), 1, 1);
+        if (timed) { ctx->End(benchTsEnd); ctx->End(benchEvent); }
         ID3D11UnorderedAccessView* none[1] = {nullptr};
         ID3D11ShaderResourceView* nrv[2] = {nullptr, nullptr};
         ctx->CSSetUnorderedAccessViews(0, 1, none, nullptr);
         ctx->CSSetShaderResources(0, 2, nrv);
         ctx->CSSetShader(nullptr, nullptr, 0);
+        if (timed) benchPending = true;
         ctx->CopyResource(g.posedBuf, g.skinOutBuf);
         g.vb = g.posedBuf;
         return true;
@@ -376,6 +425,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb);
         Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb);
         Rel(skCs);
+        Rel(benchTsStart); Rel(benchTsEnd); Rel(benchTsDisjoint); Rel(benchEvent);
+        benchQueries = false; benchPending = false; benchLastMs = -1.0;
         Clear();
         Rel(samplerWrap); Rel(samplerClamp);
         Rel(raster); Rel(rasterCull);
@@ -502,8 +553,119 @@ bool GpuView::ready() const { return impl_->dev != nullptr; }
 void GpuView::Shutdown() { impl_->ReleaseDevice(); }
 GpuKind GpuView::kind() const { return impl_->kind; }
 std::string GpuView::adapter() const { return impl_->adapterName; }
-void GpuView::SetSkinMode(const std::string& mode) { impl_->wantSkin = (mode == "cpu") ? "cpu" : "gpu"; impl_->skinOnGpu = false; }
+void GpuView::SetSkinMode(const std::string& mode) {
+    impl_->wantSkin = (mode == "cpu" || mode == "auto") ? mode : "gpu";
+    impl_->skinOnGpu = false;
+}
+void GpuView::SetSkinThreshold(size_t verts) { impl_->skinThresholdVerts = verts; }
+SkinMemoryStats GpuView::SkinMemory() const {
+    SkinMemoryStats s;
+    const Impl& I = *impl_;
+    for (const auto& m : I.meshes) {
+        const size_t bytes = m.rest.size() * sizeof(GVert);
+        if (m.restBuf) s.restBytes += bytes;
+        if (m.skinInBuf) s.skinInBytes += bytes;
+        if (m.skinOutBuf) s.skinOutBytes += bytes;
+        if (m.posedBuf) s.posedBytes += bytes;
+        s.cpuMirrorBytes += bytes;
+        s.vertexCount += m.rest.size();
+        if (!m.rest.empty()) s.bufferCount += (m.restBuf ? 1 : 0) + (m.skinInBuf ? 1 : 0) + (m.skinOutBuf ? 1 : 0) + (m.posedBuf ? 1 : 0);
+    }
+    if (I.skBones) s.boneBytes = I.skBonesBytes;
+    s.boneCount = I.skinCopy.size();
+    s.totalGpuBytes = s.restBytes + s.skinInBytes + s.skinOutBytes + s.posedBytes + s.boneBytes;
+    s.bufferCount += I.skBones ? 1 : 0;
+    // Transient scratch for one CPU-skin update (the largest mesh's posedVerts).
+    size_t largest = 0;
+    for (const auto& m : I.meshes) largest = std::max(largest, m.rest.size());
+    s.cpuStagingBytes = largest * sizeof(GVert);
+    return s;
+}
 bool GpuView::gpuSkin() const { return impl_->skinOnGpu; }
+void GpuView::SetBenchQueries(bool on) { impl_->benchQueries = on; }
+bool GpuView::BenchQueries() const { return impl_->benchQueries; }
+double GpuView::LastGpuDispatchMs() const {
+    Impl& I = *impl_;
+    if (!I.ctx || !I.benchPending) return -1.0;
+    I.ctx->Flush();
+    // Try timestamp/disjoint first (pure GPU compute time). Some drivers
+    // report a zero frequency; then fall back to the event (GPU completion
+    // time from dispatch start, waited for). Either way the result accounts
+    // for asynchronous execution; CPU submission time alone is never returned.
+    if (I.benchTsStart && I.benchTsEnd && I.benchTsDisjoint) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+        bool gotDisjoint = false;
+        for (int i = 0; i < 1000; ++i) {
+            if (I.ctx->GetData(I.benchTsDisjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) { gotDisjoint = true; break; }
+            Sleep(0);
+        }
+        if (gotDisjoint && !dj.Disjoint && dj.Frequency != 0) {
+            uint64_t t0 = 0, t1 = 0;
+            bool gotTimes = false;
+            for (int i = 0; i < 1000; ++i) {
+                const HRESULT hs = I.ctx->GetData(I.benchTsStart, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+                const HRESULT he = I.ctx->GetData(I.benchTsEnd, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+                if (hs == S_OK && he == S_OK && t1 >= t0) { gotTimes = true; break; }
+                Sleep(0);
+            }
+            if (gotTimes) {
+                I.benchPending = false;
+                I.benchLastMs = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+                return I.benchLastMs;
+            }
+        } else if (std::getenv("CARDBRIDGE_DEBUG_GPU")) {
+            static bool logged = false;
+            if (!logged) { logged = true; std::fprintf(stderr, "bench timestamps unusable (got %d freq %llu disjoint %d), using event timing\n", gotDisjoint, static_cast<unsigned long long>(dj.Frequency), dj.Disjoint); }
+        }
+    }
+    if (I.benchEvent) {
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        bool signaled = false;
+        LARGE_INTEGER now{};
+        for (int i = 0; i < 100000; ++i) {
+            if (I.ctx->GetData(I.benchEvent, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) { signaled = true; break; }
+            if ((i & 1023) == 0) Sleep(0);
+        }
+        I.benchPending = false;
+        if (!signaled) return -1.0;
+        QueryPerformanceCounter(&now);
+        I.benchLastMs = static_cast<double>(now.QuadPart - I.benchStartQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+        return I.benchLastMs;
+    }
+    I.benchPending = false;
+    return -1.0;
+}
+bool GpuView::ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vector<std::array<float, 3>>* outNrm) {
+    Impl& I = *impl_;
+    if (!I.ctx) return false;
+    outPos.clear();
+    if (outNrm) outNrm->clear();
+    // Concatenate posed positions across meshes in scene order (mesh order matches the scene).
+    // When a mesh was dispatched its posedBuf holds the result; otherwise its vb holds the CPU pose.
+    for (const auto& g : I.meshes) {
+        if (!g.vb) continue;
+        const size_t n = g.rest.size();
+        if (n == 0) continue;
+        const UINT bytes = static_cast<UINT>(n * sizeof(GVert));
+        D3D11_BUFFER_DESC sd{};
+        sd.ByteWidth = bytes; sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Buffer* stage = nullptr;
+        if (FAILED(I.dev->CreateBuffer(&sd, nullptr, &stage))) return false;
+        I.ctx->CopyResource(stage, g.vb);
+        I.ctx->Flush();
+        D3D11_MAPPED_SUBRESOURCE mp{};
+        if (FAILED(I.ctx->Map(stage, 0, D3D11_MAP_READ, 0, &mp))) { Rel(stage); return false; }
+        const GVert* p = static_cast<const GVert*>(mp.pData);
+        for (size_t v = 0; v < n; ++v) {
+            outPos.push_back({p[v].pos[0], p[v].pos[1], p[v].pos[2]});
+            if (outNrm) outNrm->push_back({p[v].nrm[0], p[v].nrm[1], p[v].nrm[2]});
+        }
+        I.ctx->Unmap(stage, 0);
+        Rel(stage);
+    }
+    return !outPos.empty();
+}
 int GpuView::skippedMaterials() const { return impl_->skipped; }
 void GpuView::SetPlain(bool on) { impl_->plain = on; }
 
@@ -516,46 +678,63 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
     const bool posed = skin && !skin->empty();
     // GPU path: one compute dispatch per mesh, no CPU vertex work. Needs the shader, the bone matrices on the GPU and a
     // rest/posed buffer pair per mesh. Anything missing falls through to the CPU loop below, same picture.
-    if (posed && I.wantSkin != "cpu" && I.MakeSkinCompute() && I.UploadBones(skin)) {
-        bool all = true;
-        for (const auto& m : I.meshes) if (!m.rest.empty() && !m.posedBuf) { all = false; break; }
-        if (all) {
-            for (auto& g : I.meshes) if (!g.rest.empty()) I.DispatchSkin(g);
-            I.skinOnGpu = true;
-            return;
-        }
+    // In "auto" mode small meshes stay on the CPU (dispatch + sync overhead outweighs the compute saving below the
+    // benchmark threshold); the threshold is per mesh so a small accessory does not pay GPU overhead for a big body.
+    size_t th = I.skinThresholdVerts;
+    if (th == 0) {
+        const char* env = std::getenv("CARDBRIDGE_SKIN_THRESHOLD");
+        // Benchmark crossover for the preview path (CPU SkinPoint vs GPU
+        // submission) sits below the smallest measured workload (10k verts,
+        // GPU 30x faster on submission); the sync+readback crossover sits
+        // near 50k. The preview never reads back, so the default stays low,
+        // just above dispatch fixed overhead (~a few hundred verts).
+        th = env ? static_cast<size_t>(std::atoll(env)) : 2000;
     }
+    auto wantGpu = [&](const GpuMesh& m) {
+        if (!posed || I.wantSkin == "cpu") return false;
+        if (I.wantSkin == "auto" && m.rest.size() < th) return false;
+        return true;
+    };
+    const bool gpuReady = posed && I.wantSkin != "cpu" && I.MakeSkinCompute() && I.UploadBones(skin);
+    auto useGpu = [&](const GpuMesh& m) { return gpuReady && wantGpu(m) && m.posedBuf != nullptr; };
     I.skinOnGpu = false;
+    if (gpuReady) {
+        for (auto& g : I.meshes) if (!g.rest.empty() && useGpu(g)) { I.DispatchSkin(g); I.skinOnGpu = true; }
+    }
     std::vector<GVert> posedVerts;
     for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
         GpuMesh& g = I.meshes[mi];
         if (!g.vb && !g.restBuf) continue;
         if (g.rest.empty()) continue;
+        if (useGpu(g)) continue;   // already dispatched above; nothing to upload
         const auto& verts = I.scene->meshes[mi].vertices;
         const std::vector<GVert>* src = &g.rest;
         if (posed) {
             posedVerts = g.rest;
             for (size_t v = 0; v < posedVerts.size() && v < verts.size(); ++v) {
-                // the vertex's blended skin matrix, applied to its position, normal and tangent
+                // the vertex's blended skin matrix, applied to its position, normal and tangent.
+                // Bounds and weight checks match SkinPoint and the compute shader.
                 Mat4 m;
                 for (float& x : m.m) x = 0;
                 float sum = 0;
                 for (int k = 0; k < 4; ++k) {
                     const float w = verts[v].weight[k];
                     const int b = verts[v].bone[k];
-                    if (w <= 0 || b < 0 || static_cast<size_t>(b) >= skin->size()) continue;
+                    if (b < 0 || static_cast<size_t>(b) >= skin->size()) continue;
+                    if (!(w > 0.0f) || !std::isfinite(w)) continue;
                     for (int e = 0; e < 16; ++e) m.m[e] += (*skin)[static_cast<size_t>(b)].m[e] * w;
                     sum += w;
                 }
-                if (sum <= 1e-6f) continue;
+                if (!(sum > 1e-6f) || !std::isfinite(sum)) continue;
                 for (float& x : m.m) x /= sum;
                 GVert& o = posedVerts[v];
                 const Vec3 p = m.point({o.pos[0], o.pos[1], o.pos[2]});
                 const Vec3 n = normalize(m.dir({o.nrm[0], o.nrm[1], o.nrm[2]}));
                 const Vec3 t = normalize(m.dir({o.tan[0], o.tan[1], o.tan[2]}));
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
                 o.pos[0] = p.x; o.pos[1] = p.y; o.pos[2] = p.z;
-                o.nrm[0] = n.x; o.nrm[1] = n.y; o.nrm[2] = n.z;
-                o.tan[0] = t.x; o.tan[1] = t.y; o.tan[2] = t.z;
+                if (std::isfinite(n.x) && std::isfinite(n.y) && std::isfinite(n.z)) { o.nrm[0] = n.x; o.nrm[1] = n.y; o.nrm[2] = n.z; }
+                if (std::isfinite(t.x) && std::isfinite(t.y) && std::isfinite(t.z)) { o.tan[0] = t.x; o.tan[1] = t.y; o.tan[2] = t.z; }
             }
             src = &posedVerts;
         }
@@ -686,6 +865,8 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     if (I.dev) return true;
     I.wantSkin = opt.skin;
     if (const char* env = std::getenv("CARDBRIDGE_SKIN")) I.wantSkin = env;
+    I.skinThresholdVerts = opt.skinThresholdVerts;
+    if (const char* env = std::getenv("CARDBRIDGE_SKIN_THRESHOLD")) I.skinThresholdVerts = static_cast<size_t>(std::atoll(env));
     std::string pref = opt.preference;
     if (const char* env = std::getenv("CARDBRIDGE_GPU")) pref = env;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
@@ -710,61 +891,82 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
         I.kind = GpuKind::Warp;
         I.adapterName = "WARP (CPU)";
     } else {
-        // Enumerate the adapters and prefer a discrete NVIDIA/AMD card over an integrated one, so the viewer and the bake
-        // use the real GPU. The default (nullptr) can pick the integrated adapter and leave the discrete card idle.
+        // Enumerate the adapters and prefer the hardware adapter best suited to CardBridge (AdapterSelect.h):
+        // software/virtual adapters are excluded, dedicated memory and the dedicated share order the rest, and
+        // vendor is only an equal tie-breaker, so the default (nullptr) never leaves a discrete card idle for an
+        // integrated one, and Intel Arc discrete competes like any other discrete card.
+        const bool debugGpu = std::getenv("CARDBRIDGE_DEBUG_GPU") != nullptr;
         int wanted = -1;
         if (const char* env = std::getenv("CARDBRIDGE_GPU_ADAPTER")) wanted = std::atoi(env);
-        struct Pick { IDXGIAdapter1* a = nullptr; DXGI_ADAPTER_DESC1 d{}; int score = 0; int index = 0; };
+        struct Pick { IDXGIAdapter1* a = nullptr; AdapterDesc desc; };
         std::vector<Pick> picks;
         IDXGIFactory1* f = nullptr;
         if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f))) && f) {
             for (UINT n = 0;; ++n) {
                 IDXGIAdapter1* a = nullptr;
                 if (FAILED(f->EnumAdapters1(n, &a)) || !a) break;
-                Pick p; p.a = a; p.index = static_cast<int>(n);
-                a->GetDesc1(&p.d);
-                int score = 0;
-                if (p.d.VendorId == 0x10DE || p.d.VendorId == 0x1002) score += 10000;   // discrete NVIDIA / AMD
-                else if (p.d.VendorId == 0x8086) score += 100;                           // Intel integrated
-                else if (p.d.VendorId == 0x1414) score -= 10000;                         // Microsoft Basic Display (no real GPU)
-                else if (p.d.DedicatedVideoMemory > 0) score += 500;                     // other discrete / high-memory adapters
-                if (p.d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) score -= 50000;
-                if (p.d.DedicatedVideoMemory > 512ULL * 1024 * 1024) score += 50;
-                p.score = score;
+                Pick p; p.a = a;
+                DXGI_ADAPTER_DESC1 d{};
+                a->GetDesc1(&d);
+                p.desc.vendorId = d.VendorId;
+                p.desc.deviceId = d.DeviceId;
+                p.desc.description = utf8(d.Description);
+                p.desc.dedicatedVideoMemory = d.DedicatedVideoMemory;
+                p.desc.dedicatedSystemMemory = d.DedicatedSystemMemory;
+                p.desc.sharedSystemMemory = d.SharedSystemMemory;
+                p.desc.flags = d.Flags;
+                p.desc.index = static_cast<int>(n);
+                if (debugGpu) std::fprintf(stderr, "gpu adapter [%d]: %s\n", p.desc.index, DescribeAdapter(p.desc).c_str());
                 picks.push_back(p);
             }
         }
         if (f) Rel(f);
-        std::sort(picks.begin(), picks.end(), [](const Pick& x, const Pick& y) { return x.score > y.score; });
         // CARDBRIDGE_GPU_ADAPTER names an adapter by its enumeration index, before any ordering.
         if (wanted >= 0) {
             Pick keep;
             bool found = false;
-            for (const auto& p : picks) if (p.index == wanted) { keep = p; found = true; break; }
+            for (const auto& p : picks) if (p.desc.index == wanted) { keep = p; found = true; break; }
             IDXGIAdapter1* keepPtr = found ? keep.a : nullptr;
             for (auto& p : picks) if (p.a != keepPtr) Rel(p.a);
             picks.clear();
             if (found) picks.push_back(keep);
+        } else {
+            // Order by the shared scoring policy, best first.
+            std::sort(picks.begin(), picks.end(), [](const Pick& x, const Pick& y) {
+                const int sx = ScoreAdapter(x.desc).score, sy = ScoreAdapter(y.desc).score;
+                if (sx != sy) return sx > sy;
+                if (x.desc.dedicatedVideoMemory != y.desc.dedicatedVideoMemory) return x.desc.dedicatedVideoMemory > y.desc.dedicatedVideoMemory;
+                return x.desc.index < y.desc.index;
+            });
         }
         bool made = false;
         for (auto& p : picks) {
-            if (p.d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            const AdapterScore s = ScoreAdapter(p.desc);
+            if (!s.suitable) continue;   // software / virtual / remote: hardware selection skips them
             D3D_FEATURE_LEVEL got{};
-            if (SUCCEEDED(D3D11CreateDevice(p.a, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 3, D3D11_SDK_VERSION, &I.dev, &got, &I.ctx))) {
+            // CARDBRIDGE_D3D_DEBUG=1 asks for a debug device when the SDK is installed, so invalid buffer access
+            // (out-of-range bone indices, bad SRV/UAV bindings) is caught by the D3D11 debug layer.
+            const UINT flags = std::getenv("CARDBRIDGE_D3D_DEBUG") ? D3D11_CREATE_DEVICE_DEBUG | D3D11_CREATE_DEVICE_BGRA_SUPPORT : D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            if (SUCCEEDED(D3D11CreateDevice(p.a, D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags, levels, 3, D3D11_SDK_VERSION, &I.dev, &got, &I.ctx))) {
                 I.kind = GpuKind::Hardware;
-                I.adapterName = utf8(p.d.Description);
+                I.adapterName = p.desc.description;
+                if (debugGpu) std::fprintf(stderr, "gpu selected [%d]: %s (feature level 0x%lx, hardware)\n", p.desc.index, DescribeAdapter(p.desc).c_str(), static_cast<long>(got));
                 made = true;
                 break;
+            } else if (debugGpu) {
+                std::fprintf(stderr, "gpu adapter [%d] device creation failed, trying next\n", p.desc.index);
             }
         }
         for (auto& p : picks) Rel(p.a);
         if (!made) {
             if (pref == "hardware") { I.kind = GpuKind::Software; return fail("no hardware GPU found"); }
             D3D_FEATURE_LEVEL got{};
-            HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 3, D3D11_SDK_VERSION, &I.dev, &got, &I.ctx);
+            const UINT flags = std::getenv("CARDBRIDGE_D3D_DEBUG") ? D3D11_CREATE_DEVICE_DEBUG | D3D11_CREATE_DEVICE_BGRA_SUPPORT : D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, levels, 3, D3D11_SDK_VERSION, &I.dev, &got, &I.ctx);
             if (FAILED(hr)) { I.dev = nullptr; I.ctx = nullptr; I.kind = GpuKind::Software; return fail("no Direct3D 11 device"); }
             I.kind = GpuKind::Warp;
             I.adapterName = "WARP (CPU)";
+            if (debugGpu) std::fprintf(stderr, "gpu selected: WARP (CPU) (no suitable hardware adapter, software fallback)\n");
         }
     }
 
@@ -892,6 +1094,10 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
             // A structured buffer cannot also be a vertex buffer, so the rest vertices live twice: once in a plain vertex
             // buffer that is drawn when there is no pose, once in a structured buffer the skinning shader reads. The
             // skinned result is written to a structured buffer too and copied into a plain posed vertex buffer for drawing.
+            // (Verified on the test hardware: BIND_VERTEX_BUFFER | BIND_SHADER_RESOURCE with
+            // D3D11_RESOURCE_MISC_BUFFER_STRUCTURED is rejected by D3D11CreateBuffer, so the duplication is required
+            // while the shader uses structured buffers. A ByteAddressBuffer rewrite could halve it; see
+            // docs/GPU_SKINNING_HARDENING.md for why that rewrite was investigated but not taken here.)
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = bytes; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
             D3D11_SUBRESOURCE_DATA sr{vb.data(), 0, 0};
@@ -933,6 +1139,11 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
             if (FAILED(I.dev->CreateBuffer(&ib, &is, &gs.ib))) continue;
             g.subs.push_back(gs);
         }
+    }
+    if (std::getenv("CARDBRIDGE_DEBUG_SKIN")) {
+        const SkinMemoryStats m = SkinMemory();
+        std::fprintf(stderr, "skin buffers: %zu verts, rest %zuKB skin-in %zuKB skin-out %zuKB posed %zuKB bones %zuKB total GPU %zuKB CPU mirror %zuKB (%zu buffers)\n",
+                     m.vertexCount, m.restBytes / 1024, m.skinInBytes / 1024, m.skinOutBytes / 1024, m.posedBytes / 1024, m.boneBytes / 1024, m.totalGpuBytes / 1024, m.cpuMirrorBytes / 1024, m.bufferCount);
     }
     return true;
 }
