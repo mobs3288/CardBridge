@@ -5,6 +5,7 @@
 #include <map>
 #include <set>
 
+#include "card/Abmx.h"
 #include "core/FileIo.h"
 #include "core/MsgPack.h"
 #include "core/Sha256.h"
@@ -419,6 +420,70 @@ std::string withOutfitPrefix(const std::string& property, int outfit) {
     return "outfit" + std::to_string(outfit) + "." + property;
 }
 
+// --- merging the outfit file's plugin payloads (ABMX, MaterialEditor) ---
+// The game's coordinate load applies the file's bone mods and material edits
+// for the outfit; without them the outfit shows its prefab look and fits
+// without its skirt scaling (the Nurse+skirt test: the white shirt overtook
+// the skirt at the waist and the stockings baked opaque).
+
+// One inner MaterialEditor list (a bin of an array of maps) with each row's
+// CoordinateIndex remapped 0->target and accessory slots remapped through
+// the merge, plus texture ids remapped through texRemap. Returns the encoded
+// bin, or empty when the source list is absent.
+Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
+                  const std::vector<int>& clothToMerged, const std::map<int64_t, int64_t>& texRemap) {
+    const Value& srcBin = clothingPayload.at(key);
+    if (!srcBin.isBin() || srcBin.asBin().empty()) return Bytes{};
+    Value list;
+    try { list = MsgPackParse(srcBin.asBin()); } catch (const FormatError&) { return Bytes{}; }
+    if (!list.isArray()) return Bytes{};
+    Value::Array rows;
+    for (const auto& row : list.asArray()) {
+        if (!row.isMap()) continue;
+        const int64_t coord = row.at("CoordinateIndex").asInt(0);
+        if (coord != 0) continue;   // the file's single outfit is coordinate 0
+        Value nr = row;
+        auto setKeyInt = [&](const char* k, int64_t v) {
+            for (auto& kv : nr.map()) if (kv.first.isStr() && kv.first.asStr() == k) { kv.second = Value(v); return; }
+            nr.map().emplace_back(Value(std::string(k)), Value(v));
+        };
+        setKeyInt("CoordinateIndex", target);
+        const int64_t objectType = row.at("ObjectType").asInt(-1);
+        const int64_t slot = row.at("Slot").asInt(0);
+        if (objectType == 2 && slot >= 0 && static_cast<size_t>(slot) < clothToMerged.size()) {
+            const int merged = clothToMerged[static_cast<size_t>(slot)];
+            if (merged < 0) continue;   // the outfit slot was empty: nothing to edit
+            setKeyInt("Slot", merged);
+        }
+        if (std::string(key) == "MaterialTexturePropertyList" && row.has("TexID")) {
+            const Value& t = row.at("TexID");
+            if (t.isInt()) {
+                auto it = texRemap.find(t.asInt());
+                if (it != texRemap.end()) setKeyInt("TexID", it->second);
+            }
+        }
+        rows.emplace_back(std::move(nr));
+    }
+    if (rows.empty()) return Bytes{};
+    return MsgPackPack(Value(std::move(rows)));
+}
+
+// Appends decoded clothing rows to a character list (a bin of an array) and
+// re-encodes it. When the character list is not a bin array, the clothing
+// rows become it (handled by the caller seeding the character value).
+Value appendMeRows(const Value& charBin, const Bytes& clothingRows) {
+    if (clothingRows.empty()) return charBin;
+    if (!charBin.isBin()) return charBin;
+    Value list;
+    try { list = MsgPackParse(charBin.asBin()); } catch (const FormatError&) { return charBin; }
+    Value clothing;
+    try { clothing = MsgPackParse(clothingRows); } catch (const FormatError&) { return charBin; }
+    if (!list.isArray() || !clothing.isArray()) return charBin;
+    Value::Array merged = list.asArray();
+    for (const auto& e : clothing.asArray()) merged.emplace_back(e);
+    return Value(MsgPackPack(Value(std::move(merged))));
+}
+
 } // namespace
 
 ClothingFile LoadClothingFile(const std::string& path) {
@@ -697,6 +762,108 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
         bool exists = false;
         for (const auto& e : card.rows) if (e.property == nr.property && e.slot == nr.slot) { exists = true; break; }
         if (!exists) card.rows.push_back(std::move(nr));
+    }
+    // --- plugin payloads: the file's bone mods and material edits for the outfit ---
+    // ABMX: union of bones (the file wins on a shared bone: it was tuned for
+    // this outfit). Without the skirt scaling the shirt overtakes the skirt.
+    if (clothes.extended.isMap()) {
+        AbmxTable charAbmx = LoadAbmx(card.extended);
+        AbmxTable clothAbmx = LoadAbmx(clothes.extended);
+        if (!clothAbmx.empty()) {
+            for (const auto& kv : clothAbmx.bones) charAbmx.bones[kv.first] = kv.second;
+            Bytes bin = PackAbmxBin(charAbmx);
+            const auto setExtended = [&](const char* key, const Value& entry) {
+                bool found = false;
+                if (card.extended.isMap())
+                    for (auto& kv : card.extended.map())
+                        if (kv.first.isStr() && kv.first.asStr() == key) { kv.second = entry; found = true; }
+                if (!found && card.extended.isMap()) card.extended.map().emplace_back(Value(std::string(key)), entry);
+            };
+            const Value& existing = card.extended.at("KKABMPlugin.ABMData");
+            Value::Map payload;
+            if (existing.isArray() && existing.at(size_t(1)).isMap()) payload = existing.at(size_t(1)).asMap();
+            bool hasBin = false;
+            for (auto& kv : payload)
+                if (kv.first.isStr() && kv.first.asStr() == "boneData") { kv.second = Value(std::move(bin)); hasBin = true; }
+            if (!hasBin) payload.emplace_back(Value(std::string("boneData")), Value(std::move(bin)));
+            const int64_t version = existing.isArray() ? existing.at(size_t(0)).asInt(3) : 3;
+            Value::Array entry{Value(version), Value(std::move(payload))};
+            setExtended("KKABMPlugin.ABMData", Value(std::move(entry)));
+            rep.notes.emplace_back("ABMX: outfit file's bone mods merged (skirt fit)");
+        }
+        // MaterialEditor: the outfit's texture replacements (the sheer
+        // stockings and the pumps) and its float/colour fixes.
+        const Value& charMe = card.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        const Value& clothMe = clothes.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        if (clothMe.isMap()) {
+            // Texture ids: fresh ids for collisions so the outfit's images
+            // never overwrite the character's.
+            std::map<int64_t, int64_t> texRemap;
+            std::map<int64_t, Bytes> charTex;
+            if (charMe.isMap() && charMe.at("TextureDictionary").isBin()) {
+                try {
+                    Value dict = MsgPackParse(charMe.at("TextureDictionary").asBin());
+                    if (dict.isMap())
+                        for (const auto& kv : dict.asMap())
+                            if (kv.first.isInt() && kv.second.isBin()) charTex[kv.first.asInt()] = kv.second.asBin();
+                } catch (const FormatError&) {}
+            }
+            std::map<int64_t, Bytes> clothTex;
+            try {
+                Value dict = MsgPackParse(clothMe.at("TextureDictionary").asBin());
+                if (dict.isMap())
+                    for (const auto& kv : dict.asMap())
+                        if (kv.first.isInt() && kv.second.isBin()) clothTex[kv.first.asInt()] = kv.second.asBin();
+            } catch (const FormatError&) {}
+            int64_t nextId = 0;
+            for (const auto& kv : charTex) nextId = std::max(nextId, kv.first + 1);
+            for (const auto& kv : clothTex) {
+                auto it = charTex.find(kv.first);
+                if (it == charTex.end()) { charTex[kv.first] = kv.second; continue; }
+                if (it->second == kv.second) continue;   // the same image: share
+                const int64_t fresh = nextId++;
+                texRemap[kv.first] = fresh;
+                charTex[fresh] = kv.second;
+            }
+            Value::Map charPayload;
+            if (charMe.isMap()) charPayload = charMe.asMap();
+            auto setPayloadBin = [&](const char* key, const Bytes& bin) {
+                bool found = false;
+                for (auto& kv : charPayload)
+                    if (kv.first.isStr() && kv.first.asStr() == key) { kv.second = Value(bin); found = true; }
+                if (!found) charPayload.emplace_back(Value(std::string(key)), Value(bin));
+            };
+            {
+                Value::Map dict;
+                for (const auto& kv : charTex) dict.emplace_back(Value(kv.first), Value(kv.second));
+                setPayloadBin("TextureDictionary", MsgPackPack(Value(std::move(dict))));
+            }
+            static const char* kMeLists[] = {"RendererPropertyList", "MaterialFloatPropertyList", "MaterialColorPropertyList",
+                                             "MaterialTexturePropertyList", "MaterialShaderList", "MaterialNamePropertyList",
+                                             "MaterialKeywordPropertyList", "ProjectorPropertyList"};
+            for (const char* key : kMeLists) {
+                const Bytes rows = mergeMeList(clothMe, key, outfit, clothToMerged, texRemap);
+                if (rows.empty()) continue;
+                const Value& cur = charMe.isMap() ? charMe.at(key) : Value::nil();
+                Value mergedRows;
+                if (cur.isBin() && !cur.asBin().empty()) mergedRows = appendMeRows(cur, rows);
+                else mergedRows = Value(rows);
+                setPayloadBin(key, mergedRows.isBin() ? mergedRows.asBin() : MsgPackPack(mergedRows));
+            }
+            bool found = false;
+            if (card.extended.isMap())
+                for (auto& kv : card.extended.map())
+                    if (kv.first.isStr() && kv.first.asStr() == "com.deathweasel.bepinex.materialeditor") {
+                        const int64_t version = kv.second.isArray() ? kv.second.at(size_t(0)).asInt(0) : 0;
+                        kv.second = Value(Value::Array{Value(version), Value(std::move(charPayload))});
+                        found = true;
+                    }
+            if (!found && card.extended.isMap()) {
+                Value::Array entry{Value(int64_t{0}), Value(std::move(charPayload))};
+                card.extended.map().emplace_back(Value(std::string("com.deathweasel.bepinex.materialeditor")), Value(std::move(entry)));
+            }
+            rep.notes.emplace_back("MaterialEditor: outfit file's edits merged (sheer stockings)");
+        }
     }
     // The in-memory merge is all the viewer and the exporter read (Resolver
     // uses rows, not the extended bin); the file on disk is untouched.

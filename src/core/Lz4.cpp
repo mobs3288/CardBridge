@@ -49,4 +49,18 @@ Bytes Lz4DecompressBlock(const uint8_t* src, size_t srcSize, size_t uncompressed
     return out;
 }
 
+Bytes Lz4CompressBlock(const uint8_t* src, size_t srcSize) {
+    Bytes out;
+    if (srcSize < 15) {
+        out.push_back(static_cast<uint8_t>(srcSize << 4));
+    } else {
+        out.push_back(0xf0);
+        size_t left = srcSize - 15;
+        while (left >= 255) { out.push_back(255); left -= 255; }
+        out.push_back(static_cast<uint8_t>(left));
+    }
+    out.insert(out.end(), src, src + srcSize);
+    return out;
+}
+
 } // namespace cardbridge

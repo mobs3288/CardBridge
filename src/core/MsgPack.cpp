@@ -88,4 +88,87 @@ Value MsgPackParse(const uint8_t* data, size_t size) {
     return v;
 }
 
+namespace {
+
+void packU16(Bytes& out, uint16_t v) { out.push_back(static_cast<uint8_t>(v >> 8)); out.push_back(static_cast<uint8_t>(v)); }
+void packU32(Bytes& out, uint32_t v) { for (int k = 3; k >= 0; --k) out.push_back(static_cast<uint8_t>(v >> (8 * k))); }
+void packU64(Bytes& out, uint64_t v) { for (int k = 7; k >= 0; --k) out.push_back(static_cast<uint8_t>(v >> (8 * k))); }
+
+void packValue(Bytes& out, const Value& v, int depth) {
+    if (depth > kMaxDepth) throw FormatError("msgpack: nested too deep to pack");
+    if (v.isNil()) { out.push_back(0xc0); return; }
+    if (v.isBool()) { out.push_back(v.asBool() ? 0xc3 : 0xc2); return; }
+    if (v.isInt()) {
+        const int64_t x = v.asInt();
+        if (x >= 0) {
+            if (x <= 0x7f) out.push_back(static_cast<uint8_t>(x));
+            else if (x <= 0xff) { out.push_back(0xcc); out.push_back(static_cast<uint8_t>(x)); }
+            else if (x <= 0xffff) { out.push_back(0xcd); packU16(out, static_cast<uint16_t>(x)); }
+            else if (x <= 0xffffffffll) { out.push_back(0xce); packU32(out, static_cast<uint32_t>(x)); }
+            else { out.push_back(0xcf); packU64(out, static_cast<uint64_t>(x)); }
+        } else {
+            if (x >= -32) out.push_back(static_cast<uint8_t>(x));
+            else if (x >= -128) { out.push_back(0xd0); out.push_back(static_cast<uint8_t>(x)); }
+            else if (x >= -32768) { out.push_back(0xd1); packU16(out, static_cast<uint16_t>(static_cast<int16_t>(x))); }
+            else if (x >= -2147483648ll) { out.push_back(0xd2); packU32(out, static_cast<uint32_t>(static_cast<int32_t>(x))); }
+            else { out.push_back(0xd3); packU64(out, static_cast<uint64_t>(x)); }
+        }
+        return;
+    }
+    if (v.isFloat()) {
+        const float f = static_cast<float>(v.asFloat());
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        out.push_back(0xca);
+        packU32(out, u);
+        return;
+    }
+    if (v.isStr()) {
+        const std::string& s = v.asStr();
+        const size_t n = s.size();
+        if (n < 32) out.push_back(static_cast<uint8_t>(0xa0 | n));
+        else if (n <= 0xff) { out.push_back(0xd9); out.push_back(static_cast<uint8_t>(n)); }
+        else if (n <= 0xffff) { out.push_back(0xda); packU16(out, static_cast<uint16_t>(n)); }
+        else { out.push_back(0xdb); packU32(out, static_cast<uint32_t>(n)); }
+        out.insert(out.end(), s.begin(), s.end());
+        return;
+    }
+    if (v.isBin()) {
+        const Bytes& b = v.asBin();
+        const size_t n = b.size();
+        if (n <= 0xff) { out.push_back(0xc4); out.push_back(static_cast<uint8_t>(n)); }
+        else if (n <= 0xffff) { out.push_back(0xc5); packU16(out, static_cast<uint16_t>(n)); }
+        else { out.push_back(0xc6); packU32(out, static_cast<uint32_t>(n)); }
+        out.insert(out.end(), b.begin(), b.end());
+        return;
+    }
+    if (v.isArray()) {
+        const Value::Array& a = v.asArray();
+        const size_t n = a.size();
+        if (n < 16) out.push_back(static_cast<uint8_t>(0x90 | n));
+        else if (n <= 0xffff) { out.push_back(0xdc); packU16(out, static_cast<uint16_t>(n)); }
+        else { out.push_back(0xdd); packU32(out, static_cast<uint32_t>(n)); }
+        for (const auto& e : a) packValue(out, e, depth + 1);
+        return;
+    }
+    if (v.isMap()) {
+        const Value::Map& m = v.asMap();
+        const size_t n = m.size();
+        if (n < 16) out.push_back(static_cast<uint8_t>(0x80 | n));
+        else if (n <= 0xffff) { out.push_back(0xde); packU16(out, static_cast<uint16_t>(n)); }
+        else { out.push_back(0xdf); packU32(out, static_cast<uint32_t>(n)); }
+        for (const auto& kv : m) { packValue(out, kv.first, depth + 1); packValue(out, kv.second, depth + 1); }
+        return;
+    }
+    throw FormatError("msgpack: cannot pack value");
+}
+
+} // namespace
+
+Bytes MsgPackPack(const Value& v) {
+    Bytes out;
+    packValue(out, v, 0);
+    return out;
+}
+
 } // namespace cardbridge

@@ -11,5 +11,6 @@ Bytes Lz4DecompressBlock(const uint8_t* src, size_t srcSize, size_t uncompressed
 // Decompresses into an existing buffer of uncompressedSize bytes (the caller
 // owns it), avoiding a temporary Bytes copy for large bundle blocks.
 void Lz4DecompressBlockTo(const uint8_t* src, size_t srcSize, uint8_t* dst, size_t uncompressedSize);
+Bytes Lz4CompressBlock(const uint8_t* src, size_t srcSize);   // literal-only: valid LZ4, larger than optimal
 
 } // namespace cardbridge

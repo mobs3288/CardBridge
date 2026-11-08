@@ -33,4 +33,10 @@ struct AbmxTable {
 // Reads the table from a card's extended data (an LZ4-compressed MessagePack list of [bone name, [modifiers]]); empty when absent.
 AbmxTable LoadAbmx(const Value& extended);
 
+// The table as MessagePack (the list LoadAbmx reads), and the full stored
+// form (the LZ4 ext-99 blob the `boneData` bin holds). Used to merge an outfit
+// file's bone mods into the character when the outfit is applied.
+Value EncodeAbmx(const AbmxTable& t);
+Bytes PackAbmxBin(const AbmxTable& t);
+
 } // namespace cardbridge::card

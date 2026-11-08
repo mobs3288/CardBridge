@@ -89,4 +89,39 @@ AbmxTable LoadAbmx(const Value& extended) {
     return t;
 }
 
+Value EncodeAbmx(const AbmxTable& t) {
+    Value::Array list;
+    // std::map order is file order's sort; the plugin reads by name, so order does not matter.
+    for (const auto& kv : t.bones) {
+        Value::Array mods;
+        for (const auto& a : kv.second) {
+            Value::Array mod;
+            mod.emplace_back(Value::Array{Value(a.scale.x), Value(a.scale.y), Value(a.scale.z)});
+            mod.emplace_back(Value(static_cast<double>(a.length)));
+            mod.emplace_back(Value::Array{Value(a.position.x), Value(a.position.y), Value(a.position.z)});
+            mod.emplace_back(Value::Array{Value(a.rotation.x), Value(a.rotation.y), Value(a.rotation.z)});
+            mods.emplace_back(Value(std::move(mod)));
+        }
+        Value::Array entry;
+        entry.emplace_back(Value(kv.first));
+        entry.emplace_back(Value(std::move(mods)));
+        list.emplace_back(Value(std::move(entry)));
+    }
+    return Value(std::move(list));
+}
+
+Bytes PackAbmxBin(const AbmxTable& t) {
+    const Bytes raw = MsgPackPack(EncodeAbmx(t));
+    const Bytes comp = Lz4CompressBlock(raw.data(), raw.size());
+    Bytes bin;
+    bin.push_back(0xc9);
+    const uint32_t payloadLen = static_cast<uint32_t>(1 + MsgPackPack(Value(static_cast<int64_t>(raw.size()))).size() + comp.size());
+    for (int k = 3; k >= 0; --k) bin.push_back(static_cast<uint8_t>(payloadLen >> (8 * k)));
+    bin.push_back(99);
+    const Bytes ulen = MsgPackPack(Value(static_cast<int64_t>(raw.size())));
+    bin.insert(bin.end(), ulen.begin(), ulen.end());
+    bin.insert(bin.end(), comp.begin(), comp.end());
+    return bin;
+}
+
 } // namespace cardbridge::card
