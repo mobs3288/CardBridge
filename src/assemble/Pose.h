@@ -37,9 +37,18 @@ std::vector<Mat4> SkinMatrices(const Scene& scene, const Pose& pose);
 // cf_j_forearm01_L / _R, or any rig with the same roles); returns false, leaving `base` empty, when the rig has no arms to turn.
 bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base);
 
+// Writes skin matrices into the scene as its new rest pose (the body of BakePose, so the jiggle settle can use it).
+void BakeSkin(Scene& scene, const std::vector<Mat4>& skin);
+
 // Writes the pose into the scene as its new rest pose: vertices, normals, blend shape offsets, bone positions and colliders move to
 // where the skin matrices put them. The bone table keeps its names and order. Afterwards `scene.pose` says what was applied.
 void BakePose(Scene& scene, const Pose& pose);
+
+// Cosmetically finishes a posed (or rest) scene exactly as the character is seen: the body's own jiggle (bust and, when on, hips) is
+// simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The exported PMX starts
+// with the breast as it hangs in the game instead of pulled straight out of the chest. `intensity` is the same jiggle-intensity
+// the export writes as the joint swing limits.
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
 
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
 // (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit

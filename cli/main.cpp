@@ -433,6 +433,14 @@ int cmdConvert(const Args& a) {
         if (!pose.base.empty()) std::fprintf(stderr, "  a-pose: arms down %.0f degrees\n", poseFile.aPoseDegrees);
         if (!poseFile.bones.empty()) std::fprintf(stderr, "  pose: %zu bone edit(s) from %s\n", poseFile.bones.size() - unknown.size(), a.get("pose").c_str());
     }
+    if (!std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) {
+        // Settle the body's own jiggle (breast and, when on, hips) under gravity, so the exported and previewed pose shows the
+        // bust as it hangs in the game instead of pulled straight out of the chest; the game draw's live sim settles again
+        // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.
+        const bool settleBust = !a.has("no-jiggle-bust"), settleButt = a.has("jiggle-butt");
+        const float settleInt = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
+        assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt);
+    }
 
     // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)
     std::vector<char> hiddenParts(scene.parts.size(), 0);

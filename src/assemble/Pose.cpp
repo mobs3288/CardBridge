@@ -1,5 +1,6 @@
 #include "assemble/Pose.h"
 
+#include "assemble/PhysicsSim.h"
 #include "shape/Shape.h"
 
 #include <nlohmann/json.hpp>
@@ -181,12 +182,10 @@ Vec3 MoveBone(const Scene& scene, const Pose& pose, size_t bone, Vec3 worldDelta
     return old + inverse(parentRot).dir(worldDelta);
 }
 
-void BakePose(Scene& scene, const Pose& pose) {
-    if (pose.empty()) return;
-    const std::vector<Mat4> skin = SkinMatrices(scene, pose);
+void BakeSkin(Scene& scene, const std::vector<Mat4>& skin) {
+    if (skin.empty()) return;
     for (auto& mesh : scene.meshes) {
-        mesh.reshapable = false;   // the bone frames the vertices were stored in no longer match
-        // blend shape offsets turn with the vertex they move (rotation and scale part of its skin)
+        mesh.reshapable = false;
         for (auto& sh : mesh.shapes)
             for (auto& [vi, d] : sh.offsets) {
                 if (vi >= mesh.vertices.size()) continue;
@@ -212,11 +211,35 @@ void BakePose(Scene& scene, const Pose& pose) {
         c.axis = normalize(skin[static_cast<size_t>(c.bone)].dir(c.axis));
     }
     for (size_t i = 0; i < scene.bones.size(); ++i) scene.bones[i].pos = skin[i].point(scene.bones[i].pos);
+}
+
+void BakePose(Scene& scene, const Pose& pose) {
+    if (pose.empty()) return;
+    BakeSkin(scene, SkinMatrices(scene, pose));
     scene.pose.clear();
     for (size_t i = 0; i < pose.bones.size() && i < scene.bones.size(); ++i)
         if (!IsIdentity(pose.bones[i])) scene.pose.push_back({scene.bones[i].name, pose.bones[i].pos, pose.bones[i].rot, pose.bones[i].scl});
     scene.aposeApplied = false;
     for (const auto& q : pose.base) if (q.x != 0 || q.y != 0 || q.z != 0) scene.aposeApplied = true;
+}
+
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+    if (scene.bones.empty() || (!jiggleBust && !jiggleButt)) return;
+    const Pose rest;
+    const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
+    PhysicsSim sim;
+    sim.Reset(scene, poseWorld, jiggleBust, jiggleButt, jiggleIntensity);
+    // Empty sim means no jiggle chains were found (Reset left nothing): nothing to settle.
+    // PhysicsSim exposes its emptiness through Step's contract: a fresh sim with no chains writes nothing.
+    std::vector<Mat4> skin = SkinMatrices(scene, rest);
+    bool anyMoved = false;
+    for (int step = 0; step < 600; ++step) {
+        const bool moved = sim.Step(scene, poseWorld, 1, skin);
+        anyMoved = anyMoved || moved;
+        if (!moved) break;
+    }
+    // Step touches only the jiggle chain bones: anything it displaced is real sag, so bake it in.
+    if (anyMoved) BakeSkin(scene, skin);
 }
 
 std::string PoseFileToJson(const PoseFile& file) {
