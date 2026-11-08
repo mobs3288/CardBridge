@@ -874,6 +874,10 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         auto& mat = scene.materials[mi];
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
         if (!sr) continue;
+        // A clamped main texture is edge-clamped in the game, not repeated: its triangles must stay at their UVs (the
+        // shader's sampler clamps the border) instead of being shifted into their integer UV tile.
+        const bool clampMain = mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
+                               scene.textures[static_cast<size_t>(mat.texture)].clamp;
         // The submeshes of exported parts that use this material, each on a flattened copy of its mesh.
         struct Use { size_t flat; const std::vector<uint32_t>* indices; };
         std::vector<Use> uses;
@@ -922,11 +926,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                     float ax = fm.vertices[i0].uv.x * W, ay = (1.0f - fm.vertices[i0].uv.y) * H;
                     float bx = fm.vertices[i1].uv.x * W, by = (1.0f - fm.vertices[i1].uv.y) * H;
                     float cx = fm.vertices[i2].uv.x * W, cy = (1.0f - fm.vertices[i2].uv.y) * H;
-                    {   // UVs outside 0..1 repeat: the triangle lands in the tile its centre is in
-                        float tu = std::floor((fm.vertices[i0].uv.x + fm.vertices[i1].uv.x + fm.vertices[i2].uv.x) / 3.0f);
-                        float tv = std::floor((fm.vertices[i0].uv.y + fm.vertices[i1].uv.y + fm.vertices[i2].uv.y) / 3.0f);
-                        ax -= tu * W; bx -= tu * W; cx -= tu * W;
-                        ay += tv * H; by += tv * H; cy += tv * H;
+                    {   // UVs outside 0..1 repeat: the triangle lands in the tile its centre is in. A clamped main
+                        // texture does not repeat, so keep the triangle where it is and let the sampler clamp its edge.
+                        if (!clampMain) {
+                            float tu = std::floor((fm.vertices[i0].uv.x + fm.vertices[i1].uv.x + fm.vertices[i2].uv.x) / 3.0f);
+                            float tv = std::floor((fm.vertices[i0].uv.y + fm.vertices[i1].uv.y + fm.vertices[i2].uv.y) / 3.0f);
+                            ax -= tu * W; bx -= tu * W; cx -= tu * W;
+                            ay += tv * H; by += tv * H; cy += tv * H;
+                        }
                     }
                     float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
                     // A triangle with no UV area (a garment part coloured from one point of its texture, like a skirt's plain upper half)
@@ -1046,6 +1053,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         bt.name = "baked_" + mat.name;
         bt.source = "shader bake (" + mat.shader + ")";
         bt.width = W; bt.height = H;
+        bt.clamp = clampMain;   // the viewer sampler must clamp the baked texture exactly as the game clamps its source
         bt.rgba.resize(static_cast<size_t>(W) * H * 4);
         // Materials whose colour lives in a linear-stored texture (an embedded MaterialEditor image) compute in linear
         // light: encode the result to sRGB bytes, like the framebuffer does, or the grading toe crushes it.

@@ -41,6 +41,28 @@ bool contains(const std::string& s, const char* sub) { return s.find(sub) != std
 // near-white clothes green and skin-like colours brown; the game's own shader does whatever conversion there is.
 Vec4 kkColor(Vec4 c) { return c; }
 
+// A card's hair tint multiplies a light, almost flat hair texture (the game's hair shader draws the strand pattern
+// through _ColorMask). A base colour near black multiplies that texture to flat black and loses both the strands and
+// the shade the card picture shows, so lift the tint to a visible brightness while keeping the hue of the card's own
+// darkest hair colour (the start/end colours when the base carries none). 0.42 lands the baked strands at the ~65/255
+// mean the card portraits measure (the shader's toon terms add their own brightness on top of the texture multiply).
+Vec4 hairTint(Vec4 base, Vec4 start, Vec4 end) {
+    auto peakOf = [](const Vec4& c) { return std::max(c.x, std::max(c.y, c.z)); };
+    Vec4 hue = base;
+    float peak = peakOf(hue);
+    if (peak < 0.02f) { hue = end; peak = peakOf(hue); }
+    if (peak < 0.02f) { hue = start; peak = peakOf(hue); }
+    if (peak < 0.02f) { hue = {1, 1, 1, 1}; peak = 1; }
+    const float target = std::getenv("CARDBRIDGE_HAIR_TINT") ? static_cast<float>(std::atof(std::getenv("CARDBRIDGE_HAIR_TINT"))) : 0.42f;   // test aid
+    if (peak < target) {
+        const float s = target / peak;
+        hue.x *= s;
+        hue.y *= s;
+        hue.z *= s;
+    }
+    return {std::min(1.0f, hue.x), std::min(1.0f, hue.y), std::min(1.0f, hue.z), 1};
+}
+
 // A local transform the card's shape sliders replace on a named bone.
 struct LocalOverride {
     Vec3 pos;
@@ -778,8 +800,9 @@ struct Builder {
     }
 
     // `look` (may be null) says how this item's materials are coloured; `matIndex` is the material's slot on its renderer.
+    // `hairTintColor` (may be null) is the character's hair colour for a hair material (the game overwrites its _Color).
     int materialFor(UnityFile& uf0, const PPtr& p0, const std::string& partId, const Vec4* fallbackColor, const ItemLook* look,
-                    const RendererInfo& r, size_t matIndex) {
+                    const RendererInfo& r, size_t matIndex, const Vec4* hairTintColor = nullptr) {
         SceneMaterial sm;
         std::string why;
         // A material the prefab's bundle only points at (the body's cf_m_body in mm_base) is read from the library bundle that holds it;
@@ -819,14 +842,18 @@ struct Builder {
             if (look && look->bakedOutfitColors && matIndex == 0 && ((look->use1.count(r.componentId) && look->tex1 >= 0) || (look->use2.count(r.componentId) && look->tex2 >= 0)))
                 for (auto& pr : sm.props)
                     if (pr.first == "_Color" || pr.first == "_Color2" || pr.first == "_Color3") pr.second = Vec4{1, 1, 1, 1};
-            if (fallbackColor && (sm.shader == "Shader Forge/main_hair" || sm.shader == "Shader Forge/main_hair_front")) {
-                // In the game the character maker's hair colour overwrites the _Color of every hair material (ChaController);
-                // our `fallbackColor` carries it (but was dropped for the named-loaded branch). Apply it here - the sign is
-                // the same for hair on any part (base hair, or a hair accessory wearing the character's colour).
+            if (const Vec4* tint = hairTintColor ? hairTintColor
+                                                 : (fallbackColor && (sm.shader == "Shader Forge/main_hair" || sm.shader == "Shader Forge/main_hair_front")
+                                                        ? fallbackColor
+                                                        : nullptr)) {
+                // In the game the character maker's hair colour overwrites the _Color of every hair material
+                // (ChaController), also for the hair pieces an accessory wears. Apply it here - the sign is the same
+                // for hair on any part (base hair, or a hair accessory wearing the character's colour). The tint is
+                // already lifted off flat black (see hairTint) so the texture keeps its strand gradient.
                 bool set = false;
-                for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *fallbackColor; set = true; }
-                if (!set) sm.props.emplace_back("_Color", *fallbackColor);
-                sm.diffuse = {fallbackColor->x, fallbackColor->y, fallbackColor->z, 0.0f};
+                for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *tint; set = true; }
+                if (!set) sm.props.emplace_back("_Color", *tint);
+                sm.diffuse = {tint->x, tint->y, tint->z, 0.0f};
             }
             if (blushAlpha >= 0)
                 for (auto& pr : sm.props) if (pr.first == "_overcolor2") pr.second.w = blushAlpha;
@@ -1225,7 +1252,7 @@ struct Builder {
 
     int addRenderer(UnityFile& uf, const RendererInfo& r, int64_t prefabRoot, int part, const std::string& partId,
                     const Mat4& placement, int staticBone, const Vec4* fallbackColor, bool accessoryMode = false,
-                    const ItemLook* look = nullptr) {
+                    const ItemLook* look = nullptr, const Vec4* hairTintColor = nullptr) {
         std::string why;
         auto mesh = uf.readMesh(r.mesh, &why);
         if (!mesh) {
@@ -1403,7 +1430,7 @@ struct Builder {
                 scene.materials.push_back(plain);
                 ss.material = static_cast<int>(scene.materials.size()) - 1;
             } else {
-                ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, look, r, mi);
+                ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, look, r, mi, hairTintColor);
             }
             sm.submeshes.push_back(std::move(ss));
         }
@@ -2471,6 +2498,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (look.tintOnly.empty()) look.tintOnly.insert(-1);   // a component that lists none: nothing is tinted
         }
         Vec4 hairColor{1, 1, 1, 1};
+        bool haveHairColor = false;
+        size_t hairKind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+        if (ref.group == "Hair" || ref.group == "Accessories") {   // hair items (and hair accessories): the card's hair colour
+            const Value& hp = card.hair.at("parts").at(hairKind);
+            if (hp.at("baseColor").size() >= 3) {
+                hairColor = hairTint(kkColor(vec4Of(hp.at("baseColor"))), kkColor(vec4Of(hp.at("startColor"))), kkColor(vec4Of(hp.at("endColor"))));
+                haveHairColor = true;
+            }
+        }
         Value hacInfo;   // HairAccessoryCustomizer data of this accessory slot (a map when the card has it)
         if (accessoryMode && ref.outfit >= 0 && ref.accIndex >= 0) {
             const Value& payload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
@@ -2518,12 +2554,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (list.find("," + r.name + ",") != std::string::npos) { skipped.push_back(r.name + " (CARDBRIDGE_SKIP)"); continue; }
             }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
-            if (ref.group == "Hair" || ref.group == "Accessories") {   // hair items (and hair accessories): the card's hair colour
-                // (shading and root-to-tip gradient are not modelled; ChaController applies the same hair colour to accessories in the game)
-                size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
-                const Value& hp = card.hair.at("parts").at(kind);
-                if (hp.at("baseColor").size() >= 3) { hairColor = kkColor(vec4Of(hp.at("baseColor"))); fb = &hairColor; }
-            }
+            if ((ref.group == "Hair" || ref.group == "Accessories") && haveHairColor) fb = &hairColor;   // the card's hair tint (see hairTint)
             ItemLook faceLook;
             const ItemLook* lookPtr = haveLook ? &look : nullptr;
             if (ref.group == "Head") {
@@ -2616,7 +2647,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     const Value& hp0 = card.hair.at("parts").at(size_t(0));
                     if (rtHairItem.count(r.componentId)) {
                         if (hacInfo.at("ColorMatch").asBool()) {
-                            b.runtime.emplace_back("_Color", rawColor(hp0.at("baseColor")));
+                            b.runtime.emplace_back("_Color", haveHairColor ? hairColor : rawColor(hp0.at("baseColor")));
                             b.runtime.emplace_back("_Color2", rawColor(hp0.at("startColor")));
                             b.runtime.emplace_back("_Color3", rawColor(hp0.at("endColor")));
                             b.runtime.emplace_back("_LineColor", vec4Of(hp0.at("outlineColor")));
@@ -2630,14 +2661,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     }
                 }
             } else if (ref.group == "Hair" && rtHairItem.count(r.componentId)) {
-                size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
-                const Value& hp = card.hair.at("parts").at(kind);
-                b.runtime.emplace_back("_Color", rawColor(hp.at("baseColor")));
+                const Value& hp = card.hair.at("parts").at(hairKind);
+                b.runtime.emplace_back("_Color", haveHairColor ? hairColor : rawColor(hp.at("baseColor")));
                 b.runtime.emplace_back("_Color2", rawColor(hp.at("startColor")));
                 b.runtime.emplace_back("_Color3", rawColor(hp.at("endColor")));
                 b.runtime.emplace_back("_LineColor", vec4Of(hp.at("outlineColor")));
             }
-            int mi = b.addRenderer(*uf, r, itemRoot, partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr);
+            const Vec4* hairTintColorForRenderer = (ref.group == "Hair" || rtHairItem.count(r.componentId)) && haveHairColor ? &hairColor : nullptr;
+            int mi = b.addRenderer(*uf, r, itemRoot, partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr, hairTintColorForRenderer);
             if (mi >= 0) part.meshes.push_back(mi);
         }
         b.addItemBones(*uf, itemRoot, ref.partId, placement, staticBone, accessoryMode);
@@ -2840,6 +2871,41 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             nude.includeInExport = false;
             scene.parts.push_back(std::move(nude));
         }
+    }
+    {   // PMX has no sampler wrap mode: a UV outside 0..1 repeats there, while the game clamps a clamped texture (the
+        // create-job alpha cuts, the ramps). Pull the UVs of a mesh whose materials all sample a clamped main texture
+        // into the tile, so the bake, the viewer and the exported file all see the same edge-clamped texel. A mesh
+        // mixing clamped and repeating materials cannot satisfy both: keep its wrap and say so.
+        size_t clampedMeshes = 0, mixedMeshes = 0;
+        for (auto& mesh : scene.meshes) {
+            if (mesh.submeshes.empty()) continue;
+            bool anyClamped = false, allClamped = true;
+            for (const auto& sub : mesh.submeshes) {
+                if (sub.material < 0 || static_cast<size_t>(sub.material) >= scene.materials.size()) { allClamped = false; continue; }
+                const SceneMaterial& mat = scene.materials[static_cast<size_t>(sub.material)];
+                const bool clamped = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
+                                     scene.textures[static_cast<size_t>(mat.texture)].clamp;
+                anyClamped = anyClamped || clamped;
+                allClamped = allClamped && clamped;
+            }
+            if (!anyClamped) continue;
+            const std::string partId = mesh.part >= 0 && static_cast<size_t>(mesh.part) < scene.parts.size() ? scene.parts[static_cast<size_t>(mesh.part)].id : std::string();
+            if (!allClamped) {
+                ++mixedMeshes;
+                scene.warn(partId, "mesh '" + mesh.name + "' mixes clamp-wrapped and repeating main textures; its UVs keep the wrap");
+                continue;
+            }
+            bool moved = false;
+            for (auto& v : mesh.vertices) {
+                const float u = std::min(1.0f, std::max(0.0f, v.uv.x));
+                const float w = std::min(1.0f, std::max(0.0f, v.uv.y));
+                if (u != v.uv.x || w != v.uv.y) { v.uv = {u, w}; moved = true; }
+            }
+            if (moved) ++clampedMeshes;
+        }
+        if (clampedMeshes || mixedMeshes)
+            log("clamped the UVs of " + std::to_string(clampedMeshes) + " mesh(es) with clamp-wrapped main textures" +
+                (mixedMeshes ? ", left " + std::to_string(mixedMeshes) + " mixed-wrap mesh(es) alone" : std::string()));
     }
 
     if (std::getenv("CARDBRIDGE_DEBUG_RIG"))
