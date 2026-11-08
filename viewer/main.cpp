@@ -288,7 +288,7 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
@@ -439,6 +439,7 @@ struct App {
     bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
+    float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     ULONGLONG physicsLast = 0;
     double physicsAccum = 0.0;
     std::vector<Mat4> poseWorld;
@@ -586,6 +587,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
     if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
+    if (id == kSag) { r.v = &g.sag; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
@@ -603,7 +605,7 @@ bool SliderFor(int id, SliderRef& r) {
 }
 
 // Pose controls change the picture at once, no re-assembly.
-bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
+bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
 
 std::string Shorten(const std::string& s, size_t maxChars);
 
@@ -634,6 +636,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
         rows.push_back({1, kJiggleIntensity, "Jiggle intensity (1 = the game)", "Jiggle"});
+        rows.push_back({1, kSag, "Sag (1 = the card's hang, 0 = none)", "Jiggle"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -723,7 +726,7 @@ assemble::Pose BuildPose(const Loaded& L, bool includeSag = true) {
     if (g.aPose) assemble::MakeAPose(L.scene, g.aPoseDeg, p.base);
     // The static preview sags the same way the export does, so the viewer shows the hang even with physics off.
     // A bone the user drags herself keeps its own edit (AddSagPose skips those).
-    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity, g.sag);
     // Height: scale everything uniformly about the roots (feet) so the model's standing height is heightCm.
     // A root the user scaled herself keeps that scale multiplied by this factor.
     if (g.baseHeightCm > 1e-4f && g.heightCm > 1e-4f) {
@@ -1042,6 +1045,15 @@ void TweakEdited(int id, bool released) {
         InvalidatePanel();
         return;
     }
+    if (id == kSag) {   // static hang: change the pose at once (also re-prime the sim if it is running)
+        if (g.physics) {
+            if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+            g.physicsKick = g.physicsMoving = true;
+        }
+        ApplyPoseLive();
+        InvalidatePanel();
+        return;
+    }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kAreola && g.expOk) {   // the baked "as exported" copy has the old areola in its textures
         g.expOk = false;
@@ -1235,15 +1247,16 @@ void StartExport() {
     const std::vector<char> hiddenNow = g.hidden;
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
     const float jiggleIntensity = g.jiggleIntensity;
+    const float sag = g.sag;
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, pose, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
-            assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity);   // the bust/hips as they hang under gravity
+            assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity, sag);   // the bust/hips as they hang under gravity
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
             Log("baking the game shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.

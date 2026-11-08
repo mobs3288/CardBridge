@@ -51,8 +51,8 @@ float SceneHeightMeters(const Scene& scene);
 // Cosmetically finishes a posed (or rest) scene exactly as the character is seen: the body's own jiggle (bust and, when on, hips) is
 // simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The exported PMX starts
 // with the breast as it hangs in the game instead of pulled straight out of the chest. `intensity` is the same jiggle-intensity
-// the export writes as the joint swing limits.
-void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
+// the export writes as the joint swing limits; `sag` scales the static hang (1 = the card's own, 0 = none, 2 = double).
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag = 1.0f);
 
 // How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
 // respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,
@@ -63,8 +63,9 @@ float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasti
 // Adds that hang to a pose (the viewer calls this so the static preview already sags; the bake above uses the same pose).
 // Bust bones (bust / bnip) droop down-forward; butt bones (siri / kosi) droop down-back (less). Only the root of each
 // side is tilted, so the whole breast hangs as one piece. A side with no body jiggle chain, or with a stiff chain, gets
-// no (or barely any) tilt: the card is left as it is. A bone the user already edited keeps its own edit.
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity);
+// no (or barely any) tilt: the card is left as it is. `sag` scales the hang (1 = the card's own). A bone the user
+// already edited keeps its own edit.
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag = 1.0f);
 
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
 // (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit

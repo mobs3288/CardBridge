@@ -115,8 +115,9 @@ void usage() {
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
         "                                             standard (Japanese) names so a motion (VMD) finds them\n"
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
-        "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-intensity F]\n"
-        "                                             breast and butt jiggle are on by default (both bounce); the intensity scales the swing (1 = the game)\n"
+        "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-intensity F] [--sag F]\n"
+        "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
+        "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu]  which device the --gpu-view picture and the skinning use (auto prefers a discrete NVIDIA/AMD card; warp and software are the CPU fallbacks)\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
@@ -542,7 +543,8 @@ int cmdConvert(const Args& a) {
         // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.
         const bool settleBust = !a.has("no-jiggle-bust"), settleButt = !a.has("no-jiggle-butt");
         const float settleInt = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
-        assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt);
+        const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str())) : 1.0f;
+        assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt, settleSag);
     }
 
     // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)

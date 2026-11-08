@@ -236,7 +236,7 @@ float SceneHeightMeters(const Scene& scene) {
     return hi >= lo ? hi - lo : 0.0f;
 }
 
-void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
     if (scene.bones.empty() || (!jiggleBust && !jiggleButt)) return;
     const Pose rest;
     const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
@@ -286,7 +286,7 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     // baked the same way as the settle above (both previews and the exported PMX).
     if (!std::getenv("CARDBRIDGE_NO_SAG")) {
         Pose droop;
-        AddSagPose(scene, droop, jiggleBust, jiggleButt, jiggleIntensity);
+        AddSagPose(scene, droop, jiggleBust, jiggleButt, jiggleIntensity, sag);
         if (!droop.empty()) BakeSkin(scene, SkinMatrices(scene, droop));
     }
 }
@@ -304,7 +304,7 @@ float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasti
     return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale * (0.5f + jiggleIntensity));
 }
 
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
     auto isBust = [](const std::string& n) {
         return n.find("bust") != std::string::npos || n.find("bnip") != std::string::npos;
     };
@@ -357,9 +357,10 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
         }
         // A bone the user already moved keeps its edit.
         if (i < pose.bones.size() && !IsIdentity(pose.bones[i])) continue;
-        const float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
-                                : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
-        if (tilt < 0.01f) continue;   // stiff / perky card: leave it as it is
+        float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
+                          : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
+        tilt = std::min(bust ? 0.85f : 0.65f, tilt * std::max(0.0f, sag));
+        if (tilt < 0.01f) continue;   // stiff / perky card (or slider at 0): leave it as it is
         (void)clamp01f;
         // Forward for the bust, backward for the butt, both tipped toward straight down.
         const Vec3 from = bust ? Vec3{0, 0, 1} : Vec3{0, 0, -1};
