@@ -172,6 +172,7 @@ struct ScenePart {
     std::string id;           // stable: "head", "hair.back", "outfit0.top", "outfit0.acc03"
     std::string label;
     std::string group;        // Body, Head, Hair, Outfit, Accessories
+    bool fromClothing = false;   // the mesh came from the added clothing file (see Card::hasClothing); viewer lists it under "Added outfit"
     std::string property;
     int category = 0;
     int64_t sourceItemId = 0;
@@ -179,6 +180,7 @@ struct ScenePart {
     std::string detail;
     std::string modGuid, modName, modVersion, modAuthor, modPath;
     std::string bundle;       // "<abdata-relative path>" of the bundle the geometry came from
+    std::string attachNode;   // accessories: the body node the item hangs on (e.g. a_n_bust); empty for garments
     bool visibleInPreview = true;
     bool includeInExport = true;
     std::vector<int> meshes;  // indices into Scene::meshes

@@ -7,6 +7,9 @@
 // Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the outfit on screen in memory only
 // (hair worn as accessories is kept; the card on disk is never saved). It stays pinned to that one outfit slot: switching
 // to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// In the Parts list the import is its own "Added outfit" group, apart from the base model's Body/Head/Hair/Outfit/
+// Accessories: its header checkbox toggles every added part at once, each item keeps its own checkbox, the slot
+// marked * is the base outfit it replaced (shown as OUTFIT (REPLACED)), and < > move it to another slot.
 // D (or the Reset clothing button) drops the imported file and returns the current outfit to the card's own clothing.
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
@@ -269,8 +272,13 @@ constexpr int kRowH = 20;
 
 struct PartRow {
     int part = -1;        // -1 = a group header
-    std::string group;    // header text
+    std::string group;    // display group (base groups plus "Added outfit")
+    bool replaced = false;   // header-only: the base outfit this slot replaced (no parts follow)
 };
+
+// The display group of a part: added-clothing parts list under "Added outfit"
+// apart from the base model's groups (Body/Head/Hair/Outfit/Accessories).
+std::string DisplayGroup(const assemble::ScenePart& p) { return p.fromClothing ? "Added outfit" : p.group; }
 
 // ---- tweaks: the sliders and switches on top of what the card says --------------------------------------------------------
 // Changing one re-assembles the character (a few seconds, after the pointer has been still for a moment); the exported PMX is
@@ -300,7 +308,7 @@ struct TweakRow {
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
-    RECT clothingReset{};
+    RECT clothingReset{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
@@ -327,6 +335,8 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     l.outfitNameTop = 138;
     l.outfitChipsTop = 160;
     l.outfitClothTop = 184;
+    l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
+    l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
     l.clothingReset = {206, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
     for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 216, 59 + i * 51, 240};
     l.partsHeadingTop = 222;
@@ -1336,26 +1346,30 @@ void ToggleAsExported() {
 }
 
 // ---- part list --------------------------------------------------------------------------------------------------------
-std::vector<PartRow> BuildRows(const assemble::Scene& scene) {
+std::vector<PartRow> BuildRows(const Loaded& L) {
+    const assemble::Scene& scene = L.scene;
     std::vector<PartRow> rows;
-    static const char* order[] = {"Body", "Head", "Hair", "Outfit", "Accessories"};
+    static const char* order[] = {"Body", "Head", "Hair", "Outfit", "Accessories", "Added outfit"};
     std::set<std::string> seen;
+    const bool baseReplaced = L.card.hasClothing && L.card.clothingOutfit == L.outfit;
     auto addGroup = [&](const std::string& group) {
         bool any = false;
         for (const auto& p : scene.parts) {
-            if (p.group != group || p.underPiece) continue;   // under pieces follow their garments and the Nude body box
-            if (!any) { rows.push_back({-1, group}); any = true; }
-            rows.push_back({static_cast<int>(&p - scene.parts.data()), group});
+            if (DisplayGroup(p) != group || p.underPiece) continue;   // under pieces follow their garments and the Nude body box
+            if (!any) { rows.push_back({-1, group, false}); any = true; }
+            rows.push_back({static_cast<int>(&p - scene.parts.data()), group, false});
         }
+        if (!any && group == "Outfit" && baseReplaced)
+            rows.push_back({-1, std::string("Outfit"), true});   // the base outfit this slot replaced (kept visible, marked)
     };
     for (const char* group : order) { addGroup(group); seen.insert(group); }
     for (const auto& p : scene.parts)
-        if (!seen.count(p.group) && !p.underPiece) { addGroup(p.group); seen.insert(p.group); }
-    // Collapsed groups lose their part rows but keep the header.
+        if (!seen.count(DisplayGroup(p)) && !p.underPiece) { addGroup(DisplayGroup(p)); seen.insert(DisplayGroup(p)); }
+    // Collapsed groups lose their part rows but keep the header (the replaced-base header is never collapsible).
     std::vector<PartRow> out;
     std::string collapsed;
     for (const auto& row : rows) {
-        if (row.part < 0) { collapsed = g.collapsedGroups.count(row.group) ? row.group : std::string(); out.push_back(row); }
+        if (row.part < 0) { collapsed = !row.replaced && g.collapsedGroups.count(row.group) ? row.group : std::string(); out.push_back(row); }
         else if (collapsed != row.group) out.push_back(row);
     }
     return out;
@@ -1387,6 +1401,8 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.all, p)) return 5;
     if (PtInRect(&l.asExported, p)) return 6;
     if (PtInRect(&l.clothingReset, p)) return 7;   // reset the imported outfit to the card default
+    if (PtInRect(&l.clothingPrev, p)) return 8;    // move the imported outfit to the previous outfit slot
+    if (PtInRect(&l.clothingNext, p)) return 9;    // move the imported outfit to the next outfit slot
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }
@@ -1780,10 +1796,21 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             s.Text(g.fontUi, ui::kDim, 74, l.outfitNameTop, g.busy ? "loading ..." : "no card");
         }
         const int chips = L ? std::min(L->outfits, OutfitChipsPerRow()) : 0;
-        for (int i = 0; i < chips; ++i) Button(s, OutfitChipRect(l, i), std::to_string(i + 1), g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
+        {
+            bool hasC = false;
+            int cOutfit = -1;
+            if (L && L->card.hasClothing) { hasC = true; cOutfit = L->card.clothingOutfit; }
+            else { std::lock_guard<std::recursive_mutex> lk(g.mu); hasC = !g.clothingPath.empty(); cOutfit = g.clothingOutfit; }
+            for (int i = 0; i < chips; ++i) {
+                const bool marked = hasC && i == cOutfit;   // the slot whose base outfit was replaced
+                Button(s, OutfitChipRect(l, i), marked ? (std::to_string(i + 1) + "*") : std::to_string(i + 1),
+                       g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
+            }
+        }
     }
-    // outfit file: which slot holds the imported outfit (if any) and the way back
-    // to the card's own clothes for it. The button is drawn greyed when nothing
+    // outfit file: which slot holds the imported outfit (if any), the way back
+    // to the card's own clothes for it, and the slot it can move between
+    // without re-dropping the file. The buttons are drawn greyed when nothing
     // is imported, so the reset exists (and is findable) before the first drop.
     if (TouchesY(clip, l.outfitClothTop, l.outfitClothTop + 20)) {
         std::string clothingName;
@@ -1798,13 +1825,19 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         int shown = L ? L->outfit : -1;
         if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
         const bool onThisOutfit = hasClothing && clothingOutfit == shown;
+        // The slot it overwrote is the base outfit it replaced ("*" on its chip).
+        // Short label: the < > slot picker takes the rest of the row.
         if (hasClothing) {
-            const std::string where = "outfit " + std::to_string(clothingOutfit + 1) + ": " + ClipText(clothingName, 20);
+            const std::string where = "#" + std::to_string(clothingOutfit + 1) + " " + ClipText(clothingName, 14);
             s.Text(g.fontSmall, onThisOutfit ? ui::kAmber : ui::kDim, 12, l.outfitClothTop + 3,
-                   ClipText(onThisOutfit ? "imported on this slot (" + where + ")" : "imported on " + where, 34));
+                   ClipText("Added: " + where, 20));
         } else {
-            s.Text(g.fontSmall, ui::kDim, 12, l.outfitClothTop + 3, ClipText("card's own clothing (drop an outfit file)", 34));
+            s.Text(g.fontSmall, ui::kDim, 12, l.outfitClothTop + 3, ClipText("card's own clothing", 20));
         }
+        const bool canPrev = hasClothing && L && clothingOutfit > 0;
+        const bool canNext = hasClothing && L && clothingOutfit + 1 < L->outfits;
+        Button(s, l.clothingPrev, "<", g.hoverButton == 8, false, canPrev && !g.busy);
+        Button(s, l.clothingNext, ">", g.hoverButton == 9, false, canNext && !g.busy);
         Button(s, l.clothingReset, "Reset clothing", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
     }
 
@@ -1916,7 +1949,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                 s.Begin(clip);
             }
         } else {
-            const std::vector<PartRow> rows = BuildRows(L->scene);
+            const std::vector<PartRow> rows = BuildRows(*L);
             const int visible = VisibleRows(l);
             g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(rows.size()) - visible));
             g.partPos = std::clamp(g.partPos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(rows.size()) - visible)));
@@ -1932,14 +1965,35 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     const bool hot = idx == g.hoverRow;
                     if (row.part < 0) {
                         if (hot) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
-                        std::string name = row.group;
-                        for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                        const bool collapsed = g.collapsedGroups.count(row.group) != 0;
-                        int count = 0;
-                        for (const auto& p : L->scene.parts) if (p.group == row.group && !p.underPiece) ++count;
-                        Expander(s, 14, y + kRowH / 2, !collapsed, ui::kAccent);
-                        s.Text(g.fontBold, ui::kAccent, 30, y + 3, name);
-                        s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
+                        if (row.replaced) {   // the base outfit this slot replaced: kept visible, marked, no parts follow
+                            s.Text(g.fontBold, ui::kAmber, 14, y + 3, "OUTFIT (REPLACED)");
+                            s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, "base outfit replaced by Added outfit");
+                        } else if (row.group == "Added outfit") {   // added clothing: master checkbox + collapse
+                            bool masterOn = true;
+                            for (const auto& p : L->scene.parts) {
+                                if (DisplayGroup(p) != row.group || p.underPiece) continue;
+                                const int pi = static_cast<int>(&p - L->scene.parts.data());
+                                if (static_cast<size_t>(pi) < g.hidden.size() && g.hidden[static_cast<size_t>(pi)]) { masterOn = false; break; }
+                            }
+                            CheckBox(s, 14, y + 3, masterOn, ui::kAmber);
+                            std::string name = row.group;
+                            for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                            const bool collapsed = g.collapsedGroups.count(row.group) != 0;
+                            int count = 0;
+                            for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
+                            Expander(s, 34, y + kRowH / 2, !collapsed, ui::kAccent);
+                            s.Text(g.fontBold, ui::kAmber, 52, y + 3, name);
+                            s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
+                        } else {
+                            std::string name = row.group;
+                            for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                            const bool collapsed = g.collapsedGroups.count(row.group) != 0;
+                            int count = 0;
+                            for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
+                            Expander(s, 14, y + kRowH / 2, !collapsed, ui::kAccent);
+                            s.Text(g.fontBold, ui::kAccent, 30, y + 3, name);
+                            s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
+                        }
                     } else {
                         const auto& p = L->scene.parts[static_cast<size_t>(row.part)];
                         const bool off = static_cast<size_t>(row.part) < g.hidden.size() && g.hidden[static_cast<size_t>(row.part)];
@@ -1952,6 +2006,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         CheckBox(s, 16, y + 3, !off, ok ? ui::kAccent : ui::kBad);
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
+                        if (p.fromClothing) name += "  (added)";
                         s.Text(g.fontMono, col, 38, y + 3, name, &clipText);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
                         s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, kPanel - 16, y + 4, tris);
@@ -2172,6 +2227,27 @@ void ResetClothing() {
     Log("clothing reset to the card's own outfit" + (name.empty() ? std::string() : " (dropped " + name + ")"), LogKind::Good);
     g.cam = {};
     StartLoad(g.cardPath, L->outfit, true);
+}
+
+// Moves the imported outfit to the next/previous outfit slot and shows it
+// there, without re-dropping the file (the card is reloaded from disk and the
+// file re-applied to the new slot).
+void MoveClothing(int delta) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.cardPath.empty()) return;
+    if (g.busy) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    int target = -1;
+    std::string name;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.clothingPath.empty()) return;
+        name = g.clothingName;
+        target = g.clothingOutfit + delta;
+        if (target < 0 || target >= L->outfits) return;
+        g.clothingOutfit = target;
+    }
+    Log("clothing moved to outfit " + std::to_string(target + 1) + (name.empty() ? std::string() : " (" + name + ")"), LogKind::Good);
+    StartLoad(g.cardPath, target, true);
 }
 
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
@@ -2900,6 +2976,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 5) { if (Current()) ShowAll(); return 0; }
             if (button == 6) { ToggleAsExported(); InvalidateRect(hwnd, nullptr, FALSE); InvalidatePanel(); return 0; }
             if (button == 7) { ResetClothing(); return 0; }
+            if (button == 8) { MoveClothing(-1); return 0; }
+            if (button == 9) { MoveClothing(1); return 0; }
             if (button >= 10) {
                 g.showIssues = false;
                 g.tab = button - 10;
@@ -2917,16 +2995,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, false); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
             if (L && !g.showIssues) {
-                std::vector<PartRow> rows = BuildRows(L->scene);
+                std::vector<PartRow> rows = BuildRows(*L);
                 int idx = RowAt(rows, l, x, y);
                 if (idx >= 0) {
                     const PartRow& row = rows[static_cast<size_t>(idx)];
                     if (row.part < 0) {
-                        if (g.collapsedGroups.count(row.group)) g.collapsedGroups.erase(row.group);
-                        else g.collapsedGroups.insert(row.group);
-                        g.hoverRow = -1;
-                        g.hoverPart = -1;
-                        InvalidatePanel();
+                        if (row.replaced) { /* nothing to expand: the base outfit has no parts left */ }
+                        else if (row.group == "Added outfit" && x < 30) {   // master checkbox: all added parts at once
+                            bool masterOn = true;
+                            for (const auto& p : L->scene.parts) {
+                                if (DisplayGroup(p) != row.group || p.underPiece) continue;
+                                const int pi = static_cast<int>(&p - L->scene.parts.data());
+                                if (static_cast<size_t>(pi) < g.hidden.size() && g.hidden[static_cast<size_t>(pi)]) { masterOn = false; break; }
+                            }
+                            for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
+                                if (DisplayGroup(L->scene.parts[i]) == row.group && !L->scene.parts[i].underPiece)
+                                    g.hidden[i] = masterOn ? 1 : 0;
+                            g.soloPart = -1;
+                            for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
+                                if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
+                                    L->scene.parts[i].visibleInPreview = !g.hidden[i];
+                            Log(masterOn ? "hide Added outfit" : "show Added outfit");
+                            ReshapeNow(true);
+                            g.dirty = true;
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            InvalidatePanel();
+                        } else {
+                            if (g.collapsedGroups.count(row.group)) g.collapsedGroups.erase(row.group);
+                            else g.collapsedGroups.insert(row.group);
+                            g.hoverRow = -1;
+                            g.hoverPart = -1;
+                            InvalidatePanel();
+                        }
                     } else if (static_cast<size_t>(row.part) < g.hidden.size()) {
                         g.hidden[static_cast<size_t>(row.part)] ^= 1;
                         g.soloPart = -1;
@@ -2977,7 +3077,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, true); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
             if (L && !g.showIssues) {
-                std::vector<PartRow> rows = BuildRows(L->scene);
+                std::vector<PartRow> rows = BuildRows(*L);
                 int idx = RowAt(rows, l, x, y);
                 if (idx >= 0 && rows[static_cast<size_t>(idx)].part >= 0) {
                     int part = rows[static_cast<size_t>(idx)].part;
@@ -3057,7 +3157,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues) {
-                std::vector<PartRow> rows = BuildRows(L->scene);
+                std::vector<PartRow> rows = BuildRows(*L);
                 int idx = RowAt(rows, l, x, y);
                 if (idx >= 0) {
                     g.hoverRow = idx;
@@ -3161,7 +3261,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     int maxScroll = std::max(0, static_cast<int>(BuildTweakRows(g.tab).size()) - VisibleRows(l));
                     g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
                 } else {
-                    std::vector<PartRow> rows = BuildRows(L->scene);
+                    std::vector<PartRow> rows = BuildRows(*L);
                     int maxScroll = std::max(0, static_cast<int>(rows.size()) - VisibleRows(l));
                     g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
                 }
@@ -3188,7 +3288,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                     hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
                 } else if (L && !g.showIssues) {
-                    std::vector<PartRow> rows = BuildRows(L->scene);
+                    std::vector<PartRow> rows = BuildRows(*L);
                     hand = RowAt(rows, l, p.x, p.y) >= 0;
                 }
             }

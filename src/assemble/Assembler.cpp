@@ -1,4 +1,5 @@
 #include "assemble/Assembler.h"
+#include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
 
@@ -2280,8 +2281,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.id = ref.partId;
         part.label = ref.label;
         part.group = ref.group;
+        part.fromClothing = card.clothingPartIds.count(ref.partId) != 0;
+        if (!part.fromClothing && ref.subKind >= 0) {   // top sub-parts inherit the top's provenance
+            const size_t at = ref.partId.find(".sub_");
+            if (at != std::string::npos) part.fromClothing = card.clothingPartIds.count(ref.partId.substr(0, at)) != 0;
+        }
         part.property = ref.property;
         part.category = ref.category;
+        part.attachNode = ref.attachNode;
         part.sourceItemId = ref.id;
         part.status = resolve::StatusName(item.status);
         part.detail = item.detail;
@@ -3251,6 +3258,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 piece.id = parent.id + ".under." + tag;
                 piece.label = parent.label + " under " + tag;
                 piece.group = parent.group;
+                piece.fromClothing = parent.fromClothing;
                 piece.status = parent.status;
                 piece.bundle = parent.bundle;
                 piece.detail = "the " + what + " triangles that " + tag + " covers (kept so the nude body can be shown)";
@@ -3384,6 +3392,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "\n");
         }
     settleHeels(scene);
+    if (opt.autoCloth && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH")) SynthesizeAutoCloth(scene, log);
     return scene;
 }
 

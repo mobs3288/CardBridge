@@ -1835,6 +1835,11 @@ void unitTests() {
         bool hairRowKept = false;
         for (const auto& r : c.rows) if (r.property == "outfit2.accessory8.ChaFileAccessory.PartsInfo.id" && r.slot == 568) hairRowKept = true;
         CHECK(hairRowKept);   // the resolver still finds the hair
+        // Added-clothing provenance: the file's parts are marked apart from the base model's.
+        CHECK(c.hasClothing && c.clothingOutfit == 2 && c.clothingName == "Test Outfit");
+        CHECK(c.clothingPartIds.count("outfit2.top") != 0 && c.clothingPartIds.count("outfit2.bottom") != 0);
+        CHECK(c.clothingPartIds.count("outfit2.shoes_inner") != 0 && c.clothingPartIds.count("outfit2.acc00") != 0);
+        CHECK(c.clothingPartIds.count("outfit2.acc08") == 0);   // the kept hair accessory is base, not added
     });
     test("clothing: a non-hair accessory in the way is replaced, and an empty outfit slot never clears the character", [] {
         auto accPart = [](int64_t type, int64_t id, const char* parent) {

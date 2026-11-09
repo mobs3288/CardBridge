@@ -3,6 +3,7 @@
 #include "core/Bytes.h"
 #include "core/Value.h"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,15 @@ struct Card {
     std::vector<Outfit> outfits;
     Value extended;                  // KKEx: plugin id -> [version, payload]
     std::vector<ResolveRow> rows;
+
+    // Added clothing (in-memory only, set by ApplyClothing): which parts came
+    // from a ClothingFile so the viewer/exporter can list them apart from the
+    // base model. Empty when no outfit file was applied.
+    bool hasClothing = false;
+    std::string clothingName;   // the file's own outfit name
+    std::string clothingPath;   // the file it was applied from
+    int clothingOutfit = -1;    // the outfit slot it overwrote
+    std::set<std::string> clothingPartIds;   // "outfitN.top", "outfitN.acc03", ...
 
     std::string displayName() const;
 

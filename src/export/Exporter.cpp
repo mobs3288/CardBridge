@@ -314,6 +314,8 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
                   {"family", card::FamilyName(card.family)}, {"marker", card.marker}, {"format_version", card.formatVersion}};
     j["character"] = {{"name", scene.name}, {"outfit", opt.outfit}};
     j["game_adapter"] = "koikatsu";
+    if (card.hasClothing)
+        j["added_outfit"] = {{"name", card.clothingName}, {"file", fileio::FileName(card.clothingPath)}, {"outfit", card.clothingOutfit}};
     j["provenance"] = {{"asset_library", opt.assetLibrary}, {"mods_folder", opt.modsFolder}};
     j["export"] = {{"format", "pmx"}, {"file", pmxFile}, {"scale", opt.scale}, {"axes", "y-up, left-handed"}, {"facing", opt.faceMinusZ ? "-z" : "+z"},
                    {"uv", "v flipped to top-left origin"}, {"texture_mode", "copy_required_textures"}, {"textures_dir", "textures"}};
@@ -331,6 +333,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
         jp["property"] = p.property;
         jp["visible_in_preview"] = p.visibleInPreview;
         jp["include_in_export"] = p.includeInExport;
+        if (p.fromClothing) jp["from_clothing"] = true;
         if (p.underPiece) { jp["under_piece_of"] = p.underOf; jp["covered_by"] = p.coveredBy; }
         if (p.startHidden) jp["start_hidden"] = true;
         if (p.nudeSwitch) jp["nude_switch"] = true;

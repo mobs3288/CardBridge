@@ -1,6 +1,7 @@
 #include "card/CardFile.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -957,6 +958,31 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
                 else if (charHasKcox)
                     rep.notes.emplace_back("KoiClothesOverlayX: previous outfit's garment paint cleared (the file has no overlays)");
             }
+        }
+    }
+    // Added-clothing provenance: which assembled parts came from the file.
+    // Their ScenePart.group stays Outfit/Accessories (the exporter's Take-off
+    // and mask logic key on it); the fromClothing flag is what the viewer
+    // lists separately under "Added outfit".
+    card.hasClothing = true;
+    card.clothingName = clothes.name.empty() ? clothes.path : clothes.name;
+    card.clothingPath = clothes.path;
+    card.clothingOutfit = outfit;
+    card.clothingPartIds.clear();
+    {
+        static const char* kSlot[9] = {"top", "bottom", "bra", "shorts", "gloves", "pantyhose", "socks", "shoes_inner", "shoes_outer"};
+        const Value& cp = target.clothes.at("parts");
+        if (cp.isArray())
+            for (size_t i = 0; i < cp.size() && i < 9; ++i) {
+                if (cp.at(i).at("id").asInt(0) == 0) continue;
+                card.clothingPartIds.insert("outfit" + std::to_string(outfit) + "." + kSlot[i]);
+            }
+        for (size_t i = 0; i < clothToMerged.size(); ++i) {
+            const int merged = clothToMerged[i];
+            if (merged < 0) continue;
+            char num[8];
+            std::snprintf(num, sizeof num, "%02d", merged);
+            card.clothingPartIds.insert("outfit" + std::to_string(outfit) + ".acc" + num);
         }
     }
     // The in-memory merge is all the viewer and the exporter read (Resolver
