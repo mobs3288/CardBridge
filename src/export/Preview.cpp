@@ -11,6 +11,7 @@
 #include <limits>
 #include <cstring>
 #include <thread>
+#include <mutex>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -327,6 +328,7 @@ struct ShaderRuntime {
 struct ViewState {
     std::vector<Mips> mips;
     std::vector<bool> built;
+    std::mutex mipMutex;   // mip chains are built lazily inside threaded shaders: build+sample must not race
     std::vector<std::unique_ptr<ShaderRuntime>> shaders;   // per Scene::shaders
 };
 
@@ -449,8 +451,11 @@ struct MatTextures : shader::ISm4Textures {
         for (const auto& tb : mat->texProps)
             if (tb.name == *name && tb.texture >= 0) {
                 size_t ti = static_cast<size_t>(tb.texture);
-                if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
-                if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                if (ti >= st->built.size() || !st->built[ti]) {   // lazy build (a texture the caller did not pre-build): build under lock so two workers cannot build/read the same chain at once
+                    std::lock_guard<std::mutex> lk(st->mipMutex);
+                    if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
+                    if (ti >= st->built.size() || !st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                }
                 const Mips& m = st->mips[ti];
                 int l = std::min(static_cast<int>(m.w.size()) - 1, std::max(0, static_cast<int>(lodIn >= 0 ? lodIn : lod)));
                 bool cl = scene->textures[ti].clamp || std::getenv("CARDBRIDGE_CLAMP_ALL");
@@ -463,8 +468,11 @@ struct MatTextures : shader::ISm4Textures {
         for (const auto& tb : scene->globalTextures)
             if (tb.name == *name && tb.texture >= 0) {
                 size_t ti = static_cast<size_t>(tb.texture);
-                if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
-                if (!st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                if (ti >= st->built.size() || !st->built[ti]) {
+                    std::lock_guard<std::mutex> lk(st->mipMutex);
+                    if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
+                    if (ti >= st->built.size() || !st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                }
                 bool cl = scene->textures[ti].clamp;
                 SampleBilinear(st->mips[ti], 0, cl ? coord[0] : coord[0] - std::floor(coord[0]), cl ? coord[1] : coord[1] - std::floor(coord[1]), out, cl);
                 return;
@@ -1046,6 +1054,11 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
+    // Build every mip chain before any worker runs: a texture a shader samples that was not in its material's
+    // texProps would otherwise be built lazily inside workers, where two workers can build/read the same chain
+    // at once and a texel can sample white/partial mips instead of the real texture.
+    for (size_t ti = 0; ti < scene.textures.size(); ++ti) BuildTexMips(scene, st, static_cast<int>(ti));
+    for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
     float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
     if (lit) {   // the light and camera of the front view the shaded picture uses, so the texture holds the same shading
         // Framed on what the viewer shows (visible final parts), not on hidden
@@ -1327,6 +1340,8 @@ void RunCreateJobs(assemble::Scene& scene) {
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
+    for (size_t ti = 0; ti < scene.textures.size(); ++ti) BuildTexMips(scene, st, static_cast<int>(ti));   // see BakeShaderTextures: no lazy mip building inside workers
+    for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
     const float L[3] = {0.0f, 0.0f, 1.0f}, camPos[3] = {0.0f, 0.0f, 5.0f};
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     for (auto& job : scene.createJobs) {
