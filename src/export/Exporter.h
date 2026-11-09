@@ -37,7 +37,11 @@ struct ExportResult {
 // <outDir>/<name>.cardbridge.json - one self-contained folder with relative
 // paths only, the contract the engine importer reads (plan section 16.1).
 // Parts with includeInExport == false are left out of the PMX but stay listed
-// in the manifest. Throws FormatError on IO or consistency errors.
+// in the manifest. Callers first run ApplyPartStateForExport with the viewer's
+// checkboxes: an unticked item becomes includeInExport == false, so it (and
+// the bones only it used) leaves no trace in the PMX, and the preview PNGs
+// are the viewer's picture at export time. Throws FormatError on IO or
+// consistency errors.
 ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt);
 
 // Structural checks on an assembled scene, each finding one line: indices outside their arrays, non-finite positions, vertex

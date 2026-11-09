@@ -672,10 +672,18 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     fileio::WriteFile(res.pmxPath, pmxBytes.data(), pmxBytes.size());
 
     // A picture of what was written (front, side, back): a conversion can be judged without a PMX viewer.
+    // Every preview image uses the same final hidden state as the viewer at
+    // export time (1:1), so a hidden list item is in none of them - and in
+    // neither the PMX nor its bones.
     log("rendering preview images");
+    const std::vector<char> effHidden = ExportHiddenParts(scene);
     res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
-    Bytes prev = RenderPreviewPng(scene);
-    fileio::WriteFile(res.previewPath, prev.data(), prev.size());
+    {
+        PreviewOptions po;
+        po.hiddenParts = &effHidden;
+        Bytes prev = RenderPreviewPng(scene, po);
+        fileio::WriteFile(res.previewPath, prev.data(), prev.size());
+    }
     {   // a head close-up, to compare face and hair against the card's own picture
         PreviewOptions head;
         head.views = 1;
@@ -683,6 +691,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         head.viewHeight = 640;
         head.yTop = 1.0f;
         head.yBottom = 0.84f;
+        head.hiddenParts = &effHidden;
         Bytes hp = RenderPreviewPng(scene, head);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
     }
@@ -691,6 +700,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         cam.yawDeg = 30;
         cam.pitchDeg = 8;
         ViewOptions vo;
+        vo.hiddenParts = &effHidden;
         auto vs = NewViewState();
         std::vector<uint32_t> px;
         RenderView(scene, cam, 640, 800, vo, *vs, px);
@@ -706,6 +716,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         cam.pitchDeg = 4;
         ViewOptions vo;
         vo.shaded = true;
+        vo.hiddenParts = &effHidden;
         auto vs = NewViewState();
         std::vector<uint32_t> px;
         RenderView(scene, cam, 640, 800, vo, *vs, px);
@@ -721,6 +732,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         feet.viewHeight = 560;
         feet.yTop = 0.16f;
         feet.yBottom = 0.0f;
+        feet.hiddenParts = &effHidden;
         Bytes fp = RenderPreviewPng(scene, feet);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_feet.png"), fp.data(), fp.size());
     }

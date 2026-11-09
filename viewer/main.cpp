@@ -1271,7 +1271,7 @@ void StartExport() {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity, sag);   // the bust/hips as they hang under gravity
-            exporter::ApplyPartStateForExport(scene, hiddenNow);   // the PMX starts the way the viewer shows it; morphs switch the rest
+            exporter::ApplyPartStateForExport(scene, hiddenNow);   // hidden items leave the PMX entirely (meshes, chains and their own bones); the preview is the viewer, 1:1
             Log("baking the game shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
             exporter::BakeShaderTextures(scene, 1024, false, nullptr, [](const std::string& m) { Log("  " + m); }, true, true);

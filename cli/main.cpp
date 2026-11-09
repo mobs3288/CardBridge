@@ -120,6 +120,9 @@ void usage() {
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
+        "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
+        "                                             in the preview or the PMX at all, bones included; --nude ticks the\n"
+        "                                             Nude body box (skin under the clothes shows)\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
@@ -568,7 +571,7 @@ int cmdConvert(const Args& a) {
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt, settleSag);
     }
 
-    // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes)
+    // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes); a hidden item is not in the PMX at all, bones included (1:1 with the viewer)
     std::vector<char> hiddenParts(scene.parts.size(), 0);
     {
         std::string list = "," + a.get("hide") + ",";

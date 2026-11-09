@@ -13,6 +13,7 @@
 #include <thread>
 #include <map>
 #include <memory>
+#include <set>
 
 #include "export/ColourGrade.h"
 #include "shader/Sm4.h"
@@ -125,11 +126,25 @@ void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4], bool
 } // namespace
 
 Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) {
+    // Exactly what the viewer shows and what the PMX starts with (1:1): exported
+    // parts that are not hidden - not just includeInExport. hiddenParts, when
+    // given, is the viewer's EffectiveHiddenParts flags; otherwise the scene's
+    // own final state (startHidden / visibleInPreview) is the flags.
+    auto visible = [&](size_t pi) {
+        const auto& part = scene.parts[pi];
+        if (!part.includeInExport) return false;
+        const char flag = opt.hiddenParts && pi < opt.hiddenParts->size() ? (*opt.hiddenParts)[pi] : 0;
+        if (flag == 2) return true;
+        if (flag == 1) return false;
+        if (part.startHidden) return false;
+        if (part.underPiece) return !part.startHidden;   // visibleInPreview is false for skin kept under cloth
+        return part.visibleInPreview;
+    };
     // Bounds over everything that will be drawn.
     Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
-    for (const auto& part : scene.parts) {
-        if (!part.includeInExport) continue;
-        for (int mi : part.meshes)
+    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        if (!visible(pi)) continue;
+        for (int mi : scene.parts[pi].meshes)
             for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
                 mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
                 mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
@@ -152,9 +167,9 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
     bool closeUp = (opt.yTop - opt.yBottom) < 0.9f;
     if (closeUp) {   // centre a close-up on the geometry inside its window, not on the whole model
         Pt wn{1e30f, 1e30f, 1e30f}, wx{-1e30f, -1e30f, -1e30f};
-        for (const auto& part : scene.parts) {
-            if (!part.includeInExport) continue;
-            for (int mi : part.meshes)
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+            if (!visible(pi)) continue;
+            for (int mi : scene.parts[pi].meshes)
                 for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
                     if (v.pos.y < y0 || v.pos.y > y1) continue;
                     wn = {std::min(wn.x, v.pos.x), 0, std::min(wn.z, v.pos.z)};
@@ -193,9 +208,9 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
         std::vector<char> projDone(scene.meshes.size(), 0);
         struct Item { int mi, sub, queue; bool overlay; };
         std::vector<Item> items;
-        for (const auto& part : scene.parts) {
-            if (!part.includeInExport) continue;
-            for (int mi : part.meshes) {
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+            if (!visible(pi)) continue;
+            for (int mi : scene.parts[pi].meshes) {
                 const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
                 for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
@@ -830,15 +845,197 @@ std::vector<char> EffectiveHiddenParts(const assemble::Scene& scene, const std::
     return eff;
 }
 
+std::vector<char> ExportHiddenParts(const assemble::Scene& scene) {
+    std::vector<char> eff(scene.parts.size(), 0);
+    for (size_t i = 0; i < scene.parts.size(); ++i) {
+        const auto& p = scene.parts[i];
+        if (!p.includeInExport) { eff[i] = 1; continue; }
+        if (p.underPiece) eff[i] = p.startHidden ? 1 : 2;
+        else if (p.startHidden || !p.visibleInPreview) eff[i] = 1;
+    }
+    return eff;
+}
+
+// Which chains / colliders a chain's owner keeps alive for the export.
+static bool ChainIsExported(const assemble::Scene& scene, const assemble::SceneChain& ch) {
+    if (ch.part == "rig") {   // the body's own jiggle: exported when the body is
+        for (const auto& p : scene.parts)
+            if (p.includeInExport && p.id == "body") return true;
+        return false;
+    }
+    for (const auto& p : scene.parts)
+        if (p.includeInExport && p.id == ch.part) return true;
+    // A chain whose owner id has no part row (e.g. a test scene) is kept only
+    // when nothing marks its part as excluded.
+    for (const auto& p : scene.parts)
+        if (!p.includeInExport && p.id == ch.part) return false;
+    return true;
+}
+
+size_t PruneExportBones(assemble::Scene& scene) {
+    if (scene.bones.empty()) return 0;
+    // Parts that will not be in the PMX (hidden after Apply, or never included).
+    std::set<std::string> excluded;
+    for (const auto& p : scene.parts)
+        if (!p.includeInExport) excluded.insert(p.id);
+    if (excluded.empty()) {
+        // Still drop chains / colliders of parts that never made it in (their
+        // owners are the only excluded ids) - nothing to do when there are none.
+        return 0;
+    }
+    const size_t n = scene.bones.size();
+    // Owner of each bone: the part that added it ("rig" for the shared skeleton).
+    auto isCandidate = [&](size_t i) {
+        return excluded.count(scene.bones[i].source) != 0;
+    };
+    std::vector<char> used(n, 0);
+    // Bones the exported meshes are skinned to.
+    for (const auto& p : scene.parts) {
+        if (!p.includeInExport) continue;
+        for (int mi : p.meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+            for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices)
+                for (int k = 0; k < 4; ++k)
+                    if (v.weight[k] > 0 && v.bone[k] >= 0 && static_cast<size_t>(v.bone[k]) < n) used[static_cast<size_t>(v.bone[k])] = 1;
+        }
+    }
+    // Bones the exported physics chains hang from.
+    std::vector<char> chainKept(scene.chains.size(), 0);
+    bool anyChain = false;
+    for (size_t i = 0; i < scene.chains.size(); ++i)
+        if (ChainIsExported(scene, scene.chains[i])) {
+            chainKept[i] = 1;
+            anyChain = true;
+            for (int b : scene.chains[i].bones)
+                if (b >= 0 && static_cast<size_t>(b) < n) used[static_cast<size_t>(b)] = 1;
+        }
+    // Body colliders only matter when a chain will collide with them; their
+    // bones are rig bones and stay anyway, but mark them so a hidden item's
+    // collider bone is not pruned from under an exported chain's collider.
+    if (anyChain)
+        for (const auto& c : scene.colliders)
+            if (!c.inside && c.bone >= 0 && static_cast<size_t>(c.bone) < n) used[static_cast<size_t>(c.bone)] = 1;
+
+    // Tentatively drop only hidden-owned bones that nothing exported uses.
+    std::vector<char> keep(n, 1);
+    for (size_t i = 0; i < n; ++i)
+        if (isCandidate(i) && !used[i]) keep[i] = 0;
+    // ... but a used bone keeps its whole ancestor chain, even if an ancestor
+    // is itself a hidden-owned joint with no weight of its own.
+    for (size_t i = 0; i < n; ++i) {
+        if (!used[i]) continue;
+        for (int p = scene.bones[i].parent; p >= 0 && static_cast<size_t>(p) < n && p != static_cast<int>(i); p = scene.bones[static_cast<size_t>(p)].parent) {
+            keep[static_cast<size_t>(p)] = 1;
+            if (scene.bones[static_cast<size_t>(p)].parent == p) break;
+        }
+    }
+    // Map old -> new; -1 for pruned.
+    std::vector<int> remap(n, -1);
+    std::vector<assemble::SceneBone> bones;
+    for (size_t i = 0; i < n; ++i)
+        if (keep[i]) {
+            remap[i] = static_cast<int>(bones.size());
+            bones.push_back(scene.bones[i]);
+        }
+    const size_t pruned = n - bones.size();
+    if (!pruned) {
+        // Still drop the hidden items' physics so nothing of them is exported.
+        std::vector<assemble::SceneChain> chains;
+        for (size_t i = 0; i < scene.chains.size(); ++i) if (chainKept[i]) chains.push_back(scene.chains[i]);
+        scene.chains = std::move(chains);
+        return 0;
+    }
+    // Parent indices into the compact table.
+    for (size_t i = 0; i < bones.size(); ++i) {
+        const int p = bones[i].parent;
+        bones[i].parent = (p >= 0 && static_cast<size_t>(p) < n) ? remap[static_cast<size_t>(p)] : -1;
+    }
+    auto remapBone = [&](int b) {
+        return (b >= 0 && static_cast<size_t>(b) < n) ? remap[static_cast<size_t>(b)] : -1;
+    };
+    // Vertices: a pruned bone can only carry zero weight (weighted use keeps
+    // it), so park it on the root; a zero-weight slot must still name a real
+    // bone for the PMX writer.
+    const int root = bones.empty() ? -1 : 0;
+    for (auto& mesh : scene.meshes)
+        for (auto& v : mesh.vertices)
+            for (int k = 0; k < 4; ++k) {
+                const int nb = remapBone(v.bone[k]);
+                v.bone[k] = nb >= 0 ? nb : root;
+            }
+    // Chains of hidden items are gone; exported chains keep (remapped) bones.
+    std::vector<assemble::SceneChain> chains;
+    for (size_t i = 0; i < scene.chains.size(); ++i) {
+        if (!chainKept[i]) continue;
+        auto ch = scene.chains[i];
+        std::vector<size_t> idx;
+        std::vector<int> nb;
+        for (size_t k = 0; k < ch.bones.size(); ++k) {
+            const int r = remapBone(ch.bones[k]);
+            if (r < 0) continue;
+            idx.push_back(k);
+            nb.push_back(r);
+        }
+        if (nb.size() < 2) continue;
+        auto trim = [&](std::vector<float>& per) {
+            if (per.empty()) return;
+            std::vector<float> t;
+            for (size_t k : idx) if (k < per.size()) t.push_back(per[k]);
+            per = std::move(t);
+        };
+        trim(ch.boneDamping);
+        trim(ch.boneElasticity);
+        trim(ch.boneStiffness);
+        ch.bones = std::move(nb);
+        chains.push_back(std::move(ch));
+    }
+    scene.chains = std::move(chains);
+    // Colliders whose bone was pruned leave with their hidden item.
+    std::vector<assemble::SceneCollider> colliders;
+    for (const auto& c : scene.colliders) {
+        const int r = remapBone(c.bone);
+        if (r < 0) continue;
+        auto cc = c;
+        cc.bone = r;
+        colliders.push_back(std::move(cc));
+    }
+    scene.colliders = std::move(colliders);
+    // Pose entries for bones that no longer exist would name nothing.
+    if (!scene.pose.empty()) {
+        std::set<std::string> names;
+        for (const auto& b : bones) names.insert(b.name);
+        std::vector<assemble::ScenePoseEntry> pose;
+        for (const auto& e : scene.pose) if (names.count(e.bone)) pose.push_back(e);
+        scene.pose = std::move(pose);
+    }
+    scene.bones = std::move(bones);
+    scene.warn("", "export: " + std::to_string(pruned) + " bone(s) of hidden items not exported");
+    return pruned;
+}
+
 void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hiddenIn) {
     std::vector<char> hidden = hiddenIn;
     hidden.resize(scene.parts.size(), 0);
     const std::vector<char> eff = EffectiveHiddenParts(scene, hidden);
     for (size_t i = 0; i < scene.parts.size(); ++i) {
         auto& p = scene.parts[i];
-        if (p.underPiece) p.startHidden = eff[i] == 1;
-        else if ((p.group == "Outfit" || p.group == "Accessories" || p.group == "Hair") && !p.nudeSwitch) p.startHidden = hidden[i] != 0;
+        if (p.underPiece) {
+            // Kept in the PMX for the Nude morph, transparent while covered.
+            p.startHidden = eff[i] == 1;
+        } else if (p.nudeSwitch) {
+            p.includeInExport = false;
+        } else if (hidden[i]) {
+            // An unticked list item is gone from the final PMX, exactly as it
+            // is gone from the viewer (1:1): no materials to toggle, and its
+            // bones are pruned below.
+            p.includeInExport = false;
+            p.startHidden = false;
+        } else {
+            // Visible: stays, and gets a "Hide <part>" morph below.
+            p.startHidden = false;
+        }
     }
+    PruneExportBones(scene);
 }
 
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
@@ -850,9 +1047,12 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     st.built.assign(scene.textures.size(), false);
     float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
     if (lit) {   // the light and camera of the front view the shaded picture uses, so the texture holds the same shading
+        // Framed on what the viewer shows (visible final parts), not on hidden
+        // items that were removed from the export.
         Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
         for (const auto& part : scene.parts) {
-            if (!part.includeInExport || !part.visibleInPreview) continue;
+            if (!part.includeInExport || part.startHidden) continue;
+            if (!part.underPiece && !part.visibleInPreview) continue;
             for (int me : part.meshes)
                 for (const auto& v : scene.meshes[static_cast<size_t>(me)].vertices) {
                     mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};

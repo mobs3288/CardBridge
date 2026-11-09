@@ -660,6 +660,69 @@ void unitTests() {
         eff = exporter::EffectiveHiddenParts(sc, hidden);
         CHECK(eff[pTop] == 1);   // no body, no skin pieces
     });
+    test("hidden item: not in the export at all, its own bones pruned, preview 1:1 with the viewer", [] {
+        using namespace assemble;
+        Scene sc;
+        // Rig bones (shared, never pruned while anything exported uses them).
+        const int root = static_cast<int>(sc.bones.size()); sc.bones.push_back({"cf_j_root", -1, {0, 0, 0}, "rig"});
+        const int spine = static_cast<int>(sc.bones.size()); sc.bones.push_back({"cf_j_spine01", root, {0, 1, 0}, "rig"});
+        // Hair's own joint chain and a top's own joint, each owned by its part.
+        const int hairJoint = static_cast<int>(sc.bones.size()); sc.bones.push_back({"cf_J_hairB_top", spine, {0, 2, 0}, "hair.back"});
+        const int hairTip = static_cast<int>(sc.bones.size()); sc.bones.push_back({"hair.back/end", hairJoint, {0, 2.5f, 0}, "hair.back"});
+        const int topJoint = static_cast<int>(sc.bones.size()); sc.bones.push_back({"outfit0.top/joint", spine, {0, 1.5f, 0}, "outfit0.top"});
+        // One mesh per part, weighted to its own joint (body to the rig).
+        auto mesh = [&](int bone, Vec3 p) {
+            SceneMesh m;
+            m.vertices.resize(3);
+            for (int i = 0; i < 3; ++i) {
+                m.vertices[static_cast<size_t>(i)].pos = p;
+                m.vertices[static_cast<size_t>(i)].normal = {0, 0, 1};
+                m.vertices[static_cast<size_t>(i)].bone[0] = bone;
+                m.vertices[static_cast<size_t>(i)].weight[0] = 1;
+            }
+            m.submeshes.push_back({0, {0, 1, 2}});
+            sc.meshes.push_back(m);
+            return static_cast<int>(sc.meshes.size()) - 1;
+        };
+        SceneMaterial mat; mat.name = "m"; mat.diffuse = {1, 1, 1, 1};
+        sc.materials.push_back(mat);
+        auto part = [&](const std::string& id, const std::string& group, int mi) {
+            ScenePart p; p.id = id; p.group = group; p.meshes = {mi}; sc.parts.push_back(p);
+            return sc.parts.size() - 1;
+        };
+        const size_t body = part("body", "Body", mesh(spine, {0, 1, 0}));
+        const size_t hair = part("hair.back", "Hair", mesh(hairTip, {0, 2.5f, 0}));
+        const size_t top = part("outfit0.top", "Outfit", mesh(topJoint, {0, 1.5f, 0}));
+        // Hair physics belongs to the hair part, body jiggle to the body.
+        { SceneChain c; c.part = "hair.back"; c.bones = {hairJoint, hairTip}; sc.chains.push_back(c); }
+        { SceneChain c; c.part = "rig"; c.bones = {root, spine}; sc.chains.push_back(c); }
+        { SceneCollider col; col.name = "body"; col.bone = spine; col.radius = 0.1f; sc.colliders.push_back(col); }
+        const size_t bonesBefore = sc.bones.size();
+        std::vector<char> hidden(sc.parts.size(), 0);
+        hidden[hair] = 1;   // the hair item is unticked in the list
+        exporter::ApplyPartStateForExport(sc, hidden);
+        CHECK(!sc.parts[hair].includeInExport);                 // gone from the PMX, not just transparent
+        CHECK(sc.parts[body].includeInExport && sc.parts[top].includeInExport);
+        CHECK(sc.boneIndex("cf_J_hairB_top") < 0 && sc.boneIndex("hair.back/end") < 0);   // its bones are not exported
+        CHECK(sc.boneIndex("cf_j_spine01") >= 0 && sc.bones[static_cast<size_t>(sc.boneIndex("cf_j_spine01"))].parent == sc.boneIndex("cf_j_root"));
+        CHECK(sc.bones.size() == bonesBefore - 2);              // exactly the two hair bones left
+        CHECK(sc.chains.size() == 1 && sc.chains[0].part == "rig");   // hair physics left with it, body jiggle stays
+        for (const auto& m : sc.meshes)                          // every remaining weight names a bone that exists
+            for (const auto& v : m.vertices)
+                for (int k = 0; k < 4; ++k) if (v.weight[k] > 0) CHECK(v.bone[k] >= 0 && static_cast<size_t>(v.bone[k]) < sc.bones.size());
+        CHECK(exporter::ValidateScene(sc).empty());
+        // 1:1: the exported picture takes the same hidden flags as the viewer.
+        const auto eff = exporter::ExportHiddenParts(sc);
+        CHECK(eff[hair] == 1 && eff[body] == 0 && eff[top] == 0);
+        CHECK(exporter::PruneExportBones(sc) == 0);              // idempotent
+        // Pruning also works without Apply when a part was excluded at assembly.
+        Scene sc2;
+        sc2.bones.push_back({"cf_j_root", -1, {0, 0, 0}, "rig"});
+        sc2.bones.push_back({"outfit0.bra/joint", 0, {0, 1, 0}, "outfit0.bra"});
+        { ScenePart p; p.id = "outfit0.bra"; p.group = "Outfit"; p.includeInExport = false; sc2.parts.push_back(p); }
+        { ScenePart p; p.id = "body"; p.group = "Body"; sc2.parts.push_back(p); }
+        CHECK(exporter::PruneExportBones(sc2) == 1 && sc2.bones.size() == 1 && sc2.boneIndex("cf_j_root") >= 0);
+    });
     test("shader layers: the header comments name, blend and default state; other files are found by name", [] {
         const std::string dir = fileio::Join(std::filesystem::temp_directory_path().string(), "cardbridge_layers_test");
         fileio::CreateDirectories(dir);

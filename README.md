@@ -107,7 +107,7 @@ Existing exporters run inside the running game, so a conversion needs a launched
 
 A Koikatsu outfit file (`【KoiKatuClothes】`, the `.png` the game saves for one coordinate) can be applied to a character **in memory only**: its clothes overwrite one outfit of the character (by default the one on screen), its accessories fill empty slots without ever deleting accessories, and the result is previewed and exported from that memory copy. The character card on disk is never saved or modified.
 
-Preview visibility and export inclusion are separate properties in the manifest, by design.
+An item unticked (hidden) in the viewer's list is gone from the export the same way it is gone from the view: its meshes, its DynamicBone physics and the bones only it used are not in the PMX at all, and every exported preview picture (`_preview.png`, `_head.png`, `_feet.png`, `_view.png`, `_shaded.png`) is the viewer's picture at export time (1:1). Visible items stay in the PMX with a `Hide <part>` morph, so MMD can still hide them; the skin under a visible garment stays as the `Under`/`Nude body` morphs, not as a visible part. In the manifest this is recorded as `include_in_export: false` for the removed items.
 
 ## What it deliberately does not do
 

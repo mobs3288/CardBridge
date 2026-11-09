@@ -17,14 +17,26 @@ struct PreviewOptions {
     float yawDegrees[3] = {0.0f, 90.0f, 180.0f};   // front, side, back (about Y)
     int views = 3;
     float yTop = 1.0f, yBottom = 0.0f;   // vertical window as fractions of the model height (1 = top); a close-up when narrower
+    // Same flags the viewer / RenderView takes (1 = do not draw, 2 = force an
+    // under piece on). When null the picture is made from the scene's own final
+    // state (includeInExport, startHidden, visibleInPreview), so the exported
+    // preview PNG is exactly what the viewer shows and what the PMX starts as.
+    const std::vector<char>* hiddenParts = nullptr;
 };
 
 // A small headless software renderer: orthographic, z-buffered, nearest-texel
-// sampling, a headlight and flat ambient. It draws the parts with includeInExport
-// set, so what it shows is what the exporter writes. It exists so a conversion can
+// sampling, a headlight and flat ambient. It draws exactly the parts the viewer
+// shows (and the PMX starts with): includeInExport parts that are not hidden
+// (hiddenParts / startHidden / visibleInPreview). It exists so a conversion can
 // be looked at without a PMX viewer (and as the seed of the Milestone 2 viewport).
 // Returns a PNG of the views side by side.
 Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt = {});
+
+// The hidden flags a drawn picture takes from a scene that already went through
+// ApplyPartStateForExport (1 = hidden, 2 = an under piece that is on). The
+// exported _view / _shaded / _head / _feet pictures and the preview PNG all use
+// this, so they are 1:1 with the viewer at export time.
+std::vector<char> ExportHiddenParts(const assemble::Scene& scene);
 
 // ---- Interactive view (the CardBridge viewer): one orthographic camera that orbits the model.
 struct ViewCamera {
@@ -72,9 +84,25 @@ void RunCreateJobs(assemble::Scene& scene);
 // it is; a garment the game hides itself ("" in coveredBy) keeps covering. Every other part keeps its own flag.
 std::vector<char> EffectiveHiddenParts(const assemble::Scene& scene, const std::vector<char>& hidden);
 
-// Makes the exported PMX start the way the viewer shows the checkboxes: under pieces and unticked outfit, accessory and hair parts get
-// ScenePart::startHidden (their PMX materials start transparent; the PMX morphs bring them back).
+// Makes the exported PMX start exactly the way the viewer shows the checkboxes:
+// an unticked list item is removed from the export entirely (no meshes, no
+// physics, and its own bones are pruned, so a hidden item leaves nothing
+// behind); everything else stays (visible items get a "Hide <part>" morph, so
+// MMD can still hide them). Under pieces are the one exception: they are kept
+// and are startHidden while they are covered, so the "Nude body" / "Take off"
+// morphs can bring the skin back - they carry no bones of their own, so they
+// never keep a hidden item's bones alive. Sets ScenePart::includeInExport
+// accordingly, drops the hidden items' DynamicBone chains / colliders that
+// only they used, and prunes bones that no exported mesh, exported chain or
+// kept collider references any more (rig bones shared with exported parts
+// stay). Call this on the export copy before BakeShaderTextures / ExportScene.
 void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hidden);
+
+// Drops bones that no exported part uses (the hidden-item prune above) and
+// remaps every bone index in the scene to the compact table. Chains and
+// colliders of non-exported parts are dropped too. Returns how many bones
+// were pruned. Idempotent: a second call prunes nothing.
+size_t PruneExportBones(assemble::Scene& scene);
 
 // Draws into a top-down BGRA buffer (width * height uint32, 0xAARRGGBB).
 void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int width, int height, const ViewOptions& opt,
