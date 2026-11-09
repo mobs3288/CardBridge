@@ -59,10 +59,15 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         ScenePart& part = scene.parts[pi];
         if (part.underPiece || part.nudeSwitch) continue;
-        if (part.group != "Accessories") continue; // garments are body-fit shells; ripping them misidentifies torso/sleeves as loose cloth
-        // Only hanging accessory slots: chest/back/waist/arm (shoulder coats, wings,
-        // capes). Bra/pants/socks/shoes/hair-wigs and fitted tops/bottoms never synthesize.
-        if (part.category != 124 && part.category != 125 && part.category != 126 && part.category != 128) continue;
+        if (part.group != "Accessories" && part.group != "Outfit") continue;
+        // Accessories: chest/back/waist/arm (shoulder coats, wings, capes) hang free
+        // from their node. Garments: only loose tops/gloves/subparts - body-fit
+        // brass/plants keep their authored skinning (no chains).
+        if (part.group == "Accessories") {
+            if (part.category != 124 && part.category != 125 && part.category != 126 && part.category != 128) continue;
+        } else { // Outfit garments
+            if (!(part.category == 105 || part.category == 109 || (part.category >= 200 && part.category <= 212))) continue;
+        }
         if (part.meshes.empty()) continue;
         if (hasAuthored.count(part.id)) continue; // authored DynamicBone wins
         bool hasShapes = false;
@@ -124,7 +129,15 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             const float dy = anchorPos.y - p.y;
             const float dx = p.x - anchorPos.x, dz = p.z - anchorPos.z;
             const float horiz = std::sqrt(dx * dx + dz * dz);
-            bool hang = (dy > 0.04f || horiz > 0.09f); // accessories hang from their node
+            bool hang = false;
+            if (part.group == "Outfit") {
+                // Garments are body-fit shells: require clearly loose geometry so the
+                // torso (horiz~0.10, dy~0.4) is never taken as cloth. Kimono wide
+                // sleeves stick out sideways, overhang tails drop far behind/in front.
+                hang = (horiz > 0.20f) || (dy > 0.25f && horiz > 0.14f) || (dy > 0.30f && horiz > 0.12f);
+            } else {
+                hang = (dy > 0.04f || horiz > 0.09f); // accessories hang from their node
+            }
             if (hang) hanging.push_back({r.mesh, r.vert, p});
         }
         if (hanging.size() < 50 || hanging.size() < static_cast<size_t>(static_cast<float>(all.size()) * 0.04f)) continue;
