@@ -196,8 +196,13 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // (the underpants went flat grey); on hair strands it pokes the inner layer out through the outer one and through the body beside it,
     // which reads as hair clipping back-to-front. Such a mesh gets no edge; its texture still shows. Single-layer meshes (the skirt) keep theirs.
     const bool innerLayer = HasInnerLayer(scene, mat);
+    const bool hair = mat.shader.find("hair") != std::string::npos;
     if (!overlay && !lens && !transparent) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
-    if (!overlay && !lens && !tooth && !cutout && !innerLayer) look.drawFlags |= 0x10;
+    // Hair gets no edge either: the game's outline width for hair is mostly 0, and MMD's fixed 0.6 edge, drawn in the
+    // card's dark outline colour, covers these thin strands and reads as a second, black, shaggy hair over the real
+    // one (in the viewer there is no such outline, so the hair there is purple and clean). Its shading still comes
+    // from the toon ramp and the sphere gloss below.
+    if (!overlay && !lens && !tooth && !cutout && !innerLayer && !hair) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
     // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
     // dark skin tone, never the white rim a light colour made round hair strands lying on the face).
@@ -211,7 +216,7 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // Sphere maps, the gloss MMD models carry instead of specular, chosen from the material itself: the teeth get roundness (multiply), any
     // hair shader the anime ring highlight, and any other surface the game gives a highlight (_SpecularColor x _SpecularPower) a soft add-gloss
     // as strong as that highlight. Skin, the face's layers, lenses and lit bakes get none.
-    const bool skin = mat.shader.find("skin") != std::string::npos, hair = mat.shader.find("hair") != std::string::npos;
+    const bool skin = mat.shader.find("skin") != std::string::npos;
     const float gloss = 0.3f * mat.specular.x + 0.59f * mat.specular.y + 0.11f * mat.specular.z;
     if (tooth) look.sphere = 1;
     else if (!mat.bakedLit && !overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
