@@ -75,6 +75,9 @@ Resolver::Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoo
     : mods_(mods), lists_(lists), abdata_(std::move(abdataRoot)) {}
 
 ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
+    // In the viewer, Reshape (UI thread) can resolve while a card load (worker thread) is assembling. Both walk
+    // the shared modlists map and mutate it, so serialize them with the bundle-cache lock.
+    std::lock_guard<std::mutex> lk(cacheMutex_);
     ResolvedItem r;
     r.ref = ref;
     // id 0 means "none" for hair, clothing and accessories - but for the head it is the first real head.
@@ -232,6 +235,7 @@ void Resolver::clearCaches() {
     cacheByKey_.clear();
     cacheBytes_ = 0;
     looseTextures_.clear();
+    providers_.clear();   // per-card "which mod ships this bundle path": a new character registers its own, so the previous one's must not stay
 }
 
 size_t Resolver::cacheBytes() const {
@@ -317,6 +321,7 @@ void Resolver::registerBundleProvider(const ResolvedItem& item) {
             if (!any) return;
         }
     } catch (...) { return; }
+    std::lock_guard<std::mutex> lk(cacheMutex_);
     auto& v = providers_[lowerOf(rel)];
     if (std::find(v.begin(), v.end(), item.modPath) == v.end()) v.push_back(item.modPath);
 }
@@ -325,8 +330,11 @@ std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& i
     if (item.status == ItemStatus::ResolvedBase) return openBaseBundle(rel, why);
 
     std::string modPath = item.modPath;
-    if (auto pr = providers_.find(lowerOf(rel)); pr != providers_.end() && pr->second.size() > 1)
-        modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    {
+        std::lock_guard<std::mutex> lk(cacheMutex_);
+        if (auto pr = providers_.find(lowerOf(rel)); pr != providers_.end() && pr->second.size() > 1)
+            modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    }
     std::string key = modPath + "|" + rel;
     if (auto hit = cacheFind(key)) return hit;
     try {
@@ -364,8 +372,11 @@ std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedIte
     std::string stem = lowerOf(ab);
     if (stem.size() > 8 && stem.compare(stem.size() - 8, 8, ".unity3d") == 0) stem.resize(stem.size() - 8);
     std::string modPath = item.modPath;
-    if (auto pr = providers_.find(lowerOf(ab)); pr != providers_.end() && pr->second.size() > 1)
-        modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    {
+        std::lock_guard<std::mutex> lk(cacheMutex_);
+        if (auto pr = providers_.find(lowerOf(ab)); pr != providers_.end() && pr->second.size() > 1)
+            modPath = *std::max_element(pr->second.begin(), pr->second.end(), [](const std::string& a, const std::string& b) { return lowerOf(a) < lowerOf(b); });
+    }
     std::string key = "loose:" + modPath + "|" + stem + "/" + lowerOf(name);
     {
         std::lock_guard<std::mutex> lk(cacheMutex_);
