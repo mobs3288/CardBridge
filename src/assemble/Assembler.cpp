@@ -46,9 +46,9 @@ Vec4 kkColor(Vec4 c) { return c; }
 // through _ColorMask). A base colour near black multiplies that texture to flat black and loses both the strands and
 // the shade the card picture shows, so lift the tint to a visible brightness while keeping the hue of the card's own
 // darkest hair colour (the start/end colours when the base carries none). The value is sRGB: the standard views
-// linearise it (0.68 -> 0.42 linear), which lands the finish at the ~65/255 mean the card portraits measure. The bake
-// feeds it to the shader as 0.42 (see SceneMaterial::hairTinted), so both views agree instead of the standard one
-// crushing the strands through the grading toe.
+// linearise it (0.68 -> 0.42 linear) and encode the frame back, so they show ~0.61; the bake feeds it raw in its
+// gamma space (see BakeShaderTextures), so the PMX texture shows the same ~0.61 instead of the linear 0.42 product,
+// which crushed saturated hair colours to near black in MikuMikuDance.
 // Only a near-black base is lifted: a card whose base is already visible must keep it raw, or _Color ends up brighter
 // than the untouched _Color2/_Color3 and the _ColorMask's R regions fade against the G/B regions (Megumin's crown).
 Vec4 hairTint(Vec4 base, Vec4 start, Vec4 end) {
