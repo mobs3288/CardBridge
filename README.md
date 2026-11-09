@@ -218,7 +218,7 @@ cardbridge/
     export/           output folder and manifest
     library/          asset library import and check
   cli/                command-line shell
-  viewer/             the viewer window (Win32 + Direct3D 11): main.cpp, Ui.* (off-screen panel, theme), res/ (icon, logo)
+  viewer/             the viewer window (Win32 + Direct3D 11): main.cpp (hub) + *.inc fragments grouped by tab/system, Ui.* (off-screen panel, theme), res/ (icon, logo)
   tools/              Python reference (research only, not shipped), viewer_smoke.ps1
   tests/              unit and golden tests
   image/              README artwork (CB.png is the logo)
