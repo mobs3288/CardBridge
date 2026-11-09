@@ -298,7 +298,7 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
@@ -454,6 +454,7 @@ struct App {
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
+    bool autoCloth = true;                        // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails)
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size
@@ -654,6 +655,8 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
         rows.push_back({1, kJiggleIntensity, "Jiggle intensity (1 = the game)", "Jiggle"});
         rows.push_back({1, kSag, "Sag (1 = the card's hang, 0 = none)", "Jiggle"});
+        rows.push_back({0, kAutoCloth, "Auto cloth (added bones + physics where parts have none; reloads the card)", "Auto cloth"});
+        rows.push_back({2, kAutoCloth, "Auto cloth: shoulder / sleeves / wings / tails", "Auto cloth"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -706,6 +709,7 @@ bool TweakChanged(int id) {
     if (id == kPhysics) return g.physics;
     if (id == kJiggleBust) return g.jiggleBust;
     if (id == kJiggleButt) return g.jiggleButt;
+    if (id == kAutoCloth) return g.autoCloth;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
 
@@ -721,6 +725,7 @@ void ResetTweak(int id) {
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = true;
+    else if (id == kAutoCloth) g.autoCloth = true;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 
@@ -1228,6 +1233,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.faceShape = g.tw.face;
                 ao.nippleInside = g.tw.nippleInside;
                 ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+                ao.autoCloth = g.autoCloth;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
             }
             ao.log = [](const std::string& m) { Log("  " + m); };
@@ -2297,6 +2303,12 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         if (right) ResetTweak(row.id); else v = !v;
         Log(row.label + ": " + (v ? "on" : "off") + " (exported PMX)");
         TweakEdited(row.id, true);
+        return;
+    }
+    if (row.kind == 2 && row.id == kAutoCloth) {
+        if (right) ResetTweak(row.id); else g.autoCloth = !g.autoCloth;
+        Log(row.label + ": " + (g.autoCloth ? "on" : "off") + " (reloads the card to rebuild cloth bones)");
+        ScheduleApplyTweaks();
         return;
     }
     if (row.kind == 2) {

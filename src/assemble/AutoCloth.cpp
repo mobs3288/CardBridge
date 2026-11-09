@@ -29,6 +29,21 @@ int nearestRigBone(const Scene& scene, Vec3 p) {
     return best;
 }
 
+// Synthetic bone rest orientation inherits its parent's rotation so Reshape
+// (which preserves parent-relative offsets) and pose keep the garment's
+// silhouette. An identity rotation here shears the chain when the body is
+// reshaped or posed.
+Mat4 worldFor(Vec3 pos, const Scene& scene, int parent) {
+    Mat4 w;
+    if (parent >= 0 && static_cast<size_t>(parent) < scene.bones.size()) {
+        const Mat4& p = scene.bones[static_cast<size_t>(parent)].world;
+        for (int idx : {0, 1, 2, 4, 5, 6, 8, 9, 10}) w.m[idx] = p.m[idx];
+    }
+    w.m[3] = pos.x; w.m[7] = pos.y; w.m[11] = pos.z;
+    w.m[12] = w.m[13] = w.m[14] = 0.0f; w.m[15] = 1.0f;
+    return w;
+}
+
 } // namespace
 
 int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string&)>& log) {
@@ -103,6 +118,8 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             sideMax = std::max(sideMax, std::sqrt(dx * dx + dz * dz));
         }
         const float hangDepth = anchorPos.y - minY;
+        if (std::getenv("CARDBRIDGE_DEBUG_CLOTH")) std::fprintf(stderr, "clothdbg %s cat=%d verts=%zu anchor=%s (%.2f %.2f %.2f) minY=%.2f hang=%.2f side=%.2f\n",
+            part.id.c_str(), part.category, all.size(), partAnchorBone >= 0 && static_cast<size_t>(partAnchorBone) < scene.bones.size() ? scene.bones[static_cast<size_t>(partAnchorBone)].name.c_str() : "?", anchorPos.x, anchorPos.y, anchorPos.z, minY, hangDepth, sideMax);
         if (hangDepth < 0.07f && sideMax < 0.10f) continue; // nothing hangs
         if (part.category == 109 && hangDepth < 0.20f && sideMax < 0.20f) continue; // gloves: only extra-long sleeves count
 
@@ -113,7 +130,16 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             const float dy = anchorPos.y - p.y;
             const float dx = p.x - anchorPos.x, dz = p.z - anchorPos.z;
             const float horiz = std::sqrt(dx * dx + dz * dz);
-            if (dy > 0.04f || horiz > 0.09f) hanging.push_back({r.mesh, r.vert, p});
+            bool hang = false;
+            if (part.group == "Outfit") {
+                // Body-fit garments (torso/shoulder) sit within ~10cm of the axis,
+                // so require clearly loose geometry: far sideways (kimono sleeves),
+                // deep below (overhang tails), or sideways+below together (wings).
+                hang = (horiz > 0.14f) || (dy > 0.18f) || (horiz > 0.09f && dy > 0.10f);
+            } else {
+                hang = (dy > 0.04f || horiz > 0.09f); // accessories hang from their node
+            }
+            if (hang) hanging.push_back({r.mesh, r.vert, p});
         }
         if (hanging.size() < 50 || hanging.size() < static_cast<size_t>(static_cast<float>(all.size()) * 0.04f)) continue;
 
@@ -151,6 +177,13 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
 
         bool partPatched = false;
         for (const auto& cl : clusters) {
+            // A top garment's center hanging verts ARE its torso (body-fit, not
+            // a tail). Synthesizing there collapses the chest; kimono/overhang
+            // sleeves and tails live in the left/right clusters.
+            if (part.group == "Outfit" && part.category == 105) {
+                const std::string suf = cl.suffix;
+                if (suf == "mid" || suf == "fall") continue; // left/right only; back tails live on bottom/accessory
+            }
             if (cl.verts.size() < 30 || static_cast<float>(cl.verts.size()) < 0.08f * hN) continue;
             // Top (nearest anchor) and tip (farthest) centroids.
             std::vector<size_t> order(cl.verts.size());
@@ -170,7 +203,11 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             Vec3 unit = dir * (1.0f / clen);
 
             int clusterAnchor = partAnchorBone;
-            if (part.attachNode.empty()) { // beige garment: anchor chain root at nearest rig joint to this cluster's top
+            if (part.attachNode.empty()) { // garment: root the chain where the cloth
+                // leaves the body (nearest rig joint to the cluster top), not where
+                // its tip happens to be skinned. The tip itself keeps its authored
+                // base influence in the weight blend (see rebind below), so elbow/
+                // hip articulation is inherited via the blend + the root parent.
                 const int nb = nearestRigBone(scene, top);
                 if (nb >= 0) clusterAnchor = nb;
             }
@@ -203,7 +240,7 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
                 nb.name = name;
                 nb.parent = parent;
                 nb.pos = bandPos[static_cast<size_t>(j)];
-                nb.world = Mat4::TRS(nb.pos, Quat{}, Vec3{1, 1, 1});
+                nb.world = worldFor(nb.pos, scene, parent);
                 nb.source = part.id;
                 scene.bones.push_back(nb);
                 const int idx = static_cast<int>(scene.bones.size()) - 1;
@@ -221,35 +258,43 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             ch.bones = chainBones;
             if (flap) { ch.damping = 0.30f; ch.elasticity = 0.25f; ch.stiffness = 0.35f; ch.inert = 0.04f; ch.radius = 0.025f; }
             else { ch.damping = 0.30f; ch.elasticity = 0.40f; ch.stiffness = 0.12f; ch.inert = 0.08f; ch.radius = 0.015f; }
-            ch.gravity = {0, -0.918, 0};
+            // Per-step units (PhysicsSim adds this directly each 1/60s update);
+            // keep it small so rest-aligned chains are not snapped, wings only sag gently.
+            ch.gravity = {0, -0.15, 0};
             ch.force = {0, 0, 0};
             scene.chains.push_back(ch);
             ++chainsMade;
             bonesMade += static_cast<int>(chainBones.size());
             partPatched = true;
 
-            // Rebind deep vertices onto the chain (keep 8% on the original bone so the root never detaches).
+            // Hybrid blend: keep the authored multi-bone blend scaled by
+            // (1-wAuto) so the garment's base deformation (elbow/hip flex) is
+            // preserved, and add secondary cloth motion via the auto bone
+            // (wAuto). Capped at 0.75 so the root never detaches; at rest the
+            // rest pose is unchanged (skin == identity for both).
             for (const auto& hv : cl.verts) {
                 const float t = clamp01(dot(sub(hv.pos, top), unit) / clen);
-                if (t < 0.12f) continue;
-                const float wAuto = smooth01((t - 0.12f) / 0.38f) * 0.92f;
+                if (t < 0.15f) continue;
+                const float wAuto = smooth01((t - 0.15f) / 0.50f) * 0.75f;
                 const int targetLocal = std::min(N - 1, std::max(0, static_cast<int>(t * static_cast<float>(N))));
                 const int autoIdx = chainBones[static_cast<size_t>(targetLocal)];
                 SceneVertex& v = scene.meshes[static_cast<size_t>(hv.mesh)].vertices[hv.vert];
-                int oldSlot = 0;
-                float bestW = -1.0f;
-                for (int k = 0; k < 4; ++k) if (v.weight[k] > bestW) { bestW = v.weight[k]; oldSlot = k; }
-                const int oldBone = v.bone[oldSlot];
-                const Vec3 oldLocal = v.local[oldSlot];
-                const Vec3 oldNlocal = v.nlocal[oldSlot];
-                if (oldBone < 0 || static_cast<size_t>(oldBone) >= scene.bones.size()) continue;
+                int oldBones[4]; float oldW[4]; Vec3 oldL[4], oldNL[4];
+                for (int k = 0; k < 4; ++k) { oldBones[k] = v.bone[k]; oldW[k] = v.weight[k]; oldL[k] = v.local[k]; oldNL[k] = v.nlocal[k]; }
+                bool bad = false;
+                for (int k = 0; k < 4; ++k) if (oldW[k] > 0 && (oldBones[k] < 0 || static_cast<size_t>(oldBones[k]) >= scene.bones.size())) bad = true;
+                if (bad) continue;
                 const Mat4 invAuto = inverse(scene.bones[static_cast<size_t>(autoIdx)].world);
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) sum += oldW[k];
+                if (!(sum > 1e-6f)) continue;
+                const float scale = (1.0f - wAuto) / sum;
                 v.bone[0] = autoIdx; v.weight[0] = wAuto;
                 v.local[0] = invAuto.point(v.pos); v.nlocal[0] = invAuto.dir(v.normal);
-                v.bone[1] = oldBone; v.weight[1] = 1.0f - wAuto;
-                v.local[1] = oldLocal; v.nlocal[1] = oldNlocal;
-                v.bone[2] = oldBone; v.weight[2] = 0.0f; v.local[2] = oldLocal; v.nlocal[2] = oldNlocal;
-                v.bone[3] = oldBone; v.weight[3] = 0.0f; v.local[3] = oldLocal; v.nlocal[3] = oldNlocal;
+                for (int k = 0; k < 3; ++k) {
+                    v.bone[k + 1] = oldBones[k]; v.weight[k + 1] = oldW[k] * scale;
+                    v.local[k + 1] = oldL[k]; v.nlocal[k + 1] = oldNL[k];
+                }
             }
         }
         if (partPatched) {

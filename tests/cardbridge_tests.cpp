@@ -10,6 +10,7 @@
 // Without them the integration tests are skipped, not failed.
 
 #include "assemble/Assembler.h"
+#include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
 #include "assemble/Pose.h"
@@ -1712,6 +1713,104 @@ void unitTests() {
             sim.Reset(s, pw, false, false, 1.0f);
             CHECK(sim.particleCount() == 0 && sim.empty());
         }
+    });
+
+    test("auto cloth: hanging garment gets chains that follow their limb, torso stays rigid", [] {
+        using namespace assemble;
+        // Synthetic kimono: rigid torso at chest + wide sleeve hanging to the
+        // forearm (left side). Before the fix the sleeve anchored to the chest
+        // and tore away when the arm moved; now the chain root votes to the
+        // forearm bone the sleeve tips already follow.
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) {
+            SceneBone b; b.name = name; b.parent = parent; b.pos = pos; b.source = "rig";
+            b.world = Mat4::TRS(pos, Quat{}, Vec3{1, 1, 1});
+            s.bones.push_back(b); return static_cast<int>(s.bones.size()) - 1;
+        };
+        // Body: chest (anchor) -> upper arm -> forearm (all rig).
+        int chest = add("cf_j_chest01", -1, {0, 1.30f, 0});
+        int upper = add("cf_j_arm00_L", chest, {-0.20f, 1.25f, 0});
+        int fore  = add("cf_j_forearm01_L", upper, {-0.42f, 0.95f, 0});
+        (void)fore;
+        // Part: outfit top (category 105) with torso + LEFT sleeve verts.
+        ScenePart part; part.id = "outfit0.top"; part.group = "Outfit"; part.category = 105;
+        part.status = "resolved-base"; part.includeInExport = true;
+        int partIdx = static_cast<int>(s.parts.size());
+        s.parts.push_back(part);
+        SceneMesh mesh; mesh.name = "top"; mesh.part = partIdx; mesh.reshapable = true;
+        // Torso verts near chest (must NOT become cloth).
+        for (int i = 0; i < 100; ++i) {
+            SceneVertex v; v.pos = {0.02f * (i % 5 - 2), 1.20f, 0.05f}; v.normal = {0, 0, 1};
+            v.bone[0] = chest; v.weight[0] = 1.0f; for (int k = 1; k < 4; ++k) { v.bone[k] = chest; v.weight[k] = 0; }
+            const Mat4 iw = inverse(s.bones[static_cast<size_t>(chest)].world);
+            v.local[0] = iw.point(v.pos); v.nlocal[0] = iw.dir(v.normal);
+            for (int k = 1; k < 4; ++k) { v.local[k] = v.local[0]; v.nlocal[k] = v.nlocal[0]; }
+            mesh.vertices.push_back(v);
+        }
+        // Sleeve verts hanging to the forearm/wrist (must get physics follow).
+        for (int i = 0; i < 400; ++i) {
+            const float t = static_cast<float>(i % 40) / 40.0f; // 0 root -> 1 tip
+            SceneVertex v; v.pos = {-0.20f - 0.25f * t, 1.25f - 0.50f * t, 0.02f}; v.normal = {0, 0, 1};
+            v.bone[0] = fore; v.weight[0] = 1.0f; for (int k = 1; k < 4; ++k) { v.bone[k] = fore; v.weight[k] = 0; }
+            const Mat4 iw = inverse(s.bones[static_cast<size_t>(fore)].world);
+            v.local[0] = iw.point(v.pos); v.nlocal[0] = iw.dir(v.normal);
+            for (int k = 1; k < 4; ++k) { v.local[k] = v.local[0]; v.nlocal[k] = v.nlocal[0]; }
+            mesh.vertices.push_back(v);
+        }
+        int meshIdx = static_cast<int>(s.meshes.size());
+        s.meshes.push_back(mesh);
+        s.parts[static_cast<size_t>(partIdx)].meshes.push_back(meshIdx);
+        // One small trinket part that must be left alone (regression: no chains).
+        ScenePart trinket; trinket.id = "outfit0.acc99"; trinket.group = "Accessories"; trinket.category = 124;
+        trinket.status = "resolved-mod"; trinket.attachNode = "cf_j_chest01";
+        SceneMesh tm; tm.name = "ring"; tm.part = static_cast<int>(s.parts.size());
+        for (int i = 0; i < 10; ++i) { SceneVertex v; v.pos = {0, 1.30f, 0.1f}; v.normal = {0, 0, 1}; v.bone[0] = chest; v.weight[0] = 1; for (int k = 1; k < 4; ++k) { v.bone[k] = chest; v.local[k] = inverse(s.bones[static_cast<size_t>(chest)].world).point(v.pos); v.nlocal[k] = inverse(s.bones[static_cast<size_t>(chest)].world).dir(v.normal); } v.local[0] = inverse(s.bones[static_cast<size_t>(chest)].world).point(v.pos); v.nlocal[0] = inverse(s.bones[static_cast<size_t>(chest)].world).dir(v.normal); tm.vertices.push_back(v); }
+        int tMesh = static_cast<int>(s.meshes.size()); s.meshes.push_back(tm);
+        trinket.meshes.push_back(tMesh);
+        s.parts.push_back(trinket);
+        // One authored part that must stay untouched.
+        ScenePart authored; authored.id = "hair.back"; authored.group = "Hair"; authored.category = 101; authored.status = "resolved-mod";
+        int hairBone = add("hair/strand", chest, {0, 1.4f, -0.1f});
+        int hairBone2 = add("hair/strand2", hairBone, {0, 1.2f, -0.15f});
+        s.parts.push_back(authored);
+        SceneChain ach; ach.name = "hair strand"; ach.part = "hair.back"; ach.bones = {hairBone, hairBone2};
+        ach.damping = 0.1f; ach.elasticity = 0.1f; ach.stiffness = 0.1f;
+        s.chains.push_back(ach);
+        const size_t bonesBefore = s.bones.size(), chainsBefore = s.chains.size();
+        // Snapshot torso verts: they must not move when auto-cloth runs.
+        std::vector<Vec3> torsoBefore;
+        for (size_t i = 0; i < 100; ++i) torsoBefore.push_back(s.meshes[static_cast<size_t>(meshIdx)].vertices[i].pos);
+        // Synthesize.
+        const int made = SynthesizeAutoCloth(s);
+        CHECK(made >= 1);
+        CHECK(s.chains.size() == chainsBefore + static_cast<size_t>(made));
+        // Authored chain untouched.
+        CHECK(s.chains.front().bones.size() == 2 && s.chains.front().name == "hair strand");
+        // Rest pose preserved: torso + sleeve tips still at rest positions.
+        Pose rest; std::vector<Mat4> skin = SkinMatrices(s, rest);
+        for (size_t i = 0; i < torsoBefore.size(); ++i) {
+            const Vec3 p = SkinPoint(s.meshes[static_cast<size_t>(meshIdx)].vertices[i], skin);
+            const float dx = p.x - torsoBefore[i].x, dy = p.y - torsoBefore[i].y, dz = p.z - torsoBefore[i].z;
+            CHECK(dx * dx + dy * dy + dz * dz < 1e-8f); // no collapse at rest
+        }
+        // Base-pose follow: move the forearm +0.2 X; sleeve tips must follow
+        // substantially (auto chain inherits the limb), not detach to chest.
+        Pose moved; moved.edit(static_cast<size_t>(fore)).pos = {0.20f, 0, 0};
+        std::vector<Mat4> skin2 = SkinMatrices(s, moved);
+        float followed = 0;
+        for (size_t i = 100; i < 500; ++i) {
+            const Vec3 p0 = SkinPoint(s.meshes[static_cast<size_t>(meshIdx)].vertices[i], skin);
+            const Vec3 p1 = SkinPoint(s.meshes[static_cast<size_t>(meshIdx)].vertices[i], skin2);
+            followed += (p1.x - p0.x); // mean X travel of sleeve verts
+        }
+        followed /= 400.0f;
+        CHECK(followed > 0.08f); // inherits forearm motion (0.20 raw * weights); chest-only anchor gives ~0
+        // Weight normalization.
+        for (size_t i = 0; i < s.meshes[static_cast<size_t>(meshIdx)].vertices.size(); ++i) {
+            float sum = 0; for (int k = 0; k < 4; ++k) sum += s.meshes[static_cast<size_t>(meshIdx)].vertices[i].weight[k];
+            CHECK(std::fabs(sum - 1.0f) < 1e-4f);
+        }
+        (void)bonesBefore;
     });
 
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
