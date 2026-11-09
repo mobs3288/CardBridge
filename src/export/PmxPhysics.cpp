@@ -389,18 +389,22 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
-    // Generated arm colliders, so the breast slides off the arm instead of clipping through it. The bust's own hit
-    // spheres are deliberately not met (they shove the jiggle forever); these arms are clear of the breast at rest,
-    // so the jiggle can meet them safely. Group 15 is the arms alone.
+    // Generated limb colliders, so cloth slides off arms/hands/shins instead of
+    // clipping through them. The bust's own hit spheres are deliberately not met
+    // (they shove the jiggle forever); these limbs are clear of the bust at rest,
+    // so the jiggle can meet them safely. Group 15 is the limbs alone.
     {
-        constexpr uint8_t kArmGroup = 15;
-        bool hasArm = false;
+        constexpr uint8_t kLimbGroup = 15;
+        bool hasLimb = false;
         auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
         for (const char* side : {"_L", "_R"}) {
             const int shoulder = findBone(std::string("cf_j_shoulder") + side);
             const int arm = findBone(std::string("cf_j_arm00") + side);
             const int forearm = findBone(std::string("cf_j_forearm01") + side);
-            auto addSeg = [&](int a, int b, float radius) {
+            const int hand = findBone(std::string("cf_j_hand_") + side);
+            const int knee = findBone(std::string("cf_j_leg01_") + side);
+            const int leg03 = findBone(std::string("cf_j_leg03_") + side);
+            auto addSeg = [&](int a, int b, float radius, const std::string& what) {
                 if (a < 0 || b < 0 || static_cast<size_t>(a) >= scene.bones.size() || static_cast<size_t>(b) >= scene.bones.size()) return;
                 const Vec3 pa = scene.bones[static_cast<size_t>(a)].pos * scale;
                 const Vec3 pb = scene.bones[static_cast<size_t>(b)].pos * scale;
@@ -409,9 +413,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 if (len3d < 1e-5f) return;
                 const Vec3 axis = normalize(dir);
                 pmx::RigidBody rb;
-                rb.name = std::string("arm collider ") + side + " " + (a == shoulder ? "upper" : "forearm");
+                rb.name = std::string("limb collider ") + side + " " + what;
                 rb.bone = a;
-                rb.group = kArmGroup;
+                rb.group = kLimbGroup;
                 rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);
                 rb.mode = 0;
                 rb.shape = (len3d - 2.0f * radius * scale) > 1e-4f ? 2 : 0;
@@ -420,15 +424,17 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(axis);
                 rb.mass = 1.0f;
                 model.rigidBodies.push_back(std::move(rb));
-                hasArm = true;
+                hasLimb = true;
             };
-            addSeg(shoulder, arm, 0.040f);
-            addSeg(arm, forearm, 0.032f);
+            addSeg(shoulder, arm, 0.040f, "upper");
+            addSeg(arm, forearm, 0.032f, "forearm");
+            addSeg(forearm, hand, 0.030f, "hand");
+            addSeg(knee, leg03, 0.038f, "shin");
         }
-        if (hasArm) {
+        if (hasLimb) {
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {
-                if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kArmGroup);
-                else model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask |= static_cast<uint16_t>(1u << kArmGroup);
+                if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kLimbGroup);
+                else model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask |= static_cast<uint16_t>(1u << kLimbGroup);
             }
         }
     }

@@ -120,16 +120,24 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
     }
     // The arms are not in the game's collider list, but the breast clipping into them is the classic break:
     // add an upper-arm + forearm capsule per arm so the jiggle particles slide off the arm instead of through it.
+    // Hand capsules (forearm -> hand) and shin capsules (knee -> ankle) close the other two
+    // universal gaps: sleeves draped to the wrist, and long coat tails swinging to the
+    // calves where no authored collider reaches.
     for (const char* side : {"_L", "_R"}) {
         const int shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);
         const int arm = scene.boneIndex(std::string("cf_j_arm00") + side);
         const int forearm = scene.boneIndex(std::string("cf_j_forearm01") + side);
+        const int hand = scene.boneIndex(std::string("cf_j_hand_") + side);
+        const int knee = scene.boneIndex(std::string("cf_j_leg01_") + side);
+        const int leg03 = scene.boneIndex(std::string("cf_j_leg03_") + side);
         auto addArmSeg = [&](int a, int b, float r) {
             if (a < 0 || b < 0 || static_cast<size_t>(a) >= poseWorld.size() || static_cast<size_t>(b) >= poseWorld.size()) return;
             colliders.push_back({poseWorld[static_cast<size_t>(a)].translation(), poseWorld[static_cast<size_t>(b)].translation(), r});
         };
         addArmSeg(shoulder, arm, 0.040f);
         addArmSeg(arm, forearm, 0.032f);
+        addArmSeg(forearm, hand, 0.030f);
+        addArmSeg(knee, leg03, 0.038f);
     }
 
     float moved = 0.0f;
