@@ -2050,6 +2050,70 @@ void unitTests() {
         CHECK(rep2.clothesReplaced >= 0);
     });
 
+    test("clothing: mod pattern ids in colorInfo are translated from local to slot (the Wiz H bug)", [] {
+        // Outfit files store pattern ids as session-local (100000421) while the
+        // resolver finds them by author Slot (2016115). Without the translation the
+        // pattern never resolves, the pattern mask stays empty and the garment
+        // loses its pattern colours (gold trim baked as the base colour).
+        auto colorEntry = [](int64_t pattern) {
+            Value::Array tiling;
+            tiling.emplace_back(1.0);
+            tiling.emplace_back(1.0);
+            Value::Array white;
+            for (int k = 0; k < 4; ++k) white.emplace_back(1.0);
+            Value::Map m;
+            m.emplace_back(Value(std::string("pattern")), Value(pattern));
+            m.emplace_back(Value(std::string("baseColor")), Value(white));
+            m.emplace_back(Value(std::string("patternColor")), Value(white));
+            m.emplace_back(Value(std::string("tiling")), Value(tiling));
+            return Value(std::move(m));
+        };
+        auto clothPart = [&](int64_t id, std::initializer_list<int64_t> patterns) {
+            Value::Array ci;
+            for (int64_t p : patterns) ci.push_back(colorEntry(p));
+            while (ci.size() < 4) ci.push_back(colorEntry(0));
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("colorInfo")), Value(std::move(ci)));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](Value top) {
+            Value::Array parts;
+            parts.push_back(std::move(top));
+            for (int i = 1; i < 9; ++i) parts.push_back(clothPart(0, {}));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})}});
+        c.outfits.resize(7);
+        c.outfits[0].clothes = mkClothes(clothPart(56, {0}));
+        c.rows = {};
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Wiz H-like";
+        // Base top id (no row) with a mod pattern referenced by its local id.
+        cl.outfit.clothes = mkClothes(clothPart(2, {100000421, 100001387, 0, 27}));
+        cl.outfit.accessory = Value(Value::Map{});
+        cl.rows = {
+            {"HeartCat_pattern", 2016115, 100000421, "ChaFileClothes.ClothesTopPattern0", 430},
+            {"koikoi.happy.nu.cloth_texture", 5801, 100001387, "ChaFileClothes.ClothesTopPattern1", 430},
+        };
+        card::ApplyClothing(c, cl, card::ApplyClothingOptions{});
+        const Value& ci = c.outfits[0].clothes.at("parts").at(size_t(0)).at("colorInfo");
+        CHECK(ci.at(size_t(0)).at("pattern").asInt() == 2016115);  // top pattern 0: local -> slot
+        CHECK(ci.at(size_t(1)).at("pattern").asInt() == 5801);     // top pattern 1: local -> slot
+        CHECK(ci.at(size_t(2)).at("pattern").asInt() == 0);        // none stays none
+        CHECK(ci.at(size_t(3)).at("pattern").asInt() == 27);       // base pattern is untouched
+        bool hasTopPatRow = false;
+        for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesTopPattern0" && r.slot == 2016115) hasTopPatRow = true;
+        CHECK(hasTopPatRow);  // resolver can find the translated pattern
+    });
+
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {
         using namespace exporter;
         constexpr uint64_t MB = 1024ULL * 1024ULL;

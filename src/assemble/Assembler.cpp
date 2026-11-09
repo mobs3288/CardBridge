@@ -2485,8 +2485,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     const char* col2[3] = {"_Color1_2", "_Color2_2", "_Color3_2"};
                     const char* colN[3] = {"_Color", "_Color2", "_Color3"};
                     for (size_t k = 0; k < 3; ++k) {
-                        texs.push_back({patTex[k], rowTextureFor(ref.partId, 430, ci.at(k).at("pattern").asInt(), "ChaFileClothes.pattern", "MainTex", "pattern" + std::to_string(k + 1), nullptr, "MainTexAB")});
                         const size_t src = (k == 0 && subC) ? 3 : k;   // sub part C takes the fourth colour slot as its first
+                        texs.push_back({patTex[k], rowTextureFor(ref.partId, 430, ci.at(src).at("pattern").asInt(), "ChaFileClothes.pattern", "MainTex", "pattern" + std::to_string(k + 1), nullptr, "MainTexAB")});
                         props.emplace_back(colN[k], kkColor(vec4Of(ci.at(src).at("baseColor"))));
                         props.emplace_back(col2[k], kkColor(vec4Of(ci.at(src).at("patternColor"))));
                         props.emplace_back("_PatternScale" + std::to_string(k + 1) + "u", Vec4{tile(src, 0), 0, 0, 0});

@@ -652,6 +652,23 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
                         const int64_t oldId = part.at("id").asInt(0);
                         const int64_t newId = translate(oldId);
                         if (newId != oldId) setPartId(part, newId);
+                        // Each garment's four colour slots also carry a pattern id, stored the
+                        // same session-local way (the outfit's resolver rows name it
+                        // "ChaFileClothes.<Slot>Pattern0" etc.). Without translating it the
+                        // resolver never finds the pattern, the pattern mask stays empty and
+                        // the garment loses its pattern colours (the gold trim baked as the
+                        // base colour instead: the Wiz H bug).
+                        if (part.isMap())
+                            for (auto& pk : part.map())
+                                if (pk.first.isStr() && pk.first.asStr() == "colorInfo" && pk.second.isArray())
+                                    for (auto& ci : pk.second.array())
+                                        if (ci.isMap())
+                                            for (auto& ck : ci.map())
+                                                if (ck.first.isStr() && ck.first.asStr() == "pattern") {
+                                                    const int64_t newPat = translate(ck.second.asInt(0));
+                                                    if (newPat != ck.second.asInt(0)) ck.second = Value(newPat);
+                                                    break;
+                                                }
                         const Value& oldP = oldParts.isArray() && i < oldParts.size() ? oldParts.at(i) : Value::nil();
                         if (oldP.at("id").asInt(0) != (newId)) ++rep.clothesReplaced;
                     }
