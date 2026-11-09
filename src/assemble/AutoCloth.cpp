@@ -199,7 +199,10 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             }
             if (clusterAnchor < 0) continue;
 
-            const int N = clen > 0.30f ? 4 : 3;
+            // ~10cm per link, 3..6 bones: long overhang coats (0.6-0.9m) go to
+            // 6 short capsules so the PMX bodies and the Y-preview particles
+            // track the shin/hand bends instead of cutting corners.
+            const int N = static_cast<int>(std::clamp(std::round(clen / 0.10f), 3.0f, 6.0f));
             // Band centroids along the chain (keeps bones inside the cloth).
             std::vector<Vec3> bandPos(static_cast<size_t>(N));
             std::vector<int> bandCount(static_cast<size_t>(N), 0);
