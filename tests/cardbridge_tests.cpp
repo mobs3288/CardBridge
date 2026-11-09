@@ -33,6 +33,7 @@
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 #include "library/Library.h"
+#include "material/MaterialWorkbench.h"
 #include "pmx/PmxWriter.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -2581,7 +2582,313 @@ void unitTests() {
         CHECK(std::fabs(heelY - toeY) < 0.003f);   // both contacts flush
         CHECK(heelY > -1e-5f && toeY > -1e-5f);
     });
+
+    // ---- Material Workbench (Stage 1) ----
+    auto makeMatScene = [] {
+        using namespace assemble;
+        Scene s;
+        s.name = "matfixture";
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneTexture t;
+        t.name = "main";
+        t.width = 2; t.height = 2; t.rgba.assign(16, 255);
+        s.textures.push_back(t);
+        SceneMaterial a;
+        a.name = "mf_m_top";
+        a.shader = "Shader Forge/main_item";
+        a.texture = 0;
+        a.diffuse = {0.9f, 0.9f, 0.9f, 1.0f};
+        a.props.emplace_back("_Color", Vec4{0.9f, 0.9f, 0.9f, 1.0f});
+        a.props.emplace_back("_SpecularColor", Vec4{0.1f, 0.1f, 0.1f, 1.0f});
+        a.props.emplace_back("_SpecularPower", Vec4{0.2f, 0, 0, 0});
+        a.texProps.push_back({"_MainTex", 0, {1, 1, 0, 0}});
+        a.specular = {0.02f, 0.02f, 0.02f};
+        s.materials.push_back(a);
+        SceneMaterial b;
+        b.name = "cf_m_hair";
+        b.shader = "Shader Forge/main_hair";
+        b.diffuse = {0.2f, 0.2f, 0.5f, 1.0f};
+        b.props.emplace_back("_Color", Vec4{0.2f, 0.2f, 0.5f, 1.0f});
+        s.materials.push_back(b);
+        auto vert = [](SceneMesh& m, float x) { SceneVertex v; v.pos = {x, 0, 0}; v.normal = {0, 0, 1}; v.uv = {0.5f, 0.5f}; m.vertices.push_back(v); };
+        SceneMesh m0; vert(m0, 0); vert(m0, 1); vert(m0, 0.5f);
+        m0.submeshes.push_back({0, {0, 1, 2}});
+        s.meshes.push_back(m0);
+        vert(m0, 0); vert(m0, 1); vert(m0, 0.5f);
+        m0.submeshes[0].material = 1;
+        s.meshes.push_back(m0);
+        ScenePart p0; p0.id = "outfit0.top"; p0.group = "Outfit"; p0.meshes = {0}; s.parts.push_back(p0);
+        ScenePart p1; p1.id = "hair.back"; p1.group = "Hair"; p1.meshes = {1}; s.parts.push_back(p1);
+        return s;
+    };
+
+    test("workbench: classification guesses old shader names, Generic is the fallback", [&] {
+        using namespace material;
+        CHECK(ClassifyMaterial("Shader Forge/main_skin", "cf_m_body") == MaterialClass::Skin);
+        CHECK(ClassifyMaterial("Shader Forge/main_hair", "cf_m_hair") == MaterialClass::Hair);
+        CHECK(ClassifyMaterial("Shader Forge/main_item", "mf_m_top") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/main_opaque", "x") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/main_alpha", "x") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/toon_eye", "x") == MaterialClass::Eyes);
+        CHECK(ClassifyMaterial("Shader Forge/toon_nose", "x") == MaterialClass::Eyelashes);
+        CHECK(ClassifyMaterial("Shader Forge/glasses", "cf_m_lens") == MaterialClass::Glass);
+        CHECK(ClassifyMaterial("Shader Forge/mnpb", "x") == MaterialClass::Generic);
+        CHECK(ClassifyMaterial("unknown shader", "thing") == MaterialClass::Generic);
+        MaterialClass c;
+        CHECK(ClassFromName("Fabric/Default", c) && c == MaterialClass::Fabric);
+        CHECK(ClassFromName("glass", c) && c == MaterialClass::Glass);
+        CHECK(!ClassFromName("not-a-class", c));
+        CHECK(std::string(ClassName(MaterialClass::Eyelashes)) == "Eyelashes");
+    });
+
+    test("workbench: presets set shading but never overwrite the colour", [&] {
+        using namespace material;
+        for (MaterialClass cls : {MaterialClass::Skin, MaterialClass::Fabric, MaterialClass::Hair, MaterialClass::Eyes, MaterialClass::Eyelashes, MaterialClass::Metal, MaterialClass::Plastic, MaterialClass::Leather, MaterialClass::Glass, MaterialClass::Rubber, MaterialClass::Generic}) {
+            MaterialOverride p = PresetForClass(cls);
+            CHECK(p.class_ && *p.class_ == cls);
+            CHECK(!p.baseColor.has_value());
+            CHECK(p.preset && *p.preset == PresetName(cls));
+        }
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        ApplyPreset(st, 0, MaterialClass::Metal);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].diffuse.x == 0.9f);   // colour untouched
+        CHECK(st.overrides[0]->roughness && std::fabs(*st.overrides[0]->roughness - 0.25f) < 1e-6f);
+        // Effective view reflects the preset.
+        EffectiveMaterial e = EffectiveOf(st, 0);
+        CHECK(e.cls == MaterialClass::Metal && e.metallic == 1.0f && std::fabs(e.roughness - 0.25f) < 1e-5f);
+        // Fabric preset carries transmission; skin carries subsurface.
+        CHECK(PresetForClass(MaterialClass::Fabric).transmission && std::fabs(PresetForClass(MaterialClass::Fabric).transmission->strength - 0.25f) < 1e-6f);
+        CHECK(PresetForClass(MaterialClass::Skin).subsurface && std::fabs(PresetForClass(MaterialClass::Skin).subsurface->strength - 0.35f) < 1e-6f);
+    });
+
+    test("workbench: base colour and opacity write diffuse and _Color, nothing else", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.8f};
+        o.opacity = 0.5f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - 0.2f) < 1e-6f && std::fabs(s.materials[0].diffuse.w - 0.5f) < 1e-6f);
+        bool colorOk = false;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_Color") colorOk = std::fabs(pr.second.x - 0.2f) < 1e-6f && std::fabs(pr.second.w - 0.5f) < 1e-6f;
+        CHECK(colorOk);
+        CHECK(s.materials[1].diffuse.z == 0.5f);   // the other material is untouched
+        CHECK(st.IsDirty() && st.OverrideCount() == 1);
+    });
+
+    test("workbench: roughness maps to _SpecularPower, specular writes colour and derived gloss", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.roughness = 0.8f;   // strength 0.2
+        o.specular = Vec3{1, 0.5f, 0};
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        float power = -1;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_SpecularPower") power = pr.second.x;
+        CHECK(std::fabs(power - 0.2f) < 1e-5f);
+        CHECK(std::fabs(s.materials[0].specular.x - 0.2f) < 1e-5f && std::fabs(s.materials[0].specular.y - 0.1f) < 1e-5f);
+        EffectiveMaterial e = EffectiveOf(st, 0);
+        CHECK(std::fabs(e.roughness - 0.8f) < 1e-5f && std::fabs(e.specularPower - 0.2f) < 1e-5f);
+    });
+
+    test("workbench: reset restores the original bit for bit, reset-parameter keeps siblings", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        const auto before = s.materials[0];
+        MaterialOverride o;
+        o.baseColor = Vec4{1, 0, 0, 1};
+        o.roughness = 0.1f;
+        o.opacity = 0.3f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].diffuse.x == 1.0f && s.materials[0].diffuse.y == 0.0f);
+        ResetParameter(st, 0, ResetParam::BaseColor);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - before.diffuse.x) < 1e-6f);
+        CHECK(std::fabs(s.materials[0].diffuse.w - 0.3f) < 1e-6f);   // opacity survives the param reset
+        ResetMaterial(st, 0);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - before.diffuse.x) < 1e-6f && s.materials[0].props.size() == before.props.size());
+        CHECK(!st.IsDirty());
+    });
+
+    test("workbench: JSON round trip, version and unknown-field tolerance, unknown material warned", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.class_ = MaterialClass::Fabric;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.75f};
+        o.roughness = 0.8f;
+        o.preset = "Fabric/Default";
+        SetOverride(st, 0, o);
+        MaterialFile f = MakeMaterialFile(s, st, "deadbeef");
+        const std::string text = MaterialFileToJson(f);
+        MaterialFile back;
+        std::string err;
+        CHECK(MaterialFileFromJson(text, back, &err));
+        CHECK(back.entries.size() == 1 && back.cardSha256 == "deadbeef");
+        CHECK(back.entries[0].part == "outfit0.top" && back.entries[0].material == "mf_m_top");
+        // Apply the reloaded file to a fresh state with the same scene.
+        assemble::Scene s2 = makeMatScene();
+        WorkbenchState st2;
+        CaptureOriginals(st2, s2);
+        std::vector<std::string> unknown;
+        CHECK(ApplyMaterialFile(s2, st2, back, &unknown) == 1 && unknown.empty());
+        CHECK(s2.materials[0].diffuse.x == 0.2f && s2.materials[0].diffuse.w == 0.75f);
+        // Unknown material: warned, not fatal.
+        MaterialFile bad;
+        MaterialEntry e; e.part = "outfit0.top"; e.material = "nope"; e.ov.opacity = 0.5f;
+        bad.entries.push_back(e);
+        std::vector<std::string> unk2;
+        CHECK(ApplyMaterialFile(s2, st2, bad, &unk2) == 0 && unk2.size() == 1);
+        bool warned = false;
+        for (const auto& is : s2.issues) warned = warned || is.message.find("nope") != std::string::npos;
+        CHECK(warned);
+        // Version / format rejections with reasons.
+        for (const char* badJson : {"", "not json", "[]", R"({"format":"other","version":1})", R"({"format":"cardbridge-materials","version":2})",
+                                    R"({"format":"cardbridge-materials","version":1,"materials":[{"material":"m","class":"Nope"}]})",
+                                    R"({"format":"cardbridge-materials","version":1,"materials":[{"part":"p"}]})"}) {
+            err.clear();
+            CHECK(!MaterialFileFromJson(badJson, back, &err) && !err.empty());
+        }
+        // Unknown fields are ignored.
+        CHECK(MaterialFileFromJson(R"({"format":"cardbridge-materials","version":1,"future":true,"materials":[{"part":"p","material":"m","opacity":0.5,"future":1}]})", back, &err));
+        CHECK(back.entries.size() == 1 && back.entries[0].ov.opacity && std::fabs(*back.entries[0].ov.opacity - 0.5f) < 1e-6f);
+    });
+
+    test("workbench: undo/redo is one step per edit, redo dies on a new edit", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o1; o1.opacity = 0.2f;
+        MaterialOverride o2; o2.opacity = 0.4f;
+        SetOverride(st, 0, o1);
+        CHECK(CanUndo(st) && !CanRedo(st));
+        SetOverride(st, 0, o2);
+        CHECK(st.undoStack.size() == 2);
+        CHECK(Undo(st) && std::fabs(*st.overrides[0]->opacity - 0.2f) < 1e-6f);
+        CHECK(Undo(st) && !st.IsDirty());
+        CHECK(Redo(st) && std::fabs(*st.overrides[0]->opacity - 0.2f) < 1e-6f);
+        MaterialOverride o3; o3.opacity = 0.9f;
+        SetOverride(st, 0, o3);
+        CHECK(!CanRedo(st));   // the new edit killed the redo branch
+        CHECK(!Redo(st));
+    });
+
+    test("workbench: texture enable/disable, rebind and replace; missing is warned not crashed", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        CHECK(SetTextureEnabled(s, st, 0, "_MainTex", false));
+        CHECK(s.materials[0].texture == -1);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].texture == -1);
+        SetTextureEnabled(s, st, 0, "_MainTex", true);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].texture == 0);
+        assemble::SceneTexture rep;
+        rep.name = "rep"; rep.width = 1; rep.height = 1; rep.rgba = {10, 20, 30, 255};
+        CHECK(ReplaceTexture(s, st, 0, "_MainTex", rep) == 1);
+        CHECK(s.materials[0].texture == 1 && s.textures.size() == 2);
+        // Out-of-range rebind is refused with a warning and no state change.
+        const size_t issuesBefore = s.issues.size();
+        CHECK(!RebindTexture(s, st, 0, "_MainTex", 99));
+        CHECK(s.issues.size() > issuesBefore && s.materials[0].texture == 1);
+        // A broken replacement texture is refused.
+        assemble::SceneTexture broken; broken.name = "broken";
+        CHECK(ReplaceTexture(s, st, 0, "_MainTex", broken) == -1);
+    });
+
+    test("workbench: shared materials edit every use; copy/paste and multi-apply keep instances separate", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        // Make material 0 shared: a second submesh on the same mesh names it.
+        s.meshes[0].vertices.push_back(s.meshes[0].vertices[2]);
+        s.meshes[0].submeshes.push_back({0, {0, 1, 2}});
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        CHECK(CountSubmeshesForMaterial(s, 0) == 2);
+        CHECK(PartForMaterial(s, 0) == "outfit0.top");
+        CHECK(FindMaterialIndex(s, "outfit0.top", "mf_m_top") == 0);
+        CHECK(FindMaterialIndex(s, "hair.back", "mf_m_top") == -1);
+        MaterialOverride o; o.opacity = 0.5f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        int edited = 0;
+        for (const auto& mesh : s.meshes) for (const auto& sub : mesh.submeshes) if (sub.material == 0) ++edited;
+        CHECK(edited == 2);
+        // Copy/paste + multi-apply.
+        MaterialOverride cp = CopyOverride(st, 0);
+        PasteOverride(st, 1, cp);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[1].diffuse.w == 0.5f);
+        PasteToMultiple(st, {1}, MaterialOverride{});
+        ApplyOverrides(s, st);
+        CHECK(s.materials[1].diffuse.w == 1.0f);
+        CHECK(MaterialIdColor(0).x != MaterialIdColor(1).x || MaterialIdColor(0).y != MaterialIdColor(1).y);
+        CHECK(MaterialIdColor(0).x == MaterialIdColor(0).x);   // deterministic
+    });
+
+    test("workbench: PMX shows the edited colour/alpha and the manifest names the file", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.5f};
+        o.roughness = 0.9f;   // unsupported in PMX: must be reported, not silently dropped
+        o.metallic = 1.0f;    // unsupported too
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        ReportUnsupported(s, st);
+        bool reported = false;
+        for (const auto& is : s.issues) reported = reported || is.message.find("metallic") != std::string::npos;
+        CHECK(reported);
+        auto unsupported = UnsupportedFields(o);
+        CHECK(unsupported.size() >= 2);
+        const exporter::MmdLook look = exporter::MmdMaterialLook(s, s.materials[0]);
+        CHECK(std::fabs(look.diffuse.x - 0.2f) < 1e-5f && std::fabs(look.diffuse.w - 0.5f) < 1e-5f);
+        // Real export pairing: the fixture JSON changes the PMX and the manifest says so.
+        card::Card c;
+        c.path = "card.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("material_export");
+        eo.overwrite = true;
+        eo.materialFile = "m.json";
+        eo.materialWorkbench = nlohmann::json::parse(MaterialFileToJson(MakeMaterialFile(s, st, "deadbeef")), nullptr, false);
+        eo.materialWorkbench["file"] = "m.json";
+        const auto r = exporter::ExportScene(s, c, eo);
+        CHECK(fileio::Exists(r.pmxPath) && fileio::Exists(r.manifestPath));
+        Bytes pmxBytes = fileio::ReadFile(r.pmxPath);
+        Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifestText(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifestText.find("\"material_workbench\"") != std::string::npos);
+        CHECK(manifestText.find("mf_m_top") != std::string::npos);
+        CHECK(manifestText.find("\"file\": \"m.json\"") != std::string::npos);
+        // The PMX carries the edited material (via the independent reader's
+        // names) and the edited diffuse reaches it through MmdMaterialLook.
+        const pmxread::Model back = readPmx(pmxBytes);
+        bool sawMaterial = false;
+        for (const auto& m : back.materials) if (m.name.find("outfit0.top") != std::string::npos) sawMaterial = true;
+        CHECK(sawMaterial && back.materials.size() > 0);
+    });
 }
+
 
 void integrationTests() {
     std::string lib = env("CARDBRIDGE_TEST_LIBRARY"), mods = env("CARDBRIDGE_TEST_MODS"), cardPath = env("CARDBRIDGE_TEST_CARD");

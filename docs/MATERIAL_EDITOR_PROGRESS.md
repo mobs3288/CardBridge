@@ -89,23 +89,82 @@ All later stages use this invocation.
 ---
 
 ## Stage 1 — Material foundation
-Status: **not started.**
+Status: **done** (2026-11-09).
 
-Todo (from `MATERIAL_EDITOR.md` §9):
+**Files changed:**
+- New `src/material/MaterialWorkbench.h` + `src/material/MaterialWorkbench.cpp`
+  (UI-free, ADR-006): `MaterialClass`, `MaterialOverride` (sparse),
+  `WorkbenchState` (originals + overrides + 200-deep undo/redo),
+  `CaptureOriginals`/`ApplyOverrides` (restore-from-original then apply only
+  overridden fields), reset (parameter/material/all), copy/paste/multi-apply,
+  `PresetForClass` (11 classes, colour-preserving), classification
+  heuristic (exporter-trusted substrings; Metal/Plastic/Leather/Rubber are
+  user-set only), texture helpers (`SetTextureEnabled`, `RebindTexture`,
+  `ReplaceTexture` with FNV-1a hash), `UnsupportedFields`/`ReportUnsupported`,
+  and the `cardbridge-materials` v1 JSON (`MaterialFileToJson`/`FromJson`,
+  `MakeMaterialFile`, `ApplyMaterialFile` keyed by part + material name,
+  tolerant reader, unknown materials warned not fatal).
+- `src/export/Exporter.h` / `.cpp`: `ExportOptions::materialFile` +
+  `materialWorkbench` (JSON object); `BuildManifest` emits a
+  `material_workbench` section when present (file name + overrides).
+- `cli/main.cpp`: `--materials <file.json>` — captured after assembly,
+  applied after the pose bake and before `ApplyPartStateForExport` (so
+  `BakeShaderTextures` sees edited colours), unknown entries logged, sha
+  mismatch warned-not-enforced, provenance passed to the exporter.
+- `CMakeLists.txt`: `src/material/MaterialWorkbench.cpp` added to
+  `cardbridge_core`. No new dependency.
+- `tests/cardbridge_tests.cpp`: 10 new test blocks (see below).
+- No viewer change, by design.
 
-- [ ] `src/material/` module: originals snapshot, sparse overrides,
-      classification, presets.
-- [ ] `ApplyOverrides` → live `SceneMaterial` write path.
-- [ ] Reset (parameter / material / all), copy/paste, multi-apply.
-- [ ] `cardbridge-materials` v1 JSON (`MaterialFileToJson`/`FromJson`).
-- [ ] CLI `convert --materials`; manifest `material_workbench` section;
-      unsupported-field warnings.
-- [ ] Unit tests (classification, presets, edits, restoration, JSON
-      round-trip, undo, texture assignment, shared instances, PMX mapping).
-- [ ] Gated integration: convert with fixture JSON, diff PMX + manifest.
+**Mapping notes (docs/MATERIAL_EDITOR.md §3.4):**
+- Base colour → `diffuse` + `_Color` (when present); opacity → `diffuse.w` +
+  `_Color.w`; specular → `_SpecularColor` + scaled derived gloss; roughness →
+  `_SpecularPower` inverse (`strength = 1 - roughness`, 0..1, the same clamp
+  the assembler uses); metallic → best-effort `_Metallic` write (preview-only,
+  PMX unsupported).
+- Preview-only (PMX cannot carry them): metallic, roughness, emission
+  (written to `_EmissionColor` when the shader reads it), normal intensity,
+  transmission, subsurface, anisotropic highlight, classification. Each set
+  field produces a named `scene.warn` via `ReportUnsupported` (lands in the
+  manifest issues) — never silently dropped.
+- Texture enable/disable writes `texProps[slot].texture = -1`; rebind binds an
+  existing scene texture by index or by name (JSON); replace appends a new
+  `SceneTexture` with FNV-1a hash. File-based texture replacement (user
+  picker) is Stage 3; the binding plumbing is done.
 
-Exit criteria: fixture JSON changes exported PMX colours/alpha; full suite
-green; no viewer change.
+**Test results:**
+```
+1772 checks, 0 failed, 1 integration suite(s) skipped   (baseline was 1659)
+```
+New checks (all passing, no game files needed):
+- classification table for skin/hair/main_item/main_opaque/main_alpha/toon_eye/
+  toon_nose/glasses/mnpb + Generic fallback + `ClassFromName`
+- every preset sets shading and leaves colour alone; Fabric carries
+  transmission, Skin carries subsurface
+- base colour / opacity write diffuse + `_Color` only
+- roughness → `_SpecularPower`, specular → colour + derived gloss
+- reset restores the original bit-for-bit; param reset keeps siblings
+- JSON round-trip (incl. `card_sha256`, part/material key), version/format
+  rejection with reasons, unknown-field tolerance, unknown material warned
+- undo/redo one step per edit, redo dies on a new edit
+- texture enable/disable, rebind, replace, missing warned-not-crashed
+- shared instances (2 submeshes edited together), part lookup, copy/paste,
+  multi-apply, deterministic `MaterialIdColor`
+- PMX: `MmdMaterialLook` carries the edited diffuse/alpha; real
+  `ExportScene` writes a PMX the independent reader can read and a manifest
+  whose `material_workbench` names the file and the material; unsupported
+  fields reported via `scene.issues`.
+
+**Remaining limitations:** no viewer UI (Stage 2), no texture file picker or
+GPU texture upload API (Stage 3), no diagnostic modes (Stage 4), no
+transmission/skin preview (Stage 5), PMX `memo` classification and the
+`--no-bake`/`--no-toon-ramp` interactions are Stage 7. The gated
+card→PMX integration suite still needs `CARDBRIDGE_TEST_LIBRARY/_MODS/_CARD`
+to exercise `--materials` against a real card; the synthetic export test
+covers the same code path without game files.
+
+Exit criteria met: fixture JSON changes exported PMX colours/alpha, the
+manifest says so, full suite green, no viewer change.
 
 ---
 

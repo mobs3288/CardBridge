@@ -316,6 +316,13 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     j["game_adapter"] = "koikatsu";
     if (card.hasClothing)
         j["added_outfit"] = {{"name", card.clothingName}, {"file", fileio::FileName(card.clothingPath)}, {"outfit", card.clothingOutfit}};
+    if (opt.materialWorkbench.is_object()) {
+        nlohmann::json wb = opt.materialWorkbench;
+        if (!wb.contains("file") && !opt.materialFile.empty()) wb["file"] = fileio::FileName(opt.materialFile);
+        j["material_workbench"] = std::move(wb);
+    } else if (!opt.materialFile.empty()) {
+        j["material_workbench"] = {{"file", fileio::FileName(opt.materialFile)}};
+    }
     j["provenance"] = {{"asset_library", opt.assetLibrary}, {"mods_folder", opt.modsFolder}};
     j["export"] = {{"format", "pmx"}, {"file", pmxFile}, {"scale", opt.scale}, {"axes", "y-up, left-handed"}, {"facing", opt.faceMinusZ ? "-z" : "+z"},
                    {"uv", "v flipped to top-left origin"}, {"texture_mode", "copy_required_textures"}, {"textures_dir", "textures"}};
