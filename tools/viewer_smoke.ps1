@@ -266,6 +266,33 @@ try {
             $c = Shot 'material_undone'
             Check 'materials: undo restores the picture' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
             Check 'materials: the window answers after undo' ($null -ne $lay)
+            # Class dropdown: open it, pick Metal (index 5) directly instead of cycling.
+            $cb = $lay.materials.classBtn
+            Click ([int]$cb[0]) ([int]$cb[1]) 400
+            $lay = Layout
+            Check 'materials: the class dropdown opens' ($lay.materials.classDropOpen -eq $true)
+            $editTop = [int]$lay.materials.editTop; $rowH = [int]$lay.rowH
+            # dropdown top = editTop + 2*rowH; Metal is item 5 (Skin 0 .. Metal 5).
+            $metalY = $editTop + 2 * $rowH + 5 * $rowH + [int]($rowH / 2)
+            Click 100 $metalY 400
+            $lay = Layout
+            Check 'materials: picking Metal in one click sets the class' ($lay.materials.classDropOpen -eq $false -and $lay.materials.cls -eq 5) "cls $($lay.materials.cls)"
+            # Colour picker: open it, drag in the SV square to a dark/saturated colour.
+            $a2 = Shot 'before_picker'
+            $undo1 = $lay.materials.undo
+            $pb = $lay.materials.pickBtn
+            Click ([int]$pb[0]) ([int]$pb[1]) 400
+            $lay = Layout
+            Check 'materials: the colour picker opens' ($lay.materials.pickerOpen -eq $true)
+            $sv = $lay.materials.pickerSV; $svLo = $lay.materials.pickerSVLo
+            Drag ([int]$sv[0]) ([int]$sv[1]) ([int]$svLo[0]) ([int]$svLo[1]) 10
+            $lay = Layout
+            $b2 = Shot 'picker_drag'
+            Check 'materials: the picker drag is one undo step' (($lay.materials.undo - $undo1) -eq 1) "mat undo $undo1 -> $($lay.materials.undo)"
+            Check 'materials: the picker changes the picture' ([V]::DiffView($a2.Path, $b2.Path, $lay.panel) -gt 0.0005) ("{0:P2} of the view" -f [V]::DiffView($a2.Path, $b2.Path, $lay.panel))
+            Click ([int]$pb[0]) ([int]$pb[1]) 400
+            $lay = Layout
+            Check 'materials: the colour picker closes' ($lay.materials.pickerOpen -eq $false -and $null -ne $lay)
         }
     }
 

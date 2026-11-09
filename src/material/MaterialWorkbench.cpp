@@ -125,6 +125,42 @@ assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4&
     return src;
 }
 
+Vec3 RgbToHsv(const Vec3& rgb) {
+    const float r = Clamp01(rgb.x), g = Clamp01(rgb.y), b = Clamp01(rgb.z);
+    const float mx = std::max({r, g, b}), mn = std::min({r, g, b}), d = mx - mn;
+    float h = 0.0f;
+    if (d > 1e-6f) {
+        if (mx == r) h = std::fmod((g - b) / d, 6.0f);
+        else if (mx == g) h = (b - r) / d + 2.0f;
+        else h = (r - g) / d + 4.0f;
+        h *= 60.0f;
+        if (h < 0.0f) h += 360.0f;
+    }
+    h /= 360.0f;
+    const float s = mx <= 1e-6f ? 0.0f : d / mx;
+    return {h, Clamp01(s), Clamp01(mx)};
+}
+
+Vec3 HsvToRgb(float h, float s, float v) {
+    s = Clamp01(s);
+    v = Clamp01(v);
+    h = h - std::floor(h);   // wrap 1.0 -> 0.0 (red)
+    const float sector = h * 6.0f;
+    const int i = static_cast<int>(std::floor(sector));
+    const float f = sector - static_cast<float>(i);
+    const float p = v * (1.0f - s);
+    const float q = v * (1.0f - s * f);
+    const float t = v * (1.0f - s * (1.0f - f));
+    switch (i % 6) {
+    case 0: return {v, t, p};
+    case 1: return {q, v, p};
+    case 2: return {p, v, t};
+    case 3: return {p, q, v};
+    case 4: return {t, p, v};
+    default: return {v, p, q};
+    }
+}
+
 const char* ClassName(MaterialClass c) {
     switch (c) {
     case MaterialClass::Skin: return "Skin";

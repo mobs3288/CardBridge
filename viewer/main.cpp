@@ -318,7 +318,7 @@ struct PanelLayout {
     // Bones tab hit areas (the click code and the drawing use the same ones): the two switches, the reset row, the undo / redo / save / load row
     RECT boneSkeleton{}, boneHelpers{}, boneResetOne{}, boneResetAll{}, boneUndo{}, boneRedo{}, boneSave{}, boneLoad{};
     // Materials tab hit areas
-    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
+    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matPickBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
@@ -375,6 +375,7 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.matClassBtn = {10, my, 140, my + kRowH};
     l.matPresetBtn = {144, my, 240, my + kRowH};
     l.matTexBtn = {244, my, kPanel - 10, my + kRowH};
+    l.matPickBtn = {306, l.matEditTop + 5 * kRowH, kPanel - 10, l.matEditTop + 6 * kRowH};
     const int mry = l.matEditTop + 12 * kRowH;
     l.matResetThis = {10, mry, 95, mry + kRowH};
     l.matResetAll = {99, mry, 184, mry + kRowH};
@@ -471,6 +472,13 @@ struct App {
     bool matHexEditing = false;               // HEX text entry in the materials editor
     std::string matHexBuf;
     bool matHexUndoPushed = false;
+    // Materials tab dropdowns + colour picker (popups over the editor).
+    bool matClassDropOpen = false;
+    bool matFilterDropOpen = false;
+    int matDropHover = -1;                    // row under the cursor in an open dropdown
+    bool matPickerOpen = false;
+    int matPickerDrag = 0;                    // 0 none, 1 = SV square, 2 = hue bar
+    bool matPickerUndoPushed = false;         // one undo step per picker session
     std::vector<Mat4> skin;                   // current skin matrices (empty = rest pose)
     std::vector<Vec3> boneWorld;              // posed bone positions, for the overlay
     std::vector<std::pair<float, float>> boneScreen;   // where the overlay put each bone in the last picture (x < 0: not drawn)
@@ -918,6 +926,101 @@ void ApplyMatHex(const std::string& hex6) {
     g.dirty = true;
     InvalidateView();
     InvalidatePanel();
+}
+
+// The colour picker's apply: same as HEX but from a picked RGB. Kept separate so
+// HEX typing keeps its own undo handling; the picker pushes once per session.
+void ApplyMatRgb(const Vec3& rgb) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0) return;
+    const size_t sel = static_cast<size_t>(g.selMaterial);
+    if (sel >= g.mat.originals.size()) return;
+    if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
+    if (!g.mat.overrides[sel]) g.mat.overrides[sel] = material::MaterialOverride{};
+    material::EffectiveMaterial cur = material::EffectiveOf(g.mat, sel);
+    g.mat.overrides[sel]->baseColor = Vec4{std::clamp(rgb.x, 0.0f, 1.0f), std::clamp(rgb.y, 0.0f, 1.0f), std::clamp(rgb.z, 0.0f, 1.0f), cur.baseColor.w};
+    material::ApplyOverrides(L->scene, g.mat);
+    SyncMaterialTextures();
+    if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+    g.dirty = true;
+    InvalidateView();
+    const PanelLayout l = Lay(ClientHeight());
+    InvalidatePanelBand(l.matEditTop, l.matEditTop + kMatEditRows * kRowH);
+}
+
+// Direct class pick (dropdown). One undo step; the class itself is only a label
+// plus metadata — the shading numbers come from the Preset button.
+void SetMatClass(int clsInt) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0) return;
+    const size_t sel = static_cast<size_t>(g.selMaterial);
+    if (sel >= g.mat.originals.size()) return;
+    auto next = static_cast<material::MaterialClass>(std::clamp(clsInt, 0, 10));
+    material::PushUndo(g.mat);
+    if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
+    if (!g.mat.overrides[sel]) g.mat.overrides[sel] = material::MaterialOverride{};
+    g.mat.overrides[sel]->class_ = next;
+    material::ApplyOverrides(L->scene, g.mat);
+    SyncMaterialTextures();
+    if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+    g.dirty = true;
+    Log(std::string("class: ") + L->scene.materials[sel].name + " -> " + material::ClassName(next));
+    InvalidateAll();
+}
+
+// Direct filter pick (dropdown). Not an undoable edit: only the list filter.
+void SetMatFilter(int filter) {
+    g.matFilter = filter;
+    g.matScroll = 0;
+    g.matPos = 0;
+    InvalidatePanel();
+}
+
+// ---- Materials tab popup geometry (single source of truth for draw + click) ----
+RECT MatClassDropRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 2 * kRowH;
+    return {10, y, 200, y + 11 * kRowH};
+}
+RECT MatFilterDropRect(const PanelLayout& l) {
+    const int y = l.partsTop + kRowH;
+    return {10, y, 200, y + 12 * kRowH};
+}
+RECT MatPickerOuter(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {10, y, kPanel - 10, y + 136};
+}
+RECT MatPickerSV(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {20, y + 8, 200, y + 88};
+}
+RECT MatPickerHue(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {20, y + 96, 200, y + 110};
+}
+RECT MatPickerPreview(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {210, y + 8, 360, y + 48};
+}
+RECT MatPickerDone(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {210, y + 112, 360, y + 128};
+}
+// Applies the picker colour at a window point inside the SV square or hue bar.
+// kind: 1 = SV (keeps the current hue), 2 = hue (keeps s/v).
+void ApplyPickerAt(int x, int y, int kind, const PanelLayout& l) {
+    if (g.selMaterial < 0) return;
+    material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+    Vec3 hsv = material::RgbToHsv(Vec3{eff.baseColor.x, eff.baseColor.y, eff.baseColor.z});
+    if (kind == 1) {
+        const RECT sv = MatPickerSV(l);
+        hsv.y = std::clamp((x - sv.left) / float(sv.right - sv.left), 0.0f, 1.0f);
+        hsv.z = 1.0f - std::clamp((y - sv.top) / float(sv.bottom - sv.top), 0.0f, 1.0f);
+    } else {
+        const RECT hb = MatPickerHue(l);
+        hsv.x = std::clamp((x - hb.left) / float(hb.right - hb.left), 0.0f, 1.0f);
+    }
+    if (!g.matPickerUndoPushed) { material::PushUndo(g.mat); g.matPickerUndoPushed = true; }
+    ApplyMatRgb(material::HsvToRgb(hsv.x, hsv.y, hsv.z));
 }
 
 std::string MatPathFromUser(bool save) {
@@ -2112,9 +2215,9 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
     // Filter row.
     {
         const int y = l.partsTop;
-        std::string fl = "Filter: All";
-        if (g.matFilter >= 0) fl = std::string("Filter: ") + material::ClassName(static_cast<material::MaterialClass>(g.matFilter));
-        s.FillRound(l.matFilter, 5, ui::kCardHi);
+        std::string fl = "Filter: All v";
+        if (g.matFilter >= 0) fl = std::string("Filter: ") + material::ClassName(static_cast<material::MaterialClass>(g.matFilter)) + " v";
+        s.FillRound(l.matFilter, 5, g.matFilterDropOpen ? ui::kLineHi : ui::kCardHi);
         s.TextCentered(g.fontUi, g.matFilter >= 0 ? ui::kAmber : ui::kText, l.matFilter, fl);
         const int total = static_cast<int>(scene.materials.size());
         const std::string n = std::to_string(BuildMatRows(L).size()) + " / " + std::to_string(total);
@@ -2172,7 +2275,8 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
             s.FillRound(r, 5, ui::kCardHi);
             s.TextCentered(g.fontUi, enabled ? ui::kText : ui::kFaint, r, label);
         };
-        ghost(l.matClassBtn, "Class: " + std::string(material::ClassName(eff.cls)), true);
+        s.FillRound(l.matClassBtn, 5, g.matClassDropOpen ? ui::kLineHi : ui::kCardHi);
+        s.TextCentered(g.fontUi, ui::kText, l.matClassBtn, "Class: " + std::string(material::ClassName(eff.cls)) + " v");
         ghost(l.matPresetBtn, "Preset", true);
         bool texOn = sm.texture >= 0;
         // Reflect enable/disable overrides for _MainTex.
@@ -2191,7 +2295,7 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
         const int y = l.matEditTop + (2 + k) * kRowH;
         if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + k, rgbLabels[k], y);
     }
-    // HEX.
+    // HEX + colour picker button.
     {
         const int y = l.matEditTop + 5 * kRowH;
         if (TouchesY(clip, y, y + kRowH)) {
@@ -2202,6 +2306,8 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
             s.FillRound(sw, 4, col);
             s.StrokeRound(sw, 4, ui::kLineHi);
             s.Text(g.fontMono, g.matHexEditing ? ui::kAmber : ui::kText, 208, y + 2, g.matHexEditing ? (g.matHexBuf + "_") : hex, nullptr);
+            s.FillRound(l.matPickBtn, 5, g.matPickerOpen ? ui::kLineHi : ui::kCardHi);
+            s.TextCentered(g.fontUi, ui::kText, l.matPickBtn, "Color");
         }
     }
     // Shading sliders.
@@ -2220,6 +2326,71 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
         ghost(l.matResetAll, "reset all", g.mat.IsDirty());
         ghost(l.matUndo, "undo", material::CanUndo(g.mat));
         ghost(l.matRedo, "redo", material::CanRedo(g.mat));
+    }
+    // Popups drawn last so they sit over the editor/list.
+    auto toColor = [](const Vec3& v) { return RGB(static_cast<int>(std::lround(std::clamp(v.x, 0.0f, 1.0f) * 255.0f)), static_cast<int>(std::lround(std::clamp(v.y, 0.0f, 1.0f) * 255.0f)), static_cast<int>(std::lround(std::clamp(v.z, 0.0f, 1.0f) * 255.0f))); };
+    if (g.matFilterDropOpen) {
+        const RECT drop = MatFilterDropRect(l);
+        s.FillRound(drop, 5, ui::kCard);
+        s.StrokeRound(drop, 5, ui::kLineHi);
+        const char* labels[12] = {"All", "Skin", "Fabric", "Hair", "Eyes", "Eyelashes", "Metal", "Plastic", "Leather", "Glass", "Rubber", "Generic"};
+        for (int i = 0; i < 12; ++i) {
+            const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
+            const int val = i == 0 ? -1 : i - 1;
+            if (val == g.matFilter || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
+            s.Text(g.fontUi, val == g.matFilter ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, labels[i], &row);
+        }
+    }
+    if (g.matClassDropOpen) {
+        const RECT drop = MatClassDropRect(l);
+        s.FillRound(drop, 5, ui::kCard);
+        s.StrokeRound(drop, 5, ui::kLineHi);
+        for (int i = 0; i < 11; ++i) {
+            const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
+            if (i == static_cast<int>(eff.cls) || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
+            s.Text(g.fontUi, (i == static_cast<int>(eff.cls)) ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, std::string(material::ClassName(static_cast<material::MaterialClass>(i))) + (static_cast<material::MaterialClass>(i) == eff.cls ? "  ✓" : ""), &row);
+        }
+    }
+    if (g.matPickerOpen) {
+        const RECT outer = MatPickerOuter(l);
+        s.FillRound(outer, 6, ui::kCard);
+        s.StrokeRound(outer, 6, ui::kLineHi);
+        material::EffectiveMaterial ceff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+        const Vec3 cur{ceff.baseColor.x, ceff.baseColor.y, ceff.baseColor.z};
+        const Vec3 hsv = material::RgbToHsv(cur);
+        const RECT sv = MatPickerSV(l);
+        const int cols = 24, rows = 12;
+        const float cw = float(sv.right - sv.left) / float(cols), ch = float(sv.bottom - sv.top) / float(rows);
+        for (int r = 0; r < rows; ++r) {
+            const float v = 1.0f - (r + 0.5f) / float(rows);
+            for (int c = 0; c < cols; ++c) {
+                const float ss = (c + 0.5f) / float(cols);
+                const RECT cell{sv.left + int(c * cw), sv.top + int(r * ch), sv.left + int((c + 1) * cw) + 1, sv.top + int((r + 1) * ch) + 1};
+                s.Fill(cell, toColor(material::HsvToRgb(hsv.x, ss, v)));
+            }
+        }
+        s.StrokeRound(sv, 3, ui::kLineHi);
+        const float cx = sv.left + hsv.y * float(sv.right - sv.left), cy = sv.top + (1.0f - hsv.z) * float(sv.bottom - sv.top);
+        s.FillDisc(cx, cy, 5, RGB(255, 255, 255));
+        s.FillDisc(cx, cy, 2, RGB(10, 10, 10));
+        const RECT hb = MatPickerHue(l);
+        const int hseg = 12;
+        for (int i2 = 0; i2 < hseg; ++i2) {
+            const int x0 = hb.left + int(i2 * float(hb.right - hb.left) / float(hseg));
+            const int x1 = hb.left + int((i2 + 1) * float(hb.right - hb.left) / float(hseg)) + 1;
+            s.Fill(RECT{x0, hb.top, x1, hb.bottom}, toColor(material::HsvToRgb(i2 / float(hseg) + 0.5f / float(hseg), 1, 1)));
+        }
+        s.StrokeRound(hb, 6, ui::kLineHi);
+        const float hx = hb.left + hsv.x * float(hb.right - hb.left);
+        s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 6, RGB(255, 255, 255));
+        s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 3, RGB(10, 10, 10));
+        const RECT pv = MatPickerPreview(l);
+        s.FillRound(pv, 4, toColor(cur));
+        s.StrokeRound(pv, 4, ui::kLineHi);
+        s.Text(g.fontMono, ui::kText, pv.left, pv.bottom + 4, MatHexOf(ceff), nullptr);
+        const RECT dn = MatPickerDone(l);
+        s.FillRound(dn, 5, ui::kCardHi);
+        s.TextCentered(g.fontUi, ui::kText, dn, "Done");
     }
 }
 
@@ -3127,17 +3298,43 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
     if (!L) return;
     if (g.mat.originals.size() != L->scene.materials.size()) material::CaptureOriginals(g.mat, L->scene);
     const POINT pt{x, y};
+    // Popups first: they are modal. A click inside picks/drags/closes;
+    // a click outside closes and is consumed (the next click acts).
+    if (g.matPickerOpen) {
+        const RECT sv = MatPickerSV(l), hb = MatPickerHue(l), dn = MatPickerDone(l), outer = MatPickerOuter(l);
+        if (!right && PtInRect(&dn, pt)) { g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return; }
+        if (!right && PtInRect(&l.matPickBtn, pt)) { g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return; }
+        if (!right && PtInRect(&sv, pt)) { g.matPickerDrag = 1; ApplyPickerAt(x, y, 1, l); SetCapture(g.hwnd); InvalidatePanel(); return; }
+        if (!right && PtInRect(&hb, pt)) { g.matPickerDrag = 2; ApplyPickerAt(x, y, 2, l); SetCapture(g.hwnd); InvalidatePanel(); return; }
+        if (PtInRect(&outer, pt)) return;
+        g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return;
+    }
+    if (g.matClassDropOpen) {
+        const RECT drop = MatClassDropRect(l);
+        if (!right && PtInRect(&drop, pt)) {
+            const int idx = (y - drop.top) / kRowH;
+            if (idx >= 0 && idx < 11) SetMatClass(idx);
+            g.matClassDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+        }
+        g.matClassDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+    }
+    if (g.matFilterDropOpen) {
+        const RECT drop = MatFilterDropRect(l);
+        if (!right && PtInRect(&drop, pt)) {
+            const int idx = (y - drop.top) / kRowH;
+            if (idx >= 0 && idx < 12) SetMatFilter(idx == 0 ? -1 : idx - 1);
+            g.matFilterDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+        }
+        g.matFilterDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+    }
     // Leaving HEX entry: any click that is not on the HEX row ends it (Enter/ESC also end it).
     if (g.matHexEditing && !(y >= l.matEditTop + 5 * kRowH && y < l.matEditTop + 6 * kRowH)) {
         g.matHexEditing = false; g.matHexUndoPushed = false;
     }
     // Filter row.
     if (!right && PtInRect(&l.matFilter, pt)) {
-        static const int order[] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-        int pos = 0;
-        for (int i = 0; i < 12; ++i) if (order[i] == g.matFilter) { pos = i; break; }
-        g.matFilter = order[(pos + 1) % 12];
-        g.matScroll = 0; g.matPos = 0;
+        g.matFilterDropOpen = !g.matFilterDropOpen;
+        g.matDropHover = -1;
         InvalidatePanel();
         return;
     }
@@ -3156,18 +3353,9 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
     const int row = (y - l.matEditTop) / kRowH;
     if (row == 1 && !right) {
         if (PtInRect(&l.matClassBtn, pt)) {
-            material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
-            int next = (static_cast<int>(eff.cls) + 1) % 11;
-            material::PushUndo(g.mat);
-            if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
-            if (!g.mat.overrides[static_cast<size_t>(g.selMaterial)]) g.mat.overrides[static_cast<size_t>(g.selMaterial)] = material::MaterialOverride{};
-            g.mat.overrides[static_cast<size_t>(g.selMaterial)]->class_ = static_cast<material::MaterialClass>(next);
-            material::ApplyOverrides(L->scene, g.mat);
-            SyncMaterialTextures();
-            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
-            g.dirty = true;
-            Log(std::string("class: ") + L->scene.materials[static_cast<size_t>(g.selMaterial)].name + " -> " + material::ClassName(static_cast<material::MaterialClass>(next)));
-            InvalidateAll();
+            g.matClassDropOpen = !g.matClassDropOpen;
+            g.matDropHover = -1;
+            InvalidatePanel();
             return;
         }
         if (PtInRect(&l.matPresetBtn, pt)) {
@@ -3197,6 +3385,15 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         return;
     }
     if (row == 5 && !right) {
+        if (PtInRect(&l.matPickBtn, pt)) {
+            g.matPickerOpen = !g.matPickerOpen;
+            g.matPickerDrag = 0;
+            g.matPickerUndoPushed = false;
+            g.matHexEditing = false;
+            g.matHexUndoPushed = false;
+            InvalidatePanel();
+            return;
+        }
         // HEX: start text entry.
         material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
         g.matHexBuf = MatHexOf(eff);
@@ -3674,9 +3871,27 @@ void DumpTestLayout() {
         }
         j["materials"]["hexY"] = l.matEditTop + 5 * kRowH + kRowH / 2;
         j["materials"]["classY"] = l.matEditTop + 1 * kRowH + kRowH / 2;
+        j["materials"]["classBtn"] = {(l.matClassBtn.left + l.matClassBtn.right) / 2, (l.matClassBtn.top + l.matClassBtn.bottom) / 2};
+        j["materials"]["pickBtn"] = {(l.matPickBtn.left + l.matPickBtn.right) / 2, (l.matPickBtn.top + l.matPickBtn.bottom) / 2};
+        j["materials"]["classDropOpen"] = g.matClassDropOpen;
+        j["materials"]["filterDropOpen"] = g.matFilterDropOpen;
+        j["materials"]["pickerOpen"] = g.matPickerOpen;
+        {
+            const RECT sv = MatPickerSV(l), hb = MatPickerHue(l);
+            j["materials"]["pickerSV"] = {(sv.left + sv.right) / 2, (sv.top + sv.bottom) / 2};
+            j["materials"]["pickerHue"] = {(hb.left + hb.right) / 2, (hb.top + hb.bottom) / 2};
+            j["materials"]["pickerHueLeft"] = {hb.left + 4, (hb.top + hb.bottom) / 2};
+            j["materials"]["pickerSVHi"] = {sv.left + 4, sv.top + 4};
+            j["materials"]["pickerSVLo"] = {sv.right - 4, sv.bottom - 4};
+        }
+        if (g.selMaterial >= 0) {
+            const auto eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+            j["materials"]["cls"] = static_cast<int>(eff.cls);
+        }
         j["materials"]["resetY"] = l.matEditTop + 12 * kRowH + kRowH / 2;
         j["materials"]["filterY"] = l.partsTop + kRowH / 2;
         j["materials"]["sel"] = g.selMaterial;
+        j["materials"]["filter"] = g.matFilter;
         j["materials"]["overrides"] = g.mat.OverrideCount();
         j["materials"]["undo"] = g.mat.undoStack.size();
         j["materials"]["redo"] = g.mat.redoStack.size();
@@ -3904,6 +4119,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.matScroll = 0; g.matPos = 0;
             for (int k = 0; k < kMatCount; ++k) g.matBuf[k] = 0;
             g.matHexEditing = false; g.matHexBuf.clear();
+            g.matClassDropOpen = false; g.matFilterDropOpen = false; g.matPickerOpen = false; g.matPickerDrag = 0; g.matDropHover = -1;
             SyncMatBuf();
         }
         if (g.physics) { g.physics = false; SetPhysics(true); }
@@ -4126,6 +4342,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         if (g.sliderDrag >= 0) { g.dragX = x; g.dragPending = true; return 0; }   // applied by Frame, once per picture
+        if (g.matPickerDrag != 0 && g.matPickerOpen) {
+            const PanelLayout l = Lay(ClientHeight());
+            ApplyPickerAt(x, y, g.matPickerDrag, l);   // immediate: same frame as a slider drag
+            return 0;
+        }
+        // Dropdown hover (highlight the row under the cursor).
+        if ((g.matClassDropOpen || g.matFilterDropOpen) && x < kPanel && g.tab == TabMaterials && !g.showIssues) {
+            const PanelLayout l = Lay(ClientHeight());
+            const RECT drop = g.matClassDropOpen ? MatClassDropRect(l) : MatFilterDropRect(l);
+            const POINT hp{x, y};
+            const int nh = PtInRect(&drop, hp) ? (y - drop.top) / kRowH : -1;
+            if (nh != g.matDropHover) {
+                g.matDropHover = nh;
+                InvalidatePanelBand(drop.top, drop.bottom);
+            }
+            return 0;
+        }
         if (g.drag == 3) {
             g.boneDragDx += static_cast<float>(x - g.last.x);
             g.boneDragDy += static_cast<float>(y - g.last.y);
@@ -4209,6 +4442,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
+        if (g.matDropHover >= 0) { g.matDropHover = -1; InvalidatePanel(); }
         if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0) {
             bool part = g.hoverPart >= 0;
             g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
@@ -4220,6 +4454,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
         ApplyPending();   // the last movement of the drag counts
         CommitPoseEdit();
+        if (g.matPickerDrag != 0) {
+            g.matPickerDrag = 0;
+            ReleaseCapture();
+            InvalidatePanel();
+            return 0;
+        }
         if (g.sliderDrag >= 0) {
             SliderRef r;
             const bool live = IsLiveId(g.sliderDrag);
@@ -4357,6 +4597,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidatePanel();
             }
             return 0;
+        }
+        if (wp == VK_ESCAPE && (g.matClassDropOpen || g.matFilterDropOpen || g.matPickerOpen)) {
+            g.matClassDropOpen = false; g.matFilterDropOpen = false; g.matPickerOpen = false; g.matPickerDrag = 0; g.matDropHover = -1;
+            InvalidatePanel(); return 0;
         }
         if (wp == VK_ESCAPE && GetProgSnapshot().active) { ProgRequestCancel(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
         if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save, Ctrl+O load (pose or materials by tab)

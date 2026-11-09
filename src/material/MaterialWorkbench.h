@@ -174,6 +174,12 @@ void ApplyOverrides(assemble::Scene& scene, WorkbenchState& st);
 // directly so the colour maths is covered without needing a compiled shader.
 assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4& ratio);
 
+// Colour picker maths (UI-free so tests can cover it, viewer does the drawing).
+// HSV is a Vec3{h, s, v} with h in [0,1) (0 = red, 1/3 = green, 2/3 = blue),
+// s and v in [0,1]. H wraps: h == 1 and h == 0 are the same hue.
+Vec3 RgbToHsv(const Vec3& rgb);
+Vec3 HsvToRgb(float h, float s, float v);
+
 // Emits one scene.warn per unsupported-in-PMX field that is set (metallic,
 // roughness, emission, normal intensity, transmission, subsurface,
 // anisotropic, classification), so a dropped field is never silent. The

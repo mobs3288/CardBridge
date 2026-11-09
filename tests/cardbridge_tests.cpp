@@ -2707,6 +2707,29 @@ void unitTests() {
         CHECK(added);
     });
 
+    test("workbench: HSV round trip and known colours (colour picker maths)", [&] {
+        using namespace material;
+        auto close3 = [](const Vec3& a, const Vec3& b) {
+            return std::fabs(a.x - b.x) < 1e-5f && std::fabs(a.y - b.y) < 1e-5f && std::fabs(a.z - b.z) < 1e-5f;
+        };
+        CHECK(close3(RgbToHsv(Vec3{1, 0, 0}), Vec3{0, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 1, 0}), Vec3{1.0f / 3.0f, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 0, 1}), Vec3{2.0f / 3.0f, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 0, 0}), Vec3{0, 0, 0}));
+        CHECK(close3(RgbToHsv(Vec3{1, 1, 1}), Vec3{0, 0, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0.5f, 0.5f, 0.5f}), Vec3{0, 0, 0.5f}));
+        // h wraps: 1.0 is red again, negatives wrap too.
+        CHECK(close3(HsvToRgb(1.0f, 1, 1), Vec3{1, 0, 0}));
+        CHECK(close3(HsvToRgb(-0.25f, 1, 1), Vec3{0.5f, 0, 1}));
+        for (const Vec3 rgb : {Vec3{1, 0, 0}, Vec3{0.2f, 0.6f, 0.9f}, Vec3{0.9f, 0.8f, 0.2f}, Vec3{0.25f, 0.25f, 0.3f}}) {
+            const Vec3 hsv = RgbToHsv(rgb);
+            CHECK(close3(HsvToRgb(hsv.x, hsv.y, hsv.z), rgb));
+        }
+        // Out-of-range inputs are clamped, never produce garbage.
+        CHECK(close3(HsvToRgb(0, 2.0f, -1.0f), Vec3{0, 0, 0}));
+        CHECK(close3(RgbToHsv(Vec3{2, -1, 0.5f}), RgbToHsv(Vec3{1, 0, 0.5f})));
+    });
+
     test("workbench: MakeTintedTexture multiplies RGBA, clamps and rehashes the pixels", [&] {
         using namespace material;
         assemble::SceneTexture t;

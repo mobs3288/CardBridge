@@ -329,6 +329,18 @@ happen on the user's own card/viewer.
 - The tint copy is an override-layer artefact; it is regenerated from the
   card when a material file is re-applied, never written into the card.
 
+### Stage 2 addendum — class dropdown + colour picker (2026-11-09)
+
+The click-cycling Class (and Filter) buttons were replaced with direct-pick
+dropdowns: clicking `Class: … v` / `Filter: … v` opens a modal list of all
+11 classes (plus All for the filter); picking a row applies it in one click.
+The base colour got a visual picker next to the HEX entry: a `Color` button
+toggles an HSV popup (saturation/value square + hue bar + preview + Done),
+dragging updates the base colour live through `ApplyOverrides` with one undo
+step per session. HSV math lives in `src/material` (`RgbToHsv`/`HsvToRgb`,
+unit tested); the viewer only draws. The smoke script now verifies the
+dropdown opens/picks Metal in one click and the picker drag changes the picture.
+
 ---
 
 ## Stage 3 — Texture and UV tools
