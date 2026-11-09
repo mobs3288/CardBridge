@@ -147,7 +147,7 @@ The converter needs base-game data (the shared skeleton and body, the item list 
 
 An outfit file is a Koikatsu `.png` whose payload after the image is a single coordinate (the same clothes / accessories / makeup blob a character card stores per outfit) plus the same `KKEx` extended map a character carries. It never carries a face, body or hair: those always come from the character.
 
-**Viewer.** Open a character, then drag an outfit file onto the window. It overwrites the outfit on screen in memory (the card on disk is not saved); the log says what was replaced and that hair was kept. Dropping a different character clears the applied outfit. Exporting (`E`) exports the merged scene, exactly as shown.
+**Viewer.** Open a character, then drag an outfit file onto the window. It overwrites the outfit on screen in memory (the card on disk is not saved) and stays pinned to that one slot; the log says what was replaced and that hair was kept. Switching to another outfit slot shows that slot's own clothing again, and switching back shows the imported file again. The status line under the slots names the slot that holds it, and **Reset clothing** (or `D`) drops the file and returns the outfit to the card default. Dropping a different character clears the applied outfit too. Exporting (`E`) exports the merged scene, exactly as shown.
 
 **Command line.** `convert <card.png> --clothes <outfit.png> ...` and `inspect <card.png> --clothes <outfit.png>` do the same one-shot merge for the export. `inspect <outfit.png>` shows an outfit file's name, garment ids and resolver rows. `--outfit N` chooses the target slot (default: the card's current outfit); `--replace-accessories` opts into wholesale accessory replacement.
 

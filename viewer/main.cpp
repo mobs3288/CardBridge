@@ -4,15 +4,17 @@
 //   cardbridge-viewer [card.png] [--library <dir>] [--mods <dir>] [--outfit N] [--clothes <outfit.png>]
 //
 // Library and mods folders are remembered in %LOCALAPPDATA%\CardBridge\viewer.json. Drop a card on the window to open it.
-// Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the current outfit in memory only
-// (hair worn as accessories is kept; the card on disk is never saved).
+// Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the outfit on screen in memory only
+// (hair worn as accessories is kept; the card on disk is never saved). It stays pinned to that one outfit slot: switching
+// to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// D (or the Reset clothing button) drops the imported file and returns the current outfit to the card's own clothing.
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
 //          G colour grading on/off, X (or the MMD button) "as exported": the PMX as MikuMikuDance shows it (toon, edge, self-shadow, ground shadow),
 //          K the skeleton over the model (click a bone to select it, Bones tab edits it), P automatic A-pose,
-//          R reset view, F/S/B front/side/back,
+//          R reset view, D reset clothing to the card default, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
 
@@ -298,7 +300,8 @@ struct TweakRow {
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
-    int outfitNameTop = 0, outfitChipsTop = 0;
+    RECT clothingReset{};
+    int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
     RECT clearLog{};
@@ -319,12 +322,15 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     l.reset = {220, by, 288, by + bh};
     l.all = {294, by, 324, by + bh};
     l.asExported = {330, by, 370, by + bh};
-    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots.
+    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
+    // then the imported-outfit status line with its reset button.
     l.outfitNameTop = 138;
     l.outfitChipsTop = 160;
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 192, 59 + i * 51, 216};
-    l.partsHeadingTop = 198;
-    l.partsTop = 224;
+    l.outfitClothTop = 184;
+    l.clothingReset = {206, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 216, 59 + i * 51, 240};
+    l.partsHeadingTop = 222;
+    l.partsTop = 248;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone editor needs the room
     l.footerTop = H - 36;
     l.logBottom = l.footerTop - 4;
@@ -400,7 +406,7 @@ struct App {
     float boneDragDx = 0, boneDragDy = 0;     // bone drag: movement since the last picture
     ULONGLONG lastFrameTick = 0;
     bool animating = false;                   // a list is still easing towards its scroll target
-    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all
+    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
@@ -463,7 +469,7 @@ constexpr UINT WM_EXP_READY = WM_APP + 4;
 constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok)
 constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
-// wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest.
+// wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
 constexpr UINT WM_BENCH = WM_APP + 41;   // CARDBRIDGE_BENCH: run the scripted timing session (see RunBench)
 void RunBench();
@@ -1146,7 +1152,6 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
     std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit]() {
-        (void)clothingOutfit;   // the file follows the outfit on screen (shown below)
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -1164,22 +1169,24 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             // out-of-range slot falls back to the first, the way Assembler does.
             int shown = outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt());
             if (shown < 0 || shown >= static_cast<int>(c.outfits.size())) shown = 0;
-            if (!clothingPath.empty()) {
+            // The outfit file is pinned to the one slot it was dropped onto (--clothes
+            // with no --outfit pins to the card's current slot on the first load): it
+            // replaces only that slot. Every other slot keeps the card's own clothing,
+            // so switching away and back shows native -> imported -> native. A pinned
+            // slot outside this card never applies.
+            const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
+                                       clothingOutfit < static_cast<int>(c.outfits.size());
+            if (applyClothing) {
                 try {
                     card::ClothingFile cl = card::LoadClothingFile(clothingPath);
                     if (!cl.supported) throw std::runtime_error(cl.supportNote);
                     card::ApplyClothingOptions opt;
-                    // The outfit file lives on the outfit on screen (README), not on the
-                    // index it was first dragged onto. Capturing the stale clothingOutfit
-                    // here pinned the file to the old slot: after an outfit switch the
-                    // assembled shoes were the character's own (flat), so the file's
-                    // heels never reached settleHeels. Always target the shown outfit.
                     opt.outfit = shown;
-                    if (opt.outfit < 0 || opt.outfit >= static_cast<int>(c.outfits.size())) opt.outfit = shown;
                     auto rep = card::ApplyClothing(c, cl, opt);
                     {
                         std::lock_guard<std::recursive_mutex> lk(g.mu);
                         g.clothingOutfit = rep.outfit;
+                        g.clothingName = cl.displayName();   // --clothes arrives without one; the drop path already set it
                     }
                     out->clothing = cl.displayName();
                     Log("clothing: " + cl.displayName() + " -> outfit " + std::to_string(rep.outfit) +
@@ -1379,6 +1386,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.reset, p)) return 4;
     if (PtInRect(&l.all, p)) return 5;
     if (PtInRect(&l.asExported, p)) return 6;
+    if (PtInRect(&l.clothingReset, p)) return 7;   // reset the imported outfit to the card default
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }
@@ -1774,6 +1782,31 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         const int chips = L ? std::min(L->outfits, OutfitChipsPerRow()) : 0;
         for (int i = 0; i < chips; ++i) Button(s, OutfitChipRect(l, i), std::to_string(i + 1), g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
     }
+    // outfit file: which slot holds the imported outfit (if any) and the way back
+    // to the card's own clothes for it. The button is drawn greyed when nothing
+    // is imported, so the reset exists (and is findable) before the first drop.
+    if (TouchesY(clip, l.outfitClothTop, l.outfitClothTop + 20)) {
+        std::string clothingName;
+        int clothingOutfit = -1;
+        bool hasClothing = false;
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            hasClothing = !g.clothingPath.empty();
+            clothingName = g.clothingName;
+            clothingOutfit = g.clothingOutfit;
+        }
+        int shown = L ? L->outfit : -1;
+        if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
+        const bool onThisOutfit = hasClothing && clothingOutfit == shown;
+        if (hasClothing) {
+            const std::string where = "outfit " + std::to_string(clothingOutfit + 1) + ": " + ClipText(clothingName, 20);
+            s.Text(g.fontSmall, onThisOutfit ? ui::kAmber : ui::kDim, 12, l.outfitClothTop + 3,
+                   ClipText(onThisOutfit ? "imported on this slot (" + where + ")" : "imported on " + where, 34));
+        } else {
+            s.Text(g.fontSmall, ui::kDim, 12, l.outfitClothTop + 3, ClipText("card's own clothing (drop an outfit file)", 34));
+        }
+        Button(s, l.clothingReset, "Reset clothing", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
+    }
 
     lap(2);
     // tabs ----------------------------------------------------------------------------------------------------------------
@@ -1958,7 +1991,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     // footer -----------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.footerTop, H)) {
         s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
-        std::string hint = "1-7 outfit · L lib · K bones · P pose · Y physics · N shake";
+        std::string hint = "1-7 outfit · L lib · K bones · P pose · Y physics · N shake · D reset clothing";
         if (g.busy) hint = "working ...";
         else if (g.exporting) hint = "exporting PMX ...";
         if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
@@ -2085,8 +2118,9 @@ void OpenCard() {
     }
 }
 
-// An outfit file dropped on a loaded character: it overwrites the current
-// outfit in memory only (never saved). Hair worn as accessories stays.
+// An outfit file dropped on a loaded character: it overwrites the outfit on
+// screen in memory only (never saved) and stays pinned to that slot (see
+// StartLoad). Hair worn as accessories stays.
 void ApplyClothingFile(const std::string& path) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.cardPath.empty()) { Log("open a character first, then drop the outfit file", LogKind::Warn); return; }
@@ -2109,12 +2143,35 @@ void ApplyClothingFile(const std::string& path) {
     StartLoad(g.cardPath, L->outfit, true);
 }
 
-// Picking a slot is the same reload Left/Right does, just aimed.
+// Picking a slot is the same reload Left/Right does, just aimed. The reload
+// reapplies the outfit file only when the picked slot is its pinned one, so
+// every other slot shows the card's own clothing (StartLoad).
 void ChooseOutfit(int index) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.busy || g.cardPath.empty()) return;
     if (index < 0 || index >= L->outfits || index == L->outfit) return;
     StartLoad(g.cardPath, index, true);
+}
+
+// Drops the imported outfit file: the current outfit is re-assembled from the
+// card's own clothes. The card on disk is never saved, so this only clears the
+// in-memory override; the next visit to the pinned slot is the card default too.
+void ResetClothing() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.cardPath.empty()) return;
+    if (g.busy) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    std::string name;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.clothingPath.empty()) return;
+        name = g.clothingName;
+        g.clothingPath.clear();
+        g.clothingName.clear();
+        g.clothingOutfit = -1;
+    }
+    Log("clothing reset to the card's own outfit" + (name.empty() ? std::string() : " (dropped " + name + ")"), LogKind::Good);
+    g.cam = {};
+    StartLoad(g.cardPath, L->outfit, true);
 }
 
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
@@ -2591,7 +2648,7 @@ void DumpTestLayout() {
     j["tab"] = g.tab;
     j["tabs"] = nlohmann::json::array();
     for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2});
-    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}};
+    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     j["rows"] = nlohmann::json::array();
     if (L && g.tab != TabParts && g.tab != TabBones) {
@@ -2623,6 +2680,15 @@ void DumpTestLayout() {
             if (b >= 0 && static_cast<size_t>(b) < g.boneScreen.size() && g.boneScreen[static_cast<size_t>(b)].first >= 0)
                 j["view"][name] = {static_cast<int>(g.boneScreen[static_cast<size_t>(b)].first) + kPanel, static_cast<int>(g.boneScreen[static_cast<size_t>(b)].second)};
         }
+    j["outfit"] = L ? L->outfit : -1;
+    j["outfits"] = L ? L->outfits : 0;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        j["clothingPath"] = g.clothingPath;
+        j["clothingName"] = g.clothingName;
+        j["clothingOutfit"] = g.clothingOutfit;
+    }
+    j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
                   {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
@@ -2650,6 +2716,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 2) UndoPose(true);
         else if (wp == 3) SavePoseFile();
         else if (wp == 4) LoadPoseFile();
+        else if (wp == 12) ResetClothing();   // reset the imported outfit to the card default
         else if (wp == 10) DumpTestLayout();
         else if (wp == 11) {   // the nude body on, and the camera close on the chest (lp = pan up, in thousandths of the window height)
             if (std::shared_ptr<Loaded> L = Current())
@@ -2832,6 +2899,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 4) { if (Current()) ResetView(0); return 0; }
             if (button == 5) { if (Current()) ShowAll(); return 0; }
             if (button == 6) { ToggleAsExported(); InvalidateRect(hwnd, nullptr, FALSE); InvalidatePanel(); return 0; }
+            if (button == 7) { ResetClothing(); return 0; }
             if (button >= 10) {
                 g.showIssues = false;
                 g.tab = button - 10;
@@ -3155,6 +3223,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'N') { ShakePhysics(); InvalidatePanel(); }
         else if (wp == 'P') { const PoseState before = CapturePose(); g.aPose = !g.aPose; Log(std::string("A-pose: ") + (g.aPose ? "on" : "off")); ApplyPoseLive(); PoseChanged(before); }
         else if (wp == 'R') ResetView(0);
+        else if (wp == 'D') ResetClothing();
         else if (wp == 'F') ResetView(0);
         else if (wp == 'S') ResetView(90);
         else if (wp == 'B') ResetView(180);
@@ -3324,6 +3393,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else card = Slashes(a);
     }
     LocalFree(argvw);
+    // --clothes pins to --outfit when given, otherwise to the card's current slot on load (StartLoad pins it there).
+    if (!g.clothingPath.empty()) g.clothingOutfit = g.wantOutfit;
     SaveSettings(g.settings);
 
     ui::Startup();
