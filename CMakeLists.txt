@@ -94,6 +94,7 @@ add_library(cardbridge_core STATIC
     src/library/Library.cpp
     src/shape/Shape.cpp
     src/material/MaterialWorkbench.cpp
+    src/material/UvDiagnostics.cpp
     src/shader/Dxbc.cpp
     src/shader/UnityShader.cpp
     src/shader/Sm4.cpp

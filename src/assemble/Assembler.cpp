@@ -2,6 +2,7 @@
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
+#include "unity/TextureDecode.h"
 
 #include "core/Bytes.h"
 #include "shape/Shape.h"
@@ -617,6 +618,7 @@ struct Builder {
             SceneTexture st;
             st.name = t->name;
             st.source = uf.name();
+            st.format = unity::FormatName(t->unityFormat);
             st.width = t->width;
             st.height = t->height;
             st.pixelHash = Fnv1a64(t->rgba.data(), t->rgba.size());
@@ -737,6 +739,7 @@ struct Builder {
             result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
             scene.textures[static_cast<size_t>(result)].clamp = t->wrapMode == 1;
             scene.textures[static_cast<size_t>(result)].srgb = t->colorSpace == 1;
+            scene.textures[static_cast<size_t>(result)].format = unity::FormatName(t->unityFormat);
         }
         shaderTexCache[key] = result;
         return result;
@@ -794,6 +797,7 @@ struct Builder {
         SceneTexture st;
         st.name = name;
         st.source = source;
+        st.format = "RGBA8";
         st.width = w;
         st.height = h;
         st.pixelHash = Fnv1a64(rgba.data(), rgba.size());

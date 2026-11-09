@@ -122,6 +122,7 @@ assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4&
         src.rgba[i + 3] = scale(src.rgba[i + 3], ratio.w);
     }
     src.pixelHash = Fnv1a64(src.rgba.data(), pixels * 4);
+    src.format = "RGBA8 (tint copy)";
     return src;
 }
 

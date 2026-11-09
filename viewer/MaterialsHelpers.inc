@@ -214,6 +214,132 @@ void ApplyPickerAt(int x, int y, int kind, const PanelLayout& l) {
     ApplyMatRgb(material::HsvToRgb(hsv.x, hsv.y, hsv.z));
 }
 
+// ---- Texture inspector + UV canvas helpers (Stage 3) ----
+// Geometry (single source of truth for draw + click). Rows 2-4 show channel
+// + slot; row 5 (HEX) stays as the view toggle; rows 6-11 show the preview
+// (left) + UV canvas (right) + one-line info + Enable/Replace/Fit actions.
+RECT MatTexPreviewRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {10, y, 160, y + 60};
+}
+RECT MatUvRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 6 * kRowH;
+    return {170, y, 370, y + 60};
+}
+RECT MatTexChannelRect(const PanelLayout& l, int i) {
+    const int y = l.matEditTop + 2 * kRowH;
+    return {10 + i * 38, y, 10 + i * 38 + 36, y + kRowH};
+}
+RECT MatTexSlotRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 2 * kRowH;
+    return {210, y, 370, y + kRowH};
+}
+RECT MatTexEnableRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 10 * kRowH + 14;
+    return {10, y, 30, y + kRowH};
+}
+RECT MatTexReplaceRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 10 * kRowH + 14;
+    return {170, y, 270, y + kRowH};
+}
+RECT MatUvFitRect(const PanelLayout& l) {
+    const int y = l.matEditTop + 10 * kRowH + 14;
+    return {274, y, 370, y + kRowH};
+}
+RECT MatTexDropRect(const PanelLayout& l, int rows) {
+    const RECT b = MatTexSlotRect(l);
+    return {b.left, b.bottom, b.right, b.bottom + rows * kRowH};
+}
+struct MatTexSlotInfo { std::string prop; int texIdx = -1; bool enabled = true; };
+std::vector<MatTexSlotInfo> MatTexSlots(const assemble::SceneMaterial& m) {
+    std::vector<MatTexSlotInfo> out;
+    for (const auto& tb : m.texProps) out.push_back({tb.name, tb.texture, tb.texture >= 0});
+    if (out.empty() && m.texture >= 0) out.push_back({"_MainTex", m.texture, true});
+    if (out.empty()) out.push_back({"_MainTex", -1, false});
+    return out;
+}
+MatTexSlotInfo MatTexSelected(const assemble::Scene& scene) {
+    if (g.selMaterial < 0 || static_cast<size_t>(g.selMaterial) >= scene.materials.size()) return {};
+    auto slots = MatTexSlots(scene.materials[static_cast<size_t>(g.selMaterial)]);
+    if (slots.empty()) return {};
+    if (g.matTexSlot < 0 || g.matTexSlot >= static_cast<int>(slots.size())) {
+        int pick = 0;
+        for (int i = 0; i < static_cast<int>(slots.size()); ++i) if (slots[static_cast<size_t>(i)].prop == "_MainTex") { pick = i; break; }
+        g.matTexSlot = pick;
+    }
+    return slots[static_cast<size_t>(g.matTexSlot)];
+}
+std::string texNameLine(const assemble::Scene& scene, const MatTexSlotInfo& sel) {
+    if (sel.texIdx < 0 || static_cast<size_t>(sel.texIdx) >= scene.textures.size())
+        return sel.prop + ": (disabled / no texture)";
+    const auto& t = scene.textures[static_cast<size_t>(sel.texIdx)];
+    char hb[32];
+    std::snprintf(hb, sizeof hb, "%08llx", static_cast<unsigned long long>(t.pixelHash));
+    return sel.prop + ": " + t.name + "  " + std::to_string(t.width) + "x" + std::to_string(t.height) + "  " + (t.format.empty() ? "RGBA8" : t.format) + (t.srgb ? "  sRGB" : "  linear") + (t.clamp ? "  clamp" : "  repeat") + "  #" + hb;
+}
+int MatUvMeshIndex(const assemble::Scene& scene) {
+    if (g.selMaterial < 0) return -1;
+    for (int mi = 0; mi < static_cast<int>(scene.meshes.size()); ++mi)
+        for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes)
+            if (sub.material == g.selMaterial) return mi;
+    return -1;
+}
+void EnsureUvCache(const assemble::Scene& scene) {
+    const int meshIdx = MatUvMeshIndex(scene);
+    if (meshIdx == g.matUvCacheMesh && g.selMaterial == g.matUvCacheMat && g.matUvCacheMat != -2) return;
+    g.matUvCacheMat = g.selMaterial;
+    g.matUvCacheMesh = meshIdx;
+    g.matUvSeams.clear();
+    if (meshIdx < 0) { g.matUvReport = material::UvReport{}; g.matUvSelIsland = -1; return; }
+    int tw = 1024, th = 1024;
+    const MatTexSlotInfo sel = MatTexSelected(scene);
+    if (sel.texIdx >= 0 && static_cast<size_t>(sel.texIdx) < scene.textures.size()) {
+        const auto& t = scene.textures[static_cast<size_t>(sel.texIdx)];
+        if (t.width > 0) tw = t.width;
+        if (t.height > 0) th = t.height;
+    }
+    const auto& mesh = scene.meshes[static_cast<size_t>(meshIdx)];
+    g.matUvReport = material::DiagnoseUv(mesh, tw, th);
+    int total = 0, seamTris = 0;
+    material::CountSeams(mesh, total, seamTris, &g.matUvSeams);
+    g.matUvSelIsland = -1;
+}
+std::string PickImageFile() {
+    if (const char* env = std::getenv("CARDBRIDGE_REPLACE_TEXTURE_PATH")) return Slashes(env);
+    wchar_t file[1024] = L"";
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof of;
+    of.hwndOwner = g.hwnd;
+    of.lpstrFilter = L"Images (*.png;*.jpg;*.jpeg;*.bmp)\0*.png;*.jpg;*.jpeg;*.bmp\0All files\0*.*\0";
+    of.lpstrFile = file;
+    of.nMaxFile = 1024;
+    of.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&of) ? Slashes(WideToUtf8(file)) : std::string();
+}
+void ReplaceMatTexture(const std::string& prop) {
+    const std::string path = PickImageFile();
+    if (path.empty()) return;
+    const Bytes raw = fileio::ReadFile(path);
+    int w = 0, h = 0;
+    std::vector<uint8_t> rgba;
+    if (!card::DecodeImageBytes(raw, w, h, rgba) || w <= 0 || h <= 0) { Log("replace: '" + path + "' is not a readable image; kept original", LogKind::Warn); return; }
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0) return;
+    assemble::SceneTexture tex;
+    tex.name = fileio::FileName(path);
+    tex.source = "replaced (viewer)";
+    tex.format = "PNG (replaced)";
+    tex.width = w; tex.height = h; tex.rgba = std::move(rgba); tex.srgb = true;
+    const int idx = material::ReplaceTexture(L->scene, g.mat, static_cast<size_t>(g.selMaterial), prop, tex);
+    if (idx < 0) return;
+    SyncMaterialTextures();
+    if (g.gpuOk && g.gpuScene == L) g.gpu.EnsureTexture(idx);
+    Log("replaced " + prop + ": " + std::to_string(w) + "x" + std::to_string(h) + " (texture " + std::to_string(idx) + ")", LogKind::Good);
+    g.dirty = true;
+    InvalidateView();
+    InvalidatePanel();
+}
+
 std::string MatPathFromUser(bool save) {
     if (const char* env = std::getenv("CARDBRIDGE_MATERIALS_PATH")) return Slashes(env);
     wchar_t file[1024] = L"materials.json";

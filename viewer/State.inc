@@ -89,7 +89,7 @@ struct PanelLayout {
     // Bones tab hit areas (the click code and the drawing use the same ones): the two switches, the reset row, the undo / redo / save / load row
     RECT boneSkeleton{}, boneHelpers{}, boneResetOne{}, boneResetAll{}, boneUndo{}, boneRedo{}, boneSave{}, boneLoad{};
     // Materials tab hit areas
-    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matPickBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
+    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matPickBtn{}, matInspectBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
@@ -146,7 +146,8 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.matClassBtn = {10, my, 140, my + kRowH};
     l.matPresetBtn = {144, my, 240, my + kRowH};
     l.matTexBtn = {244, my, kPanel - 10, my + kRowH};
-    l.matPickBtn = {306, l.matEditTop + 5 * kRowH, kPanel - 10, l.matEditTop + 6 * kRowH};
+    l.matPickBtn = {260, l.matEditTop + 5 * kRowH, 310, l.matEditTop + 6 * kRowH};
+    l.matInspectBtn = {314, l.matEditTop + 5 * kRowH, kPanel - 10, l.matEditTop + 6 * kRowH};
     const int mry = l.matEditTop + 12 * kRowH;
     l.matResetThis = {10, mry, 95, mry + kRowH};
     l.matResetAll = {99, mry, 184, mry + kRowH};
@@ -250,6 +251,20 @@ struct App {
     bool matPickerOpen = false;
     int matPickerDrag = 0;                    // 0 none, 1 = SV square, 2 = hue bar
     bool matPickerUndoPushed = false;         // one undo step per picker session
+    // Texture inspector + UV canvas (Stage 3): false = shading sliders, true = inspector.
+    bool matInspectOpen = false;
+    int matTexChannel = 0;                    // 0 all, 1 R, 2 G, 3 B, 4 A
+    int matTexSlot = -1;                      // selected texProps slot (-1 = auto _MainTex)
+    bool matTexSlotDropOpen = false;
+    float uvScale = 0.0f, uvPanX = 0.0f, uvPanY = 0.0f;   // UV canvas affine (px per UV unit)
+    int matUvDrag = 0;
+    int matUvSelIsland = -1;
+    material::UvReport matUvReport;
+    std::vector<std::pair<uint32_t, uint32_t>> matUvSeams;
+    int matUvCacheMat = -2, matUvCacheMesh = -2;
+    std::vector<char> matUvSelMask;          // per flattened tri of the cached mesh: 1 = selected island
+    POINT uvDown{};
+    float uvPan0X = 0, uvPan0Y = 0;
     std::vector<Mat4> skin;                   // current skin matrices (empty = rest pose)
     std::vector<Vec3> boneWorld;              // posed bone positions, for the overlay
     std::vector<std::pair<float, float>> boneScreen;   // where the overlay put each bone in the last picture (x < 0: not drawn)

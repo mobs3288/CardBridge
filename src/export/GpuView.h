@@ -106,6 +106,12 @@ public:
     // shader recompile, mesh upload or full Load. False when a texture could
     // not be created (the old view stays usable).
     bool UpdateTextures(const std::vector<int>& textureIndices);
+    // Stage 3 texture-replace helpers: EnsureTexture uploads the texture when
+    // it has never been uploaded (or its slot is missing); UploadTexture
+    // always recreates it. Both touch only the named scene texture. False on
+    // an out-of-range index or a failed create.
+    bool EnsureTexture(int textureIndex);
+    bool UploadTexture(int textureIndex);
 
     // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions (1 hides, 2 forces a default-hidden part on).
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.

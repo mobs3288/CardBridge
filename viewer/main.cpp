@@ -23,6 +23,7 @@
 
 #include "assemble/Assembler.h"
 #include "material/MaterialWorkbench.h"
+#include "material/UvDiagnostics.h"
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
 #include "export/BoneLabels.h"
@@ -31,6 +32,7 @@
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "card/CardFile.h"
+#include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
 #include "library/Library.h"

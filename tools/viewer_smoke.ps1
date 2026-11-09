@@ -293,6 +293,21 @@ try {
             Click ([int]$pb[0]) ([int]$pb[1]) 400
             $lay = Layout
             Check 'materials: the colour picker closes' ($lay.materials.pickerOpen -eq $false -and $null -ne $lay)
+            # Texture inspector: open it, check the format string is recorded, drag the UV canvas.
+            $ib = $lay.materials.inspectBtn
+            Click ([int]$ib[0]) ([int]$ib[1]) 400
+            $lay = Layout
+            Check 'materials: the texture inspector opens' ($lay.materials.inspectOpen -eq $true)
+            Check 'materials: the texture format is recorded' ($lay.materials.texFormat -ne $null -and $lay.materials.texFormat -ne '') "tex $($lay.materials.texFormat)"
+            $s3 = Shot 'inspector'
+            Check 'materials: the inspector shows the preview and UV' ($s3.Distinct -gt 40) "$($s3.Distinct) colours"
+            $uv = $lay.materials.uvCanvas
+            Drag ([int]$uv[0]) ([int]$uv[1]) ([int]$uv[0] + 30) ([int]$uv[1] + 10) 8
+            $lay = Layout
+            Check 'materials: dragging the UV canvas answers' ($null -ne $lay -and $lay.materials.inspectOpen -eq $true)
+            Click ([int]$ib[0]) ([int]$ib[1]) 400
+            $lay = Layout
+            Check 'materials: the texture inspector closes back to shading' ($lay.materials.inspectOpen -eq $false -and $null -ne $lay)
         }
     }
 

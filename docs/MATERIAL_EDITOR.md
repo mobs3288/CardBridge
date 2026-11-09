@@ -626,9 +626,9 @@ Data already available: `SceneTexture` pixels + size + `srgb`/`clamp` +
 into the panel) showing:
 
 - Preview (blit + upscale, checkerboard for alpha).
-- Resolution, format (from the decoded format — record it in `SceneTexture`
-  at assembly: today only dimensions survive; the format string must be
-  added), sRGB/linear, wrap mode, source bundle.
+- Resolution, format (recorded in `SceneTexture::format` at assembly since
+  Stage 3: Unity name via `unity::FormatName`, `RGBA8` for decoded/baked,
+  `RGBA8 (tint copy)` / `PNG (replaced)` for Workbench copies), sRGB/linear, wrap mode, source bundle.
 - Channel views: R / G / B / A alone, and alpha-on-checkerboard. Pure pixel
   re-mapping on the CPU before blit — no renderer involvement.
 - Slot assignment: the interpreted texture slots (MainTex / Normal /

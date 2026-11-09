@@ -170,6 +170,17 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         }
         g.matFilterDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
     }
+    if (g.matTexSlotDropOpen && g.matInspectOpen) {
+        const auto slots = MatTexSlots(L->scene.materials[static_cast<size_t>(g.selMaterial)]);
+        const int rows = std::min(6, static_cast<int>(slots.size()));
+        const RECT drop = MatTexDropRect(l, rows);
+        if (!right && PtInRect(&drop, pt)) {
+            const int idx = (y - drop.top) / kRowH;
+            if (idx >= 0 && idx < rows) { g.matTexSlot = idx; g.matUvCacheMat = -2; }
+            g.matTexSlotDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+        }
+        g.matTexSlotDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+    }
     // Leaving HEX entry: any click that is not on the HEX row ends it (Enter/ESC also end it).
     if (g.matHexEditing && !(y >= l.matEditTop + 5 * kRowH && y < l.matEditTop + 6 * kRowH)) {
         g.matHexEditing = false; g.matHexUndoPushed = false;
@@ -186,6 +197,7 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         const int idx = (y - l.matListTop + static_cast<int>(std::lround(g.matPos * kRowH))) / kRowH;
         if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return;
         g.selMaterial = rows[static_cast<size_t>(idx)];
+        g.matTexSlot = -1; g.matUvCacheMat = -2; g.matTexSlotDropOpen = false;
         SyncMatBuf();
         g.dirty = true;
         InvalidateAll();
@@ -228,6 +240,14 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         return;
     }
     if (row == 5 && !right) {
+        if (PtInRect(&l.matInspectBtn, pt)) {
+            g.matInspectOpen = !g.matInspectOpen;
+            g.matTexSlotDropOpen = false;
+            g.matDropHover = -1;
+            if (g.matInspectOpen) { g.uvScale = 0; g.uvPanX = 0; g.uvPanY = 0; g.matUvCacheMat = -2; }
+            InvalidatePanel();
+            return;
+        }
         if (PtInRect(&l.matPickBtn, pt)) {
             g.matPickerOpen = !g.matPickerOpen;
             g.matPickerDrag = 0;
@@ -243,6 +263,51 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         g.matHexEditing = true;
         InvalidatePanel();
         return;
+    }
+    // Inspector clicks (channel/slot, UV canvas, actions). The reset row is shared.
+    if (g.matInspectOpen) {
+        if (!right) {
+            for (int i = 0; i < 5; ++i) { const RECT r = MatTexChannelRect(l, i); if (PtInRect(&r, pt)) { g.matTexChannel = i; InvalidatePanel(); return; } }
+            { const RECT r = MatTexSlotRect(l); if (PtInRect(&r, pt)) { g.matTexSlotDropOpen = !g.matTexSlotDropOpen; g.matDropHover = -1; InvalidatePanel(); return; } }
+            { const RECT r = MatTexEnableRect(l);
+            if (PtInRect(&r, pt)) {
+                const MatTexSlotInfo sel = MatTexSelected(L->scene);
+                material::SetTextureEnabled(L->scene, g.mat, static_cast<size_t>(g.selMaterial), sel.prop, !sel.enabled);
+                SyncMaterialTextures();
+                if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+                g.dirty = true; InvalidateAll(); return;
+            } }
+            { const RECT r = MatTexReplaceRect(l);
+            if (PtInRect(&r, pt)) {
+                const MatTexSlotInfo sel = MatTexSelected(L->scene);
+                ReplaceMatTexture(sel.prop);
+                return;
+            } }
+            { const RECT r = MatUvFitRect(l);
+            if (PtInRect(&r, pt)) {
+                const RECT uv = MatUvRect(l);
+                g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
+                g.uvPanX = (float(uv.right - uv.left) - g.uvScale) / 2.0f;
+                g.uvPanY = (float(uv.bottom - uv.top) - g.uvScale) / 2.0f;
+                InvalidatePanel(); return;
+            } }
+            { const RECT r = MatUvRect(l);
+            if (PtInRect(&r, pt)) {
+                EnsureUvCache(L->scene);
+                g.matUvDrag = 1;
+                g.uvDown = pt;
+                g.uvPan0X = g.uvPanX; g.uvPan0Y = g.uvPanY;
+                if (g.uvScale <= 0) {
+                    const RECT uv = MatUvRect(l);
+                    g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
+                }
+                SetCapture(g.hwnd);
+                InvalidatePanel(); return;
+            } }
+            { const RECT r = MatTexPreviewRect(l); if (PtInRect(&r, pt)) return; }
+        }
+        if (row == 12 && !right) { /* fall through to the reset row below */ }
+        else return;
     }
     if (row >= 2 && row <= 4) {
         const int id = kMatBase + (row - 2);

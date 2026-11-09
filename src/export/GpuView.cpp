@@ -1039,6 +1039,17 @@ bool GpuView::UpdateTextures(const std::vector<int>& textureIndices) {
     return ok;
 }
 
+bool GpuView::UploadTexture(int textureIndex) { return UpdateTextures(std::vector<int>{textureIndex}); }
+
+bool GpuView::EnsureTexture(int textureIndex) {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return false;
+    if (textureIndex < 0 || static_cast<size_t>(textureIndex) >= I.scene->textures.size()) return false;
+    const size_t ti = static_cast<size_t>(textureIndex);
+    if (I.textures.size() > ti && I.textures[ti].srv && I.textures[ti].tex) return true;
+    return UpdateTextures(std::vector<int>{textureIndex});
+}
+
 bool GpuView::Load(const assemble::Scene& scene, std::string* why,
                    const std::function<void(double, const std::string&)>& progress,
                    const std::function<bool()>& cancelled) {

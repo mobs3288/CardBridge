@@ -34,7 +34,9 @@
 #include "export/ShaderLayer.h"
 #include "library/Library.h"
 #include "material/MaterialWorkbench.h"
+#include "material/UvDiagnostics.h"
 #include "pmx/PmxWriter.h"
+#include "unity/TextureDecode.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
@@ -2755,6 +2757,109 @@ void unitTests() {
         broken.name = "broken"; broken.width = 4; broken.height = 4; broken.rgba = {1, 2, 3};
         const assemble::SceneTexture kept = MakeTintedTexture(broken, Vec4{0, 0, 0, 0});
         CHECK(kept.rgba == broken.rgba);
+        // The tint copy records its own format so the inspector does not repeat DXT5.
+        CHECK(out.format == "RGBA8 (tint copy)");
+    });
+
+    test("workbench: Unity format names round-trip to the inspector string", [] {
+        CHECK(unity::FormatName(1) == "Alpha8");
+        CHECK(unity::FormatName(3) == "RGB24");
+        CHECK(unity::FormatName(4) == "RGBA32");
+        CHECK(unity::FormatName(12) == "DXT5");
+        CHECK(unity::FormatName(99) == "UnityFormat 99");
+    });
+
+    test("workbench: UV diagnostics flag missing, out-of-range, stretch, overlap, seams", [] {
+        using namespace assemble;
+        auto mkVert = [](float px, float py, float u, float v) {
+            SceneVertex s; s.pos = {px, py, 0}; s.normal = {0, 0, 1}; s.uv = {u, v}; return s;
+        };
+        // One small open sheet (two triangles sharing an edge) + one isolated
+        // triangle with the same UV extent (overlap) + one NaN vertex.
+        SceneMesh m;
+        m.vertices.push_back(mkVert(0, 0, 0, 0));
+        m.vertices.push_back(mkVert(1, 0, 1, 0));
+        m.vertices.push_back(mkVert(0, 1, 0, 1));
+        m.vertices.push_back(mkVert(1, 1, 1, 1));
+        m.vertices.push_back(mkVert(2, 0, std::nan(""), 0.5f));
+        m.vertices.push_back(mkVert(3, 0, 1.5f, 0.5f));   // out of range (u=1.5)
+        m.vertices.push_back(mkVert(2, 1, 0.5f, 0.5f));
+        SceneSubmesh sub;
+        sub.material = 0;
+        sub.indices = {0, 1, 2, 0, 1, 3, 3, 4, 5, 4, 6, 5};
+        m.submeshes.push_back(sub);
+        CHECK(material::CountMissingUv(m) == 1);
+        CHECK(material::FindMissingUv(m).size() == 1 && material::FindMissingUv(m)[0] == 4);
+        float worst = 0;
+        CHECK(material::CountOutOfRange(m, 0.02f, worst) == 1 && std::fabs(worst - 0.48f) < 1e-4f);
+        // With a zero margin the same vertex still counts; with 0.6 it does not.
+        CHECK(material::CountOutOfRange(m, 0.6f, worst) == 0);
+        const material::UvReport rep = material::DiagnoseUv(m, 1024, 1024);
+        CHECK(rep.missingUvVerts == 1 && rep.outOfRangeVerts == 1);
+        CHECK(rep.triangles == 4);
+        CHECK(rep.islands == 1);            // all four share a vertex chain (0-1-3-4-5)
+        CHECK(rep.overlapPairs == 0);       // one island: nothing to overlap with
+        // Two disjoint islands with the same UV extent overlap each other.
+        SceneMesh two;
+        two.vertices.push_back(mkVert(0, 0, 0, 0));
+        two.vertices.push_back(mkVert(1, 0, 1, 0));
+        two.vertices.push_back(mkVert(0, 1, 0, 1));
+        two.vertices.push_back(mkVert(2, 0, 0, 0));
+        two.vertices.push_back(mkVert(3, 0, 1, 0));
+        two.vertices.push_back(mkVert(2, 1, 0, 1));
+        SceneSubmesh tsub;
+        tsub.material = 0;
+        tsub.indices = {0, 1, 2, 3, 4, 5};
+        two.submeshes.push_back(tsub);
+        CHECK(material::UvIslands(two).size() == 2);
+        CHECK(material::UvOverlapPairs(two) == 1);
+        CHECK(rep.boundaryEdges > 0 && rep.totalEdges > 0 && rep.seamTriangles > 0);
+        CHECK(rep.stretchMin >= 0.0f && rep.stretchMax >= rep.stretchMin);
+        CHECK(rep.worstStretchTri >= 0 && rep.worstStretchTri < 4);
+        // A closed tetra (every edge shared by two triangles) has no seams.
+        SceneMesh closed;
+        closed.vertices.push_back(mkVert(0, 0, 0, 0));
+        closed.vertices.push_back(mkVert(1, 0, 1, 0));
+        closed.vertices.push_back(mkVert(0, 1, 0, 1));
+        closed.vertices.push_back(mkVert(1, 1, 0.5f, 0.5f));
+        SceneSubmesh csub;
+        csub.material = 0;
+        csub.indices = {0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3};
+        closed.submeshes.push_back(csub);
+        int total = 0, seamTris = 0;
+        CHECK(material::CountSeams(closed, total, seamTris) == 0 && total == 6 && seamTris == 0);
+        CHECK(material::UvIslands(closed).size() == 1);
+        // Stretch: a dense-UV triangle vs a sparse one — densities differ.
+        SceneMesh st;
+        st.vertices.push_back(mkVert(0, 0, 0, 0));
+        st.vertices.push_back(mkVert(1, 0, 1, 0));
+        st.vertices.push_back(mkVert(0, 1, 0, 1));
+        st.vertices.push_back(mkVert(10, 0, 0.2f, 0));
+        st.vertices.push_back(mkVert(11, 0, 0.4f, 0));
+        st.vertices.push_back(mkVert(10, 1, 0.2f, 0.2f));
+        SceneSubmesh ssub;
+        ssub.material = 0;
+        ssub.indices = {0, 1, 2, 3, 4, 5};
+        st.submeshes.push_back(ssub);
+        float mn, mx, mean;
+        int worst2;
+        std::vector<material::UvStretchTri> per;
+        material::UvStretchAll(st, 1024, 1024, mn, mx, mean, worst2, &per);
+        CHECK(per.size() == 2 && mx > mn * 4.0f && worst2 >= 0);
+        // UvTrisForMaterial picks only the named material's triangles.
+        Scene scene;
+        scene.meshes.push_back(m);
+        SceneMesh other;
+        other.vertices = {mkVert(0, 0, 0, 0), mkVert(1, 0, 1, 0), mkVert(0, 1, 0, 1)};
+        SceneSubmesh osub;
+        osub.material = 1;
+        osub.indices = {0, 1, 2};
+        other.submeshes.push_back(osub);
+        scene.meshes.push_back(other);
+        auto tris0 = material::UvTrisForMaterial(scene, 0);
+        auto tris1 = material::UvTrisForMaterial(scene, 1);
+        CHECK(tris0.size() == 4 && tris1.size() == 1);
+        CHECK(tris0[0].mesh == 0 && tris1[0].mesh == 1);
     });
 
     test("workbench: an unanalyseable shader keeps the cheap _Color path, no tint copy", [&] {

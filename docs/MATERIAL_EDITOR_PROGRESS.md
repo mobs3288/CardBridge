@@ -344,14 +344,38 @@ dropdown opens/picks Metal in one click and the picker drag changes the picture.
 ---
 
 ## Stage 3 — Texture and UV tools
-Status: **not started.**
+Status: **done** (2026-11-09, branch `feature/material-workbench`).
 
-- [ ] Texture Inspector (preview, channels, slots, enable/disable, replace).
-- [ ] Record texture format string in `SceneTexture` at assembly.
-- [ ] `GpuView::EnsureTexture`/`UploadTexture` + `ViewState` invalidation.
-- [ ] UV canvas (triangles/wireframe/texture bg, zoom/pan/fit).
-- [ ] Five diagnostics (missing, out-of-range, stretch, overlap, seams) as
-      pure functions + synthetic-mesh unit tests.
+**Core (UI-free):** `SceneTexture::format` (`src/assemble/Scene.h`) recorded
+from the Unity format at assembly (`unity::FormatName`, `Assembler`
+`textureFor`/`shaderTexture`, `RGBA8` default for baked/replaced copies,
+`RGBA8 (tint copy)` for tint copies). `GpuView::EnsureTexture`/`UploadTexture`
+wrap `UpdateTextures` (Stage 2) for the texture-replace path. New module
+`src/material/UvDiagnostics.*`: missing / out-of-range (margin 0.02) /
+stretch (texel density + edge ratio) / islands + bbox overlap / seams
+(boundary edges), plus `UvTrisForMaterial` and `DiagnoseUv` aggregator.
+
+**Viewer (Materials tab, new `Texture` view toggled from the HEX row):**
+channel (All/R/G/B/A) + slot dropdown (defaults to `_MainTex`), preview with
+checkerboard + per-pixel channel filtering, UV canvas (texture background +
+wireframe, out-of-range red, seams amber, drag = pan, wheel = zoom, click =
+pick island, `Fit UV`), one-line info (name, size, format, sRGB/clamp,
+hash) + diagnostics line (counts + stretch range), Enable checkbox,
+Replace (file dialog → `DecodeImageBytes` → `ReplaceTexture` → `EnsureTexture`),
+Fit UV. `DumpTestLayout` exposes inspector/UV state; the smoke script checks
+open → format recorded → UV drag → close.
+
+**Tests:** 2 new blocks (format names; five diagnostics on synthetic meshes
+incl. closed-tetra seams, island overlap, stretch contrast, per-material tris).
+Full suite + Materials smoke green.
+
+**Limitations:** slot dropdown shows 6 rows max (no scroll); UV canvas draws
+the first 2000 triangles of the material (note in-canvas) and caches
+diagnostics per material/mesh (recomputed on reselection); islands highlight
+by bounding-box pick; filtering/wrap stay read-only (flag + re-upload needs
+sampler-state work in both renderers, as planned); UV edit stays read-only
+(No editing by design). Replaced textures ride the existing tint path, so
+an active base-colour edit still tints the replacement.
 
 ---
 

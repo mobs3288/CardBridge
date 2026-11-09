@@ -135,9 +135,25 @@ void DumpTestLayout() {
         j["materials"]["classY"] = l.matEditTop + 1 * kRowH + kRowH / 2;
         j["materials"]["classBtn"] = {(l.matClassBtn.left + l.matClassBtn.right) / 2, (l.matClassBtn.top + l.matClassBtn.bottom) / 2};
         j["materials"]["pickBtn"] = {(l.matPickBtn.left + l.matPickBtn.right) / 2, (l.matPickBtn.top + l.matPickBtn.bottom) / 2};
+        j["materials"]["inspectBtn"] = {(l.matInspectBtn.left + l.matInspectBtn.right) / 2, (l.matInspectBtn.top + l.matInspectBtn.bottom) / 2};
         j["materials"]["classDropOpen"] = g.matClassDropOpen;
         j["materials"]["filterDropOpen"] = g.matFilterDropOpen;
         j["materials"]["pickerOpen"] = g.matPickerOpen;
+        j["materials"]["inspectOpen"] = g.matInspectOpen;
+        j["materials"]["texChannel"] = g.matTexChannel;
+        {
+            const RECT pv = MatTexPreviewRect(l), uv = MatUvRect(l);
+            j["materials"]["texPreview"] = {(pv.left + pv.right) / 2, (pv.top + pv.bottom) / 2};
+            j["materials"]["uvCanvas"] = {(uv.left + uv.right) / 2, (uv.top + uv.bottom) / 2};
+            if (g.selMaterial >= 0) {
+                const MatTexSlotInfo ssel = MatTexSelected(L->scene);
+                j["materials"]["texSlot"] = g.matTexSlot;
+                j["materials"]["texIdx"] = ssel.texIdx;
+                j["materials"]["texEnabled"] = ssel.enabled;
+                if (ssel.texIdx >= 0 && static_cast<size_t>(ssel.texIdx) < L->scene.textures.size())
+                    j["materials"]["texFormat"] = L->scene.textures[static_cast<size_t>(ssel.texIdx)].format;
+            }
+        }
         {
             const RECT sv = MatPickerSV(l), hb = MatPickerHue(l);
             j["materials"]["pickerSV"] = {(sv.left + sv.right) / 2, (sv.top + sv.bottom) / 2};
@@ -382,6 +398,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int k = 0; k < kMatCount; ++k) g.matBuf[k] = 0;
             g.matHexEditing = false; g.matHexBuf.clear();
             g.matClassDropOpen = false; g.matFilterDropOpen = false; g.matPickerOpen = false; g.matPickerDrag = 0; g.matDropHover = -1;
+            g.matInspectOpen = false; g.matTexSlotDropOpen = false; g.matUvDrag = 0; g.matUvCacheMat = -2; g.matTexSlot = -1; g.uvScale = 0;
             SyncMatBuf();
         }
         if (g.physics) { g.physics = false; SetPhysics(true); }
@@ -609,10 +626,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyPickerAt(x, y, g.matPickerDrag, l);   // immediate: same frame as a slider drag
             return 0;
         }
+        if (g.matUvDrag != 0 && g.matInspectOpen) {
+            g.uvPanX = g.uvPan0X + (x - g.uvDown.x);
+            g.uvPanY = g.uvPan0Y + (y - g.uvDown.y);
+            InvalidatePanel();
+            return 0;
+        }
         // Dropdown hover (highlight the row under the cursor).
-        if ((g.matClassDropOpen || g.matFilterDropOpen) && x < kPanel && g.tab == TabMaterials && !g.showIssues) {
+        if ((g.matClassDropOpen || g.matFilterDropOpen || g.matTexSlotDropOpen) && x < kPanel && g.tab == TabMaterials && !g.showIssues) {
             const PanelLayout l = Lay(ClientHeight());
-            const RECT drop = g.matClassDropOpen ? MatClassDropRect(l) : MatFilterDropRect(l);
+            const RECT drop = g.matClassDropOpen ? MatClassDropRect(l) : g.matFilterDropOpen ? MatFilterDropRect(l) : MatTexDropRect(l, 6);
             const POINT hp{x, y};
             const int nh = PtInRect(&drop, hp) ? (y - drop.top) / kRowH : -1;
             if (nh != g.matDropHover) {
@@ -722,6 +745,64 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidatePanel();
             return 0;
         }
+        if (g.matUvDrag != 0) {
+            const int ux = GET_X_LPARAM(lp), uy = GET_Y_LPARAM(lp);
+            const bool still = std::abs(ux - g.uvDown.x) < 4 && std::abs(uy - g.uvDown.y) < 4;
+            const int held = g.matUvDrag;
+            g.matUvDrag = 0;
+            ReleaseCapture();
+            if (still && held == 1) {
+                // Click (not drag): pick the island under the point.
+                std::shared_ptr<Loaded> LL = Current();
+                if (LL && ux < kPanel) {
+                    const PanelLayout l = Lay(ClientHeight());
+                    EnsureUvCache(LL->scene);
+                    const int meshIdx = MatUvMeshIndex(LL->scene);
+                    if (meshIdx >= 0) {
+                        const auto& mesh = LL->scene.meshes[static_cast<size_t>(meshIdx)];
+                        const auto islands = material::UvIslands(mesh);
+                        // Map UV point -> canvas inverse (same transform as draw).
+                        const RECT uv = MatUvRect(l);
+                        const float uu = (ux - uv.left - g.uvPanX) / g.uvScale;
+                        const float vv = 1.0f - (uy - uv.top - g.uvPanY) / g.uvScale;
+                        // Find the island whose bounding box holds the point (cheap pick).
+                        int pickIsl = -1;
+                        for (int ii = 0; ii < static_cast<int>(islands.size()); ++ii) {
+                            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                            for (const auto& id : islands[static_cast<size_t>(ii)]) {
+                                const auto& sub = mesh.submeshes[static_cast<size_t>(id.submesh)];
+                                for (int k = 0; k < 3; ++k) {
+                                    const uint32_t vi = sub.indices[static_cast<size_t>(id.tri) * 3 + k];
+                                    if (vi >= mesh.vertices.size()) continue;
+                                    const Vec2 p = mesh.vertices[vi].uv;
+                                    x0 = std::min(x0, p.x); y0 = std::min(y0, p.y);
+                                    x1 = std::max(x1, p.x); y1 = std::max(y1, p.y);
+                                }
+                            }
+                            if (uu >= x0 && uu <= x1 && vv >= y0 && vv <= y1) { pickIsl = ii; break; }
+                        }
+                        g.matUvSelMask.clear();
+                        if (pickIsl >= 0) {
+                            // Highlight every flat tri of that island (rebuild flat index map).
+                            const auto islands2 = islands;
+                            std::set<std::pair<int, int>> want;
+                            for (const auto& id : islands2[static_cast<size_t>(pickIsl)]) want.insert({id.submesh, id.tri});
+                            size_t flat = 0;
+                            for (const auto& sub : mesh.submeshes) {
+                                for (int ti = 0; ti + 2 < static_cast<int>(sub.indices.size()); ti += 3) {
+                                    const int ord = ti / 3;
+                                    int si = static_cast<int>(&sub - mesh.submeshes.data());
+                                    g.matUvSelMask.push_back(want.count({si, ord}) ? 1 : 0);
+                                    ++flat;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            InvalidatePanel();
+            return 0;
+        }
         if (g.sliderDrag >= 0) {
             SliderRef r;
             const bool live = IsLiveId(g.sliderDrag);
@@ -758,7 +839,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
-            if (pt.y >= l.logTop) {
+            const RECT uvBox = MatUvRect(l);
+            if (L && g.tab == TabMaterials && g.matInspectOpen && PtInRect(&uvBox, pt)) {
+                const RECT uv = uvBox;
+                if (g.uvScale <= 0) g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
+                const float u0 = (pt.x - uv.left - g.uvPanX) / g.uvScale;
+                const float v0 = 1.0f - (pt.y - uv.top - g.uvPanY) / g.uvScale;
+                g.uvScale = std::clamp(g.uvScale * (d > 0 ? 1.15f : 1.0f / 1.15f), 10.0f, 4000.0f);
+                g.uvPanX = pt.x - uv.left - u0 * g.uvScale;
+                g.uvPanY = (pt.y - uv.top) - (1.0f - v0) * g.uvScale;
+                InvalidatePanel();
+            } else if (pt.y >= l.logTop) {
                 std::lock_guard<std::mutex> lk(g.logMu);   // Log() touches logScroll from worker threads
                 int visible = std::max(1, (l.logBottom - (l.logTop + 24)) / 15);
                 int maxScroll = std::max(0, static_cast<int>(g.logLines.size()) - visible);
@@ -860,8 +951,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        if (wp == VK_ESCAPE && (g.matClassDropOpen || g.matFilterDropOpen || g.matPickerOpen)) {
-            g.matClassDropOpen = false; g.matFilterDropOpen = false; g.matPickerOpen = false; g.matPickerDrag = 0; g.matDropHover = -1;
+        if (wp == VK_ESCAPE && (g.matClassDropOpen || g.matFilterDropOpen || g.matPickerOpen || g.matTexSlotDropOpen || g.matUvDrag)) {
+            g.matClassDropOpen = false; g.matFilterDropOpen = false; g.matPickerOpen = false; g.matPickerDrag = 0; g.matTexSlotDropOpen = false; g.matUvDrag = 0; g.matDropHover = -1;
             InvalidatePanel(); return 0;
         }
         if (wp == VK_ESCAPE && GetProgSnapshot().active) { ProgRequestCancel(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }

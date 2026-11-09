@@ -84,13 +84,15 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
         if (shaderName.rfind(prefix, 0) == 0) shaderName = shaderName.substr(prefix.size());
         s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.matEditTop + 4, ClipText(shaderName, 22));
     }
-    // RGB sliders.
-    static const char* const rgbLabels[3] = {"Red", "Green", "Blue"};
-    for (int k = 0; k < 3; ++k) {
-        const int y = l.matEditTop + (2 + k) * kRowH;
-        if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + k, rgbLabels[k], y);
+    // RGB sliders (shading view only).
+    if (!g.matInspectOpen) {
+        static const char* const rgbLabels[3] = {"Red", "Green", "Blue"};
+        for (int k = 0; k < 3; ++k) {
+            const int y = l.matEditTop + (2 + k) * kRowH;
+            if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + k, rgbLabels[k], y);
+        }
     }
-    // HEX + colour picker button.
+    // HEX + colour picker button (always: it holds the view toggle).
     {
         const int y = l.matEditTop + 5 * kRowH;
         if (TouchesY(clip, y, y + kRowH)) {
@@ -103,13 +105,179 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
             s.Text(g.fontMono, g.matHexEditing ? ui::kAmber : ui::kText, 208, y + 2, g.matHexEditing ? (g.matHexBuf + "_") : hex, nullptr);
             s.FillRound(l.matPickBtn, 5, g.matPickerOpen ? ui::kLineHi : ui::kCardHi);
             s.TextCentered(g.fontUi, ui::kText, l.matPickBtn, "Color");
+            s.FillRound(l.matInspectBtn, 5, g.matInspectOpen ? ui::kLineHi : ui::kCardHi);
+            s.TextCentered(g.fontUi, ui::kText, l.matInspectBtn, g.matInspectOpen ? "Shading" : "Texture");
         }
     }
-    // Shading sliders.
-    static const char* const shadeLabels[6] = {"Opacity", "Roughness", "Metallic", "Specular", "Emission", "Normal"};
-    for (int k = 0; k < 6; ++k) {
-        const int y = l.matEditTop + (6 + k) * kRowH;
-        if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + 3 + k, shadeLabels[k], y);
+    // Shading sliders (shading view) or the texture inspector (inspector view).
+    if (!g.matInspectOpen) {
+        static const char* const shadeLabels[6] = {"Opacity", "Roughness", "Metallic", "Specular", "Emission", "Normal"};
+        for (int k = 0; k < 6; ++k) {
+            const int y = l.matEditTop + (6 + k) * kRowH;
+            if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + 3 + k, shadeLabels[k], y);
+        }
+    } else {
+        EnsureUvCache(scene);
+        const MatTexSlotInfo sel = MatTexSelected(scene);
+        const auto slots = MatTexSlots(sm);
+        const int yChan = l.matEditTop + 2 * kRowH;
+        // Channel + slot row (rows 2).
+        {
+            const char* ch[5] = {"All", "R", "G", "B", "A"};
+            for (int i = 0; i < 5; ++i) {
+                const RECT r = MatTexChannelRect(l, i);
+                s.FillRound(r, 5, (i == g.matTexChannel) ? ui::kLineHi : ui::kCardHi);
+                s.TextCentered(g.fontUi, (i == g.matTexChannel) ? ui::kAmber : ui::kText, r, ch[i]);
+            }
+            const RECT sr = MatTexSlotRect(l);
+            s.FillRound(sr, 5, g.matTexSlotDropOpen ? ui::kLineHi : ui::kCardHi);
+            s.TextCentered(g.fontUi, ui::kText, sr, "Slot: " + sel.prop + " v");
+        }
+        // Slot detail rows (rows 3-4).
+        {
+            const RECT det{10, yChan + kRowH, 370, yChan + 3 * kRowH};
+            std::string line2 = texNameLine(scene, sel);
+            s.Text(g.fontSmall, ui::kSub, det.left, det.top + 2, line2, &det);
+            s.Text(g.fontSmall, ui::kDim, det.left, det.top + 22, "drag UV to pan  wheel to zoom  click UV to pick island", &det);
+        }
+        // Canvases (rows 6-9).
+        const RECT pv = MatTexPreviewRect(l);
+        const RECT uv = MatUvRect(l);
+        auto texCol = [&](COLORREF c, int a) { return ui::kText; };
+        (void)texCol;
+        // Preview.
+        {
+            s.FillRound(pv, 4, ui::kCardHi);
+            s.StrokeRound(pv, 4, ui::kLineHi);
+            const RECT inner{pv.left + 2, pv.top + 2, pv.right - 2, pv.bottom - 2};
+            const int cw = 2, chh = 2;
+            const int cols = (inner.right - inner.left) / cw, rows = (inner.bottom - inner.top) / chh;
+            const assemble::SceneTexture* tex = nullptr;
+            if (sel.texIdx >= 0 && static_cast<size_t>(sel.texIdx) < scene.textures.size()) tex = &scene.textures[static_cast<size_t>(sel.texIdx)];
+            for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) {
+                const bool dark = ((r / 4) + (c / 4)) % 2 == 0;
+                COLORREF base = dark ? RGB(32, 34, 44) : RGB(52, 56, 70);
+                COLORREF col = base;
+                if (tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4) {
+                    const int tx = std::min(tex->width - 1, std::max(0, int(c * tex->width / (double)std::max(1, cols))));
+                    const int ty = std::min(tex->height - 1, std::max(0, int(r * tex->height / (double)std::max(1, rows))));
+                    const uint8_t* p = &tex->rgba[(static_cast<size_t>(ty) * tex->width + tx) * 4];
+                    const int R = p[0], G = p[1], B = p[2], A = p[3];
+                    if (g.matTexChannel == 0) col = RGB((R * A + GetRValue(base) * (255 - A)) / 255, (G * A + GetGValue(base) * (255 - A)) / 255, (B * A + GetBValue(base) * (255 - A)) / 255);
+                    else if (g.matTexChannel == 4) { const int g1 = A; col = RGB(g1, g1, g1); }
+                    else { const int g1 = g.matTexChannel == 1 ? R : g.matTexChannel == 2 ? G : B; col = RGB(g1, g1, g1); }
+                }
+                s.Fill(RECT{inner.left + c * cw, inner.top + r * chh, inner.left + (c + 1) * cw + 1, inner.top + (r + 1) * chh + 1}, col);
+            }
+            if (!tex) s.TextCentered(g.fontUi, ui::kDim, inner, "no texture");
+        }
+        // UV canvas.
+        {
+            s.FillRound(uv, 4, RGB(14, 16, 24));
+            s.StrokeRound(uv, 4, ui::kLineHi);
+            const int meshIdx = MatUvMeshIndex(scene);
+            if (meshIdx >= 0 && g.uvScale <= 0) { g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f; g.uvPanX = (float(uv.right - uv.left) - g.uvScale) / 2.0f; g.uvPanY = (float(uv.bottom - uv.top) - g.uvScale) / 2.0f; }
+            if (meshIdx >= 0 && g.uvScale > 0) {
+                const auto& mesh = scene.meshes[static_cast<size_t>(meshIdx)];
+                const MatTexSlotInfo ssel = sel;
+                const assemble::SceneTexture* tex = nullptr;
+                if (ssel.texIdx >= 0 && static_cast<size_t>(ssel.texIdx) < scene.textures.size()) tex = &scene.textures[static_cast<size_t>(ssel.texIdx)];
+                const RECT inn{uv.left + 2, uv.top + 2, uv.right - 2, uv.bottom - 2};
+                const int cw = 2, chh = 2;
+                const int cols = (inn.right - inn.left) / cw, rows = (inn.bottom - inn.top) / chh;
+                for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) {
+                    const float u = ((inn.left + c * cw + 1 - uv.left) - g.uvPanX) / g.uvScale;
+                    const float v = 1.0f - ((inn.top + r * chh + 1 - uv.top) - g.uvPanY) / g.uvScale;
+                    COLORREF col = RGB(22, 24, 34);
+                    if (tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4) {
+                        float uu = u, vv = v;
+                        if (tex->clamp) { uu = std::clamp(uu, 0.0f, 1.0f); vv = std::clamp(vv, 0.0f, 1.0f); }
+                        else { uu -= std::floor(uu); vv -= std::floor(vv); }
+                        const int tx = std::min(tex->width - 1, std::max(0, int(uu * tex->width)));
+                        const int ty = std::min(tex->height - 1, std::max(0, int(vv * tex->height)));
+                        const uint8_t* p = &tex->rgba[(static_cast<size_t>(ty) * tex->width + tx) * 4];
+                        col = RGB((p[0] * p[3] + 22 * (255 - p[3])) / 255, (p[1] * p[3] + 24 * (255 - p[3])) / 255, (p[2] * p[3] + 34 * (255 - p[3])) / 255);
+                    }
+                    s.Fill(RECT{inn.left + c * cw, inn.top + r * chh, inn.left + (c + 1) * cw + 1, inn.top + (r + 1) * chh + 1}, col);
+                }
+                auto toPx = [&](const Vec2& p, float& x, float& y) {
+                    x = uv.left + p.x * g.uvScale + g.uvPanX;
+                    y = uv.top + (1.0f - p.y) * g.uvScale + g.uvPanY;
+                    return std::isfinite(x) && std::isfinite(y);
+                };
+                // Seams first (amber, under the wireframe).
+                for (const auto& e : g.matUvSeams) {
+                    if (e.first >= mesh.vertices.size() || e.second >= mesh.vertices.size()) continue;
+                    float x0, y0, x1, y1;
+                    if (!toPx(mesh.vertices[e.first].uv, x0, y0) || !toPx(mesh.vertices[e.second].uv, x1, y1)) continue;
+                    if ((x0 < uv.left - 100 && x1 < uv.left - 100) || (x0 > uv.right + 100 && x1 > uv.right + 100)) continue;
+                    s.Line(x0, y0, x1, y1, ui::kAmber, 2.0f);
+                }
+                const auto tris = material::UvTrisForMaterial(scene, g.selMaterial);
+                const int shown = std::min(2000, static_cast<int>(tris.size()));
+                size_t flat = 0;
+                for (const auto& dt : tris) {
+                    if (static_cast<int>(flat) >= shown) break;
+                    ++flat;
+                    if (dt.mesh != meshIdx) continue;
+                    const auto& sub = mesh.submeshes[static_cast<size_t>(dt.submesh)];
+                    const size_t b = static_cast<size_t>(dt.tri) * 3;
+                    if (b + 2 >= sub.indices.size()) continue;
+                    const uint32_t vi[3] = {sub.indices[b], sub.indices[b + 1], sub.indices[b + 2]};
+                    float x[3], y[3];
+                    bool ok = true, out = false;
+                    for (int i = 0; i < 3; ++i) {
+                        if (vi[i] >= mesh.vertices.size()) { ok = false; break; }
+                        const Vec2 p = mesh.vertices[vi[i]].uv;
+                        if (!toPx(p, x[i], y[i])) { ok = false; break; }
+                        if (p.x < -0.02f || p.x > 1.02f || p.y < -0.02f || p.y > 1.02f) out = true;
+                    }
+                    if (!ok) continue;
+                    bool sel = flat - 1 < g.matUvSelMask.size() && g.matUvSelMask[flat - 1];
+                    const COLORREF c = sel ? RGB(90, 200, 255) : out ? ui::kBad : RGB(190, 200, 220);
+                    for (int i = 0; i < 3; ++i) {
+                        const int j = (i + 1) % 3;
+                        s.Line(x[i], y[i], x[j], y[j], c, 1.0f);
+                    }
+                }
+                if (static_cast<int>(tris.size()) > 2000) s.Text(g.fontSmall, ui::kDim, uv.left + 4, uv.bottom - 14, "2000 of " + std::to_string(tris.size()) + " tris", nullptr);
+            } else {
+                s.TextCentered(g.fontUi, ui::kDim, uv, "no triangles");
+            }
+        }
+        // Info + diagnostics (one line each, small font).
+        {
+            const int yInfo = MatUvRect(l).bottom + 4;
+            std::string texLine = texNameLine(scene, sel);
+            s.Text(g.fontSmall, ui::kSub, 10, yInfo, ClipText(texLine, 58), nullptr);
+            const auto& r = g.matUvReport;
+            char db[160];
+            std::snprintf(db, sizeof db, "missing %d  out %d  seams %d  islands %d  overlap %d  stretch %.1f-%.1f", r.missingUvVerts, r.outOfRangeVerts, r.boundaryEdges, r.islands, r.overlapPairs, r.stretchMin, r.stretchMax);
+            s.Text(g.fontSmall, ui::kDim, 10, yInfo + 15, ClipText(db, 58), nullptr);
+        }
+        // Actions.
+        {
+            const RECT en = MatTexEnableRect(l);
+            CheckBox(s, en.left, en.top + 3, sel.enabled, ui::kAccent);
+            s.Text(g.fontUi, ui::kText, en.left + 24, en.top + 2, "Enabled", nullptr);
+            const RECT rp = MatTexReplaceRect(l);
+            s.FillRound(rp, 5, ui::kCardHi);
+            s.TextCentered(g.fontUi, ui::kText, rp, "Replace");
+            const RECT ft = MatUvFitRect(l);
+            s.FillRound(ft, 5, ui::kCardHi);
+            s.TextCentered(g.fontUi, ui::kText, ft, "Fit UV");
+        }
+        // Slot dropdown popup (modal, over the canvases).
+        if (g.matTexSlotDropOpen) {
+            const RECT drop = MatTexDropRect(l, std::min(6, static_cast<int>(slots.size())));
+            s.FillRound(drop, 5, ui::kCard);
+            s.StrokeRound(drop, 5, ui::kLineHi);
+            for (int i = 0; i < std::min(6, static_cast<int>(slots.size())); ++i) {
+                const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
+                if (i == g.matTexSlot || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
+                s.Text(g.fontUi, (i == g.matTexSlot) ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, slots[static_cast<size_t>(i)].prop, &row);
+            }
+        }
     }
     // Reset + undo row.
     {
