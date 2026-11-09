@@ -170,6 +170,8 @@ void appendMoreAccessories(Card& c) {
         part.emplace_back(Value(std::string("parentKey")), Value(xmlAttr(tag, "parentKey")));
         part.emplace_back(Value(std::string("color")), Value(std::move(colors)));
         part.emplace_back(Value(std::string("addMove")), Value(std::move(addMove)));
+        part.emplace_back(Value(std::string("hideCategory")), Value(static_cast<int64_t>(std::atoi(xmlAttr(tag, "hideCategory").c_str()))));
+        part.emplace_back(Value(std::string("noShake")), Value(xmlAttr(tag, "noShake") == "true"));
         Value& acc = c.outfits[static_cast<size_t>(coordinate)].accessory;
         if (!acc.isMap()) continue;
         for (auto& kv : acc.map())
@@ -350,6 +352,8 @@ void appendMoreAccessoriesToOutfit(Outfit& outfit, const Value& extended) {
         part.emplace_back(Value(std::string("parentKey")), Value(xmlAttr(tag, "parentKey")));
         part.emplace_back(Value(std::string("color")), Value(std::move(colors)));
         part.emplace_back(Value(std::string("addMove")), Value(std::move(addMove)));
+        part.emplace_back(Value(std::string("hideCategory")), Value(static_cast<int64_t>(std::atoi(xmlAttr(tag, "hideCategory").c_str()))));
+        part.emplace_back(Value(std::string("noShake")), Value(xmlAttr(tag, "noShake") == "true"));
         Value& acc = outfit.accessory;
         if (!acc.isMap()) continue;
         for (auto& kv : acc.map())
