@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -151,6 +152,29 @@ void printIssues(const std::vector<std::string>& v, const char* prefix) {
     for (const auto& s : v) std::fprintf(stderr, "%s%s\n", prefix, s.c_str());
 }
 
+// A one-line text progress bar: "label [####------] 42% (item 3 / 10)".
+// fraction < 0 = indeterminate spinner. Skipped when CARDBRIDGE_NO_PROGRESS=1.
+void printProgress(double fraction, const std::string& stage) {
+    if (std::getenv("CARDBRIDGE_NO_PROGRESS")) return;
+    constexpr int W = 24;
+    std::string bar(W, '-');
+    char pct[8] = {0};
+    if (fraction >= 0.0) {
+        const double f = std::clamp(fraction, 0.0, 1.0);
+        const int filled = static_cast<int>(f * W);
+        for (int i = 0; i < filled; ++i) bar[static_cast<size_t>(i)] = '#';
+        std::snprintf(pct, sizeof pct, "%3d%%", static_cast<int>(std::lround(f * 100.0)));
+    } else {
+        static int tick = 0;
+        ++tick;
+        const int pos = tick % W;
+        bar[static_cast<size_t>(pos)] = '*';
+        std::snprintf(pct, sizeof pct, "  ");
+    }
+    std::fprintf(stderr, "\r[%s] %s %s", bar.c_str(), pct, stage.c_str());
+    std::fflush(stderr);
+}
+
 // Shared by convert and inspect: mods index, base lists, resolver.
 struct Context {
     resolve::ModIndex mods;
@@ -171,9 +195,10 @@ bool buildContext(const Args& a, Context& ctx) {
         resolve::ModIndex::Stats st;
         std::fprintf(stderr, "indexing mods in %s ...\n", modsDir.c_str());
         ctx.mods = resolve::ModIndex::Build(modsDir, normalizeSlashes(cache), &issues, &st, [](size_t d, size_t n) {
-            std::fprintf(stderr, "  %zu / %zu\r", d, n);
+            printProgress(n ? static_cast<double>(d) / static_cast<double>(n) : -1.0,
+                          "indexing mods " + std::to_string(d) + " / " + std::to_string(n));
         });
-        std::fprintf(stderr, "  %zu mods files (%zu from cache, %zu read, %zu unreadable), %zu distinct GUIDs\n",
+        std::fprintf(stderr, "\n  %zu mods files (%zu from cache, %zu read, %zu unreadable), %zu distinct GUIDs\n",
                      st.zips, st.reused, st.opened, st.failed, ctx.mods.guidCount());
         printIssues(issues, "  note: ");
         issues.clear();
@@ -209,7 +234,11 @@ int cmdLibrary(const Args& a) {
         o.libraryRoot = lib;
         o.profile = a.has("minimal") ? library::Profile::Minimal : library::Profile::Full;
         std::fprintf(stderr, "copying game data into %s (the game folder is only read) ...\n", lib.c_str());
-        auto r = library::ImportLibrary(o, [](size_t d, size_t n) { std::fprintf(stderr, "  %zu / %zu\r", d, n); });
+        auto r = library::ImportLibrary(o, [](size_t d, size_t n) {
+            printProgress(n ? static_cast<double>(d) / static_cast<double>(n) : -1.0,
+                          "copying game data " + std::to_string(d) + " / " + std::to_string(n));
+        });
+        std::fprintf(stderr, "\n");
         printIssues(r.issues, "  problem: ");
         std::printf("library import: %zu files (%zu copied, %zu already present), %.1f MB\n", r.files, r.copied, r.unchanged,
                     static_cast<double>(r.bytes) / 1048576.0);
@@ -480,6 +509,7 @@ int cmdConvert(const Args& a) {
     ao.autoCloth = a.has("auto-cloth") && !a.has("no-auto-cloth") && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH") &&
                    std::string(std::getenv("CARDBRIDGE_AUTO_CLOTH") ? std::getenv("CARDBRIDGE_AUTO_CLOTH") : "1") != "0";
     ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
+    ao.progress = [](double f, const std::string& stage) { printProgress(f, "assembling: " + stage); };
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
@@ -601,8 +631,20 @@ int cmdConvert(const Args& a) {
         std::string bakeNote;
         auto tb0 = std::chrono::steady_clock::now();
         exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
-                                     [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); }, true, !a.has("no-toon-ramp"));
-        std::fprintf(stderr, "  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
+                                     [](const std::string& m) {
+                                         std::fprintf(stderr, "  %s\n", m.c_str());
+                                         const std::string key = "baked texture ";
+                                         const size_t at = m.find(key);
+                                         if (at != std::string::npos) {
+                                             char* end = nullptr;
+                                             const long n = std::strtol(m.c_str() + at + key.size(), &end, 10);
+                                             if (end && end[0] == '/') {
+                                                 const long tot = std::strtol(end + 1, nullptr, 10);
+                                                 if (tot > 0) printProgress(static_cast<double>(n) / static_cast<double>(tot), m);
+                                             }
+                                         }
+                                     }, true, !a.has("no-toon-ramp"));
+        std::fprintf(stderr, "\n  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
         LogMemory("after bake");
     }
 
@@ -671,6 +713,7 @@ int cmdConvert(const Args& a) {
     eo.assetLibrary = a.get("library");
     eo.modsFolder = a.get("mods");
     eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
+    eo.progress = [](double f, const std::string& stage) { printProgress(f, "exporting: " + stage); };
     try {
         auto r = exporter::ExportScene(scene, c, eo);
         LogMemory("after export");

@@ -72,7 +72,8 @@ struct ViewOptions {
 // light swept from straight on to behind, and the result relative to the baked colour is the ramp a PMX toon texture carries. Ignored
 // with lit (the shading is in the texture then).
 void BakeShaderTextures(assemble::Scene& scene, int maxSize = 1024, bool lit = true, std::string* report = nullptr,
-                        const std::function<void(const std::string&)>& progress = {}, bool grade = false, bool toon = false);
+                        const std::function<void(const std::string&)>& progress = {}, bool grade = false, bool toon = false,
+                        const std::function<bool()>& cancelled = {});
 
 // Runs every pending Scene::createJobs: the game's "create" materials (eye iris and white, face and body skin) drawn over one quad
 // into their placeholder textures. Called once, at the end of assembly.

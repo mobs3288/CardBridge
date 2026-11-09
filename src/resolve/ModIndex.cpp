@@ -66,7 +66,8 @@ bool readManifest(const std::string& path, ModEntry& e) {
 } // namespace
 
 ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, std::vector<std::string>* issues,
-                         Stats* stats, const std::function<void(size_t, size_t)>& progress) {
+                         Stats* stats, const std::function<void(size_t, size_t)>& progress,
+                         const std::function<bool()>& cancelled) {
     Stats st;
     std::vector<std::string> files = fileio::ListFiles(root, {".zipmod", ".zip"}, issues);
     st.zips = files.size();
@@ -98,8 +99,11 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
     std::vector<char> ok(files.size(), 0);
     std::mutex issueMutex;
     std::atomic<size_t> next{0}, done{0}, reused{0}, opened{0}, failed{0};
+    std::atomic<bool> stop{false};
     auto worker = [&]() {
         while (true) {
+            if (stop.load()) return;
+            if (cancelled && cancelled()) { stop.store(true); return; }
             size_t i = next.fetch_add(1);
             if (i >= files.size()) return;
             const std::string& p = files[i];
@@ -128,16 +132,18 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
             }
             results[i] = std::move(e);
             size_t d = ++done;
-            if (progress && (d % 200 == 0 || d == files.size())) {
+            if (progress && (d % 50 == 0 || d == files.size())) {
                 std::lock_guard<std::mutex> lk(issueMutex);
                 progress(d, files.size());
             }
+            if (cancelled && cancelled()) { stop.store(true); return; }
         }
     };
     unsigned n = std::max(2u, std::min(8u, std::thread::hardware_concurrency()));
     std::vector<std::thread> pool;
     for (unsigned t = 0; t < n; ++t) pool.emplace_back(worker);
     for (auto& t : pool) t.join();
+    if (stop.load()) throw Cancelled{};
 
     ModIndex idx;
     nlohmann::json out;

@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -88,8 +89,11 @@ public:
     bool ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vector<std::array<float, 3>>* outNrm = nullptr);
 
     // Uploads the scene's meshes, textures and shader programs. Call again whenever the Scene changes; the Scene must outlive
-    // the next Render calls.
-    bool Load(const assemble::Scene& scene, std::string* why = nullptr);
+    // the next Render calls. `progress` (fraction 0..1, stage) and `cancelled` let the viewer drive its loading bar over the
+    // upload; when cancelled fires the upload stops, the GPU copy is released, `why` is "cancelled by user" and Load returns false.
+    bool Load(const assemble::Scene& scene, std::string* why = nullptr,
+              const std::function<void(double, const std::string&)>& progress = {},
+              const std::function<bool()>& cancelled = {});
     // Releases every uploaded mesh, texture, shader and the CPU mirror of the
     // vertices (GpuMesh::rest), keeping the device and its shared states for
     // the next Load. Call when the loaded scene is discarded so the previous

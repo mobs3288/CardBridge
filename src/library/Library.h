@@ -51,9 +51,12 @@ bool ExtractColourGrade(const std::string& gameRoot, const std::string& libraryR
 bool HasEmbeddedLibrary(const std::string& exePath);
 // Unpacks it into `destParent` (the entries start with "library/", so the library ends up in destParent/library). Files already there with
 // the right size are left alone, so an interrupted unpack resumes. False, with the reason, on failure.
-bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why = nullptr);
+// `cancelled`: when it returns true the copy stops and cardbridge::Cancelled is thrown.
+bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why = nullptr,
+                            const std::function<bool()>& cancelled = {});
 
-ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(size_t, size_t)>& progress = {});
+ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(size_t, size_t)>& progress = {},
+                           const std::function<bool()>& cancelled = {});
 
 struct CheckResult {
     bool ok = false;

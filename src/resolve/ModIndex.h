@@ -27,9 +27,12 @@ public:
     struct Stats { size_t zips = 0, reused = 0, opened = 0, failed = 0; };
 
     // `cachePath` may be empty (no cache). Files that cannot be read go into `issues`.
+    // `cancelled`: when it returns true the build stops early and throws
+    // cardbridge::Cancelled (from the calling thread, after the pool joins).
     static ModIndex Build(const std::string& modsRoot, const std::string& cachePath,
                           std::vector<std::string>* issues, Stats* stats = nullptr,
-                          const std::function<void(size_t, size_t)>& progress = {});
+                          const std::function<void(size_t, size_t)>& progress = {},
+                          const std::function<bool()>& cancelled = {});
 
     const std::vector<ModEntry>* find(const std::string& guid) const;
     // The mods whose lists define (category, id). A card saved without Sideloader's resolve info names its mod items by this raw id.

@@ -1048,7 +1048,8 @@ void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hi
 }
 
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
-                        const std::function<void(const std::string&)>& progress, bool grade, bool toon) {
+                        const std::function<void(const std::string&)>& progress, bool grade, bool toon,
+                        const std::function<bool()>& cancelled) {
     grade = grade && ColourGradeEnabled();
     toon = toon && !lit;
     ViewState st;
@@ -1085,6 +1086,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     int baked = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+        if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
         if (!sr) continue;

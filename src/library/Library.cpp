@@ -37,13 +37,15 @@ bool HasEmbeddedLibrary(const std::string& exePath) {
     return ReadFooter(exePath, off, size);
 }
 
-bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why) {
+bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destParent, const std::function<void(size_t, size_t)>& progress, std::string* why,
+                            const std::function<bool()>& cancelled) {
     uint64_t off = 0, size = 0;
     if (!ReadFooter(exePath, off, size)) { if (why) *why = "this exe carries no library"; return false; }
     try {
         ZipArchive zip(exePath, off, size);
         size_t done = 0;
         for (const auto& e : zip.entries()) {
+            if (cancelled && cancelled()) throw Cancelled{};
             if (!e.name.empty() && e.name.back() == '/') { ++done; continue; }
             if (e.name.find("..") != std::string::npos || e.name.rfind("library/", 0) != 0) continue;   // only library/..., nothing that climbs out
             const std::string dst = fileio::Join(destParent, e.name);
@@ -55,6 +57,8 @@ bool ExtractEmbeddedLibrary(const std::string& exePath, const std::string& destP
             if (progress) progress(++done, zip.entries().size());
         }
         return true;
+    } catch (const Cancelled&) {
+        throw;
     } catch (const std::exception& ex) {
         if (why) *why = ex.what();
         return false;
@@ -89,7 +93,8 @@ bool ExtractColourGrade(const std::string& gameRoot, const std::string& libraryR
     return false;
 }
 
-ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(size_t, size_t)>& progress) {
+ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(size_t, size_t)>& progress,
+                           const std::function<bool()>& cancelled) {
     ImportResult res;
     std::string srcAbdata = fileio::Join(opt.gameRoot, "abdata");
     if (!fileio::Exists(fileio::Join(srcAbdata, "chara/oo_base.unity3d"))) {
@@ -126,6 +131,7 @@ ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(si
     fileio::CreateDirectories(AbdataRoot(opt.libraryRoot));
     size_t done = 0;
     for (const std::string& rel : rels) {
+        if (cancelled && cancelled()) throw Cancelled{};
         std::string src = fileio::Join(srcAbdata, rel);
         std::string dst = fileio::Join(AbdataRoot(opt.libraryRoot), rel);
         try {

@@ -215,6 +215,29 @@ void Surface::Line(float x0, float y0, float x1, float y1, COLORREF c, float wid
     impl_->G().DrawLine(&pen, x0, y0, x1, y1);
 }
 
+void Surface::ProgressBar(const RECT& r, double fraction, double phase) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    const int h = r.bottom - r.top;
+    FillRound(r, h / 2, kLine);
+    if (fraction >= 0.0) {
+        const double f = std::clamp(fraction, 0.0, 1.0);
+        if (f > 0.001) {
+            RECT fill{r.left, r.top, r.left + static_cast<int>((r.right - r.left) * f), r.bottom};
+            FillGradient(fill, h / 2, kAccent, kAccent2);
+        }
+    } else {
+        // Indeterminate: a chunk sliding across, wrapping on its own length.
+        const double w = static_cast<double>(r.right - r.left);
+        const double chunk = w * 0.28;
+        double t = phase - static_cast<double>(static_cast<long long>(phase));
+        const double x = (t * (w + chunk)) - chunk;
+        RECT seg{static_cast<int>(r.left + x), r.top, static_cast<int>(r.left + x + chunk), r.bottom};
+        RECT clipped;
+        if (IntersectRect(&clipped, &seg, &r)) FillGradient(clipped, h / 2, kAccent, kAccent2);
+    }
+    StrokeRound(r, h / 2, kLineHi);
+}
+
 void Surface::Logo(const RECT& r, int radius) {
     const int size = r.right - r.left;
     if (!g_logo || size < 4) return;

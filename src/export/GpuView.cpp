@@ -1017,16 +1017,24 @@ void GpuView::Unload() {
     I.lastW = I.lastH = 0;
 }
 
-bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
+bool GpuView::Load(const assemble::Scene& scene, std::string* why,
+                   const std::function<void(double, const std::string&)>& progress,
+                   const std::function<bool()>& cancelled) {
     auto fail = [&](const std::string& m) { if (why) *why = m; return false; };
+    auto report = [&](double frac, const std::string& stage) { if (progress) progress(frac, stage); };
+    auto isCancelled = [&]() { return cancelled && cancelled(); };
     Impl& I = *impl_;
     if (!I.dev) return fail("no device");
+    if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     I.Clear();
     I.scene = &scene;
 
     // Shaders: the forward pass of each, straight from the bundle's DXBC.
     I.shaders.resize(scene.shaders.size());
     for (size_t i = 0; i < scene.shaders.size(); ++i) {
+        if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
+        report(0.05 + 0.15 * (scene.shaders.empty() ? 1.0 : static_cast<double>(i + 1) / static_cast<double>(scene.shaders.size())),
+               "shaders " + std::to_string(i + 1) + " / " + std::to_string(scene.shaders.size()));
         auto& g = I.shaders[i];
         Bytes blob(scene.shaders[i].blob.begin(), scene.shaders[i].blob.end());
         g.progs = shader::ParseUnityShaderBlob(blob, nullptr);
@@ -1067,8 +1075,14 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
                 texFailed = true;
         }
     };
-    for (const auto& m : scene.materials) { for (const auto& tb : m.texProps) upload(tb.texture); upload(m.texture); }
+    for (const auto& m : scene.materials) {
+        if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
+        for (const auto& tb : m.texProps) upload(tb.texture);
+        upload(m.texture);
+    }
     for (const auto& tb : scene.globalTextures) upload(tb.texture);
+    report(0.5, "textures");
+    if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     if (texFailed) { I.Clear(); I.scene = nullptr; return fail("a texture upload failed"); }
 
     I.cutout.assign(scene.materials.size(), 0);
@@ -1080,6 +1094,10 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
     const bool dual = I.wantSkin != "cpu" && I.MakeSkinCompute();
     I.meshes.resize(scene.meshes.size());
     for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
+        if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
+        if (mi % 8 == 0 && !scene.meshes.empty())
+            report(0.5 + 0.5 * (static_cast<double>(mi) / static_cast<double>(scene.meshes.size())),
+                   "meshes " + std::to_string(mi + 1) + " / " + std::to_string(scene.meshes.size()));
         const auto& m = scene.meshes[mi];
         auto& g = I.meshes[mi];
         if (m.vertices.empty()) continue;
@@ -1145,6 +1163,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why) {
         std::fprintf(stderr, "skin buffers: %zu verts, rest %zuKB skin-in %zuKB skin-out %zuKB posed %zuKB bones %zuKB total GPU %zuKB CPU mirror %zuKB (%zu buffers)\n",
                      m.vertexCount, m.restBytes / 1024, m.skinInBytes / 1024, m.skinOutBytes / 1024, m.posedBytes / 1024, m.boneBytes / 1024, m.totalGpuBytes / 1024, m.cpuMirrorBytes / 1024, m.bufferCount);
     }
+    report(1.0, "done");
     return true;
 }
 

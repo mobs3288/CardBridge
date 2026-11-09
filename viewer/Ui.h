@@ -49,6 +49,9 @@ public:
     void FillDisc(float cx, float cy, float radius, COLORREF c, int alpha = 255);
     void FillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, COLORREF c);
     void Line(float x0, float y0, float x1, float y1, COLORREF c, float width = 1.0f);
+    // A loading bar: track, fill up to `fraction` (0..1), or an animated
+    // sliding chunk when indeterminate (fraction < 0). `phase` animates it.
+    void ProgressBar(const RECT& r, double fraction, double phase = 0.0);
     void Logo(const RECT& r, int radius);
 
     // Text: GDI (ClearType). `clip` keeps a long string inside its box.

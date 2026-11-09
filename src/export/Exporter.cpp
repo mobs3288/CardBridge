@@ -408,6 +408,8 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
 ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt) {
     ExportResult res;
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
+    auto report = [&](double frac, const std::string& stage) { if (opt.progress) opt.progress(frac, stage); };
+    auto checkCancel = [&]() { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; };
     std::string stem = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
 
     if (fileio::Exists(opt.outDir) && !opt.overwrite) {
@@ -417,6 +419,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
     fileio::CreateDirectories(fileio::Join(opt.outDir, "textures"));
     log("writing textures and materials");
+    report(0.05, "writing textures");
     // A re-export replaces the previous one: stale textures from an earlier run must not linger beside it.
     if (opt.overwrite)
         for (const std::string& f : fileio::ListFiles(fileio::Join(opt.outDir, "textures"), {".png"})) fileio::RemoveFile(f);
@@ -460,6 +463,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::map<std::string, int> sphereFiles; // sphere map name -> PMX texture index
     int meshOrdinal = 0;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        checkCancel();
         const auto& part = scene.parts[pi];
         if (!part.includeInExport) continue;
         range[pi].first = static_cast<int>(model.materials.size());
@@ -540,7 +544,10 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             ++meshOrdinal;
         }
         range[pi].second = static_cast<int>(model.materials.size()) - range[pi].first;
+        report(0.05 + 0.45 * (static_cast<double>(pi + 1) / static_cast<double>(scene.parts.size())),
+               "export part " + std::to_string(pi + 1) + " / " + std::to_string(scene.parts.size()) + ": " + part.id);
     }
+    report(0.52, "morphs and physics");
 
     // Morphs: switch outfit parts off and the nude body on, so one PMX serves every state (the game's own clothes-off needs no second model).
     //   "Hide <part>" / "Show <part>"  one part (transparent / opaque again, by how it starts)
@@ -669,6 +676,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
 
     if (opt.faceMinusZ) pmx::TurnAboutY(model);
     log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
+    report(0.62, "writing PMX");
+    checkCancel();
     Bytes pmxBytes = pmx::WritePmx(model);
     std::string pmxFile = stem + ".pmx";
     res.pmxPath = fileio::Join(opt.outDir, pmxFile);
@@ -679,6 +688,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     // export time (1:1), so a hidden list item is in none of them - and in
     // neither the PMX nor its bones.
     log("rendering preview images");
+    report(0.68, "rendering preview images");
     const std::vector<char> effHidden = ExportHiddenParts(scene);
     res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
     {
@@ -688,6 +698,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         fileio::WriteFile(res.previewPath, prev.data(), prev.size());
     }
     {   // a head close-up, to compare face and hair against the card's own picture
+        checkCancel();
+        report(0.74, "rendering head preview");
         PreviewOptions head;
         head.views = 1;
         head.viewWidth = 640;
@@ -699,6 +711,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
     }
     {   // a three-quarter view through the same camera the viewer uses (keeps the viewer's renderer under test)
+        checkCancel();
+        report(0.79, "rendering view preview");
         ViewCamera cam;
         cam.yawDeg = 30;
         cam.pitchDeg = 8;
@@ -714,6 +728,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_view.png"), png.data(), png.size());
     }
     {   // the same view through the game's own shaders (materials whose shader is in the bundle), for comparing with the card picture
+        checkCancel();
+        report(0.84, "rendering shaded preview");
         ViewCamera cam;
         cam.yawDeg = 0;
         cam.pitchDeg = 4;
@@ -730,6 +746,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_shaded.png"), png.data(), png.size());
     }
     {   // the feet from the front, side and back
+        checkCancel();
+        report(0.89, "rendering feet preview");
         PreviewOptions feet;
         feet.viewWidth = 560;
         feet.viewHeight = 560;
@@ -745,6 +763,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     manifest["counts"]["ik_bones"] = ikBones.size();   // added after the scene's bones, so the PMX has "bones" + "ik_bones"
     manifest["counts"]["joints"] = model.joints.size();
     log("writing manifest");
+    report(0.95, "writing manifest");
+    checkCancel();
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");
     fileio::WriteTextFile(res.manifestPath, manifest.dump(2) + "\n");
 
@@ -756,6 +776,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     res.textures = model.textures.size();
     res.parts = scene.parts.size();
     (void)meshOrdinal;
+    report(1.0, "done");
     return res;
 }
 

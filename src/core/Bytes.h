@@ -17,6 +17,13 @@ struct FormatError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// Thrown when a cooperative-cancellation predicate (`cancelled`) reports the
+// user asked to stop. Distinct from FormatError so callers can tell "the user
+// cancelled" apart from "the data was broken" and keep the previous scene.
+struct Cancelled : std::exception {
+    const char* what() const noexcept override { return "cancelled by user"; }
+};
+
 // A bounds-checked cursor over a byte range. Truncated or corrupt data throws
 // FormatError instead of reading past the end.
 class ByteReader {

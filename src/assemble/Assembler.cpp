@@ -1845,6 +1845,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     Scene scene;
     scene.name = card.displayName();
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
+    auto report = [&](double frac, const std::string& stage) { if (opt.progress) opt.progress(frac, stage); };
+    auto checkCancel = [&]() { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; };
     Rig rig;
     Builder b{nullptr, scene, rig, {}};
     b.resolverPtr = &resolver;
@@ -1905,6 +1907,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
 
     // --- shared skeleton and body ---------------------------------------
     log("loading the shared skeleton and body");
+    report(0.05, "skeleton and body");
     std::string why;
     auto base = resolver.openBaseBundle("chara/oo_base.unity3d", &why);
     if (!base) {
@@ -2234,6 +2237,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // --- card items ------------------------------------------------------
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
     log("assembling " + std::to_string(work.size()) + " card item(s)");
+    report(0.15, "resolving items");
     for (const auto& wr : work) {   // which installed mods ship the same bundle path (the one loaded last is what the game uses)
         resolve::ResolvedItem probe = resolver.resolve(card, wr);
         resolver.registerBundleProvider(probe);
@@ -2246,6 +2250,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
     std::vector<MaskSource> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
+        checkCancel();
         const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
         if (item.status == resolve::ItemStatus::Empty) continue;
@@ -3188,6 +3193,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         size_t logMeshes = part.meshes.size();
         scene.parts.push_back(std::move(part));
         log(logId + ": " + (logStatus.empty() ? std::string("ok") : logStatus) + ", " + std::to_string(logMeshes) + " mesh(es)");
+        report(0.15 + 0.6 * (static_cast<double>(wi + 1) / static_cast<double>(work.size())),
+               "item " + std::to_string(wi + 1) + " / " + std::to_string(work.size()) + ": " + logId);
     }
     LogMemory("assemble after items");
 
@@ -3204,6 +3211,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // the body this way, and the bra the same way (OverBraMask). The covered triangles leave the part but are kept as "under pieces"
     // (one part per set of garments covering them) so the nude body can be shown again, in the viewer and through PMX morphs.
     log("applying clothing masks");
+    report(0.78, "clothing masks");
     auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
                           const std::vector<MaskSource>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
         if (masks.empty()) return;
@@ -3357,9 +3365,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
     log("running " + std::to_string(scene.createJobs.size()) + " game create material(s)");
+    report(0.88, "create materials");
+    checkCancel();
     LogMemory("assemble before create jobs");
     exporter::RunCreateJobs(scene);
     log("create materials done");
+    report(0.96, "finishing");
     LogMemory("assemble after create jobs");
     if (std::getenv("CARDBRIDGE_DEBUG_BODY_UV")) {
         for (const auto& part : scene.parts) for (int mi : part.meshes) {
@@ -3393,6 +3404,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
     settleHeels(scene);
     if (opt.autoCloth && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH")) SynthesizeAutoCloth(scene, log);
+    report(1.0, "done");
     return scene;
 }
 

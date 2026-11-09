@@ -31,6 +31,13 @@ struct AssembleOptions {
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
+    // Optional determinate progress: (fraction 0..1, stage label). A negative
+    // fraction means "indeterminate, just show the stage". Called from the
+    // assembling thread, as `log` is.
+    std::function<void(double, const std::string&)> progress;
+    // Optional cooperative cancellation: when it returns true the assembly
+    // stops at the next item boundary and throws cardbridge::Cancelled.
+    std::function<bool()> cancelled;
 };
 
 // The game draws its garment and eye "create" materials in linear light (sRGB textures decoded, linear colours, encoded result); the skin ones

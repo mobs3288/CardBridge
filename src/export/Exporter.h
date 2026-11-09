@@ -26,6 +26,12 @@ struct ExportOptions {
     std::string modsFolder;        // recorded as provenance only
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
+    // Optional determinate progress: (fraction 0..1, stage label). A negative
+    // fraction means "indeterminate, just show the stage".
+    std::function<void(double, const std::string&)> progress;
+    // Optional cooperative cancellation: true stops the export at the next
+    // part / preview boundary with cardbridge::Cancelled.
+    std::function<bool()> cancelled;
 };
 
 struct ExportResult {

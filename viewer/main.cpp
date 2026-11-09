@@ -465,6 +465,19 @@ struct App {
     // Frame timing (CARDBRIDGE_BENCH): milliseconds spent in the three parts of a paint, summed, and how many paints ran.
     struct Prof { double render = 0, blit = 0, panel = 0, panelDraw = 0, panelCopy = 0, reshape = 0, refresh = 0, sec[8] = {}; long paints = 0, renders = 0; } prof;
 
+    // ---- global loading bar (every long job: card / outfit / costume loads,
+    // mod indexing, GPU uploads, bakes, preview renders, library builds, export) ----
+    // Workers report through ProgSet(); the UI thread paints the bar from a
+    // snapshot. Cancelling sets progCancel; workers poll it at stage / item
+    // boundaries (the core callbacks throw cardbridge::Cancelled).
+    std::atomic<bool> progActive{false};
+    std::atomic<bool> progCancel{false};
+    std::mutex progMu;
+    std::string progTitle, progStage;
+    double progFrac = -1.0;   // <0 = indeterminate
+    int progGen = 0;          // bumped per job, so a stale worker cannot report
+    bool progHoverCancel = false;
+
     std::mutex logMu;
     std::vector<LogLine> logLines;
     HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr;
@@ -477,8 +490,9 @@ constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
 constexpr UINT WM_EXPORT_DONE = WM_APP + 3;
 constexpr UINT WM_EXP_READY = WM_APP + 4;
-constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok)
+constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok, 2 = cancelled)
 constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
+constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: repaint the bar
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
@@ -489,6 +503,118 @@ constexpr UINT_PTR kTimerApplyTweaks = 2;
 std::shared_ptr<Loaded> Current() {
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     return g.loaded;
+}
+
+// ---- loading bar state (workers report; the UI thread paints) --------------
+struct ProgSnapshot {
+    bool active = false;
+    bool cancelRequested = false;
+    double frac = -1.0;   // <0 = indeterminate
+    std::string title, stage;
+};
+
+void Log(const std::string& text, LogKind kind);   // defined below
+
+void ProgBegin(const std::string& title, bool indeterminate = true) {
+    {
+        std::lock_guard<std::mutex> lk(g.progMu);
+        g.progTitle = title;
+        g.progStage = indeterminate ? title : std::string();
+        g.progFrac = indeterminate ? -1.0 : 0.0;
+        ++g.progGen;
+    }
+    g.progCancel.store(false);
+    g.progActive.store(true);
+    g.progHoverCancel = false;
+    if (g.hwnd) PostMessageW(g.hwnd, WM_PROGRESS, 0, 0);
+}
+
+void ProgSet(double frac, const std::string& stage) {
+    // Cheap: just store the snapshot. Frame() repaints at ~30/s while a job
+    // runs, so posting a message here would flood paints (one per mod file /
+    // material) and make the bar flicker. Fractions never run backwards:
+    // denominators that grow mid-job (assemble sub-parts) would otherwise
+    // jitter the bar, and a stray indeterminate tick mid-job would flip the
+    // bar into a sliding chunk and back.
+    if (!g.progActive.load()) return;
+    {
+        std::lock_guard<std::mutex> lk(g.progMu);
+        if (frac >= 0.0) {
+            if (!(g.progFrac >= 0.0 && frac < g.progFrac)) g.progFrac = frac;
+        }
+        // frac < 0 while already determinate: keep the fraction, only the
+        // stage label moves. Only a job that started indeterminate stays one.
+        else if (g.progFrac < 0.0) g.progFrac = frac;
+        if (!stage.empty()) g.progStage = stage;
+    }
+}
+
+void ProgStage(const std::string& stage) { ProgSet(-1.0, stage); }
+
+void ProgEnd() {
+    g.progActive.store(false);
+    g.progCancel.store(false);
+    if (g.hwnd) PostMessageW(g.hwnd, WM_PROGRESS, 0, 0);
+}
+
+void ProgRequestCancel() {
+    if (!g.progActive.load()) return;
+    g.progCancel.store(true);
+    Log("cancelling...", LogKind::Warn);
+    if (g.hwnd) PostMessageW(g.hwnd, WM_PROGRESS, 0, 0);
+}
+
+bool ProgCancelled() { return g.progCancel.load(); }
+
+ProgSnapshot GetProgSnapshot() {
+    ProgSnapshot s;
+    s.active = g.progActive.load();
+    s.cancelRequested = g.progCancel.load();
+    std::lock_guard<std::mutex> lk(g.progMu);
+    s.frac = g.progFrac;
+    s.title = g.progTitle;
+    s.stage = g.progStage;
+    return s;
+}
+
+// Paint the bar once, synchronously. UI-thread uploads (GPU Load) would
+// otherwise block before the first paint of the bar is ever made.
+void ProgFlush() {
+    if (!g.hwnd) return;
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    UpdateWindow(g.hwnd);
+}
+
+// The viewport overlay card, centred in the 3D view (middle on both axes).
+// Client coordinates (includes the kPanel offset) so hit-tests compare
+// directly against WndProc points. DrawProgressOverlay subtracts kPanel
+// when drawing into the viewport-sized comp DC.
+RECT ProgOverlayRect(int clientW, int clientH) {
+    const int vw = clientW - kPanel;
+    if (vw < 200 || clientH < 200) return RECT{kPanel + 8, 8, clientW - 8, 8};
+    const int w = std::min(460, vw - 48);
+    const int h = 132;
+    const int x = kPanel + (vw - w) / 2;
+    const int y = std::max(14, (clientH - h) / 2);
+    return RECT{x, y, x + w, y + h};
+}
+
+RECT ProgCancelRect(const RECT& card) {
+    return RECT{card.right - 104, card.bottom - 34, card.right - 10, card.bottom - 10};
+}
+
+// Parses the bake's "baked texture N/M: ..." into a fraction, -1 when it is not a count line.
+double ParseBakeFrac(const std::string& msg) {
+    const std::string key = "baked texture ";
+    const size_t at = msg.find(key);
+    if (at == std::string::npos) return -1.0;
+    const char* p = msg.c_str() + at + key.size();
+    char* end = nullptr;
+    const long n = std::strtol(p, &end, 10);
+    if (end == p || end[0] != '/') return -1.0;
+    const long m = std::strtol(end + 1, &end, 10);
+    if (m <= 0) return -1.0;
+    return static_cast<double>(n) / static_cast<double>(m);
 }
 
 // Invalidation is by area, so a hover or a slider drag repaints a few rows instead of the whole window.
@@ -647,16 +773,16 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kAreola, "Areola size", "Nipples"});
         rows.push_back({0, -1, "Pose (shows at once, the export carries it)", "Pose"});
         rows.push_back({2, kAPose, "Automatic A-pose: arms down from the T-pose", "Pose"});
-        rows.push_back({1, kAPoseDeg, "A-pose angle (degrees)", "Pose"});
+        rows.push_back({1, kAPoseDeg, "A-pose angle", "Pose"});
         rows.push_back({0, -1, "Physics preview (Y; N shakes it)", "Physics"});
         rows.push_back({2, kPhysics, "Simulate hair, skirts and ribbons live", "Physics"});
         rows.push_back({0, kJiggleBust, "Jiggle (the exported PMX, and the physics preview)", "Jiggle"});
         rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
-        rows.push_back({1, kJiggleIntensity, "Jiggle intensity (1 = the game)", "Jiggle"});
-        rows.push_back({1, kSag, "Sag (1 = the card's hang, 0 = none)", "Jiggle"});
+        rows.push_back({1, kJiggleIntensity, "Jiggle intensity", "Jiggle"});
+        rows.push_back({1, kSag, "Sag", "Jiggle"});
         rows.push_back({0, kAutoCloth, "Auto cloth (added bones + physics where parts have none; reloads the card)", "Auto cloth"});
-        rows.push_back({2, kAutoCloth, "Auto cloth: shoulder / sleeves / wings / tails", "Auto cloth"});
+        rows.push_back({2, kAutoCloth, "Auto cloth: sleeves / wings / tails", "Auto cloth"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -1114,17 +1240,22 @@ bool EnsureResolver(std::string& err) {
     }
     if (!g.settings.mods.empty()) {
         Log("indexing mods in " + g.settings.mods + " ...");
-        g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, [](size_t done, size_t total) {
-            Log("indexing mods " + std::to_string(done) + " / " + std::to_string(total));
-        });
+        auto modProgress = [](size_t done, size_t total) {
+            // Map the mod-index range (which can be minutes on a 4,000-mod
+            // folder) into the first slice of the overall loading bar.
+            const double f = total ? static_cast<double>(done) / static_cast<double>(total) : -1.0;
+            ProgSet(f >= 0.0 ? f * 0.15 : -1.0, "indexing mods " + std::to_string(done) + " / " + std::to_string(total));
+            if (done % 200 == 0 || done == total) Log("indexing mods " + std::to_string(done) + " / " + std::to_string(total));
+        };
+        auto modCancel = [] { return ProgCancelled(); };
+        g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, modProgress, modCancel);
         // A game folder instead of its mods folder: look one level down.
         if (g.mods.guidCount() == 0 && Exists(g.settings.mods + "/mods")) {
             g.settings.mods += "/mods";
-            g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, [](size_t done, size_t total) {
-                Log("indexing mods " + std::to_string(done) + " / " + std::to_string(total));
-            });
+            g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, modProgress, modCancel);
             SaveSettings(g.settings);
         }
+        ProgSet(0.15, "mods indexed");
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo = std::to_string(g.mods.guidCount()) + " mods found";
         if (g.mods.guidCount() == 0) g.modsInfo = "NO mods found in that folder - press M and pick the folder that holds the .zipmod files";
@@ -1133,7 +1264,9 @@ bool EnsureResolver(std::string& err) {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo = "no mods folder set - mod items will be missing (press M)";
         Log(g.modsInfo, LogKind::Warn);
+        ProgSet(0.15, "no mods folder");
     }
+    ProgSet(0.16, "checking asset library");
     auto chk = library::CheckLibrary(g.settings.library, false);
     if (!chk.ok) { err = "asset library problem: " + (chk.issues.empty() ? std::string("unusable") : chk.issues[0]); return false; }
     Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile", LogKind::Good);
@@ -1147,6 +1280,7 @@ bool EnsureResolver(std::string& err) {
 
 void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    const std::string prevCardPath = g.cardPath;
     g.cardPath = path;
     std::string clothingPath;
     int clothingOutfit = -1;
@@ -1164,14 +1298,20 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     KillTimer(g.hwnd, kTimerApplyTweaks);
     g.loadingOutfit = outfit;
     g.status = "loading " + fileio::FileName(path) + " ...";   // the full path is in the log
+    ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit]() {
+    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, prevCardPath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
+        bool cancelled = false;
         try {
+            ProgSet(0.02, "indexing mods");
+            if (ProgCancelled()) throw Cancelled{};
             if (!EnsureResolver(err)) throw std::runtime_error(err);
+            if (ProgCancelled()) throw Cancelled{};
+            ProgSet(0.18, "reading the card");
             // The previous character's bundles are no longer needed (its
             // scene holds copies of everything it extracted): drop them
             // before this character's bundles allocate beside that scene
@@ -1192,6 +1332,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
                                        clothingOutfit < static_cast<int>(c.outfits.size());
             if (applyClothing) {
+                ProgSet(0.20, "applying outfit file (cloth)");
                 try {
                     card::ClothingFile cl = card::LoadClothingFile(clothingPath);
                     if (!cl.supported) throw std::runtime_error(cl.supportNote);
@@ -1237,7 +1378,15 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
             }
             ao.log = [](const std::string& m) { Log("  " + m); };
+            ao.progress = [](double f, const std::string& stage) {
+                // The assemble spans most of the overall bar; map its 0..1 into 0.22..0.96.
+                ProgSet(f >= 0.0 ? 0.22 + f * 0.74 : -1.0, stage);
+            };
+            ao.cancelled = [] { return ProgCancelled(); };
+            if (ProgCancelled()) throw Cancelled{};
             out->scene = assemble::Assemble(c, *g.resolver, ao);
+            if (ProgCancelled()) throw Cancelled{};
+            ProgSet(0.97, "counting triangles");
             out->outfits = static_cast<int>(c.outfits.size());
             out->outfit = shown;
             out->title = c.displayName();
@@ -1251,16 +1400,23 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             char msg[256];
             std::snprintf(msg, sizeof msg, "ready in %.1fs: %zu parts, %s triangles", secs, out->scene.parts.size(), Count(Triangles(out->scene)).c_str());
             Log(msg, LogKind::Good);
+        } catch (const Cancelled&) {
+            cancelled = true;
+            Log("loading cancelled", LogKind::Warn);
         } catch (const std::exception& e) {
             out->notes.push_back(e.what());
             Log(std::string("load failed: ") + e.what(), LogKind::Error);
         }
-        {
+        if (!cancelled) {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
             g.loaded = out;
+        } else {
+            // The old character stays on screen: forget the cancelled file.
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.cardPath = prevCardPath;
         }
         g.busy = false;
-        PostMessageW(g.hwnd, WM_LOADED, 0, 0);
+        PostMessageW(g.hwnd, WM_LOADED, cancelled ? 1 : 0, 0);
     }).detach();
 }
 
@@ -1286,18 +1442,30 @@ void StartExport() {
     const float jiggleIntensity = g.jiggleIntensity;
     const float sag = g.sag;
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
+    ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
     std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
+        bool cancelled = false;
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
+            ProgSet(0.03, "posing");
+            if (ProgCancelled()) throw Cancelled{};
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity, sag);   // the bust/hips as they hang under gravity
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // hidden items leave the PMX entirely (meshes, chains and their own bones); the preview is the viewer, 1:1
             Log("baking the game shader textures");
+            ProgSet(0.06, "baking shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
-            exporter::BakeShaderTextures(scene, 1024, false, nullptr, [](const std::string& m) { Log("  " + m); }, true, true);
+            exporter::BakeShaderTextures(scene, 1024, false, nullptr,
+                [](const std::string& m) {
+                    Log("  " + m);
+                    const double f = ParseBakeFrac(m);
+                    ProgSet(f >= 0.0 ? 0.06 + f * 0.44 : -1.0, m);
+                }, true, true, [] { return ProgCancelled(); });
+            if (ProgCancelled()) throw Cancelled{};
+            ProgSet(0.52, "writing PMX");
             exporter::ExportOptions eo;
             eo.outDir = outDir;
             eo.baseName = stem;
@@ -1308,17 +1476,25 @@ void StartExport() {
             eo.assetLibrary = library;
             eo.modsFolder = mods;
             eo.log = [](const std::string& m) { Log("  " + m); };
+            eo.progress = [](double f, const std::string& stage) {
+                ProgSet(f >= 0.0 ? 0.52 + f * 0.48 : -1.0, stage);
+            };
+            eo.cancelled = [] { return ProgCancelled(); };
             exporter::ExportResult r = exporter::ExportScene(scene, L->card, eo);
+            if (ProgCancelled()) throw Cancelled{};
             double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             char msg[512];
             std::snprintf(msg, sizeof msg, "export done in %.1fs: %s (%s vertices, %s triangles, %zu textures)", secs, r.pmxPath.c_str(),
                           Count(r.vertices).c_str(), Count(r.triangles).c_str(), r.textures);
             Log(msg, LogKind::Good);
+        } catch (const Cancelled&) {
+            cancelled = true;
+            Log("export cancelled; the partial folder " + outDir + " is kept (delete it if you do not need it)", LogKind::Warn);
         } catch (const std::exception& e) {
             Log(std::string("export failed: ") + e.what(), LogKind::Error);
         }
         g.exporting = false;
-        PostMessageW(g.hwnd, WM_EXPORT_DONE, 0, 0);
+        PostMessageW(g.hwnd, WM_EXPORT_DONE, cancelled ? 1 : 0, 0);
     }).detach();
 }
 
@@ -1332,13 +1508,25 @@ void ToggleAsExported() {
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
+    ProgBegin("Rendering as-exported preview (MMD look)");
     Log(std::string("baking the export preview (colour only, toon ramps, ") + (grade ? "graded" : "not graded") + ")");
     auto copy = std::make_shared<assemble::Scene>(L->scene);
     std::thread([L, grade, copy]() {
         std::shared_ptr<assemble::Scene> sc;
+        bool cancelled = false;
         try {
             sc = copy;
-            exporter::BakeShaderTextures(*sc, 1024, false, nullptr, {}, grade, true);
+            ProgSet(0.05, "baking shader textures");
+            exporter::BakeShaderTextures(*sc, 1024, false, nullptr,
+                [](const std::string& m) {
+                    const double f = ParseBakeFrac(m);
+                    ProgSet(f >= 0.0 ? 0.05 + f * 0.80 : -1.0, m);
+                }, grade, true, [] { return ProgCancelled(); });
+            if (ProgCancelled()) throw Cancelled{};
+        } catch (const Cancelled&) {
+            cancelled = true;
+            Log("as-exported preview cancelled", LogKind::Warn);
+            sc.reset();
         } catch (const std::exception& e) {
             Log(std::string("export preview failed: ") + e.what(), LogKind::Error);
             sc.reset();
@@ -1347,7 +1535,7 @@ void ToggleAsExported() {
             std::lock_guard<std::recursive_mutex> lock(g.mu);
             g.expPending = sc; g.expPendingFor = L; g.expPendingGrade = grade;
         }
-        PostMessageW(g.hwnd, WM_EXP_READY, 0, 0);
+        PostMessageW(g.hwnd, WM_EXP_READY, cancelled ? 1 : 0, 0);
     }).detach();
 }
 
@@ -1621,7 +1809,9 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y) {
     const bool changed = TweakChanged(id);
     const COLORREF mark = changed ? ui::kAmber : ui::kAccent;
     const RECT labelClip{12, y, kTrackL - 8, y + kRowH};
-    s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, 12, y + 2, label, &labelClip);
+    // The label box is only ~148px wide: truncate with … so a long name never
+    // hard-cuts mid-word at the track edge.
+    s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, 12, y + 2, ClipText(label, 22), &labelClip);
     const int mid = y + kRowH / 2;
     auto xOf = [&](float v) { return kTrackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (kTrackR - kTrackL))); };
     s.FillRound(RECT{kTrackL, mid - 2, kTrackR, mid + 2}, 2, ui::kLine);
@@ -1654,11 +1844,14 @@ void DrawBonesTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const 
     {   // the two switches
         const int y = l.partsTop;
         CheckBox(s, 12, y + 3, g.showBones, ui::kAmber);
-        s.Text(g.fontUi, g.showBones ? ui::kAmber : ui::kText, 32, y + 2, "skeleton in the view (K)");
+        const RECT skClip{32, y, 206, y + kRowH};
+        s.Text(g.fontUi, g.showBones ? ui::kAmber : ui::kText, 32, y + 2, "skeleton in the view (K)", &skClip);
         CheckBox(s, 214, y + 3, g.showHelpers, ui::kAmber);
-        s.Text(g.fontUi, g.showHelpers ? ui::kAmber : ui::kText, 234, y + 2, "helper bones");
+        const RECT hpClip{234, y, kPanel - 14, y + kRowH};
+        s.Text(g.fontUi, g.showHelpers ? ui::kAmber : ui::kText, 234, y + 2, "helper bones", &hpClip);
     }
-    const RECT listClip{6, l.boneListTop, kPanel - 6, l.boneListBottom};
+    // Keep tree names clear of the scroll thumb at the right edge.
+    const RECT listClip{6, l.boneListTop, kPanel - 18, l.boneListBottom};
     const std::vector<BoneRow> rows = BuildBoneRows(scene);
     const int visible = std::max(1, (l.boneListBottom - l.boneListTop) / kRowH);
     g.boneScroll = std::max(0, std::min(g.boneScroll, static_cast<int>(rows.size()) - visible));
@@ -1700,7 +1893,7 @@ void DrawBonesTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const 
         ghost(l.boneRedo, "redo", !g.redoStack.empty());
         ghost(l.boneSave, "save pose", true);
         ghost(l.boneLoad, "load pose", true);
-        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.boneUndo.top + 4, "Ctrl+Z / Y / S / O");
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.boneUndo.top + 4, "Ctrl+Z/Y/S/O");
     }
     if (sel < 0) {
         s.Text(g.fontUi, ui::kSub, 12, l.boneEditTop + 2, "click a bone in the list or in the view (turn on the skeleton)", &headClip);
@@ -1782,6 +1975,15 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         Button(s, l.all, "All", g.hoverButton == 5, false, L != nullptr);
         Button(s, l.asExported, "MMD", g.hoverButton == 6, g.showExp, L != nullptr);   // X: the exported PMX as MikuMikuDance shows it
     }
+    // Loading bar: a thin strip in the gap under the toolbar (the only spare
+    // space; nothing moves). The viewport overlay carries the labels.
+    if (TouchesY(clip, l.open.bottom + 1, l.open.bottom + 11)) {
+        const ProgSnapshot ps = GetProgSnapshot();
+        if (ps.active) {
+            const double phase = static_cast<double>(GetTickCount64() % 1200) / 1200.0;
+            s.ProgressBar(RECT{10, l.open.bottom + 3, kPanel - 10, l.open.bottom + 9}, ps.frac, phase);
+        }
+    }
 
     lap(1);
     // outfit: the counter and the game's name for the coordinate, over a row of slots that can be clicked (Left / Right still step) ----
@@ -1794,7 +1996,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             // Hovering a slot previews that outfit's name without loading it.
             const int preview = g.hoverOutfit >= 0 && g.hoverOutfit < L->outfits ? g.hoverOutfit : shown;
             const COLORREF nameColor = g.busy ? ui::kAccent : g.hoverOutfit >= 0 ? RGB(246, 249, 255) : ui::kText;
-            s.Text(g.fontBold, nameColor, 74, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30));
+            const RECT nameClip{74, l.outfitNameTop, kPanel - 64, l.outfitNameTop + 20};
+            s.Text(g.fontBold, nameColor, 74, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30), &nameClip);
             char count[32];
             std::snprintf(count, sizeof count, "%d / %d", shown + 1, L->outfits);
             s.TextRight(g.fontBold, ui::kAmber, kPanel - 12, l.outfitNameTop, count);
@@ -1833,12 +2036,13 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         const bool onThisOutfit = hasClothing && clothingOutfit == shown;
         // The slot it overwrote is the base outfit it replaced ("*" on its chip).
         // Short label: the < > slot picker takes the rest of the row.
+        const RECT clothClip{12, l.outfitClothTop, 144, l.outfitClothTop + 20};
         if (hasClothing) {
             const std::string where = "#" + std::to_string(clothingOutfit + 1) + " " + ClipText(clothingName, 14);
             s.Text(g.fontSmall, onThisOutfit ? ui::kAmber : ui::kDim, 12, l.outfitClothTop + 3,
-                   ClipText("Added: " + where, 20));
+                   ClipText("Added: " + where, 20), &clothClip);
         } else {
-            s.Text(g.fontSmall, ui::kDim, 12, l.outfitClothTop + 3, ClipText("card's own clothing", 20));
+            s.Text(g.fontSmall, ui::kDim, 12, l.outfitClothTop + 3, ClipText("card's own clothing", 20), &clothClip);
         }
         const bool canPrev = hasClothing && L && clothingOutfit > 0;
         const bool canNext = hasClothing && L && clothingOutfit + 1 < L->outfits;
@@ -1870,7 +2074,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
             else if (g.tab == TabSettings) right = "saved";
             else right = AnyTweak() ? "tweaked" : "as card";
-            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, right);
+            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
         }
     }
 
@@ -1932,21 +2136,27 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     if (row.kind == 0) {
                         std::string name = row.label;
                         for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                        s.Text(g.fontBold, ui::kAccent, 14, y + 3, name, &clipText);
+                        // Header and its right-aligned "reset" share the row:
+                        // clip the title so it can never run under "reset".
+                        const RECT headClip{14, y, kPanel - 58, y + kRowH};
+                        s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
                         bool any = false;
                         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
                         if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
                     } else if (row.kind == 4) {
-                        s.Text(g.fontSmall, ui::kDim, 14, y + 4, row.label, &clipText);
+                        const RECT infoClip{14, y, kPanel - 16, y + kRowH};
+                        s.Text(g.fontSmall, ui::kDim, 14, y + 4, ClipText(row.label, 58), &infoClip);
                     } else if (row.kind == 5) {
                         const RECT btn{12, y + 1, kPanel - 16, y + kRowH - 1};
                         s.FillRound(btn, 5, idx == g.hoverRow ? ui::kLineHi : ui::kCardHi);
-                        s.Text(g.fontUi, ui::kText, 20, y + 2, row.label, &clipText);
+                        const RECT btnClip{20, y, kPanel - 24, y + kRowH};
+                        s.Text(g.fontUi, ui::kText, 20, y + 2, ClipText(row.label, 56), &btnClip);
                     } else if (row.kind == 2) {
                         const bool on = TweakChanged(row.id);
                         const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
                         CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAmber);
-                        s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, failed ? row.label + "  (does not compile)" : row.label, &clipText);
+                        const RECT swClip{36, y, kPanel - 18, y + kRowH};
+                        s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
                     } else {
                         DrawSliderRow(s, row.id, row.label, y);
                     }
@@ -1972,7 +2182,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     if (row.part < 0) {
                         if (hot) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
                         if (row.replaced) {   // the base outfit this slot replaced: kept visible, marked, no parts follow
-                            s.Text(g.fontBold, ui::kAmber, 14, y + 3, "OUTFIT (REPLACED)");
+                            const RECT repClip{14, y, kPanel - 190, y + kRowH};
+                            s.Text(g.fontBold, ui::kAmber, 14, y + 3, "OUTFIT (REPLACED)", &repClip);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, "base outfit replaced by Added outfit");
                         } else if (row.group == "Added outfit") {   // added clothing: master checkbox + collapse
                             bool masterOn = true;
@@ -1988,7 +2199,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             int count = 0;
                             for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
                             Expander(s, 34, y + kRowH / 2, !collapsed, ui::kAccent);
-                            s.Text(g.fontBold, ui::kAmber, 52, y + 3, name);
+                            const RECT gClip1{52, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAmber, 52, y + 3, ClipText(name, 44), &gClip1);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
                         } else {
                             std::string name = row.group;
@@ -1997,7 +2209,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             int count = 0;
                             for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
                             Expander(s, 14, y + kRowH / 2, !collapsed, ui::kAccent);
-                            s.Text(g.fontBold, ui::kAccent, 30, y + 3, name);
+                            const RECT gClip2{30, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAccent, 30, y + 3, ClipText(name, 44), &gClip2);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
                         }
                     } else {
@@ -2013,7 +2226,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
                         if (p.fromClothing) name += "  (added)";
-                        s.Text(g.fontMono, col, 38, y + 3, name, &clipText);
+                        // Name and the right-aligned triangle count share the row.
+                        const RECT partClip{38, y, kPanel - 64, y + kRowH};
+                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, 44), &partClip);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
                         s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, kPanel - 16, y + 4, tris);
                     }
@@ -2051,9 +2266,12 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     lap(5);
     // footer -----------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.footerTop, H)) {
-        s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64));
+        const RECT footClip{12, l.footerTop, kPanel - 10, l.footerTop + 34};
+        s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64), &footClip);
         std::string hint = "1-7 outfit · L lib · K bones · P pose · Y physics · N shake · D reset clothing";
-        if (g.busy) hint = "working ...";
+        const ProgSnapshot ps = GetProgSnapshot();
+        if (ps.active) hint = ps.cancelRequested ? "cancelling ..." : (ps.stage.empty() ? "working ... (Esc or Cancel to stop)" : ps.stage + "  (Esc cancels)");
+        else if (g.busy) hint = "working ...";
         else if (g.exporting) hint = "exporting PMX ...";
         if (L && g.hoverPart >= 0 && static_cast<size_t>(g.hoverPart) < L->scene.parts.size()) {
             const auto& p = L->scene.parts[static_cast<size_t>(g.hoverPart)];
@@ -2064,11 +2282,100 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         } else if (!modsInfo.empty() && !L) {
             hint = modsInfo;
         }
-        s.Text(g.fontSmall, g.busy ? ui::kAccent : g.exporting ? ui::kAmber : ui::kSub, 12, l.footerTop + 17, ClipText(hint, 64));
+        s.Text(g.fontSmall, ps.active ? ui::kAccent : g.busy ? ui::kAccent : g.exporting ? ui::kAmber : ui::kSub, 12, l.footerTop + 17, ClipText(hint, 64), &footClip);
     }
     s.Fill(RECT{kPanel - 1, clip.top, kPanel, clip.bottom}, ui::kLine);
     s.End();
     lap(6);
+}
+
+// The loading overlay over the 3D view: title, stage, determinate bar (or a
+// sliding indeterminate chunk) and Cancel. Drawn into the viewport-sized
+// comp DC (origin at the view's top-left, NOT the client's), so `card` is
+// shifted left by kPanel. Esc (or Cancel) sets the flag the workers poll.
+void DrawProgressOverlay(HDC dc, int clientW, int clientH) {
+    const ProgSnapshot ps = GetProgSnapshot();
+    if (!ps.active) return;
+    const RECT client = ProgOverlayRect(clientW, clientH);
+    // The comp DC is viewport-sized: its (0,0) is kPanel, so shift the card.
+    const RECT card{client.left - kPanel, client.top, client.right - kPanel, client.bottom};
+    if (card.right <= card.left || card.bottom <= card.top) return;
+    // Dim the view behind the card (solid, GDI cannot alpha-blend easily).
+    HBRUSH dim = CreateSolidBrush(RGB(8, 10, 16));
+    FillRect(dc, &card, dim);
+    DeleteObject(dim);
+    HBRUSH vs = CreateSolidBrush(ui::kCard);
+    HPEN border = CreatePen(PS_SOLID, 1, ui::kLineHi);
+    HGDIOBJ olds = SelectObject(dc, vs);
+    HGDIOBJ oldp = SelectObject(dc, border);
+    RoundRect(dc, card.left, card.top, card.right, card.bottom, 16, 16);
+    SelectObject(dc, olds);
+    SelectObject(dc, oldp);
+    DeleteObject(vs);
+    DeleteObject(border);
+    auto text = [&](HFONT font, COLORREF color, int x, int y, const std::string& s) {
+        HGDIOBJ old = SelectObject(dc, font);
+        SetTextColor(dc, color);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextAlign(dc, TA_LEFT | TA_TOP);
+        const std::wstring w = Utf8ToWide(ClipText(s, 52));
+        ExtTextOutW(dc, x, y, ETO_CLIPPED, &card, w.c_str(), static_cast<UINT>(w.size()), nullptr);
+        SelectObject(dc, old);
+    };
+    text(g.fontBold, ui::kAccent, card.left + 14, card.top + 10, ps.title);
+    text(g.fontSmall, ps.cancelRequested ? ui::kAmber : ui::kSub, card.left + 14, card.top + 32,
+         ps.cancelRequested ? std::string("cancelling...") : (ps.stage.empty() ? std::string("working...") : ps.stage));
+    // Bar.
+    const RECT bar{card.left + 14, card.top + 56, card.right - 14, card.top + 68};
+    HBRUSH track = CreateSolidBrush(ui::kLine);
+    FillRect(dc, &bar, track);
+    DeleteObject(track);
+    if (ps.frac >= 0.0) {
+        const double f = std::clamp(ps.frac, 0.0, 1.0);
+        if (f > 0.001) {
+            RECT fill{bar.left, bar.top, bar.left + static_cast<int>((bar.right - bar.left) * f), bar.bottom};
+            HBRUSH acc = CreateSolidBrush(ui::kAccent);
+            FillRect(dc, &fill, acc);
+            DeleteObject(acc);
+        }
+    } else {
+        const double w = static_cast<double>(bar.right - bar.left);
+        const double chunk = w * 0.28;
+        const double t = static_cast<double>(GetTickCount64() % 1200) / 1200.0;
+        const double x = t * (w + chunk) - chunk;
+        RECT seg{static_cast<int>(bar.left + x), bar.top, static_cast<int>(bar.left + x + chunk), bar.bottom};
+        RECT clipped;
+        if (IntersectRect(&clipped, &seg, &bar)) {
+            HBRUSH acc = CreateSolidBrush(ui::kAccent);
+            FillRect(dc, &clipped, acc);
+            DeleteObject(acc);
+        }
+    }
+    // Percent on the left, Cancel on the right.
+    char pct[16] = {0};
+    if (ps.frac >= 0.0) std::snprintf(pct, sizeof pct, "%d%%", static_cast<int>(std::lround(ps.frac * 100.0)));
+    else std::snprintf(pct, sizeof pct, "%%");
+    text(g.fontSmall, ui::kSub, card.left + 14, card.top + 76, pct);
+    text(g.fontSmall, ui::kDim, card.left + 60, card.top + 76, "Esc cancels");
+    const RECT cancel = ProgCancelRect(card);
+    HBRUSH cb = CreateSolidBrush(ps.cancelRequested ? ui::kLine : (g.progHoverCancel ? ui::kLineHi : ui::kCardHi));
+    HPEN cp = CreatePen(PS_SOLID, 1, ui::kLine);
+    HGDIOBJ ob = SelectObject(dc, cb);
+    HGDIOBJ op = SelectObject(dc, cp);
+    RoundRect(dc, cancel.left, cancel.top, cancel.right, cancel.bottom, 10, 10);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(cb);
+    DeleteObject(cp);
+    {
+        HGDIOBJ old = SelectObject(dc, g.fontUi);
+        SetTextColor(dc, ps.cancelRequested ? ui::kFaint : ui::kText);
+        SetBkMode(dc, TRANSPARENT);
+        std::wstring w = L"Cancel";
+        RECT t = cancel;
+        DrawTextW(dc, w.data(), static_cast<int>(w.size()), &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+    }
 }
 
 void Paint(HWND hwnd) {
@@ -2105,6 +2412,7 @@ void Paint(HWND hwnd) {
         ++g.prof.renders;
     }
     const double tBlit = NowMs();
+    const bool overlayActive = GetProgSnapshot().active;
     if (viewDamaged && !g.frame.empty() && g.fw == W && g.fh == H && W > 0 && H > 0) {
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -2113,7 +2421,40 @@ void Paint(HWND hwnd) {
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
-        StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        if (overlayActive) {
+            // Frame + loading card in one off-screen DC, a single BitBlt to
+            // the window: drawing the card over an already-visible blit is
+            // what made every update flash the bare frame first.
+            static HDC compDc = nullptr;
+            static HBITMAP compBmp = nullptr;
+            static HGDIOBJ compOld = nullptr;
+            static int compW = 0, compH = 0;
+            if (compDc && (compW != W || compH != H)) {
+                SelectObject(compDc, compOld);
+                DeleteObject(compBmp);
+                DeleteDC(compDc);
+                compDc = nullptr; compBmp = nullptr; compOld = nullptr;
+            }
+            if (!compDc) {
+                HDC screen = GetDC(nullptr);
+                compDc = CreateCompatibleDC(screen);
+                compBmp = CreateCompatibleBitmap(screen, W, H);
+                ReleaseDC(nullptr, screen);
+                if (compDc && compBmp) {
+                    compOld = SelectObject(compDc, compBmp);
+                    compW = W; compH = H;
+                }
+            }
+            if (compDc && compBmp) {
+                StretchDIBits(compDc, 0, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+                DrawProgressOverlay(compDc, static_cast<int>(rc.right), H);
+                BitBlt(dc, kPanel, 0, W, H, compDc, 0, 0, SRCCOPY);
+            } else {
+                StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+            }
+        } else {
+            StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        }
     }
     const double tPanel = NowMs();
     g.prof.blit += tPanel - tBlit;
@@ -2408,24 +2749,33 @@ void StartLibraryImport(const std::string& game) {
     if (g.busy.exchange(true)) { Log("still busy; wait for it to finish", LogKind::Warn); return; }
     const std::string dest = DefaultLibraryDir();
     g.status = "copying the game data into the library ...";
+    ProgBegin("Building asset library from game");
     Log("building the asset library from " + game, LogKind::Info);
     InvalidatePanel();
     std::thread([game, dest]() {
-        bool ok = false;
+        bool ok = false, cancelled = false;
         try {
             library::ImportOptions o;
             o.gameRoot = game;
             o.libraryRoot = dest;
             o.profile = library::Profile::Full;
-            auto r = library::ImportLibrary(o, [](size_t done, size_t total) { if (done % 25 == 0 || done == total) Log("  copying game data " + std::to_string(done) + " / " + std::to_string(total)); });
+            auto r = library::ImportLibrary(o, [](size_t done, size_t total) {
+                const double f = total ? static_cast<double>(done) / static_cast<double>(total) : -1.0;
+                ProgSet(f, "copying game data " + std::to_string(done) + " / " + std::to_string(total));
+                if (done % 25 == 0 || done == total) Log("  copying game data " + std::to_string(done) + " / " + std::to_string(total));
+            }, [] { return ProgCancelled(); });
             for (const auto& issue : r.issues) Log("  " + issue, LogKind::Warn);
             ok = r.files > 0 && library::CheckLibrary(dest, false).ok;
+            if (ok) ProgSet(1.0, "done");
             Log(ok ? "asset library ready: " + dest : std::string("the library import failed: is that the Koikatsu folder (it has abdata inside)?"), ok ? LogKind::Good : LogKind::Error);
+        } catch (const Cancelled&) {
+            cancelled = true;
+            Log("library import cancelled (files already copied stay on disk; run it again to finish)", LogKind::Warn);
         } catch (const std::exception& e) {
             Log(std::string("the library import failed: ") + e.what(), LogKind::Error);
         }
         g.busy = false;
-        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, ok ? 1 : 0);
+        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, cancelled ? 2 : (ok ? 1 : 0));
     }).detach();
 }
 
@@ -2437,21 +2787,30 @@ void StartEmbeddedUnpack() {
     const std::string exePath = Slashes(WideToUtf8(exe));
     const std::string dest = DefaultLibraryDir();
     g.status = "unpacking the game data that comes with CardBridge (first run only) ...";
+    ProgBegin("Unpacking library from exe");
     Log("unpacking the library that is inside this exe into " + dest);
     InvalidatePanel();
     std::thread([exePath, dest]() {
-        bool ok = false;
+        bool ok = false, cancelled = false;
         std::string why;
         try {
             const std::string parent = dest.substr(0, dest.find_last_of('/'));
-            ok = library::ExtractEmbeddedLibrary(exePath, parent, [](size_t done, size_t total) { if (done % 25 == 0 || done == total) Log("  unpacking " + std::to_string(done) + " / " + std::to_string(total)); }, &why)
+            ok = library::ExtractEmbeddedLibrary(exePath, parent, [](size_t done, size_t total) {
+                const double f = total ? static_cast<double>(done) / static_cast<double>(total) : -1.0;
+                ProgSet(f, "unpacking " + std::to_string(done) + " / " + std::to_string(total));
+                if (done % 25 == 0 || done == total) Log("  unpacking " + std::to_string(done) + " / " + std::to_string(total));
+            }, &why, [] { return ProgCancelled(); })
                  && library::CheckLibrary(dest, false).ok;
+            if (ok) ProgSet(1.0, "done");
+        } catch (const Cancelled&) {
+            cancelled = true;
+            why = "cancelled by user";
         } catch (const std::exception& e) {
             why = e.what();
         }
-        Log(ok ? "asset library ready: " + dest : "could not unpack the library: " + why, ok ? LogKind::Good : LogKind::Error);
+        Log(cancelled ? "library unpack cancelled (unpack again to finish)" : (ok ? "asset library ready: " + dest : "could not unpack the library: " + why), cancelled ? LogKind::Warn : ok ? LogKind::Good : LogKind::Error);
         g.busy = false;
-        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, ok ? 1 : 0);
+        PostMessageW(g.hwnd, WM_LIBRARY_DONE, 0, cancelled ? 2 : (ok ? 1 : 0));
     }).detach();
 }
 
@@ -2506,6 +2865,11 @@ void ReloadLayers(bool announce) {
 // so switching GPU / WARP / software takes effect at once without restarting. The baked "as exported" copy is re-uploaded
 // too when there is one. On failure the viewer keeps the CPU fallback (software renderer).
 void ReinitGpu() {
+    // A device switch re-uploads the whole scene (the "render" preparation);
+    // it runs on the UI thread, so the bar shows indeterminate over it and
+    // cannot be pressed until it returns. The upload itself is short.
+    ProgBegin("Switching graphics device");
+    ProgFlush();
     exporter::GpuOptions go;
     go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
     go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
@@ -2558,6 +2922,7 @@ void ReinitGpu() {
         }
     }
     ApplyPoseLive();
+    ProgEnd();
     g.dirty = true;
     InvalidateRect(g.hwnd, nullptr, FALSE);
 }
@@ -2717,6 +3082,18 @@ void Frame() {
     const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
     g.animating = a || b;
     if (g.animating) InvalidateList();
+    // While a job runs, Frame is the single painter for the bar (~30/s): it
+    // repaints the overlay card, the strip and the footer hint, so worker
+    // reports never queue paints of their own.
+    if (g.progActive.load()) {
+        RECT rc;
+        GetClientRect(g.hwnd, &rc);
+        const RECT card = ProgOverlayRect(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
+        InvalidateRect(g.hwnd, &card, FALSE);
+        const PanelLayout l = Lay(rc.bottom);
+        InvalidatePanelBand(l.open.bottom + 1, l.open.bottom + 12);
+        InvalidateFooter();
+    }
     if (GetUpdateRect(g.hwnd, nullptr, FALSE)) UpdateWindow(g.hwnd);
 }
 
@@ -2780,6 +3157,10 @@ void DumpTestLayout() {
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
                   {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
+    {   // the loading bar: title / stage / fraction so scripted runs can check it
+        const ProgSnapshot ps = GetProgSnapshot();
+        j["progress"] = {{"active", ps.active}, {"cancelRequested", ps.cancelRequested}, {"frac", ps.frac}, {"title", ps.title}, {"stage", ps.stage}};
+    }
     const std::string text = j.dump(2);
     fileio::WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size());
 }
@@ -2797,6 +3178,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         KillTimer(hwnd, 1); g.dirty = true; InvalidateView(); return 0;
     case WM_LOG: InvalidateLog(); return 0;
+    case WM_PROGRESS: {
+        // Keep the indeterminate chunk / percent moving: repaint the strip
+        // under the toolbar and the overlay card, plus the footer hint.
+        InvalidatePanelBand(Lay(ClientHeight()).open.bottom + 1, Lay(ClientHeight()).open.bottom + 12);
+        InvalidateFooter();
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const RECT card = ProgOverlayRect(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
+            InvalidateRect(hwnd, &card, FALSE);
+        }
+        return 0;
+    }
     case WM_TEST: {
         static const bool hooks = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
         if (!hooks) return 0;
@@ -2829,8 +3223,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize = {kPanel + 380, 620};
         return 0;
     }
-    case WM_EXPORT_DONE: InvalidatePanel(); return 0;
+    case WM_EXPORT_DONE: ProgEnd(); InvalidatePanel(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_EXP_READY: {
+        const bool wasCancelled = (wp == 1);
         std::shared_ptr<assemble::Scene> sc;
         {
             std::lock_guard<std::recursive_mutex> lock(g.mu);
@@ -2840,27 +3235,44 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         g.expBusy = false;
         g.expOk = false;
-        if (sc && g.expFor != Current()) {   // the character changed while it baked: drop the stale copy instead of keeping it
+        if (wasCancelled || !sc) {   // cancelled (or a failed bake): keep the previous look
             g.expFor.reset();
-            g.gpuExp.Unload();
+            ProgEnd();
             g.dirty = true;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (sc && g.expFor != Current()) {   // the character changed while it baked: drop the stale copy instead of keeping it
+            g.expFor.reset();
+            g.gpuExp.Unload();
+            ProgEnd();
+            g.dirty = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        ProgSet(0.92, "uploading to GPU");
         std::string why;
         exporter::GpuOptions go;
         go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
         if (sc && (g.gpuExp.ready() || g.gpuExp.Init(go, &why))) {
             g.gpuExp.SetPlain(true);
-            if (g.gpuExp.Load(*sc, &why)) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); Log("as exported: on (X switches back)", LogKind::Good); }
+            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); Log("as exported: on (X switches back)", LogKind::Good); }
             else Log("export preview upload failed: " + why, LogKind::Warn);
         } else if (sc) Log("export preview: no Direct3D 11 device (" + why + ")", LogKind::Warn);
+        ProgEnd();
         g.dirty = true;
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_LOADED: {
+        if (wp == 1) {   // cancelled: keep the previous character, just stop the bar
+            g.loadingOutfit = -1;
+            ProgEnd();
+            g.status = Current() ? "loading cancelled" : "drop a Koikatsu card on this window";
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         std::shared_ptr<Loaded> L = Current();
         if (L && !L->scene.bones.empty()) {
             g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;   // metres to centimetres
@@ -2904,16 +3316,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.poseWorld.clear();
         g.sim = assemble::PhysicsSim{};
         if (L && g.gpu.ready()) {
-            if (g.gpu.Load(L->scene)) {
+            ProgSet(0.97, "uploading shaders to GPU");
+            ProgFlush();
+            std::string gpuWhy;
+            if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
                 g.gpuScene = L;
                 g.gpuOk = true;
                 Log("game shaders uploaded to Direct3D 11", LogKind::Good);
+            } else if (gpuWhy == "cancelled by user") {
+                Log("GPU upload cancelled; showing the software renderer", LogKind::Warn);
             } else {
                 Log("Direct3D 11 upload failed; using the software renderer", LogKind::Warn);
             }
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
+        ProgEnd();
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
         if (g.physics) { g.physics = false; SetPhysics(true); }
@@ -2929,7 +3347,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_BENCH: RunBench(); return 0;
     case WM_SETUP_LIBRARY: SetupLibrary(false); return 0;
     case WM_LIBRARY_DONE:
-        if (lp) {
+        ProgEnd();
+        if (lp == 2) {   // cancelled: the library stays unfinished; start again to finish
+            g.status = "library setup cancelled: press L to try again";
+        } else if (lp) {
             g.settings.library = DefaultLibraryDir();
             SaveSettings(g.settings);
             g.resolver.reset();   // the next load builds its resolver over the new library
@@ -2976,6 +3397,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (x >= kPanel && GetProgSnapshot().active) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const RECT cancel = ProgCancelRect(ProgOverlayRect(static_cast<int>(rc.right), rc.bottom));
+            POINT p{x, y};
+            if (PtInRect(&cancel, p)) { ProgRequestCancel(); return 0; }
+        }
         if (x < kPanel) {
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -3160,6 +3588,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         g.hoverButton = x < kPanel ? ButtonAt(l, x, y) : 0;
         g.hoverOutfit = x < kPanel ? OutfitChipAt(l, x, y) : -1;
+        const RECT cardNow = ProgOverlayRect(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
+        const RECT cancelNow = ProgCancelRect(cardNow);
+        const bool hoverCancel = x >= kPanel && GetProgSnapshot().active && PtInRect(&cancelNow, POINT{x, y}) != 0;
+        if (hoverCancel != g.progHoverCancel) {
+            g.progHoverCancel = hoverCancel;
+            InvalidateRect(hwnd, &cardNow, FALSE);
+        }
         g.hoverRow = -1;
         g.hoverPart = -1;
         if (x < kPanel) {
@@ -3295,6 +3730,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PanelLayout l = Lay(rc.bottom);
             bool hand = ButtonAt(l, p.x, p.y) != 0 || PtInRect(&l.clearLog, p) != 0 ||
                         OutfitChipAt(l, p.x, p.y) >= 0;
+            if (p.x >= kPanel && GetProgSnapshot().active) {
+                const RECT cardNow = ProgOverlayRect(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
+                const RECT cancelNow = ProgCancelRect(cardNow);
+                hand = hand || PtInRect(&cancelNow, p) != 0;
+            }
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();
                 if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
@@ -3311,6 +3751,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KEYDOWN: {
         std::shared_ptr<Loaded> L = Current();
+        if (wp == VK_ESCAPE && GetProgSnapshot().active) { ProgRequestCancel(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
         if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save the pose, Ctrl+O load a pose
             if (wp == 'Z') UndoPose((GetKeyState(VK_SHIFT) & 0x8000) != 0);
             else if (wp == 'Y') UndoPose(true);
@@ -3575,9 +4016,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         }
         if (quit) break;
         Frame();
-        const bool again = g.physics || g.animating || g.dragPending;
+        const bool again = g.physics || g.animating || g.dragPending || g.progActive.load();
         if (!again) MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        else MsgWaitForMultipleObjectsEx(0, nullptr, 8, QS_ALLINPUT, 0);
+        else MsgWaitForMultipleObjectsEx(0, nullptr, 33, QS_ALLINPUT, 0);
     }
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
     for (HFONT* f : {&g.fontTitle, &g.fontUi, &g.fontBold, &g.fontMono, &g.fontLog, &g.fontSmall})
