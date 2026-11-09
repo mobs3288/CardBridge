@@ -59,15 +59,10 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         ScenePart& part = scene.parts[pi];
         if (part.underPiece || part.nudeSwitch) continue;
-        if (part.group != "Accessories" && part.group != "Outfit") continue; // per decision: accessories + tops/tails, hair excluded
-        // Only hanging cloth slots: chest/back/waist/arm accessories (shoulder coats,
-        // wings, capes) and top/bottom + jacket sub-parts. This keeps bras, pants,
-        // socks, shoes and hair wigs from growing flappy chains.
-        if (part.group == "Accessories") {
-            if (part.category != 124 && part.category != 125 && part.category != 126 && part.category != 128) continue;
-        } else { // Outfit garments
-            if (!(part.category == 105 || part.category == 106 || part.category == 109 || (part.category >= 200 && part.category <= 212))) continue;
-        }
+        if (part.group != "Accessories") continue; // garments are body-fit shells; ripping them misidentifies torso/sleeves as loose cloth
+        // Only hanging accessory slots: chest/back/waist/arm (shoulder coats, wings,
+        // capes). Bra/pants/socks/shoes/hair-wigs and fitted tops/bottoms never synthesize.
+        if (part.category != 124 && part.category != 125 && part.category != 126 && part.category != 128) continue;
         if (part.meshes.empty()) continue;
         if (hasAuthored.count(part.id)) continue; // authored DynamicBone wins
         bool hasShapes = false;
@@ -121,7 +116,6 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
         if (std::getenv("CARDBRIDGE_DEBUG_CLOTH")) std::fprintf(stderr, "clothdbg %s cat=%d verts=%zu anchor=%s (%.2f %.2f %.2f) minY=%.2f hang=%.2f side=%.2f\n",
             part.id.c_str(), part.category, all.size(), partAnchorBone >= 0 && static_cast<size_t>(partAnchorBone) < scene.bones.size() ? scene.bones[static_cast<size_t>(partAnchorBone)].name.c_str() : "?", anchorPos.x, anchorPos.y, anchorPos.z, minY, hangDepth, sideMax);
         if (hangDepth < 0.07f && sideMax < 0.10f) continue; // nothing hangs
-        if (part.category == 109 && hangDepth < 0.20f && sideMax < 0.20f) continue; // gloves: only extra-long sleeves count
 
         struct HV { int mesh; size_t vert; Vec3 pos; };
         std::vector<HV> hanging;
@@ -130,15 +124,7 @@ int SynthesizeAutoCloth(Scene& scene, const std::function<void(const std::string
             const float dy = anchorPos.y - p.y;
             const float dx = p.x - anchorPos.x, dz = p.z - anchorPos.z;
             const float horiz = std::sqrt(dx * dx + dz * dz);
-            bool hang = false;
-            if (part.group == "Outfit") {
-                // Body-fit garments (torso/shoulder) sit within ~10cm of the axis,
-                // so require clearly loose geometry: far sideways (kimono sleeves),
-                // deep below (overhang tails), or sideways+below together (wings).
-                hang = (horiz > 0.14f) || (dy > 0.18f) || (horiz > 0.09f && dy > 0.10f);
-            } else {
-                hang = (dy > 0.04f || horiz > 0.09f); // accessories hang from their node
-            }
+            bool hang = (dy > 0.04f || horiz > 0.09f); // accessories hang from their node
             if (hang) hanging.push_back({r.mesh, r.vert, p});
         }
         if (hanging.size() < 50 || hanging.size() < static_cast<size_t>(static_cast<float>(all.size()) * 0.04f)) continue;

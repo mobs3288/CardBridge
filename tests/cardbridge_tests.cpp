@@ -1717,10 +1717,10 @@ void unitTests() {
 
     test("auto cloth: hanging garment gets chains that follow their limb, torso stays rigid", [] {
         using namespace assemble;
-        // Synthetic kimono: rigid torso at chest + wide sleeve hanging to the
-        // forearm (left side). Before the fix the sleeve anchored to the chest
-        // and tore away when the arm moved; now the chain root votes to the
-        // forearm bone the sleeve tips already follow.
+        // Synthetic shoulder coat accessory: rigid anchor at chest + hanging
+        // panel to the forearm side. garment tops are intentionally excluded
+        // (body-fit), so this regression now uses an accessory; the test
+        // verifies rest preservation and forearm follow via chain parent.
         Scene s;
         auto add = [&](const char* name, int parent, Vec3 pos) {
             SceneBone b; b.name = name; b.parent = parent; b.pos = pos; b.source = "rig";
@@ -1732,8 +1732,9 @@ void unitTests() {
         int upper = add("cf_j_arm00_L", chest, {-0.20f, 1.25f, 0});
         int fore  = add("cf_j_forearm01_L", upper, {-0.42f, 0.95f, 0});
         (void)fore;
-        // Part: outfit top (category 105) with torso + LEFT sleeve verts.
-        ScenePart part; part.id = "outfit0.top"; part.group = "Outfit"; part.category = 105;
+        // Part: accessory chest drape (category 124) with hanging panel - garment tops are excluded from synthesis
+        ScenePart part; part.id = "outfit0.acc99"; part.group = "Accessories"; part.category = 124;
+        part.attachNode = "cf_j_chest01";
         part.status = "resolved-base"; part.includeInExport = true;
         int partIdx = static_cast<int>(s.parts.size());
         s.parts.push_back(part);

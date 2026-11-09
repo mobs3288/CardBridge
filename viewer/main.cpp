@@ -454,7 +454,7 @@ struct App {
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
     float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
-    bool autoCloth = true;                        // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails)
+    bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size
@@ -725,7 +725,7 @@ void ResetTweak(int id) {
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = true;
-    else if (id == kAutoCloth) g.autoCloth = true;
+    else if (id == kAutoCloth) g.autoCloth = false;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 
