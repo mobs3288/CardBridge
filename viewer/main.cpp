@@ -343,7 +343,10 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
     l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
     l.clothingReset = {206, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 216, 59 + i * 51, 240};
+    // Seven tabs, 42 px each with a 2 px gap, so the right-hand status line
+    // ("34 parts", "0 edited", ...) keeps its own room instead of overlapping
+    // the last tab.
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {8 + i * 44, 216, 50 + i * 44, 240};
     l.partsHeadingTop = 222;
     l.partsTop = 248;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
@@ -782,7 +785,7 @@ bool SliderFor(int id, SliderRef& r) {
         switch (k) {
         case 0: case 1: case 2:
             r.def = (k == 0 ? orig.baseColor.x : k == 1 ? orig.baseColor.y : orig.baseColor.z) * 255.0f;
-            r.lo = 0; r.hi = 255; r.step = 1; r.percent = false; r.fmt = "%d"; return true;
+            r.lo = 0; r.hi = 255; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true;   // %d with the float value printed garbage
         case 3: r.def = orig.opacity; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
         case 4: r.def = orig.roughness; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
         case 5: r.def = orig.metallic; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
@@ -826,6 +829,22 @@ void SyncMatBuf() {
     }
 }
 
+// ApplyOverrides can rewrite a material's tint copy of its main texture (the
+// game's skin / outfit shaders ignore _Color). Push those pixels to the GPU
+// view and drop the software renderer's cached mips so the next frame uses
+// them. Only textures that actually changed are touched; a roughness drag on
+// the same material reuses the copy.
+void SyncMaterialTextures() {
+    if (g.mat.changedTextures.empty()) return;
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) { g.mat.changedTextures.clear(); return; }
+    if (g.state)
+        for (int ti : g.mat.changedTextures) exporter::InvalidateViewTexture(*g.state, ti);
+    if (g.gpuOk && g.gpuScene == L && !g.gpu.UpdateTextures(g.mat.changedTextures))
+        Log("materials: the tinted texture could not be uploaded to the GPU; the CPU view still shows it", LogKind::Warn);
+    g.mat.changedTextures.clear();
+}
+
 void MaterialSliderEdited(int id, bool released) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.selMaterial < 0) return;
@@ -847,6 +866,7 @@ void MaterialSliderEdited(int id, bool released) {
     else if (k == 7) { o.emissionIntensity = std::clamp(g.matBuf[7], 0.0f, 2.0f); if (!o.emissionColor) o.emissionColor = cur.emissionColor; }
     else if (k == 8) { o.normalIntensity = std::clamp(g.matBuf[8], 0.0f, 2.0f); }
     material::ApplyOverrides(L->scene, g.mat);
+    SyncMaterialTextures();
     if (g.expOk) {
         g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload();
         Log("the material changed: press X to bake the as-exported view again");
@@ -862,6 +882,7 @@ void MaterialUndo(bool redo) {
     const bool ok = redo ? material::Redo(g.mat) : material::Undo(g.mat);
     if (!ok) { Log(redo ? "nothing to redo" : "nothing to undo", LogKind::Warn); return; }
     material::ApplyOverrides(L->scene, g.mat);
+    SyncMaterialTextures();
     g.dirty = true;
     InvalidatePanel();
     InvalidateView();
@@ -892,6 +913,7 @@ void ApplyMatHex(const std::string& hex6) {
     material::EffectiveMaterial cur = material::EffectiveOf(g.mat, sel);
     g.mat.overrides[sel]->baseColor = Vec4{((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f, cur.baseColor.w};
     material::ApplyOverrides(L->scene, g.mat);
+    SyncMaterialTextures();
     if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
     g.dirty = true;
     InvalidateView();
@@ -941,6 +963,7 @@ void LoadMatFile(const std::string& given = std::string()) {
     material::PushUndo(g.mat);
     std::vector<std::string> unknown;
     const int n = material::ApplyMaterialFile(L->scene, g.mat, f, &unknown);
+    SyncMaterialTextures();
     for (const auto& u : unknown) Log("materials: '" + u + "' is not in this scene; skipped", LogKind::Warn);
     material::ReportUnsupported(L->scene, g.mat);
     g.dirty = true;
@@ -2140,7 +2163,7 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
     {
         const RECT headClip{10, l.matEditTop, kPanel - 10, l.matEditTop + kRowH};
         const bool edited = static_cast<size_t>(g.selMaterial) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(g.selMaterial)] && !g.mat.overrides[static_cast<size_t>(g.selMaterial)]->empty();
-        s.Text(g.fontBold, edited ? ui::kAmber : ui::kAccent, 12, l.matEditTop + 2, ClipText(eff.displayName + " [" + material::ClassName(eff.cls) + "]", 44), &headClip);
+        s.Text(g.fontBold, edited ? ui::kAmber : ui::kAccent, 12, l.matEditTop + 2, ClipText(eff.displayName + " [" + material::ClassName(eff.cls) + "]", 30), &headClip);
     }
     // Class / preset / texture row.
     {
@@ -2156,7 +2179,11 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
         if (static_cast<size_t>(g.selMaterial) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(g.selMaterial)])
             for (const auto& t : g.mat.overrides[static_cast<size_t>(g.selMaterial)]->textures) if (t.property == "_MainTex") texOn = t.enabled;
         ghost(l.matTexBtn, texOn ? "MainTex: on" : "MainTex: off", true);
-        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, y + 4, "shader: " + ClipText(sm.shader, 26));
+        // The shader belongs on the material's heading line: drawn in this row it ran under the three buttons.
+        std::string shaderName = sm.shader;
+        const std::string prefix = "Shader Forge/";
+        if (shaderName.rfind(prefix, 0) == 0) shaderName = shaderName.substr(prefix.size());
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.matEditTop + 4, ClipText(shaderName, 22));
     }
     // RGB sliders.
     static const char* const rgbLabels[3] = {"Red", "Green", "Blue"};
@@ -3136,6 +3163,7 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
             if (!g.mat.overrides[static_cast<size_t>(g.selMaterial)]) g.mat.overrides[static_cast<size_t>(g.selMaterial)] = material::MaterialOverride{};
             g.mat.overrides[static_cast<size_t>(g.selMaterial)]->class_ = static_cast<material::MaterialClass>(next);
             material::ApplyOverrides(L->scene, g.mat);
+            SyncMaterialTextures();
             if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
             g.dirty = true;
             Log(std::string("class: ") + L->scene.materials[static_cast<size_t>(g.selMaterial)].name + " -> " + material::ClassName(static_cast<material::MaterialClass>(next)));
@@ -3146,6 +3174,7 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
             material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
             material::ApplyPreset(g.mat, static_cast<size_t>(g.selMaterial), eff.cls);
             material::ApplyOverrides(L->scene, g.mat);
+            SyncMaterialTextures();
             if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
             g.dirty = true;
             Log("preset: " + std::string(material::ClassName(eff.cls)) + "/Default");
@@ -3159,6 +3188,7 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
             if (sel < g.mat.overrides.size() && g.mat.overrides[sel])
                 for (const auto& t : g.mat.overrides[sel]->textures) if (t.property == "_MainTex") on = t.enabled;
             material::SetTextureEnabled(L->scene, g.mat, sel, "_MainTex", !on);
+            SyncMaterialTextures();
             if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
             g.dirty = true;
             InvalidateAll();
@@ -3206,9 +3236,11 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         if (PtInRect(&l.matResetThis, pt)) {
             material::ResetMaterial(g.mat, static_cast<size_t>(g.selMaterial));
             material::ApplyOverrides(L->scene, g.mat);
+            SyncMaterialTextures();
         } else if (PtInRect(&l.matResetAll, pt)) {
             material::ResetAll(g.mat);
             material::ApplyOverrides(L->scene, g.mat);
+            SyncMaterialTextures();
         } else if (PtInRect(&l.matUndo, pt)) { MaterialUndo(false); return; }
         else if (PtInRect(&l.matRedo, pt)) { MaterialUndo(true); return; }
         else return;

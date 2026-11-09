@@ -115,6 +115,27 @@ struct WorkbenchState {
     // mirroring the pose stacks in viewer/main.cpp). Capped at 200 like poses.
     std::vector<std::vector<std::optional<MaterialOverride>>> undoStack;
     std::vector<std::vector<std::optional<MaterialOverride>>> redoStack;
+
+    // Base colour for a shader that ignores _Color is baked into a copy of the
+    // material's main texture (main_skin / main_opaque / main_alpha in the
+    // game do not read _Color at all; their create jobs painted the card's
+    // colour into the texture). tintTextures[i] is the scene texture that holds
+    // material i's copy (-1 before the first edit), tintCache skips rebuilding
+    // it while the ratio and source pixels are unchanged, and
+    // changedTextures lists the texture indices whose pixels ApplyOverrides
+    // rewrote (the viewer invalidates its mip chain and re-uploads those).
+    struct TintCache {
+        int source = -1;              // scene texture the copy was made from
+        Vec4 ratio{1, 1, 1, 1};       // colour multiplier that produced it
+        uint64_t sourceHash = 0;      // source pixelHash at the time
+    };
+    std::vector<int> tintTextures;
+    std::vector<TintCache> tintCache;
+    std::vector<int> changedTextures;
+    // Per Scene::shaders: 0 unknown, 1 the forward pixel program reads _Color,
+    // 2 it provably ignores it, 3 it could not be analysed. Filled lazily.
+    std::vector<uint8_t> readsColor;
+
     bool empty() const { return originals.empty(); }
     bool IsDirty() const;                 // any override set anywhere
     size_t OverrideCount() const;         // materials with a non-empty override
@@ -134,10 +155,24 @@ EffectiveMaterial EffectiveOf(const OriginalMaterial& orig, const MaterialOverri
 // scene copy is restored from the original first, then only overridden
 // fields are applied, so clearing a field really reverts it. Texture blocks
 // are handled by ApplyTexOverrides (re-binding by index, or by name when the
-// index is stale, with a scene.warn on miss). This is the same-frame update
-// path: no geometry rebuild, no shader recompile, no texture re-upload when
-// only colours/parameters change.
+// index is stale, with a scene.warn on miss).
+//
+// Base colour is routed by what the forward pixel shader actually reads:
+//   - a shader that reads _Color gets the cheap same-frame property write;
+//   - a shader that provably ignores _Color (the game's main_skin,
+//     main_opaque and main_alpha bake their colour into _MainTex) gets a tinted
+//     copy of the main texture, bound as _MainTex, and white diffuse so the
+//     tint is not applied twice. The copy is reused and only rebuilt when the
+//     colour ratio or the source pixels change; its index is reported in
+//     WorkbenchState::changedTextures so callers can invalidate mip chains and
+//     re-upload it to the GPU.
+// No geometry is rebuilt and no shader is recompiled.
 void ApplyOverrides(assemble::Scene& scene, WorkbenchState& st);
+
+// Multiplies a texture's RGBA by `ratio` (clamped to 0..255, alpha included)
+// and recomputes pixelHash. The tint-copy path uses it; tests exercise it
+// directly so the colour maths is covered without needing a compiled shader.
+assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4& ratio);
 
 // Emits one scene.warn per unsupported-in-PMX field that is set (metallic,
 // roughness, emission, normal intensity, transmission, subsurface,

@@ -100,6 +100,13 @@ public:
     // character's GPU copy does not stay resident beside the new one.
     void Unload();
 
+    // Re-uploads scene textures whose pixels changed in place, and uploads new
+    // ones (the Material Workbench's tint copies). The indices are
+    // WorkbenchState::changedTextures. Only the named textures are touched: no
+    // shader recompile, mesh upload or full Load. False when a texture could
+    // not be created (the old view stays usable).
+    bool UpdateTextures(const std::vector<int>& textureIndices);
+
     // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions (1 hides, 2 forces a default-hidden part on).
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,

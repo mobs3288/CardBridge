@@ -1017,6 +1017,28 @@ void GpuView::Unload() {
     I.lastW = I.lastH = 0;
 }
 
+bool GpuView::UpdateTextures(const std::vector<int>& textureIndices) {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return false;
+    bool ok = true;
+    for (int ti : textureIndices) {
+        if (ti < 0 || static_cast<size_t>(ti) >= I.scene->textures.size()) continue;
+        if (I.textures.size() < I.scene->textures.size()) I.textures.resize(I.scene->textures.size());
+        GpuTex& g = I.textures[static_cast<size_t>(ti)];
+        Rel(g.srv);
+        Rel(g.tex);
+        const auto& t = I.scene->textures[static_cast<size_t>(ti)];
+        if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * static_cast<size_t>(t.height) * 4) {
+            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), g, true, LinearLight() && t.srgb)) {
+                Rel(g.srv);
+                Rel(g.tex);
+                ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
 bool GpuView::Load(const assemble::Scene& scene, std::string* why,
                    const std::function<void(double, const std::string&)>& progress,
                    const std::function<bool()>& cancelled) {

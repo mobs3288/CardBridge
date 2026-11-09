@@ -492,6 +492,11 @@ struct MatTextures : shader::ISm4Textures {
 void ViewStateDeleter::operator()(ViewState* v) const { delete v; }
 ViewStatePtr NewViewState() { return ViewStatePtr(new ViewState()); }
 
+void InvalidateViewTexture(ViewState& st, int textureIndex) {
+    if (textureIndex < 0 || static_cast<size_t>(textureIndex) >= st.built.size()) return;
+    st.built[static_cast<size_t>(textureIndex)] = false;
+}
+
 namespace {
 
 struct PsIn { float r[8][4]; };

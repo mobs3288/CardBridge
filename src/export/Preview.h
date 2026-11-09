@@ -50,6 +50,12 @@ struct ViewStateDeleter { void operator()(ViewState*) const; };
 using ViewStatePtr = std::unique_ptr<ViewState, ViewStateDeleter>;
 ViewStatePtr NewViewState();
 
+// Marks one scene texture's cached mip chain stale after its pixels changed in
+// place (the Material Workbench rewrites its tint copy). The next RenderView
+// rebuilds that chain; out-of-range indices are ignored (a new texture is
+// picked up by RenderView's own size check).
+void InvalidateViewTexture(ViewState& state, int textureIndex);
+
 struct ViewOptions {
     bool textured = true;
     const std::vector<char>* hiddenParts = nullptr;   // per scene part: 1 = do not draw (on top of visibleInPreview), 2 = draw even when visibleInPreview is false

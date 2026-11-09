@@ -2682,6 +2682,80 @@ void unitTests() {
         CHECK(st.IsDirty() && st.OverrideCount() == 1);
     });
 
+    test("workbench: the base colour is _Color when stored (diffuse stays white in a real scene), and is written even when absent", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        // A real assembled material keeps its colour in _Color; diffuse is the
+        // PMX-facing fallback and stays white. The inspector must show _Color.
+        s.materials[1].diffuse = {1, 1, 1, 1};
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        EffectiveMaterial e = EffectiveOf(st, 1);
+        CHECK(std::fabs(e.baseColor.x - 0.2f) < 1e-6f && std::fabs(e.baseColor.z - 0.5f) < 1e-6f);
+        CHECK(std::fabs(e.opacity - 1.0f) < 1e-6f);
+        // A create-job material (skin, outfit) has no stored _Color: an edit
+        // must add it, or the game shader sees no tint at all.
+        for (auto& pr : s.materials[1].props) if (pr.first == "_Color") pr.first = "_Removed";
+        WorkbenchState st2;
+        CaptureOriginals(st2, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.25f, 0.5f, 0.75f, 1.0f};
+        SetOverride(st2, 1, o);
+        ApplyOverrides(s, st2);
+        bool added = false;
+        for (const auto& pr : s.materials[1].props) if (pr.first == "_Color") added = std::fabs(pr.second.x - 0.25f) < 1e-6f && std::fabs(pr.second.z - 0.75f) < 1e-6f;
+        CHECK(added);
+    });
+
+    test("workbench: MakeTintedTexture multiplies RGBA, clamps and rehashes the pixels", [&] {
+        using namespace material;
+        assemble::SceneTexture t;
+        t.name = "skin";
+        t.width = 2; t.height = 1;
+        t.rgba = {100, 150, 200, 255, 10, 20, 30, 128};
+        t.pixelHash = 1234;
+        const assemble::SceneTexture out = MakeTintedTexture(t, Vec4{0.5f, 2.0f, 0.0f, 0.5f});
+        CHECK(out.width == 2 && out.height == 1 && out.rgba.size() == 8);
+        CHECK(out.rgba[0] == 50 && out.rgba[1] == 255 && out.rgba[2] == 0 && out.rgba[3] == 128);
+        // 10*0.5 = 5; 20*2 = 40; 30*0 = 0; alpha 128*0.5 = 64.
+        CHECK(out.rgba[4] == 5 && out.rgba[5] == 40 && out.rgba[6] == 0 && out.rgba[7] == 64);
+        // The copy owns fresh pixels: the source is untouched, and the hash
+        // identifies the new pixels (so a consumer can tell the copy changed).
+        CHECK(t.rgba[0] == 100 && t.rgba[1] == 150 && t.rgba[2] == 200 && t.pixelHash == 1234);
+        CHECK(out.pixelHash != 0 && out.pixelHash != t.pixelHash);
+        CHECK(out.pixelHash == Fnv1a64(out.rgba.data(), out.rgba.size()));
+        // Identity ratio keeps the values exactly.
+        const assemble::SceneTexture same = MakeTintedTexture(t, Vec4{1, 1, 1, 1});
+        CHECK(same.rgba == t.rgba);
+        // Malformed pixel data is returned as-is instead of read out of bounds.
+        assemble::SceneTexture broken;
+        broken.name = "broken"; broken.width = 4; broken.height = 4; broken.rgba = {1, 2, 3};
+        const assemble::SceneTexture kept = MakeTintedTexture(broken, Vec4{0, 0, 0, 0});
+        CHECK(kept.rgba == broken.rgba);
+    });
+
+    test("workbench: an unanalyseable shader keeps the cheap _Color path, no tint copy", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        s.materials[0].shaderIndex = 0;
+        assemble::SceneShader sh;
+        sh.name = "Shader Forge/main_item";
+        s.shaders.push_back(sh);   // empty blob: cannot be analysed
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.5f, 0.5f, 0.5f, 1.0f};
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(s.textures.size() == 1);            // no tint copy allocated
+        CHECK(st.changedTextures.empty());        // and no texture upload requested
+        CHECK(s.materials[0].texture == 0);       // original main texture still bound
+        CHECK(std::fabs(s.materials[0].diffuse.x - 0.5f) < 1e-6f);
+        bool colorOk = false;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_Color") colorOk = std::fabs(pr.second.x - 0.5f) < 1e-6f;
+        CHECK(colorOk);
+    });
+
     test("workbench: roughness maps to _SpecularPower, specular writes colour and derived gloss", [&] {
         using namespace material;
         assemble::Scene s = makeMatScene();

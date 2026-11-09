@@ -1,10 +1,15 @@
 #include "material/MaterialWorkbench.h"
 
+#include "core/Bytes.h"
+#include "shader/Sm4.h"
+#include "shader/UnityShader.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <set>
 
 namespace cardbridge::material {
 
@@ -40,7 +45,85 @@ void SetProp(assemble::SceneMaterial& m, const std::string& name, Vec4 v) {
 float StrengthFromRoughness(float r) { return Clamp01(1.0f - r); }
 float RoughnessFromStrength(float s) { return Clamp01(1.0f - s); }
 
+bool SameVec4(const Vec4& a, const Vec4& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+// A multiplier that maps the original channel to the requested one. Black
+// cannot be brightened by a multiplier (0 * anything stays 0), so a zero
+// original keeps the texture unchanged instead of producing a wild ratio.
+float SafeChannelRatio(float now, float original) {
+    if (!(original > 1e-4f) || !std::isfinite(now) || !std::isfinite(original)) return 1.0f;
+    return std::clamp(now / original, 0.0f, 64.0f);
+}
+
+void BindMainTexture(assemble::SceneMaterial& m, int textureIndex) {
+    bool found = false;
+    for (auto& b : m.texProps)
+        if (b.name == "_MainTex") { b.texture = textureIndex; found = true; }
+    if (!found && textureIndex >= 0) {
+        assemble::SceneTexBinding b;
+        b.name = "_MainTex";
+        b.texture = textureIndex;
+        m.texProps.push_back(b);
+    }
+    m.texture = textureIndex;
+}
+
+// Whether the material's forward pixel program provably does NOT read the
+// _Color constant-buffer parameter. This is the exact bytecode test the debug
+// dump used (out/mats_debug.txt): a property can be present in the material and
+// declared by the shader yet never sampled; main_skin / main_opaque /
+// main_alpha read the colour baked into _MainTex and ignore _Color entirely.
+// Unknown/unparseable shaders stay on the cheap _Color write path.
+bool PixelIgnoresColor(const assemble::Scene& scene, WorkbenchState& st, int shaderIndex) {
+    if (shaderIndex < 0 || static_cast<size_t>(shaderIndex) >= scene.shaders.size()) return false;
+    if (st.readsColor.size() != scene.shaders.size()) st.readsColor.assign(scene.shaders.size(), 0);
+    uint8_t& state = st.readsColor[static_cast<size_t>(shaderIndex)];
+    if (state == 2) return true;          // known: ignores _Color
+    if (state == 1 || state == 3) return false;
+    const auto& sh = scene.shaders[static_cast<size_t>(shaderIndex)];
+    Bytes blob(sh.blob.begin(), sh.blob.end());
+    const std::vector<shader::UnityProgram> progs = shader::ParseUnityShaderBlob(blob, nullptr);
+    size_t pi = 0, vi = 0;
+    shader::Sm4Program ps;
+    if (!shader::PickForwardPass(progs, pi, vi) || !shader::DecodeSm4(progs[pi].code.tokens, ps, nullptr)) {
+        state = 3;
+        return false;
+    }
+    // cbuffer operands carry their slot and the float4 offset in index0/index1.
+    std::set<std::pair<int, int>> used;
+    for (const auto& in : ps.code)
+        for (const auto& o : in.operands)
+            if (o.type == 8) used.insert({o.index0, o.index1});
+    bool readsColor = false;
+    for (const auto& cb : progs[pi].cbuffers)
+        for (const auto& pm : cb.params)
+            if (pm.name == "_Color" && used.count({cb.slot, static_cast<int>(pm.offset / 16)}) != 0) {
+                readsColor = true;
+                break;
+            }
+    state = readsColor ? 1 : 2;
+    return state == 2;
+}
+
 } // namespace
+
+assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4& ratio) {
+    const size_t pixels = static_cast<size_t>(std::max(0, src.width)) * static_cast<size_t>(std::max(0, src.height));
+    if (pixels == 0 || src.rgba.size() < pixels * 4) return src;
+    auto scale = [](uint8_t v, float k) {
+        return static_cast<uint8_t>(std::lround(std::clamp(static_cast<float>(v) * k, 0.0f, 255.0f)));
+    };
+    for (size_t i = 0; i + 3 < pixels * 4; i += 4) {
+        src.rgba[i + 0] = scale(src.rgba[i + 0], ratio.x);
+        src.rgba[i + 1] = scale(src.rgba[i + 1], ratio.y);
+        src.rgba[i + 2] = scale(src.rgba[i + 2], ratio.z);
+        src.rgba[i + 3] = scale(src.rgba[i + 3], ratio.w);
+    }
+    src.pixelHash = Fnv1a64(src.rgba.data(), pixels * 4);
+    return src;
+}
 
 const char* ClassName(MaterialClass c) {
     switch (c) {
@@ -229,6 +312,12 @@ void CaptureOriginals(WorkbenchState& st, const assemble::Scene& scene) {
         st.originals[i].autoClass = ClassifyMaterial(scene.materials[i].shader, scene.materials[i].name);
         st.originals[i].part = PartForMaterial(scene, static_cast<int>(i));
     }
+    // A new baseline means a new scene (or a changed material table): cached
+    // tint copies and shader analyses belong to the previous one.
+    st.tintTextures.assign(scene.materials.size(), -1);
+    st.tintCache.assign(scene.materials.size(), WorkbenchState::TintCache{});
+    st.changedTextures.clear();
+    st.readsColor.assign(scene.shaders.size(), 0);
     if (resized) {
         st.overrides.assign(scene.materials.size(), std::nullopt);
         st.undoStack.clear();
@@ -242,8 +331,13 @@ EffectiveMaterial EffectiveOf(const OriginalMaterial& orig, const MaterialOverri
     EffectiveMaterial e;
     e.displayName = orig.mat.name;
     e.doubleSided = orig.mat.doubleSided;
+    // The game's shaders take their tint from the _Color property, not from
+    // SceneMaterial::diffuse (the assembler leaves diffuse at white for a
+    // normal material: the colour lives in _Color, or is already baked into
+    // the main texture for a create-job material). Reading diffuse first made
+    // every material show FFFFFF even though _Color held the real colour.
     const Vec4* colorProp = FindProp(orig.mat, "_Color");
-    e.baseColor = ov && ov->baseColor ? *ov->baseColor : orig.mat.diffuse;
+    e.baseColor = ov && ov->baseColor ? *ov->baseColor : (colorProp ? *colorProp : orig.mat.diffuse);
     e.opacity = ov && ov->opacity ? *ov->opacity : e.baseColor.w;
     e.cls = ov && ov->class_ ? *ov->class_ : orig.autoClass;
     if (ov && ov->displayName) e.displayName = *ov->displayName;
@@ -281,6 +375,9 @@ EffectiveMaterial EffectiveOf(const WorkbenchState& st, size_t index) {
 
 void ApplyOverrides(assemble::Scene& scene, WorkbenchState& st) {
     if (st.originals.size() != scene.materials.size()) CaptureOriginals(st, scene);
+    if (st.tintTextures.size() != scene.materials.size()) st.tintTextures.assign(scene.materials.size(), -1);
+    if (st.tintCache.size() != scene.materials.size()) st.tintCache.assign(scene.materials.size(), WorkbenchState::TintCache{});
+    st.changedTextures.clear();
     for (size_t i = 0; i < scene.materials.size(); ++i) {
         // Restore from the original first: clearing a field really reverts it.
         assemble::SceneMaterial m = st.originals[i].mat;
@@ -290,11 +387,20 @@ void ApplyOverrides(assemble::Scene& scene, WorkbenchState& st) {
             if (ov->doubleSided) m.doubleSided = *ov->doubleSided;
             if (ov->baseColor) {
                 m.diffuse = *ov->baseColor;
-                if (const Vec4* old = FindProp(m, "_Color")) { Vec4 v = *old; v.x = m.diffuse.x; v.y = m.diffuse.y; v.z = m.diffuse.z; v.w = m.diffuse.w; SetProp(m, "_Color", v); }
+                // Write _Color even when the material did not store one: the
+                // shader declares it, and a material whose colour is baked into
+                // its main texture (skin, outfit create results) has no stored
+                // _Color at all, so updating only diffuse changed nothing on
+                // the game-shader path. Adding it gives that tint back.
+                Vec4 v = FindProp(m, "_Color") ? *FindProp(m, "_Color") : Vec4{1, 1, 1, 1};
+                v.x = m.diffuse.x; v.y = m.diffuse.y; v.z = m.diffuse.z; v.w = m.diffuse.w;
+                SetProp(m, "_Color", v);
             }
             if (ov->opacity) {
                 m.diffuse.w = *ov->opacity;
-                if (const Vec4* old = FindProp(m, "_Color")) { Vec4 v = *old; v.w = *ov->opacity; SetProp(m, "_Color", v); }
+                Vec4 v = FindProp(m, "_Color") ? *FindProp(m, "_Color") : Vec4{1, 1, 1, 1};
+                v.w = *ov->opacity;
+                SetProp(m, "_Color", v);
             }
             // Specular colour + highlight strength (see StrengthFromRoughness).
             {
@@ -335,6 +441,51 @@ void ApplyOverrides(assemble::Scene& scene, WorkbenchState& st) {
                         if (idx < 0) { scene.warn(st.originals[i].part, "material workbench: texture '" + t.textureName + "' for " + m.name + " not in the scene; kept original"); continue; }
                     }
                     bind(idx);
+                }
+            }
+            // Base colour routing. A shader that reads _Color takes the cheap
+            // property write above. The game's main_skin / main_opaque /
+            // main_alpha do not read _Color at all: their create job already
+            // painted the card's colour into _MainTex, so a _Color edit cannot
+            // show. Give those a tinted copy of the main texture instead (the
+            // ratio of the requested colour to the original one) and leave
+            // diffuse white so the plain renderer and PMX do not tint twice.
+            if ((ov->baseColor || ov->opacity) && m.texture >= 0 &&
+                static_cast<size_t>(m.texture) < scene.textures.size() && PixelIgnoresColor(scene, st, m.shaderIndex)) {
+                const int sourceIndex = m.texture;
+                int tintIndex = st.tintTextures[i];
+                if (tintIndex < 0 || static_cast<size_t>(tintIndex) >= scene.textures.size()) {
+                    scene.textures.emplace_back();
+                    tintIndex = static_cast<int>(scene.textures.size()) - 1;
+                    st.tintTextures[i] = tintIndex;
+                    st.tintCache[i] = WorkbenchState::TintCache{};
+                }
+                const assemble::SceneTexture& source = scene.textures[static_cast<size_t>(sourceIndex)];
+                if (source.width > 0 && source.height > 0 &&
+                    source.rgba.size() >= static_cast<size_t>(source.width) * static_cast<size_t>(source.height) * 4) {
+                    const EffectiveMaterial orig = EffectiveOf(st.originals[i], nullptr);
+                    Vec4 ratio{1, 1, 1, 1};
+                    if (ov->baseColor) {
+                        ratio.x = SafeChannelRatio(m.diffuse.x, orig.baseColor.x);
+                        ratio.y = SafeChannelRatio(m.diffuse.y, orig.baseColor.y);
+                        ratio.z = SafeChannelRatio(m.diffuse.z, orig.baseColor.z);
+                    }
+                    ratio.w = SafeChannelRatio(m.diffuse.w, orig.baseColor.w);
+                    WorkbenchState::TintCache& cache = st.tintCache[i];
+                    const bool same = cache.source == sourceIndex && SameVec4(cache.ratio, ratio) &&
+                                      cache.sourceHash == source.pixelHash;
+                    if (!same) {
+                        const std::string sourceName = source.name;
+                        scene.textures[static_cast<size_t>(tintIndex)] = MakeTintedTexture(source, ratio);
+                        scene.textures[static_cast<size_t>(tintIndex)].name = sourceName + "~wb";
+                        cache.source = sourceIndex;
+                        cache.ratio = ratio;
+                        cache.sourceHash = source.pixelHash;
+                        st.changedTextures.push_back(tintIndex);
+                    }
+                    BindMainTexture(m, tintIndex);
+                    m.diffuse.x = 1.0f; m.diffuse.y = 1.0f; m.diffuse.z = 1.0f;
+                    m.diffuse.w = ov->opacity ? *ov->opacity : m.diffuse.w;
                 }
             }
         }

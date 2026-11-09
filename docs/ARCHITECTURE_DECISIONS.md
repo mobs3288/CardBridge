@@ -40,7 +40,8 @@ layer can evolve without touching the scene.
 ## ADR-002 — Live updates are same-frame `props` writes, not reloads
 
 **Date:** Stage 0.
-**Status:** proposed — verified against source.
+**Status:** accepted — verified in Stage 1/2; amended by ADR-009 for base
+colour on shaders that ignore `_Color`.
 
 **Context.** The spec requires material updates without rebuilding geometry,
 re-importing the character, re-uploading unchanged textures, or recompiling
@@ -199,3 +200,51 @@ viewport gets a mode strip (`Button` row) and the panel gets a legend
 
 **Consequences.** No new window, no new renderer, no stored-property
 mutation: diagnostic modes never write back to the scene.
+
+---
+
+## ADR-009 — Base colour falls back to a tinted `_MainTex` copy when the shader ignores `_Color`
+
+**Date:** Stage 2 correction (2026-11-09).
+**Status:** accepted — implemented and covered by unit + smoke tests.
+
+**Context.** The first live check showed the Workbench colour sliders doing
+nothing on body, face and outfit. The inspectable scene had `_Color` props
+for some materials but not for the create-job results; a bytecode dump
+(`out/mats_debug.txt`) proved that the forward pixel programs of
+`main_skin`, `main_opaque` and `main_alpha` never read `_Color` at all — the
+card's colour is baked into `_MainTex` by the create shader. ADR-002's
+same-frame `props` write is therefore insufficient for the most visible
+materials.
+
+**Decision.** Keep ADR-002 as the fast path, but route base colour by what the
+forward pixel program actually reads:
+
+1. Analyse each `SceneShader` once (DXBC cbuffer operands of the selected
+   forward pixel program) and cache the result: reads `_Color`, ignores it,
+   or unanalysable.
+2. Reads / unanalysable → write `_Color` + `diffuse` exactly as before.
+3. Provably ignores → build one tinted copy of the material's main texture
+   (`MakeTintedTexture`: RGBA × requested/original ratio, clamp, keep alpha,
+   recompute `pixelHash`), bind it as `_MainTex`, force `diffuse` white, and
+   report the copy in `WorkbenchState::changedTextures`.
+
+`GpuView::UpdateTextures(indices)` re-uploads only the named textures and
+`exporter::InvalidateViewTexture` drops only the named CPU mip chains. The
+copy is cached by source texture, ratio and source pixel hash, so a slider
+drag rebuilds it but a roughness change or an unrelated frame does not.
+
+**Consequences.** Colour edits now change pixels on every material with a
+main texture, on both renderers and in the PMX bake, without a scene reload
+or shader recompile. Costs: one extra scene texture per tint-edited material
+(allocated once, reused); a multiplicative approximation (zero channels
+cannot be raised; hue shifts are not colour-managed); opacity on shaders that
+do not blend the main texture remains cutout-only or a no-op. Unparseable
+shaders keep the old path rather than guessing — no crash, no corruption.
+
+**Alternatives rejected.** Rewriting the card's baked create texture in place
+(breaks the "never modify the source card/assets" rule and invalidates every
+material sharing it); a runtime HLSL replacement shader for the whole
+character (ADR-003 reserves that for Workbench-only shading, not for live
+colour edits); recolouring only in the PMX (leaves the inspector preview
+lying).

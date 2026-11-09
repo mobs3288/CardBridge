@@ -152,7 +152,7 @@ instance graph beyond the index. Consequences for the Workbench:
 |---|---|---|---|
 | `props` value (colour/float, incl. `_Color`, `_ShadowColor`, `_SpecularColor`, `_rimpower`, `_Cutoff`, …), `diffuse`, `shadow`, `specular`, `outline*`, `doubleSided`, `alpha` | Next `Render()` reads them when building the per-frame cbuffers. No shader recompile, no geometry rebuild, no texture re-upload. (`matDone` per frame ⇒ live.) | Next `RenderView()` fills the CPU cbuffers from the same fields. | **Already live.** The Workbench only needs to write these fields (through its override layer) and mark the viewer dirty. |
 | `texProps` binding to an *existing* scene texture (re-assign among textures already in the scene) | `PSSetShaderResources` per draw reads the GPU texture bound to that scene index. If the target texture was uploaded at `Load`, re-binding is just a different SRV. **But** `Load` only uploads textures that *some* material bound at load time; a texture that no material referenced is never uploaded. | `MatTextures::Sample` lazily builds mips for any scene texture (`Preview.cpp:454-458`), so any scene-texture index works without a rebuild. | **Mostly live on GPU** if the target was already uploaded; otherwise needs a new `GpuView::EnsureTexture(ti)` helper (see §3). |
-| Replacing a texture with *new pixels* (user-supplied file, or a tinted copy) | No API exists. `Load` is all-or-nothing; textures are immutable after upload. | Write the pixels into a `SceneTexture` + invalidate its `ViewState` mips (the `built` flag). | **Needs new plumbing:** a `GpuView::UploadTexture` / texture-replace call + a CPU mip-invalidation. Small, contained. |
+| Replacing a texture with *new pixels* (user-supplied file, or a tinted copy) | No API exists in Stage 0. Stage 2 added `GpuView::UpdateTextures(indices)`: it recreates only the named SRVs/textures through the same `MakeTexture` path, without a `Load`. | Write the pixels into a `SceneTexture` + invalidate its `ViewState` mips (`InvalidateViewTexture`, the `built` flag). | **Implemented in Stage 2** for tint copies; Stage 3 reuses it for a file picker. |
 | Vertex/UV edits | Would need a geometry re-upload (`Load` or `Refresh`, which only handles skinning). | Would need re-projection (already per-frame). | **Out of scope** (§11) except for read-only UV display. |
 
 **Bottom line:** colour/parameter editing is a same-frame update on both
@@ -445,7 +445,7 @@ Application rules:
 
 | Workbench field | Scene (`SceneMaterial`) write | Preview effect | PMX write | Unsupported in PMX? |
 |---|---|---|---|---|
-| Base colour | `diffuse` + `_Color` prop (linearised by the renderers) | Multiplies main texture in the game shader + fallback shade | `diffuse` (MmdLook) | No |
+| Base colour | `_Color` prop + `diffuse` when the forward pixel program reads `_Color`; otherwise a tinted copy of `_MainTex` (original pixels × requested/original ratio) bound as the main texture, with white `diffuse` | Multiplies the main texture in the game shader + fallback shade | `diffuse` (MmdLook); for the tint path the colour is already in the baked/main texture and PMX diffuse stays white | No |
 | Opacity | `diffuse.w` (+ `_Color.w` when present) | Alpha blend / cutout | `diffuse.w` + draw flags | No |
 | Specular / power | `_SpecularColor`, `_SpecularPower` | Game shader highlight | Sphere gloss strength (derived, as today) | Specular itself not carried — sphere is the carrier |
 | Roughness | `_SpecularPower` inverse (approximation) | Highlight width in game shader | Sphere strength | **Yes** — manifest + warning |
@@ -459,6 +459,27 @@ Application rules:
 | Texture enable/disable | `texProps[slot].texture = -1` | Sampler falls back to shader default | Falls back to white | No (white) |
 | Texture replace | New `SceneTexture` + bind | Same pixels in preview + PMX | New `textures/*.png` | No |
 | Classification | Workbench only | Drives presets + hint | `memo` in PMX material | **Yes** — manifest only + `memo` |
+
+**Base-colour routing (Stage 2 correction).** Writing `_Color`/`diffuse` is
+enough only when the forward pixel program actually reads `_Color`. The game's
+`main_skin`, `main_opaque` and `main_alpha` do not: their create jobs painted
+the card colour into `_MainTex`, which is why a `_Color` edit looked dead on
+body/face/outfit. The Workbench analyses the forward program's DXBC cbuffer
+operands once per shader and picks the path:
+
+- reads `_Color`, or the bytecode cannot be parsed: `_Color` + `diffuse`;
+- provably ignores `_Color` with a main texture: one tinted copy of the main
+  texture per material (`…~wb`, multiplied RGBA, clamped, alpha kept,
+  `pixelHash` recomputed), bound as `_MainTex`, `diffuse` forced white. The
+  copy is cached by source index/ratio/source hash and only rebuilt when one
+  changes; `WorkbenchState::changedTextures` tells the viewer which indices to
+  re-upload (`GpuView::UpdateTextures`) and whose CPU mips to invalidate
+  (`InvalidateViewTexture`).
+
+Consequences: a tint edit appends one scene texture per edited material (not
+per frame); a black source channel cannot be brightened (zero stays zero);
+opacity on `main_skin`/`main_opaque` may be a no-op or cutout-only because
+those programs do not alpha-blend the main texture.
 
 Every "**Yes**" row must (a) still preview in CardBridge, (b) be written to
 the JSON, (c) appear in the manifest's `material_workbench` section, and

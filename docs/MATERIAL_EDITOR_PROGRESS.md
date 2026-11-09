@@ -169,13 +169,15 @@ manifest says so, full suite green, no viewer change.
 ---
 
 ## Stage 2 — Material Inspector (viewer)
-Status: **done** (2026-11-09).
+Status: **done, corrected after the first live check** (2026-11-09).
 
 **Files changed:**
 - `viewer/main.cpp`:
   - New `TabMaterials` (“Mats” truncated tab label) between Bones and Setup;
-    `kTabNames`/`TabCount` and panel tabs updated (7 tabs, 51 px pitch still
-    fits the 380 px panel). Setup moved to index 6 (smoke script updated).
+    `kTabNames`/`TabCount` and panel tabs updated (7 tabs). The pitch was
+    narrowed from 51 to 44 px (42 px pill, 2 px gap) after the first live check:
+    with 51 px the last tab ended at x 365 and the right-hand status line
+    ("0 edited") was drawn over it.
   - `App` gains `material::WorkbenchState mat`, `selMaterial`/`matFilter`/
     `matScroll`/`matPos`, 9 slider buffers, and HEX entry state.
   - `CapturesOriginals` on every `WM_LOADED` (fresh character) and resets
@@ -224,10 +226,16 @@ Status: **done** (2026-11-09).
     `classY`, `resetY`, `filterY`, `sel`, `overrides`, `undo`/`redo`) and
     `state.{selMaterial,matUndo,matRedo,matOverrides}` for the smoke script.
     `WM_TEST` 13/14/15/16 are material undo/redo/save/load.
+- Core additions for the tint path (correction below):
+  `src/material/MaterialWorkbench.{h,cpp}` (`MakeTintedTexture`,
+  `PixelIgnoresColor`, tint caches, `changedTextures`, `CaptureOriginals`
+  resets), `src/export/GpuView.{h,cpp}` (`UpdateTextures`),
+  `src/export/Preview.{h,cpp}` (`InvalidateViewTexture`).
 - `tools/viewer_smoke.ps1`: Materials step (tab select, list visible, editor
   rows, select material, drag Red slider, picture change, single undo step,
   undo restores) + Setup index moved to 6.
-- No core changes (Stage 1 already green): `1772 checks, 0 failed`.
+- No core changes in the first pass (Stage 1 already green): `1772 checks,
+  0 failed`. The correction below added the tint path and two tests.
 
 **Behaviour notes:**
 - RGB sliders (0–255) are the primary colour control; HEX is display + live
@@ -244,6 +252,82 @@ for manual validation / gated CI (same as previous stages).
 Exit criteria: colour changes in real time (same-frame `ApplyOverrides`),
 undo/redo per gesture + Ctrl bindings, resets restore originals, other tabs
 untouched (only tab enum + shared `AnyTweak` inclusion of `mat.IsDirty()`).
+
+### Stage 2 correction — the first live check found the colour path dead
+
+The user reported: “all not work, and all hex is FFFFF, and all slider doesnt
+do shit to any changes to card”. Reproduced and fixed:
+
+1. **HEX FFFFF / wrong values.** `EffectiveOf` preferred `diffuse`; a real
+   assembled material keeps its colour in `_Color` and leaves `diffuse` white
+   for PMX. The inspector now prefers a stored `_Color`, then falls back to
+   `diffuse`. `ApplyOverrides` always writes `_Color` (adding it when the
+   material did not store one) so an edit cannot be invisible.
+2. **RGB text showed `0` / `536870912`.** `%d` was used with a `double`
+   argument. Changed to `%.0f`.
+3. **The material row overlapped the shader name.** Shader name moved into
+   the heading line; heading clipped to 30 chars.
+4. **The tab/status overlap** described above (44 px pitch).
+5. **The sliders still did nothing on body/face/outfit.** `out/mats_debug.txt`
+   (temporary debug dump, removed after diagnosis) showed the forward pixel
+   programs of `main_skin`, `main_opaque` and `main_alpha` never read
+   `_Color`: their create jobs already painted the card colour into
+   `_MainTex`, so a `_Color`/`diffuse` write cannot show.
+
+**Base-colour routing (the actual fix).** `MaterialWorkbench.cpp` now
+analyses the forward pixel program of each `SceneShader` once
+(`PixelIgnoresColor`, parsing the DXBC cbuffer operands; cached in
+`WorkbenchState::readsColor` as unknown / reads / ignores / unanalysable):
+
+- reads `_Color` (or unanalysable): the cheap same-frame `props` write, as
+  before;
+- provably ignores `_Color` and has a main texture: append one tinted copy of
+  `_MainTex` per edited material (`name + "~wb"`), made by
+  `MakeTintedTexture` (multiplies RGBA by the requested/original ratio,
+  clamps, keeps alpha, recomputes `pixelHash`), bind it as `_MainTex` and
+  write white `diffuse` so the tint is not applied twice. The copy is cached
+  (`tintTextures`, `tintCache`: source index, ratio, source hash) and only
+  rebuilt when the ratio or the source pixels change. Changed indices are
+  reported in `WorkbenchState::changedTextures`.
+
+**Consumers of `changedTextures`.** `GpuView::UpdateTextures` re-uploads only
+the named textures (no `Load`, no shader/mesh work), and
+`exporter::InvalidateViewTexture` drops the software renderer's cached mip
+chain. The viewer's `SyncMaterialTextures()` calls both after every
+`ApplyOverrides` / material-file load / texture toggle / reset path. Export
+and the as-exported bake copy the live scene, so they see the tinted texture;
+`BakeShaderTextures` then carries it into the PMX and white PMX diffuse, as
+before.
+
+**Tests.** Two new unit blocks: `MakeTintedTexture` (known pixels, channel
+ratio, alpha, clamp, fresh pixels/hash, identity, malformed input) and an
+unanalysable shader staying on the `_Color` path with no tint copy.
+
+**Results:**
+```
+1788 checks, 0 failed, 1 integration suite(s) skipped
+viewer_smoke.ps1 -Only materials: 12 checks, 0 failed
+  materials: the picture changed 2.50% of the view
+  materials: undo restores the picture (view diff 0.000%)
+```
+The smoke screenshot confirms the bold Red drag (250 → 8) turned the body's
+skin teal through the tint copy, while the outfit was untouched, and undo
+restored the original skin exactly. The remaining visual confirmation has to
+happen on the user's own card/viewer.
+
+**Limitations of the correction.**
+- Multiplicative ratio: a black original channel cannot be brightened (the
+  ratio is kept at 1 for a zero source); hue shifts are approximate, not a
+  colour-space-correct relight.
+- One extra scene texture per tint-edited material. It is reused, not
+  reallocated per frame, and only re-uploaded when its pixels change.
+- Opacity on `main_skin` / `main_opaque` may be a no-op or cutout-only: those
+  programs do not alpha-blend the main texture.
+- A shader whose bytecode cannot be parsed stays on the `_Color` path; if it
+  also ignores `_Color` in practice, the colour edit still cannot show. It
+  does not crash or corrupt the scene.
+- The tint copy is an override-layer artefact; it is regenerated from the
+  card when a material file is re-applied, never written into the card.
 
 ---
 

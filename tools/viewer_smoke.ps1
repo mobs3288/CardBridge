@@ -250,8 +250,10 @@ try {
             Check 'materials: selecting a material answers' ($null -ne $lay -and $lay.materials.sel -ge 0) "sel $($lay.materials.sel)"
             $a = Shot 'before_material_drag'
             $rY = [int]$lay.materials.fieldY[0]
-            $x0 = [int]($lay.track[0] + 0.2 * ($lay.track[1] - $lay.track[0]))
-            $x1 = [int]($lay.track[0] + 0.9 * ($lay.track[1] - $lay.track[0]))
+            # A bold change: red from ~90% down to ~3%, so the view has to change clearly (a
+            # 20-point change on a skin tone was too subtle to tell from render noise).
+            $x0 = [int]($lay.track[0] + 0.9 * ($lay.track[1] - $lay.track[0]))
+            $x1 = [int]($lay.track[0] + 0.03 * ($lay.track[1] - $lay.track[0]))
             $undo0 = $lay.materials.undo
             Drag $x0 $rY $x1 $rY 12
             $lay = Layout
@@ -262,7 +264,7 @@ try {
             [void](Hook 13); Start-Sleep -Milliseconds 300
             $lay = Layout
             $c = Shot 'material_undone'
-            Check 'materials: undo restores the picture' ([V]::Diff($a.Path, $c.Path) -lt 0.002) ("diff {0:P3}" -f [V]::Diff($a.Path, $c.Path))
+            Check 'materials: undo restores the picture' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
             Check 'materials: the window answers after undo' ($null -ne $lay)
         }
     }
