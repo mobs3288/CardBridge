@@ -11,6 +11,7 @@
 #include <limits>
 #include <cstring>
 #include <thread>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
@@ -1067,7 +1068,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         const float ctr[3] = {(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
         for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
     }
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
     int baked = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
@@ -1121,72 +1122,102 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
 
         img.assign(static_cast<size_t>(W) * H * 4, 0.0f);
         cov.assign(static_cast<size_t>(W) * H, 0);
-        auto worker = [&](unsigned wi) {
-            MatTextures mt;
-            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
-            for (const auto& use : uses) {
-                const auto& fm = flats[use.flat];
-                const auto& vo = vsOut[use.flat];
-                for (size_t t = 0; t + 2 < use.indices->size(); t += 3) {
-                    uint32_t i0 = (*use.indices)[t], i1 = (*use.indices)[t + 1], i2 = (*use.indices)[t + 2];
-                    float ax = fm.vertices[i0].uv.x * W, ay = (1.0f - fm.vertices[i0].uv.y) * H;
-                    float bx = fm.vertices[i1].uv.x * W, by = (1.0f - fm.vertices[i1].uv.y) * H;
-                    float cx = fm.vertices[i2].uv.x * W, cy = (1.0f - fm.vertices[i2].uv.y) * H;
-                    {   // UVs outside 0..1 repeat: the triangle lands in the tile its centre is in. A clamped main
-                        // texture does not repeat, so keep the triangle where it is and let the sampler clamp its edge.
-                        if (!clampMain) {
-                            float tu = std::floor((fm.vertices[i0].uv.x + fm.vertices[i1].uv.x + fm.vertices[i2].uv.x) / 3.0f);
-                            float tv = std::floor((fm.vertices[i0].uv.y + fm.vertices[i1].uv.y + fm.vertices[i2].uv.y) / 3.0f);
-                            ax -= tu * W; bx -= tu * W; cx -= tu * W;
-                            ay += tv * H; by += tv * H; cy += tv * H;
-                        }
-                    }
-                    float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-                    // A triangle with no UV area (a garment part coloured from one point of its texture, like a skirt's plain upper half)
-                    // still samples that point in the PMX: the texel under its UV centre is shaded with the triangle's centre.
-                    const bool point = std::fabs(den) < 1e-8f;
-                    int x0 = std::max(0, static_cast<int>(std::floor(std::min({ax, bx, cx})))), x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max({ax, bx, cx}))));
-                    int y0 = std::max(0, static_cast<int>(std::floor(std::min({ay, by, cy})))), y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max({ay, by, cy}))));
-                    if (point) {
-                        x0 = x1 = static_cast<int>(std::floor((ax + bx + cx) / 3.0f));
-                        y0 = y1 = static_cast<int>(std::floor((ay + by + cy) / 3.0f));
-                        if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) continue;
-                    }
-                    for (int y = y0; y <= y1; ++y) {
-                        if (static_cast<unsigned>(y) % hw != wi) continue;
-                        for (int x = x0; x <= x1; ++x) {
+        // Deterministic two passes: pass 1 finds, per texel, the lowest-index triangle covering it (overlapping UV
+        // islands: the first one wins, exactly as a single-thread bake does); pass 2 runs the shader once per texel
+        // for that triangle only. Running the shader in the same threaded loop that claims texels made the winner
+        // depend on thread scheduling (a later, white-lined triangle could claim a texel before the dark main-body
+        // triangle that covers it, flipping e.g. falbala gloves white instead of dark between runs).
+        struct Tri { size_t flat; uint32_t i0, i1, i2; float ax, ay, bx, by, cx, cy, den; bool point; };
+        std::vector<Tri> tris;
+        for (const auto& use : uses) {
+            const auto& fm = flats[use.flat];
+            for (size_t t = 0; t + 2 < use.indices->size(); t += 3) {
+                uint32_t i0 = (*use.indices)[t], i1 = (*use.indices)[t + 1], i2 = (*use.indices)[t + 2];
+                float ax = fm.vertices[i0].uv.x * W, ay = (1.0f - fm.vertices[i0].uv.y) * H;
+                float bx = fm.vertices[i1].uv.x * W, by = (1.0f - fm.vertices[i1].uv.y) * H;
+                float cx = fm.vertices[i2].uv.x * W, cy = (1.0f - fm.vertices[i2].uv.y) * H;
+                if (!clampMain) {
+                    float tu = std::floor((fm.vertices[i0].uv.x + fm.vertices[i1].uv.x + fm.vertices[i2].uv.x) / 3.0f);
+                    float tv = std::floor((fm.vertices[i0].uv.y + fm.vertices[i1].uv.y + fm.vertices[i2].uv.y) / 3.0f);
+                    ax -= tu * W; bx -= tu * W; cx -= tu * W;
+                    ay += tv * H; by += tv * H; cy += tv * H;
+                }
+                float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+                tris.push_back({use.flat, i0, i1, i2, ax, ay, bx, by, cx, cy, den, std::fabs(den) < 1e-8f});
+            }
+        }
+        std::vector<std::atomic<int>> best(static_cast<size_t>(W) * H);
+        for (auto& b : best) b.store(-1);
+        auto coverWorker = [&](unsigned wi) {
+            for (size_t tri = 0; tri < tris.size(); ++tri) {
+                const Tri& tr = tris[tri];
+                int x0 = std::max(0, static_cast<int>(std::floor(std::min({tr.ax, tr.bx, tr.cx})))), x1 = std::min(W - 1, static_cast<int>(std::ceil(std::max({tr.ax, tr.bx, tr.cx}))));
+                int y0 = std::max(0, static_cast<int>(std::floor(std::min({tr.ay, tr.by, tr.cy})))), y1 = std::min(H - 1, static_cast<int>(std::ceil(std::max({tr.ay, tr.by, tr.cy}))));
+                if (tr.point) {
+                    x0 = x1 = static_cast<int>(std::floor((tr.ax + tr.bx + tr.cx) / 3.0f));
+                    y0 = y1 = static_cast<int>(std::floor((tr.ay + tr.by + tr.cy) / 3.0f));
+                    if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) continue;
+                }
+                for (int y = y0; y <= y1; ++y) {
+                    if (static_cast<unsigned>(y) % hw != wi) continue;
+                    for (int x = x0; x <= x1; ++x) {
+                        if (!tr.point) {
                             float px = x + 0.5f, py = y + 0.5f;
-                            float l0 = 1.0f / 3.0f, l1 = 1.0f / 3.0f, l2 = 1.0f / 3.0f;
-                            if (!point) {
-                                l0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den;
-                                l1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den;
-                                l2 = 1.0f - l0 - l1;
-                                if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
-                            }
-                            size_t ti = static_cast<size_t>(y) * W + x;
-                            if (cov[ti]) continue;   // overlapping UV islands: the first one wins
-                            shader::Sm4Io io;
-                            io.constantBuffers = psCb.ptr;
-                            io.textures = &mt;
-                            for (const auto& l : sr->links)
-                                for (int ch = 0; ch < 4; ++ch)
-                                    io.input[l.psReg][ch] = l0 * vo[i0].r[l.psReg][ch] + l1 * vo[i1].r[l.psReg][ch] + l2 * vo[i2].r[l.psReg][ch];
-                            for (const auto& in : sr->programs[sr->pi].code.inputs) {
-                                if (in.reg >= 32) continue;
-                                if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = px; io.input[in.reg][1] = py; io.input[in.reg][2] = 0.5f; io.input[in.reg][3] = 1; }
-                                else if (in.semantic == "SV_IsFrontFace") { uint32_t bits = 0xFFFFFFFFu; std::memcpy(&io.input[in.reg][0], &bits, 4); }
-                            }
-                            std::string why;
-                            if (!shader::RunSm4(sr->ps, io, &why)) continue;
-                            cov[ti] = 1;
-                            float a = io.discarded ? 0.0f : io.output[0][3];
-                            if (!mat.alpha && a >= 0.5f) a = 1.0f;
-                            for (int c = 0; c < 3; ++c) img[ti * 4 + static_cast<size_t>(c)] = io.output[0][c];
-                            img[ti * 4 + 3] = a;
+                            float l0 = ((tr.by - tr.cy) * (px - tr.cx) + (tr.cx - tr.bx) * (py - tr.cy)) / tr.den;
+                            float l1 = ((tr.cy - tr.ay) * (px - tr.cx) + (tr.ax - tr.cx) * (py - tr.cy)) / tr.den;
+                            if (l0 < -1e-4f || l1 < -1e-4f || 1.0f - l0 - l1 < -1e-4f) continue;
+                        }
+                        size_t ti = static_cast<size_t>(y) * W + x;
+                        int cur = best[ti].load(std::memory_order_relaxed);
+                        while (cur < 0 || static_cast<int>(tri) < cur) {
+                            if (best[ti].compare_exchange_weak(cur, static_cast<int>(tri), std::memory_order_relaxed)) break;
                         }
                     }
                 }
             }
+        };
+        {
+            std::vector<std::thread> pool;
+            for (unsigned w = 1; w < hw; ++w) pool.emplace_back(coverWorker, w);
+            coverWorker(0);
+            for (auto& th : pool) th.join();
+        }
+        auto worker = [&](unsigned wi) {
+            MatTextures mt;
+            mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
+            for (int y = static_cast<int>(wi); y < H; y += static_cast<int>(hw))
+                for (int x = 0; x < W; ++x) {
+                    size_t ti = static_cast<size_t>(y) * W + x;
+                    int tri = best[ti].load(std::memory_order_relaxed);
+                    if (tri < 0) continue;
+                    cov[ti] = 1;
+                    const Tri& tr = tris[static_cast<size_t>(tri)];
+                    const auto& vo = vsOut[tr.flat];
+                    float px = x + 0.5f, py = y + 0.5f;
+                    float l0 = 1.0f / 3.0f, l1 = 1.0f / 3.0f, l2 = 1.0f / 3.0f;
+                    if (!tr.point) {
+                        l0 = ((tr.by - tr.cy) * (px - tr.cx) + (tr.cx - tr.bx) * (py - tr.cy)) / tr.den;
+                        l1 = ((tr.cy - tr.ay) * (px - tr.cx) + (tr.ax - tr.cx) * (py - tr.cy)) / tr.den;
+                        l2 = 1.0f - l0 - l1;
+                    }
+                    shader::Sm4Io io;
+                    io.constantBuffers = psCb.ptr;
+                    io.textures = &mt;
+                    for (const auto& l : sr->links)
+                        for (int ch = 0; ch < 4; ++ch)
+                            io.input[l.psReg][ch] = l0 * vo[tr.i0].r[l.psReg][ch] + l1 * vo[tr.i1].r[l.psReg][ch] + l2 * vo[tr.i2].r[l.psReg][ch];
+                    for (const auto& in : sr->programs[sr->pi].code.inputs) {
+                        if (in.reg >= 32) continue;
+                        if (in.semantic == "SV_POSITION") { io.input[in.reg][0] = px; io.input[in.reg][1] = py; io.input[in.reg][2] = 0.5f; io.input[in.reg][3] = 1; }
+                        else if (in.semantic == "SV_IsFrontFace") { uint32_t bits = 0xFFFFFFFFu; std::memcpy(&io.input[in.reg][0], &bits, 4); }
+                    }
+                    std::string why;
+                    if (!shader::RunSm4(sr->ps, io, &why)) continue;
+                    float a = io.discarded ? 0.0f : io.output[0][3];
+                    if (!mat.alpha && a >= 0.5f) a = 1.0f;
+                    for (int c = 0; c < 3; ++c) img[ti * 4 + static_cast<size_t>(c)] = io.output[0][c];
+                    img[ti * 4 + 3] = a;
+                }
         };
         std::vector<std::thread> pool;
         for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker, w);

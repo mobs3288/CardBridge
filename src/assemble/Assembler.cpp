@@ -2050,7 +2050,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
     // (run by export::RunCreateJobs at the end of assembly) and returns the placeholder texture that will hold the result.
     using TexInput = std::pair<std::string, std::shared_ptr<unity::TextureData>>;
-    std::map<const unity::TextureData*, int> inputTexCache;
+    // Keyed by raw pointer, so the cache must keep the TextureData alive: after the decoded-texture LRU evicts an
+    // entry, a new texture can be allocated at the freed address and would hit a stale entry (e.g. the maid apron's
+    // colour mask reusing the shoes mask's scene texture, tinting it wrong and flipping between runs).
+    std::map<const unity::TextureData*, std::pair<int, std::shared_ptr<unity::TextureData>>> inputTexCache;
     auto createJobFor = [&](const std::string& partId, const char* matName, const std::vector<TexInput>& texs, const std::vector<std::pair<std::string, Vec4>>& props, int size) -> int {
         std::string w;
         auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w);
@@ -2081,9 +2084,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     int made = b.addSceneTexture(td->name, mm->name(), td->width, td->height, std::move(copy));
                     scene.textures[static_cast<size_t>(made)].clamp = td->wrapMode == 1;   // gradation masks and ramps clamp
                     scene.textures[static_cast<size_t>(made)].srgb = td->colorSpace == 1;
-                    it = inputTexCache.emplace(td.get(), made).first;
+                    it = inputTexCache.emplace(td.get(), std::make_pair(made, td)).first;
                 }
-                idx = it->second;
+                idx = it->second.first;
             }
             bool set = false;
             for (auto& tb : job.material.texProps) if (tb.name == name) { tb.texture = idx; set = true; }
