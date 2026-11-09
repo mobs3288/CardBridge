@@ -26,8 +26,9 @@ struct AssembleOptions {
     bool nippleInside = false;
     float nippleInsideOffset = -0.008f;
     float areolaSize = -1.0f;              // the areola size (a property of the body's material: shader _nipsize); negative = the card's
-    bool autoCloth = true;                 // synthesize bones+physics for hanging cloth that has no authored DynamicBone (shoulder,
-                                           // kimono sleeves, wings, overhang tails); CARDBRIDGE_NO_AUTO_CLOTH=1 or --no-auto-cloth disables
+    bool autoCloth = false;                // DISABLED by default (revert to last good look): synthesised chains were rebinding hanging cloth
+                                           // onto new bones and collapsing it toward the body. Opt-in with --auto-cloth / CARDBRIDGE_AUTO_CLOTH=1;
+                                           // CARDBRIDGE_NO_AUTO_CLOTH=1 disables
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
 };

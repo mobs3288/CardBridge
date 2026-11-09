@@ -116,9 +116,9 @@ void usage() {
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
         "                                             standard (Japanese) names so a motion (VMD) finds them\n"
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
-        "             [--no-auto-cloth]               no synthesized cloth bones/physics for parts missing authored physics\n"
-        "                                            (default: synthesize loose chains for hanging shoulder jackets, kimono\n"
-        "                                            sleeves, wings, overhang tails; CARDBRIDGE_NO_AUTO_CLOTH=1 disables)\n"
+        "             [--auto-cloth]                  opt-in: synthesize loose chains for hanging cloth missing authored physics\n"
+        "                                            (disabled by default: synthesised chains were collapsing cloth onto the body;\n"
+        "                                            --no-auto-cloth / CARDBRIDGE_NO_AUTO_CLOTH=1 keep it off)\n"
         "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-intensity F] [--sag F]\n"
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
@@ -477,7 +477,8 @@ int cmdConvert(const Args& a) {
     }
     ao.nippleInside = a.has("nipple-inside");
     if (a.opt.count("nipple-offset")) ao.nippleOffset = static_cast<float>(std::atof(a.get("nipple-offset").c_str()));
-    ao.autoCloth = !a.has("no-auto-cloth") && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH");
+    ao.autoCloth = a.has("auto-cloth") && !a.has("no-auto-cloth") && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH") &&
+                   std::string(std::getenv("CARDBRIDGE_AUTO_CLOTH") ? std::getenv("CARDBRIDGE_AUTO_CLOTH") : "1") != "0";
     ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
@@ -695,7 +696,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
