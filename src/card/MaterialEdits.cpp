@@ -84,14 +84,20 @@ MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
     MaterialEdits me;
 
     // KCOX: "Overlays" is a MessagePack blob of coordinate -> {garment object name -> [png bytes, replace]}.
+    // Clothing files (a single outfit) also appear as {garment -> [png bytes, replace]} with no coordinate level;
+    // those apply to the asked coordinate after the merge in ApplyClothing, and are read the same way here.
     const Value& kcox = extended.at("KCOX").at(size_t(1));
     if (kcox.isMap() && kcox.at("Overlays").isBin()) {
         Value overlays = MsgPackParse(kcox.at("Overlays").asBin());
         for (const auto& kv : overlays.asMap()) {
-            if (!kv.first.isInt() || kv.first.asInt() != coordinate) continue;
-            for (const auto& g : kv.second.asMap())
-                if (g.first.isStr() && g.second.at(size_t(0)).isBin() && g.second.at(size_t(0)).size() > 0)
-                    me.clothesOverlays[g.first.asStr()] = {g.second.at(size_t(0)).asBin(), g.second.at(size_t(1)).asBool()};
+            if (kv.first.isInt()) {
+                if (kv.first.asInt() != coordinate) continue;
+                for (const auto& g : kv.second.asMap())
+                    if (g.first.isStr() && g.second.at(size_t(0)).isBin() && g.second.at(size_t(0)).size() > 0)
+                        me.clothesOverlays[g.first.asStr()] = {g.second.at(size_t(0)).asBin(), g.second.at(size_t(1)).asBool()};
+            } else if (kv.first.isStr() && kv.second.isArray() && kv.second.size() >= 2 && kv.second.at(size_t(0)).isBin() && kv.second.at(size_t(0)).size() > 0) {
+                me.clothesOverlays[kv.first.asStr()] = {kv.second.at(size_t(0)).asBin(), kv.second.at(size_t(1)).asBool()};
+            }
         }
     }
 

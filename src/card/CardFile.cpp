@@ -864,6 +864,100 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
             }
             rep.notes.emplace_back("MaterialEditor: outfit file's edits merged (sheer stockings)");
         }
+        // KoiClothesOverlayX: the image painted over each garment's texture.
+        // Many clothing cards carry the real look here, not in the ChaFile
+        // colours (the Gantz vault suit is grey + a blue overlay, the Shrine
+        // Maiden kit is blue/green/red + a white/red overlay, the Jiangshi
+        // leotard is red/green/blue + a mustard/pink overlay): without the
+        // overlay the outfit shows the placeholder base colours. The file's
+        // single outfit (coordinate 0) replaces the target coordinate's
+        // overlays; other coordinates keep theirs. A clothing file writes the
+        // overlays as {garment -> [png, replace]} with no coordinate level
+        // (or as {0: {...}}), while a character stores {coordinate: {...}}.
+        {
+            auto parseOutfitOverlays = [](const Value& ext) -> std::map<std::string, std::pair<Bytes, bool>> {
+                std::map<std::string, std::pair<Bytes, bool>> out;
+                const Value& kcox = ext.at("KCOX").at(size_t(1));
+                if (!kcox.isMap() || !kcox.at("Overlays").isBin()) return out;
+                Value overlays;
+                try { overlays = MsgPackParse(kcox.at("Overlays").asBin()); } catch (const FormatError&) { return out; }
+                if (!overlays.isMap()) return out;
+                for (const auto& kv : overlays.asMap()) {
+                    if (kv.first.isInt()) {
+                        if (kv.first.asInt() != 0) continue;
+                        if (!kv.second.isMap()) continue;
+                        for (const auto& g : kv.second.asMap())
+                            if (g.first.isStr() && g.second.at(size_t(0)).isBin() && g.second.at(size_t(0)).size() > 0)
+                                out[g.first.asStr()] = {g.second.at(size_t(0)).asBin(), g.second.at(size_t(1)).asBool()};
+                    } else if (kv.first.isStr() && kv.second.isArray() && kv.second.size() >= 2 &&
+                               kv.second.at(size_t(0)).isBin() && kv.second.at(size_t(0)).size() > 0) {
+                        out[kv.first.asStr()] = {kv.second.at(size_t(0)).asBin(), kv.second.at(size_t(1)).asBool()};
+                    }
+                }
+                return out;
+            };
+            const auto clothOverlays = parseOutfitOverlays(clothes.extended);
+            const bool clothHasKcox = clothes.extended.at("KCOX").at(size_t(1)).isMap() && clothes.extended.at("KCOX").at(size_t(1)).at("Overlays").isBin();
+            // Keep the character's other coordinates, drop the target's old
+            // paint (it belonged to the outfit that was replaced, and would
+            // otherwise paint over the new garments).
+            Value::Map outer;
+            Value::Map charPayload;
+            int64_t kcoxVersion = 1;
+            bool charHasKcox = false;
+            if (card.extended.isMap()) {
+                const Value& charKcox = card.extended.at("KCOX").at(size_t(1));
+                if (charKcox.isMap() && charKcox.at("Overlays").isBin()) {
+                    charHasKcox = true;
+                    charPayload = charKcox.asMap();
+                    const Value& entry = card.extended.at("KCOX");
+                    if (entry.isArray()) kcoxVersion = entry.at(size_t(0)).asInt(1);
+                    Value prev;
+                    try { prev = MsgPackParse(charKcox.at("Overlays").asBin()); } catch (const FormatError&) {}
+                    if (prev.isMap()) {
+                        for (const auto& kv : prev.asMap()) {
+                            // Character form is {coordinate: {...}}; a {garment: ...}
+                            // form has no coordinate to keep, so it is dropped with the target.
+                            if (kv.first.isInt() && kv.first.asInt() != outfit) outer.emplace_back(kv.first, kv.second);
+                        }
+                    }
+                }
+            }
+            if (!clothOverlays.empty()) {
+                Value::Map garments;
+                for (const auto& kv : clothOverlays) {
+                    Value::Array ga{Value(kv.second.first), Value(kv.second.second)};
+                    garments.emplace_back(Value(kv.first), Value(std::move(ga)));
+                }
+                outer.emplace_back(Value(static_cast<int64_t>(outfit)), Value(std::move(garments)));
+            }
+            if (!outer.empty() || charHasKcox || !clothOverlays.empty()) {
+                Bytes newBin = MsgPackPack(Value(std::move(outer)));
+                bool found = false;
+                for (auto& kv : charPayload)
+                    if (kv.first.isStr() && kv.first.asStr() == "Overlays") { kv.second = Value(newBin); found = true; }
+                if (!found) charPayload.emplace_back(Value(std::string("Overlays")), Value(newBin));
+                // When the outfit has no overlays, storing the emptied blob
+                // clears the target coordinate (no old paint left over).
+                bool entryFound = false;
+                if (card.extended.isMap())
+                    for (auto& kv : card.extended.map())
+                        if (kv.first.isStr() && kv.first.asStr() == "KCOX") {
+                            kv.second = Value(Value::Array{Value(kcoxVersion), Value(std::move(charPayload))});
+                            entryFound = true;
+                        }
+                if (!entryFound && card.extended.isMap() && (!clothOverlays.empty() || charHasKcox)) {
+                    Value::Array entryV{Value(kcoxVersion), Value(std::move(charPayload))};
+                    card.extended.map().emplace_back(Value(std::string("KCOX")), Value(std::move(entryV)));
+                }
+                if (!clothOverlays.empty())
+                    rep.notes.emplace_back("KoiClothesOverlayX: outfit file's garment paint merged (the blue/red looks)");
+                else if (clothHasKcox)
+                    rep.notes.emplace_back("KoiClothesOverlayX: outfit file's garment paint cleared (no overlays in the file)");
+                else if (charHasKcox)
+                    rep.notes.emplace_back("KoiClothesOverlayX: previous outfit's garment paint cleared (the file has no overlays)");
+            }
+        }
     }
     // The in-memory merge is all the viewer and the exporter read (Resolver
     // uses rows, not the extended bin); the file on disk is untouched.
