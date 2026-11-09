@@ -22,6 +22,7 @@
 //          M mods folder, L asset library folder
 
 #include "assemble/Assembler.h"
+#include "material/MaterialWorkbench.h"
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
 #include "export/BoneLabels.h"
@@ -289,8 +290,8 @@ struct Tweaks {
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabMaterials, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Mats", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
@@ -298,7 +299,7 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;
@@ -312,15 +313,19 @@ struct PanelLayout {
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
+    int matEditTop = 0, matListTop = 0, matListBottom = 0;       // Materials tab: filter row, list, editor
     RECT clearLog{};
     // Bones tab hit areas (the click code and the drawing use the same ones): the two switches, the reset row, the undo / redo / save / load row
     RECT boneSkeleton{}, boneHelpers{}, boneResetOne{}, boneResetAll{}, boneUndo{}, boneRedo{}, boneSave{}, boneLoad{};
+    // Materials tab hit areas
+    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
+constexpr int kMatEditRows = 13;    // heading, class/preset row, R G B, HEX, 6 shading sliders, reset/undo row
 constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
 
-PanelLayout LayoutFor(int H, bool boneTab = false) {
+PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows) {
     PanelLayout l;
     l.logo = {12, 12, 68, 68};
     const int by = 98, bh = 26;
@@ -341,14 +346,17 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     for (int i = 0; i < TabCount; ++i) l.tabs[i] = {10 + i * 51, 216, 59 + i * 51, 240};
     l.partsHeadingTop = 222;
     l.partsTop = 248;
-    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone editor needs the room
+    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
     l.footerTop = H - 36;
     l.logBottom = l.footerTop - 4;
     l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
     l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
-    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - kBoneEditRows * kRowH - 4);
+    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
     l.boneListTop = l.partsTop + kRowH;
     l.boneListBottom = l.boneEditTop - 4;
+    l.matEditTop = l.boneEditTop;
+    l.matListTop = l.boneListTop;
+    l.matListBottom = l.boneListBottom;
     l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
     l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
     l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
@@ -359,6 +367,16 @@ PanelLayout LayoutFor(int H, bool boneTab = false) {
     l.boneRedo = {60, ay, 110, ay + kRowH};
     l.boneSave = {114, ay, 190, ay + kRowH};
     l.boneLoad = {194, ay, 268, ay + kRowH};
+    l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
+    const int my = l.matEditTop + 1 * kRowH;
+    l.matClassBtn = {10, my, 140, my + kRowH};
+    l.matPresetBtn = {144, my, 240, my + kRowH};
+    l.matTexBtn = {244, my, kPanel - 10, my + kRowH};
+    const int mry = l.matEditTop + 12 * kRowH;
+    l.matResetThis = {10, mry, 95, mry + kRowH};
+    l.matResetAll = {99, mry, 184, mry + kRowH};
+    l.matUndo = {188, mry, 244, mry + kRowH};
+    l.matRedo = {248, mry, kPanel - 10, mry + kRowH};
     return l;
 }
 
@@ -440,6 +458,16 @@ struct App {
     std::string selBoneName;                  // the selected bone, by name
     std::set<std::string> openBones;          // tree nodes that are open
     bool bonesSeeded = false;                 // openBones was given its first value for this character
+    // Material workbench (Stage 2): the override state for the loaded character.
+    material::WorkbenchState mat;             // originals snapshot + sparse overrides + undo/redo
+    int selMaterial = -1;                     // selected material index (-1 = none)
+    int matFilter = -1;                       // -1 = all classes, else static_cast<material::MaterialClass>
+    int matScroll = 0;                        // material list scroll target, in rows
+    float matPos = 0;                         // eased position
+    float matBuf[kMatCount] = {};             // slider buffers: R,G,B,opacity,rough,metallic,specular,emission,normal
+    bool matHexEditing = false;               // HEX text entry in the materials editor
+    std::string matHexBuf;
+    bool matHexUndoPushed = false;
     std::vector<Mat4> skin;                   // current skin matrices (empty = rest pose)
     std::vector<Vec3> boneWorld;              // posed bone positions, for the overlay
     std::vector<std::pair<float, float>> boneScreen;   // where the overlay put each bone in the last picture (x < 0: not drawn)
@@ -484,7 +512,7 @@ struct App {
 };
 App g;
 
-PanelLayout Lay(int H) { return LayoutFor(H, g.tab == TabBones && !g.showIssues); }
+PanelLayout Lay(int H) { return LayoutFor(H, (g.tab == TabBones || g.tab == TabMaterials) && !g.showIssues, g.tab == TabMaterials ? kMatEditRows : kBoneEditRows); }
 
 constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;
@@ -745,11 +773,181 @@ bool SliderFor(int id, SliderRef& r) {
         else { r.def = 1; r.lo = 0.1f; r.hi = 3; r.step = 0.01f; r.fmt = "%.2f"; }
         return true;
     }
+    if (id >= kMatBase && id < kMatBase + kMatCount) {   // a field of the selected material
+        std::shared_ptr<Loaded> L = Current();
+        if (!L || g.selMaterial < 0 || static_cast<size_t>(g.selMaterial) >= g.mat.originals.size()) return false;
+        const int k = id - kMatBase;
+        material::EffectiveMaterial orig = material::EffectiveOf(g.mat.originals[static_cast<size_t>(g.selMaterial)], nullptr);
+        r.v = &g.matBuf[k];
+        switch (k) {
+        case 0: case 1: case 2:
+            r.def = (k == 0 ? orig.baseColor.x : k == 1 ? orig.baseColor.y : orig.baseColor.z) * 255.0f;
+            r.lo = 0; r.hi = 255; r.step = 1; r.percent = false; r.fmt = "%d"; return true;
+        case 3: r.def = orig.opacity; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
+        case 4: r.def = orig.roughness; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
+        case 5: r.def = orig.metallic; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
+        case 6: r.def = orig.specularPower; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr; return true;
+        case 7: r.def = orig.emissionIntensity; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true;
+        case 8: r.def = orig.normalIntensity; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true;
+        default: return false;
+        }
+    }
     return false;
 }
 
 // Pose controls change the picture at once, no re-assembly.
-bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount); }
+bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount); }
+
+// ---- materials (Stage 2) ----------------------------------------------------------------------------------------------
+// The workbench state lives in App; these helpers keep slider buffers in sync
+// with the effective material and apply buffer changes to the override.
+bool IsMatId(int id) { return id >= kMatBase && id < kMatBase + kMatCount; }
+
+std::vector<int> BuildMatRows(const Loaded& L) {
+    std::vector<int> rows;
+    for (size_t i = 0; i < L.scene.materials.size(); ++i) {
+        if (g.matFilter >= 0) {
+            material::EffectiveMaterial e = (i < g.mat.originals.size()) ? material::EffectiveOf(g.mat, i) : material::EffectiveMaterial{};
+            if (static_cast<int>(e.cls) != g.matFilter) continue;
+        }
+        rows.push_back(static_cast<int>(i));
+    }
+    return rows;
+}
+
+void SyncMatBuf() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0 || static_cast<size_t>(g.selMaterial) >= g.mat.originals.size()) return;
+    material::EffectiveMaterial e = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+    const float vals[kMatCount] = {e.baseColor.x * 255.0f, e.baseColor.y * 255.0f, e.baseColor.z * 255.0f, e.opacity, e.roughness, e.metallic, e.specularPower, e.emissionIntensity, e.normalIntensity};
+    for (int k = 0; k < kMatCount; ++k) {
+        const int id = kMatBase + k;
+        if (g.sliderDrag != id) g.matBuf[k] = vals[k];
+    }
+}
+
+void MaterialSliderEdited(int id, bool released) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0) return;
+    const size_t sel = static_cast<size_t>(g.selMaterial);
+    if (sel >= g.mat.originals.size()) return;
+    if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
+    if (!g.mat.overrides[sel]) g.mat.overrides[sel] = material::MaterialOverride{};
+    material::MaterialOverride& o = *g.mat.overrides[sel];
+    material::EffectiveMaterial cur = material::EffectiveOf(g.mat, sel);
+    const int k = id - kMatBase;
+    if (k >= 0 && k <= 2) {
+        float a = cur.baseColor.w;
+        if (g.mat.overrides[sel]->opacity) a = *g.mat.overrides[sel]->opacity;
+        o.baseColor = Vec4{g.matBuf[0] / 255.0f, g.matBuf[1] / 255.0f, g.matBuf[2] / 255.0f, a};
+    } else if (k == 3) { o.opacity = std::clamp(g.matBuf[3], 0.0f, 1.0f); }
+    else if (k == 4) { o.roughness = std::clamp(g.matBuf[4], 0.0f, 1.0f); }
+    else if (k == 5) { o.metallic = std::clamp(g.matBuf[5], 0.0f, 1.0f); }
+    else if (k == 6) { o.specularPower = std::clamp(g.matBuf[6], 0.0f, 1.0f); }
+    else if (k == 7) { o.emissionIntensity = std::clamp(g.matBuf[7], 0.0f, 2.0f); if (!o.emissionColor) o.emissionColor = cur.emissionColor; }
+    else if (k == 8) { o.normalIntensity = std::clamp(g.matBuf[8], 0.0f, 2.0f); }
+    material::ApplyOverrides(L->scene, g.mat);
+    if (g.expOk) {
+        g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload();
+        Log("the material changed: press X to bake the as-exported view again");
+    }
+    g.dirty = true;
+    InvalidateView();
+    if (released) InvalidatePanel(); else InvalidatePanel();
+}
+
+void MaterialUndo(bool redo) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return;
+    const bool ok = redo ? material::Redo(g.mat) : material::Undo(g.mat);
+    if (!ok) { Log(redo ? "nothing to redo" : "nothing to undo", LogKind::Warn); return; }
+    material::ApplyOverrides(L->scene, g.mat);
+    g.dirty = true;
+    InvalidatePanel();
+    InvalidateView();
+    Log(std::string(redo ? "redo" : "undo") + " (" + std::to_string(g.mat.undoStack.size()) + " step(s) to undo, " + std::to_string(g.mat.redoStack.size()) + " to redo)");
+}
+
+std::string MatHexOf(const material::EffectiveMaterial& e) {
+    char b[16];
+    std::snprintf(b, sizeof b, "%02X%02X%02X", static_cast<int>(std::lround(e.baseColor.x * 255.0f)), static_cast<int>(std::lround(e.baseColor.y * 255.0f)), static_cast<int>(std::lround(e.baseColor.z * 255.0f)));
+    return b;
+}
+
+void ApplyMatHex(const std::string& hex6) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.selMaterial < 0 || hex6.size() != 6) return;
+    auto hv = [](char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    int v = 0;
+    for (char c : hex6) { const int d = hv(c); if (d < 0) return; v = v * 16 + d; }
+    const size_t sel = static_cast<size_t>(g.selMaterial);
+    if (sel >= g.mat.originals.size()) return;
+    if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
+    if (!g.mat.overrides[sel]) g.mat.overrides[sel] = material::MaterialOverride{};
+    material::EffectiveMaterial cur = material::EffectiveOf(g.mat, sel);
+    g.mat.overrides[sel]->baseColor = Vec4{((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f, cur.baseColor.w};
+    material::ApplyOverrides(L->scene, g.mat);
+    if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+    g.dirty = true;
+    InvalidateView();
+    InvalidatePanel();
+}
+
+std::string MatPathFromUser(bool save) {
+    if (const char* env = std::getenv("CARDBRIDGE_MATERIALS_PATH")) return Slashes(env);
+    wchar_t file[1024] = L"materials.json";
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof of;
+    of.hwndOwner = g.hwnd;
+    of.lpstrFilter = L"CardBridge materials (*.json)\0*.json\0All files\0*.*\0";
+    of.lpstrFile = file;
+    of.nMaxFile = 1024;
+    of.lpstrDefExt = L"json";
+    of.lpstrTitle = save ? L"Save materials" : L"Load materials";
+    of.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    const BOOL ok = save ? GetSaveFileNameW(&of) : GetOpenFileNameW(&of);
+    return ok ? Slashes(WideToUtf8(file)) : std::string();
+}
+
+void SaveMatFile() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) { Log("open a card first", LogKind::Warn); return; }
+    const std::string path = MatPathFromUser(true);
+    if (path.empty()) return;
+    try {
+        material::MaterialFile f = material::MakeMaterialFile(L->scene, g.mat, L->card.sha256);
+        const std::string text = material::MaterialFileToJson(f);
+        fileio::WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size());
+        Log("saved " + std::to_string(f.entries.size()) + " material edit(s) to " + path, LogKind::Good);
+    } catch (const std::exception& e) { Log(std::string("could not save materials: ") + e.what(), LogKind::Error); }
+}
+
+void LoadMatFile(const std::string& given = std::string()) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) { Log("open a card first", LogKind::Warn); return; }
+    const std::string path = given.empty() ? MatPathFromUser(false) : given;
+    if (path.empty()) return;
+    material::MaterialFile f;
+    std::string err;
+    try {
+        const Bytes raw = fileio::ReadFile(path);
+        if (!material::MaterialFileFromJson(std::string(raw.begin(), raw.end()), f, &err)) { Log("not a materials file: " + err, LogKind::Error); return; }
+    } catch (const std::exception& e) { Log(std::string("could not read materials: ") + e.what(), LogKind::Error); return; }
+    material::PushUndo(g.mat);
+    std::vector<std::string> unknown;
+    const int n = material::ApplyMaterialFile(L->scene, g.mat, f, &unknown);
+    for (const auto& u : unknown) Log("materials: '" + u + "' is not in this scene; skipped", LogKind::Warn);
+    material::ReportUnsupported(L->scene, g.mat);
+    g.dirty = true;
+    InvalidatePanel();
+    InvalidateView();
+    Log("loaded " + std::to_string(n) + " material edit(s) from " + path, LogKind::Good);
+}
 
 std::string Shorten(const std::string& s, size_t maxChars);
 
@@ -842,11 +1040,35 @@ bool TweakChanged(int id) {
 bool AnyTweak() {
     for (int i = 0; i < kFaceBase; ++i) if (TweakChanged(i)) return true;
     for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
-    return TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside;
+    if (TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside) return true;
+    if (g.mat.IsDirty()) return true;
+    return false;
 }
 
 void ResetTweak(int id) {
     SliderRef r;
+    if (IsMatId(id)) {
+        std::shared_ptr<Loaded> L = Current();
+        if (!L || g.selMaterial < 0) return;
+        const int k = id - kMatBase;
+        material::EffectiveMaterial orig = (static_cast<size_t>(g.selMaterial) < g.mat.originals.size()) ? material::EffectiveOf(g.mat.originals[static_cast<size_t>(g.selMaterial)], nullptr) : material::EffectiveMaterial{};
+        float def = 0;
+        if (k == 0) def = orig.baseColor.x * 255.0f;
+        else if (k == 1) def = orig.baseColor.y * 255.0f;
+        else if (k == 2) def = orig.baseColor.z * 255.0f;
+        else if (k == 3) def = orig.opacity;
+        else if (k == 4) def = orig.roughness;
+        else if (k == 5) def = orig.metallic;
+        else if (k == 6) def = orig.specularPower;
+        else if (k == 7) def = orig.emissionIntensity;
+        else if (k == 8) def = orig.normalIntensity;
+        g.matBuf[k] = def;
+        material::PushUndo(g.mat);
+        // MaterialSliderEdited rebuilds baseColor from all three RGB buffers, so
+        // the untouched channels (still synced to effective) are preserved.
+        MaterialSliderEdited(id, false);
+        return;
+    }
     if (id == kNippleIn) g.tw.nippleInside = false;
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
@@ -1187,6 +1409,7 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
+    if (IsMatId(id)) { MaterialSliderEdited(id, released); return; }
     if (id == kJiggleBust || id == kJiggleButt || id == kJiggleIntensity) {
         if (g.physics) {   // the preview shows what the export will do: prime the sim again with the new switches
             if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
@@ -1442,10 +1665,12 @@ void StartExport() {
     const float jiggleIntensity = g.jiggleIntensity;
     const float sag = g.sag;
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
+    material::WorkbenchState matCopy = g.mat;   // materials: snapshot for the manifest (the scene copy already carries the edits)
+    const std::string matSha = L->card.sha256;
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, matCopy, matSha, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -1455,6 +1680,7 @@ void StartExport() {
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggleIntensity, sag);   // the bust/hips as they hang under gravity
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // hidden items leave the PMX entirely (meshes, chains and their own bones); the preview is the viewer, 1:1
+            if (matCopy.IsDirty()) material::ReportUnsupported(scene, matCopy);   // unsupported workbench fields are reported, never silently dropped
             Log("baking the game shader textures");
             ProgSet(0.06, "baking shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
@@ -1475,6 +1701,12 @@ void StartExport() {
             eo.jiggleIntensity = jiggleIntensity;
             eo.assetLibrary = library;
             eo.modsFolder = mods;
+            if (matCopy.IsDirty()) {
+                material::MaterialFile mf = material::MakeMaterialFile(scene, matCopy, matSha);
+                eo.materialFile = "viewer";
+                eo.materialWorkbench = nlohmann::json::parse(material::MaterialFileToJson(mf), nullptr, false);
+                if (!eo.materialWorkbench.is_discarded()) eo.materialWorkbench["file"] = "viewer";
+            }
             eo.log = [](const std::string& m) { Log("  " + m); };
             eo.progress = [](double f, const std::string& stage) {
                 ProgSet(f >= 0.0 ? 0.52 + f * 0.48 : -1.0, stage);
@@ -1721,10 +1953,19 @@ void Render(int w, int h) {
     g.hidden.resize(L->scene.parts.size(), 0);
     g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
     g.vopt.textured = g.textured;
-    g.vopt.highlightPart = g.hoverPart;
-    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, g.hoverPart)) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); return; }   // as exported
+    int highlight = g.hoverPart;
+    if (g.tab == TabMaterials && g.selMaterial >= 0) {
+        highlight = -1;
+        for (size_t pi = 0; pi < L->scene.parts.size() && highlight < 0; ++pi)
+            for (int mi : L->scene.parts[pi].meshes) {
+                if (mi < 0 || static_cast<size_t>(mi) >= L->scene.meshes.size()) continue;
+                for (const auto& sub : L->scene.meshes[static_cast<size_t>(mi)].submeshes) if (sub.material == g.selMaterial) { highlight = static_cast<int>(pi); break; }
+            }
+    }
+    g.vopt.highlightPart = highlight;
+    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); return; }   // as exported
     if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate
-        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, g.hoverPart)) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); return; }
+        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); return; }
         g.gpuOk = false;
     }
     g.lastGpu = nullptr;
@@ -1836,6 +2077,123 @@ void ScrollBar(ui::Surface& s, int top, int bottom, int rows, int visible, float
     const float span = static_cast<float>(std::max(1, rows - visible));
     const int thumbY = top + static_cast<int>(static_cast<float>(trackH - thumbH) * std::clamp(pos / span, 0.0f, 1.0f));
     s.FillRound(RECT{kPanel - 11, thumbY, kPanel - 7, thumbY + thumbH}, 2, ui::kLineHi);
+}
+
+// The Materials tab: filter row, material list, and under it the inspector of
+// the selected material (class/preset, RGB + HEX, shading sliders, texture
+// enable, reset + undo). All edits go through ApplyOverrides (same frame).
+void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const Loaded& L) {
+    const assemble::Scene& scene = L.scene;
+    if (g.mat.originals.size() != scene.materials.size()) material::CaptureOriginals(g.mat, scene);
+    if (g.selMaterial < 0 && !scene.materials.empty()) g.selMaterial = 0;
+    // Filter row.
+    {
+        const int y = l.partsTop;
+        std::string fl = "Filter: All";
+        if (g.matFilter >= 0) fl = std::string("Filter: ") + material::ClassName(static_cast<material::MaterialClass>(g.matFilter));
+        s.FillRound(l.matFilter, 5, ui::kCardHi);
+        s.TextCentered(g.fontUi, g.matFilter >= 0 ? ui::kAmber : ui::kText, l.matFilter, fl);
+        const int total = static_cast<int>(scene.materials.size());
+        const std::string n = std::to_string(BuildMatRows(L).size()) + " / " + std::to_string(total);
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, y + 4, n);
+    }
+    // Material list.
+    const RECT listClip{6, l.matListTop, kPanel - 18, l.matListBottom};
+    const std::vector<int> rows = BuildMatRows(L);
+    const int visible = std::max(1, (l.matListBottom - l.matListTop) / kRowH);
+    g.matScroll = std::max(0, std::min(g.matScroll, std::max(0, static_cast<int>(rows.size()) - visible)));
+    g.matPos = std::clamp(g.matPos, 0.0f, static_cast<float>(std::max(0, static_cast<int>(rows.size()) - visible)));
+    RECT sub;
+    if (IntersectRect(&sub, &clip, &listClip)) {
+        s.Begin(sub);
+        const ListView v = ViewOf(l.matListTop, l.matListBottom, g.matPos);
+        for (int i = 0; i < v.count; ++i) {
+            const int idx = v.first + i;
+            if (idx >= static_cast<int>(rows.size())) break;
+            const int mi = rows[static_cast<size_t>(idx)];
+            const int y = l.matListTop - v.offset + i * kRowH;
+            const bool sel = mi == g.selMaterial;
+            const bool edited = mi >= 0 && static_cast<size_t>(mi) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(mi)] && !g.mat.overrides[static_cast<size_t>(mi)]->empty();
+            if (sel || idx == g.hoverRow) {
+                s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, sel ? RGB(36, 50, 78) : ui::kCardHi);
+                if (sel) s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
+            }
+            material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(mi));
+            std::string txt = std::to_string(mi) + " " + eff.displayName + " [" + material::ClassName(eff.cls) + "]";
+            const int shared = material::CountSubmeshesForMaterial(scene, mi);
+            if (shared > 1) txt += " x" + std::to_string(shared);
+            s.Text(g.fontUi, edited ? ui::kAmber : sel ? RGB(240, 246, 255) : ui::kText, 14, y + 2, ClipText(txt, 46), &listClip);
+        }
+        ScrollBar(s, l.matListTop, l.matListBottom, static_cast<int>(rows.size()), visible, g.matPos);
+        s.Begin(clip);
+    }
+    // Editor.
+    s.Fill(RECT{10, l.matEditTop - 3, kPanel - 10, l.matEditTop - 2}, ui::kLine);
+    if (g.selMaterial < 0 || static_cast<size_t>(g.selMaterial) >= g.mat.originals.size()) {
+        const RECT headClip{10, l.matEditTop, kPanel - 10, l.matEditTop + kRowH};
+        s.Text(g.fontUi, ui::kSub, 12, l.matEditTop + 2, "click a material in the list", &headClip);
+        return;
+    }
+    SyncMatBuf();
+    material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+    const assemble::SceneMaterial& sm = scene.materials[static_cast<size_t>(g.selMaterial)];
+    {
+        const RECT headClip{10, l.matEditTop, kPanel - 10, l.matEditTop + kRowH};
+        const bool edited = static_cast<size_t>(g.selMaterial) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(g.selMaterial)] && !g.mat.overrides[static_cast<size_t>(g.selMaterial)]->empty();
+        s.Text(g.fontBold, edited ? ui::kAmber : ui::kAccent, 12, l.matEditTop + 2, ClipText(eff.displayName + " [" + material::ClassName(eff.cls) + "]", 44), &headClip);
+    }
+    // Class / preset / texture row.
+    {
+        const int y = l.matEditTop + 1 * kRowH;
+        auto ghost = [&](const RECT& r, const std::string& label, bool enabled) {
+            s.FillRound(r, 5, ui::kCardHi);
+            s.TextCentered(g.fontUi, enabled ? ui::kText : ui::kFaint, r, label);
+        };
+        ghost(l.matClassBtn, "Class: " + std::string(material::ClassName(eff.cls)), true);
+        ghost(l.matPresetBtn, "Preset", true);
+        bool texOn = sm.texture >= 0;
+        // Reflect enable/disable overrides for _MainTex.
+        if (static_cast<size_t>(g.selMaterial) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(g.selMaterial)])
+            for (const auto& t : g.mat.overrides[static_cast<size_t>(g.selMaterial)]->textures) if (t.property == "_MainTex") texOn = t.enabled;
+        ghost(l.matTexBtn, texOn ? "MainTex: on" : "MainTex: off", true);
+        s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, y + 4, "shader: " + ClipText(sm.shader, 26));
+    }
+    // RGB sliders.
+    static const char* const rgbLabels[3] = {"Red", "Green", "Blue"};
+    for (int k = 0; k < 3; ++k) {
+        const int y = l.matEditTop + (2 + k) * kRowH;
+        if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + k, rgbLabels[k], y);
+    }
+    // HEX.
+    {
+        const int y = l.matEditTop + 5 * kRowH;
+        if (TouchesY(clip, y, y + kRowH)) {
+            const std::string hex = MatHexOf(eff);
+            s.Text(g.fontUi, ui::kText, 12, y + 2, "HEX", nullptr);
+            RECT sw{168, y + 2, 200, y + kRowH - 2};
+            COLORREF col = RGB(static_cast<int>(std::lround(eff.baseColor.x * 255.0f)), static_cast<int>(std::lround(eff.baseColor.y * 255.0f)), static_cast<int>(std::lround(eff.baseColor.z * 255.0f)));
+            s.FillRound(sw, 4, col);
+            s.StrokeRound(sw, 4, ui::kLineHi);
+            s.Text(g.fontMono, g.matHexEditing ? ui::kAmber : ui::kText, 208, y + 2, g.matHexEditing ? (g.matHexBuf + "_") : hex, nullptr);
+        }
+    }
+    // Shading sliders.
+    static const char* const shadeLabels[6] = {"Opacity", "Roughness", "Metallic", "Specular", "Emission", "Normal"};
+    for (int k = 0; k < 6; ++k) {
+        const int y = l.matEditTop + (6 + k) * kRowH;
+        if (TouchesY(clip, y, y + kRowH)) DrawSliderRow(s, kMatBase + 3 + k, shadeLabels[k], y);
+    }
+    // Reset + undo row.
+    {
+        auto ghost = [&](const RECT& r, const char* label, bool enabled) {
+            s.FillRound(r, 5, ui::kCardHi);
+            s.TextCentered(g.fontUi, enabled ? ui::kText : ui::kFaint, r, label);
+        };
+        ghost(l.matResetThis, "reset", true);
+        ghost(l.matResetAll, "reset all", g.mat.IsDirty());
+        ghost(l.matUndo, "undo", material::CanUndo(g.mat));
+        ghost(l.matRedo, "redo", material::CanRedo(g.mat));
+    }
 }
 
 // The Bones tab: the skeleton switch row, the bone tree, and under it the editor of the selected bone.
@@ -2071,10 +2429,12 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             else if (g.busy && g.tab != TabParts) right = "shaping";
             else if (g.tweakPending) right = "applying";
             else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
+            else if (g.tab == TabMaterials) right = std::to_string(g.mat.OverrideCount()) + " edited";
             else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
             else if (g.tab == TabSettings) right = "saved";
             else right = AnyTweak() ? "tweaked" : "as card";
-            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : AnyTweak() && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
+            const bool ed = AnyTweak();
+            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : ed && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
         }
     }
 
@@ -2118,6 +2478,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             }
         } else if (g.tab == TabBones) {
             DrawBonesTab(s, clip, l, *L);
+        } else if (g.tab == TabMaterials) {
+            DrawMaterialsTab(s, clip, l, *L);
         } else if (g.tab != TabParts) {
             const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
             const int visible = VisibleRows(l);
@@ -2731,6 +3093,132 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
     }
 }
 
+// A click in the Materials tab: filter, list select, class/preset/texture
+// buttons, HEX, sliders (live), reset/undo.
+void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return;
+    if (g.mat.originals.size() != L->scene.materials.size()) material::CaptureOriginals(g.mat, L->scene);
+    const POINT pt{x, y};
+    // Leaving HEX entry: any click that is not on the HEX row ends it (Enter/ESC also end it).
+    if (g.matHexEditing && !(y >= l.matEditTop + 5 * kRowH && y < l.matEditTop + 6 * kRowH)) {
+        g.matHexEditing = false; g.matHexUndoPushed = false;
+    }
+    // Filter row.
+    if (!right && PtInRect(&l.matFilter, pt)) {
+        static const int order[] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        int pos = 0;
+        for (int i = 0; i < 12; ++i) if (order[i] == g.matFilter) { pos = i; break; }
+        g.matFilter = order[(pos + 1) % 12];
+        g.matScroll = 0; g.matPos = 0;
+        InvalidatePanel();
+        return;
+    }
+    if (y >= l.matListTop && y < l.matListBottom) {
+        const std::vector<int> rows = BuildMatRows(*L);
+        const int idx = (y - l.matListTop + static_cast<int>(std::lround(g.matPos * kRowH))) / kRowH;
+        if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return;
+        g.selMaterial = rows[static_cast<size_t>(idx)];
+        SyncMatBuf();
+        g.dirty = true;
+        InvalidateAll();
+        return;
+    }
+    if (y < l.matEditTop) return;
+    if (g.selMaterial < 0) return;
+    const int row = (y - l.matEditTop) / kRowH;
+    if (row == 1 && !right) {
+        if (PtInRect(&l.matClassBtn, pt)) {
+            material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+            int next = (static_cast<int>(eff.cls) + 1) % 11;
+            material::PushUndo(g.mat);
+            if (g.mat.overrides.size() != g.mat.originals.size()) g.mat.overrides.resize(g.mat.originals.size());
+            if (!g.mat.overrides[static_cast<size_t>(g.selMaterial)]) g.mat.overrides[static_cast<size_t>(g.selMaterial)] = material::MaterialOverride{};
+            g.mat.overrides[static_cast<size_t>(g.selMaterial)]->class_ = static_cast<material::MaterialClass>(next);
+            material::ApplyOverrides(L->scene, g.mat);
+            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+            g.dirty = true;
+            Log(std::string("class: ") + L->scene.materials[static_cast<size_t>(g.selMaterial)].name + " -> " + material::ClassName(static_cast<material::MaterialClass>(next)));
+            InvalidateAll();
+            return;
+        }
+        if (PtInRect(&l.matPresetBtn, pt)) {
+            material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+            material::ApplyPreset(g.mat, static_cast<size_t>(g.selMaterial), eff.cls);
+            material::ApplyOverrides(L->scene, g.mat);
+            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+            g.dirty = true;
+            Log("preset: " + std::string(material::ClassName(eff.cls)) + "/Default");
+            InvalidateAll();
+            return;
+        }
+        if (PtInRect(&l.matTexBtn, pt)) {
+            // Toggle _MainTex enabled (Stage 2: enable/disable only).
+            const size_t sel = static_cast<size_t>(g.selMaterial);
+            bool on = L->scene.materials[sel].texture >= 0;
+            if (sel < g.mat.overrides.size() && g.mat.overrides[sel])
+                for (const auto& t : g.mat.overrides[sel]->textures) if (t.property == "_MainTex") on = t.enabled;
+            material::SetTextureEnabled(L->scene, g.mat, sel, "_MainTex", !on);
+            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+            g.dirty = true;
+            InvalidateAll();
+            return;
+        }
+        return;
+    }
+    if (row == 5 && !right) {
+        // HEX: start text entry.
+        material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
+        g.matHexBuf = MatHexOf(eff);
+        g.matHexEditing = true;
+        InvalidatePanel();
+        return;
+    }
+    if (row >= 2 && row <= 4) {
+        const int id = kMatBase + (row - 2);
+        SliderRef r;
+        if (!SliderFor(id, r)) return;
+        if (right) { ResetTweak(id); TweakEdited(id, true); return; }
+        if (x < kTrackL - 8) return;
+        if (g.sliderDrag != id) material::PushUndo(g.mat);
+        g.sliderDrag = id;
+        *r.v = SliderValueAt(r, x);
+        MaterialSliderEdited(id, false);
+        SetCapture(g.hwnd);
+        InvalidatePanel();
+        return;
+    }
+    if (row >= 6 && row <= 11) {
+        const int id = kMatBase + 3 + (row - 6);
+        SliderRef r;
+        if (!SliderFor(id, r)) return;
+        if (right) { ResetTweak(id); TweakEdited(id, true); return; }
+        if (x < kTrackL - 8) return;
+        if (g.sliderDrag != id) material::PushUndo(g.mat);
+        g.sliderDrag = id;
+        *r.v = SliderValueAt(r, x);
+        MaterialSliderEdited(id, false);
+        SetCapture(g.hwnd);
+        InvalidatePanel();
+        return;
+    }
+    if (row == 12 && !right) {
+        if (PtInRect(&l.matResetThis, pt)) {
+            material::ResetMaterial(g.mat, static_cast<size_t>(g.selMaterial));
+            material::ApplyOverrides(L->scene, g.mat);
+        } else if (PtInRect(&l.matResetAll, pt)) {
+            material::ResetAll(g.mat);
+            material::ApplyOverrides(L->scene, g.mat);
+        } else if (PtInRect(&l.matUndo, pt)) { MaterialUndo(false); return; }
+        else if (PtInRect(&l.matRedo, pt)) { MaterialUndo(true); return; }
+        else return;
+        if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
+        SyncMatBuf();
+        g.dirty = true;
+        InvalidateAll();
+    }
+}
+
 void ChooseMods() {
     std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder");
     if (d.empty()) return;
@@ -3030,6 +3518,19 @@ void InvalidateSliderRow(int id) {
         InvalidatePanelBand(y, y + kRowH);
         return;
     }
+    if (IsMatId(id)) {
+        const int k = id - kMatBase;
+        int row = -1;
+        if (k >= 0 && k <= 2) row = 2 + k;
+        else if (k >= 3 && k <= 8) row = 6 + (k - 3);
+        if (row >= 0) {
+            const int y = l.matEditTop + row * kRowH;
+            InvalidatePanelBand(y, y + kRowH);
+        }
+        RECT heading{kPanel - 80, l.partsHeadingTop - 2, kPanel, l.partsHeadingTop + 16};
+        InvalidateRect(g.hwnd, &heading, FALSE);
+        return;
+    }
     const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
     for (size_t i = 0; i < rows.size(); ++i)
         if (rows[i].kind == 1 && rows[i].id == id) {
@@ -3080,7 +3581,8 @@ void Frame() {
     PhysicsTick();
     const bool a = EaseScroll(g.partPos, g.partScroll, dt);
     const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
-    g.animating = a || b;
+    const bool c = EaseScroll(g.matPos, g.matScroll, dt);
+    g.animating = a || b || c;
     if (g.animating) InvalidateList();
     // While a job runs, Frame is the single painter for the bar (~30/s): it
     // repaints the overlay card, the strip and the footer hint, so worker
@@ -3116,12 +3618,36 @@ void DumpTestLayout() {
     j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     j["rows"] = nlohmann::json::array();
-    if (L && g.tab != TabParts && g.tab != TabBones) {
+    if (L && g.tab != TabParts && g.tab != TabBones && g.tab != TabMaterials) {
         const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
         for (size_t i = 0; i < rows.size(); ++i) {
             const int y = l.partsTop + static_cast<int>(i) * kRowH - static_cast<int>(std::lround(g.partPos * kRowH)) + kRowH / 2;
             j["rows"].push_back({{"id", rows[i].id}, {"kind", rows[i].kind}, {"label", rows[i].label}, {"y", y >= l.partsTop && y < l.partsBottom ? y : -1}});
         }
+    }
+    j["materials"] = nlohmann::json::object();
+    if (L && g.tab == TabMaterials) {
+        const std::vector<int> mrows = BuildMatRows(*L);
+        j["materials"]["list"] = nlohmann::json::array();
+        for (size_t i = 0; i < mrows.size(); ++i) {
+            const int y = l.matListTop + static_cast<int>(i) * kRowH - static_cast<int>(std::lround(g.matPos * kRowH)) + kRowH / 2;
+            if (y >= l.matListTop && y < l.matListBottom)
+                j["materials"]["list"].push_back({{"index", mrows[i]}, {"y", y}, {"name", L->scene.materials[static_cast<size_t>(mrows[i])].name}, {"sel", mrows[i] == g.selMaterial}});
+        }
+        j["materials"]["editTop"] = l.matEditTop;
+        j["materials"]["fieldY"] = nlohmann::json::array();
+        for (int k = 0; k < kMatCount; ++k) {
+            int row = (k <= 2) ? (2 + k) : (3 + k);
+            j["materials"]["fieldY"].push_back(l.matEditTop + row * kRowH + kRowH / 2);
+        }
+        j["materials"]["hexY"] = l.matEditTop + 5 * kRowH + kRowH / 2;
+        j["materials"]["classY"] = l.matEditTop + 1 * kRowH + kRowH / 2;
+        j["materials"]["resetY"] = l.matEditTop + 12 * kRowH + kRowH / 2;
+        j["materials"]["filterY"] = l.partsTop + kRowH / 2;
+        j["materials"]["sel"] = g.selMaterial;
+        j["materials"]["overrides"] = g.mat.OverrideCount();
+        j["materials"]["undo"] = g.mat.undoStack.size();
+        j["materials"]["redo"] = g.mat.redoStack.size();
     }
     j["bones"] = nlohmann::json::object();
     if (L && g.tab == TabBones) {
@@ -3155,7 +3681,7 @@ void DumpTestLayout() {
     }
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
-                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}};
+                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
     {   // the loading bar: title / stage / fraction so scripted runs can check it
         const ProgSnapshot ps = GetProgSnapshot();
@@ -3198,6 +3724,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 2) UndoPose(true);
         else if (wp == 3) SavePoseFile();
         else if (wp == 4) LoadPoseFile();
+        else if (wp == 13) MaterialUndo(false);
+        else if (wp == 14) MaterialUndo(true);
+        else if (wp == 15) SaveMatFile();
+        else if (wp == 16) LoadMatFile();
         else if (wp == 12) ResetClothing();   // reset the imported outfit to the card default
         else if (wp == 10) DumpTestLayout();
         else if (wp == 11) {   // the nude body on, and the camera close on the chest (lp = pan up, in thousandths of the window height)
@@ -3334,6 +3864,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ProgEnd();
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
+        // Materials: capture a fresh baseline for the new character.
+        if (L) {
+            material::CaptureOriginals(g.mat, L->scene);
+            g.selMaterial = L->scene.materials.empty() ? -1 : 0;
+            g.matFilter = -1;
+            g.matScroll = 0; g.matPos = 0;
+            for (int k = 0; k < kMatCount; ++k) g.matBuf[k] = 0;
+            g.matHexEditing = false; g.matHexBuf.clear();
+            SyncMatBuf();
+        }
         if (g.physics) { g.physics = false; SetPhysics(true); }
         else ApplyPoseLive();
         if (L && !g.wantPose.empty()) { const std::string pose = g.wantPose; g.wantPose.clear(); LoadPoseFile(pose); }
@@ -3397,6 +3937,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (g.matHexEditing && x >= kPanel) { g.matHexEditing = false; g.matHexUndoPushed = false; }
         if (x >= kPanel && GetProgSnapshot().active) {
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -3433,6 +3974,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (PtInRect(&l.clearLog, p)) { ClearLog(); return 0; }
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, false); return 0; }
+            if (L && !g.showIssues && g.tab == TabMaterials) { MaterialsTabClick(x, y, l, false); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(*L);
@@ -3515,6 +4057,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, true); return 0; }
+            if (L && !g.showIssues && g.tab == TabMaterials) { MaterialsTabClick(x, y, l, true); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(*L);
@@ -3601,6 +4144,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) {
                 if (y >= l.boneListTop && y < l.boneListBottom) g.hoverRow = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
+            } else if (L && !g.showIssues && g.tab == TabMaterials) {
+                if (y >= l.matListTop && y < l.matListBottom) g.hoverRow = (y - l.matListTop + ScrollPx(g.matPos)) / kRowH;
             } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues) {
@@ -3615,8 +4160,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Repaint only what changed: the old and new row, the buttons band, the footer's hint.
         if (oldRow != g.hoverRow) {
             const bool bones = g.tab == TabBones;
-            const int top = bones ? l.boneListTop : l.partsTop, bottom = bones ? l.boneListBottom : l.partsBottom;
-            const int px = ScrollPx(bones ? g.bonePos : g.partPos);
+            const bool mats = g.tab == TabMaterials;
+            const int top = bones ? l.boneListTop : mats ? l.matListTop : l.partsTop, bottom = bones ? l.boneListBottom : mats ? l.matListBottom : l.partsBottom;
+            const int px = ScrollPx(bones ? g.bonePos : mats ? g.matPos : g.partPos);
             for (int idx : {oldRow, g.hoverRow})
                 if (idx >= 0) InvalidatePanelBand(std::max(top, top + idx * kRowH - px), std::min(bottom, top + (idx + 1) * kRowH - px));
         }
@@ -3687,6 +4233,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (L || g.tab == TabSettings) {
                 if (g.showIssues) {
                     g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3));
+                } else if (g.tab == TabMaterials) {
+                    const int visible = std::max(1, (l.matListBottom - l.matListTop) / kRowH);
+                    const int maxScroll = std::max(0, static_cast<int>(BuildMatRows(*L).size()) - visible);
+                    g.matScroll = std::max(0, std::min(maxScroll, g.matScroll - (d > 0 ? 3 : -3)));
                 } else if (g.tab == TabBones) {
                     if (pt.y >= l.boneEditTop && !g.selBoneName.empty()) {   // over a field: a fine step (Shift: ten)
                         const int row = (pt.y - l.boneEditTop) / kRowH;
@@ -3737,7 +4287,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();
-                if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
+                if (L && !g.showIssues && g.tab == TabMaterials) {
+                    hand = (p.y >= l.matListTop && p.y < l.matListBottom) || (p.y >= l.matEditTop);
+                } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
                     hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
                 } else if (L && !g.showIssues) {
                     std::vector<PartRow> rows = BuildRows(*L);
@@ -3751,12 +4303,42 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KEYDOWN: {
         std::shared_ptr<Loaded> L = Current();
+        if (g.matHexEditing) {
+            if (wp == VK_ESCAPE) { g.matHexEditing = false; g.matHexUndoPushed = false; g.matHexBuf.clear(); InvalidatePanel(); return 0; }
+            if (wp == VK_RETURN) { g.matHexEditing = false; g.matHexUndoPushed = false; InvalidatePanel(); return 0; }
+            if (wp == VK_BACK) { if (!g.matHexBuf.empty()) g.matHexBuf.pop_back(); InvalidatePanel(); return 0; }
+            int ch = -1;
+            if (wp >= '0' && wp <= '9') ch = wp;
+            else if (wp >= 'A' && wp <= 'F') ch = wp;
+            else if (wp >= 'a' && wp <= 'f') ch = wp;
+            else if (wp >= VK_NUMPAD0 && wp <= VK_NUMPAD9) ch = '0' + (wp - VK_NUMPAD0);
+            if (ch >= 0) {
+                if (g.matHexBuf.size() >= 6) return 0;
+                if (g.matHexBuf.empty()) { material::EffectiveMaterial eff = (g.selMaterial >= 0) ? material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial)) : material::EffectiveMaterial{}; g.matHexBuf = MatHexOf(eff); }
+                // Clear on first digit so typing replaces the colour.
+                if (g.matHexBuf.size() == 6 && !g.matHexUndoPushed) g.matHexBuf.clear();
+                g.matHexBuf.push_back(static_cast<char>(ch));
+                if (g.matHexBuf.size() == 6) {
+                    if (!g.matHexUndoPushed) { material::PushUndo(g.mat); g.matHexUndoPushed = true; }
+                    ApplyMatHex(g.matHexBuf);
+                }
+                InvalidatePanel();
+            }
+            return 0;
+        }
         if (wp == VK_ESCAPE && GetProgSnapshot().active) { ProgRequestCancel(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
-        if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save the pose, Ctrl+O load a pose
-            if (wp == 'Z') UndoPose((GetKeyState(VK_SHIFT) & 0x8000) != 0);
-            else if (wp == 'Y') UndoPose(true);
-            else if (wp == 'S') SavePoseFile();
-            else if (wp == 'O') LoadPoseFile();
+        if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save, Ctrl+O load (pose or materials by tab)
+            if (g.tab == TabMaterials) {
+                if (wp == 'Z') MaterialUndo((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                else if (wp == 'Y') MaterialUndo(true);
+                else if (wp == 'S') SaveMatFile();
+                else if (wp == 'O') LoadMatFile();
+            } else {
+                if (wp == 'Z') UndoPose((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                else if (wp == 'Y') UndoPose(true);
+                else if (wp == 'S') SavePoseFile();
+                else if (wp == 'O') LoadPoseFile();
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }

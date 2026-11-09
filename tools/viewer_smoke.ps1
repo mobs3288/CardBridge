@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
-  asexported, export. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
+  asexported, export, materials. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
 
@@ -221,8 +221,8 @@ try {
     }
     if (Want 'setup') {
         Write-Host 'setup tab'
-        $lay = GoTab 5
-        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 5)
+        $lay = GoTab 6
+        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 6)
         $s = Shot 'setup'
         $actions = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
         Check 'setup: the settings actions are listed' ($actions -gt 3) "$actions visible"
@@ -233,6 +233,38 @@ try {
         Check 'bones: the tab opens' ($null -ne $lay -and $lay.tab -eq 4)
         $s = Shot 'bones'
         Check 'bones: the bone list is there' ($lay.bones.list.Count -gt 3) "$($lay.bones.list.Count) rows"
+    }
+    if (Want 'materials') {
+        Write-Host 'materials tab'
+        $lay = GoTab 5
+        Check 'materials: the tab opens' ($null -ne $lay -and $lay.tab -eq 5)
+        $s = Shot 'materials'
+        $mats = $lay.materials.list.Count
+        Check 'materials: the material list is there' ($mats -gt 0) "$mats rows, selected $($lay.materials.sel)"
+        Check 'materials: the editor is there' ($lay.materials.fieldY.Count -ge 9) "$($lay.materials.fieldY.Count) slider rows"
+        # select the first material, then drag its Red slider and undo it
+        if ($mats -gt 0) {
+            $rowY = [int]$lay.materials.list[0].y
+            Click 100 $rowY 400
+            $lay = Layout
+            Check 'materials: selecting a material answers' ($null -ne $lay -and $lay.materials.sel -ge 0) "sel $($lay.materials.sel)"
+            $a = Shot 'before_material_drag'
+            $rY = [int]$lay.materials.fieldY[0]
+            $x0 = [int]($lay.track[0] + 0.2 * ($lay.track[1] - $lay.track[0]))
+            $x1 = [int]($lay.track[0] + 0.9 * ($lay.track[1] - $lay.track[0]))
+            $undo0 = $lay.materials.undo
+            Drag $x0 $rY $x1 $rY 12
+            $lay = Layout
+            $b = Shot 'material_drag'
+            Check 'materials: the window answers after the drag' ($null -ne $lay)
+            Check 'materials: the drag is one undo step' (($lay.materials.undo - $undo0) -eq 1) "mat undo $undo0 -> $($lay.materials.undo)"
+            Check 'materials: the picture changed' ([V]::DiffView($a.Path, $b.Path, $lay.panel) -gt 0.0005) ("{0:P2} of the view" -f [V]::DiffView($a.Path, $b.Path, $lay.panel))
+            [void](Hook 13); Start-Sleep -Milliseconds 300
+            $lay = Layout
+            $c = Shot 'material_undone'
+            Check 'materials: undo restores the picture' ([V]::Diff($a.Path, $c.Path) -lt 0.002) ("diff {0:P3}" -f [V]::Diff($a.Path, $c.Path))
+            Check 'materials: the window answers after undo' ($null -ne $lay)
+        }
     }
 
     # ---- the skeleton overlay and a bone drag (one gesture = one undo step) ----

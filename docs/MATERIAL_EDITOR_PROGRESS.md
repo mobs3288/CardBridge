@@ -169,14 +169,81 @@ manifest says so, full suite green, no viewer change.
 ---
 
 ## Stage 2 — Material Inspector (viewer)
-Status: **not started.**
+Status: **done** (2026-11-09).
 
-- [ ] `Materials` tab + material list + selection + shared-instance badge.
-- [ ] Classifier picker, preset picker, RGB + HEX colour rows (HSV if simple).
-- [ ] Shading sliders, texture-slot rows, Reset buttons — all through
-      `ApplyOverrides` + dirty flag (same-frame on both renderers).
-- [ ] Drag-start undo snapshot; amber "changed" marker.
-- [ ] `viewer_smoke.ps1` `materials` step.
+**Files changed:**
+- `viewer/main.cpp`:
+  - New `TabMaterials` (“Mats” truncated tab label) between Bones and Setup;
+    `kTabNames`/`TabCount` and panel tabs updated (7 tabs, 51 px pitch still
+    fits the 380 px panel). Setup moved to index 6 (smoke script updated).
+  - `App` gains `material::WorkbenchState mat`, `selMaterial`/`matFilter`/
+    `matScroll`/`matPos`, 9 slider buffers, and HEX entry state.
+  - `CapturesOriginals` on every `WM_LOADED` (fresh character) and resets
+    selection/filter/scroll/input; export snapshots `mat` + `card.sha256`
+    for the manifest.
+  - `LayoutFor(H, boneTab, editRows)` + `Lay()` give Materials its own 13-row
+    editor (filter row + 5-row list + inspector). List reuses
+    `matListTop/Bottom`; editor reuses an offset 13-row block
+    (`matEditTop = boneEditTop`). Filter/class/preset/texture/reset/undo hit
+    rects added to `PanelLayout`.
+  - `SliderFor` extended to `kMatBase = 5000` (R,G,B,opacity,roughness,
+    metallic,specular,emission,normal). `TweakChanged`/`AnyTweak` show the
+    amber “changed” marker; `IsLiveId` includes material ids so they update
+    live without reassembly; `TweakEdited` routes material ids to
+    `MaterialSliderEdited` (write `SceneMaterial` via `ApplyOverrides`, mark
+    dirty, invalidate as-exported bake).
+  - `DrawMaterialsTab` mirroring `DrawBonesTab`: filter row (“Filter: All /
+    class name”), material rows (index + name + `[Class]`, `xN` shared badge,
+    amber when edited, selection bar), header (display name + class), class /
+    preset / MainTex enable row, R/G/B sliders, HEX swatch + text, 6 shading
+    sliders, reset/reset-all/undo/redo row.
+  - `MaterialsTabClick`: filter cycles (All → 11 classes), list selects
+    (syncs buffers), class cycles, preset applies `PresetForClass`
+    (colour-preserving), MainTex enable/disable via `SetTextureEnabled`,
+    sliders drag-start pushes one undo step then live-applies, HEX click
+    starts keyboard entry, texture row toggles, resets and undo/redo buttons.
+  - `SyncMatBuf()` syncs slider buffers from `EffectiveOf` (unless that
+    slider is being dragged) so thumb position and “where the card had it”
+    marker follow edits, resets and undo.
+  - HEX: click the HEX row to edit; type 6 hex digits (live-apply, one undo
+    step per entry), Backspace, Enter/Escape to end. Editor captures
+    `CARDBRIDGE_MATERIALS_PATH` for scripted save/load.
+  - `Render()` highlights the part that owns the selected material
+    (`hoverPart` equivalent) so selection is visible in the viewport on both
+    GPU and software paths.
+  - `Frame()` eases `matPos`; `InvalidateSliderRow()` knows material rows;
+    mouse-move hover over the material list; wheel scrolls the material list;
+    `WM_SETCURSOR` hand over the Materials editor; `Ctrl+Z/Y/S/O` on the
+    Materials tab are material undo/redo/save/load (other tabs keep pose
+    bindings); `SaveMatFile`/`LoadMatFile` mirror the pose file flow.
+  - `StartExport()` snapshots `mat`, calls `ReportUnsupported` on the export
+    copy (unsupported fields appear as manifest issues) and fills
+    `eo.materialFile`/`eo.materialWorkbench` from `MakeMaterialFile` so the
+    `<name>.cardbridge.json` carries a `material_workbench` section.
+  - `DumpTestLayout()` exposes `materials` (list rows/y, `fieldY[9]`, `hexY`,
+    `classY`, `resetY`, `filterY`, `sel`, `overrides`, `undo`/`redo`) and
+    `state.{selMaterial,matUndo,matRedo,matOverrides}` for the smoke script.
+    `WM_TEST` 13/14/15/16 are material undo/redo/save/load.
+- `tools/viewer_smoke.ps1`: Materials step (tab select, list visible, editor
+  rows, select material, drag Red slider, picture change, single undo step,
+  undo restores) + Setup index moved to 6.
+- No core changes (Stage 1 already green): `1772 checks, 0 failed`.
+
+**Behaviour notes:**
+- RGB sliders (0–255) are the primary colour control; HEX is display + live
+  typed entry. HSV sliders were not added (sliders + HEX already satisfy
+  the stage’s “where practical” and reuse `DrawSliderRow` exactly; HSV is
+  deferred as a number-for-number complement).
+- Right-click on a material slider resets that slider to the original
+  (pushes one undo step).
+
+**Test results:** build + full unit suite green (`1772 checks, 0 failed`).
+Smoke script updated; full GUI walk needs a real card + library and is left
+for manual validation / gated CI (same as previous stages).
+
+Exit criteria: colour changes in real time (same-frame `ApplyOverrides`),
+undo/redo per gesture + Ctrl bindings, resets restore originals, other tabs
+untouched (only tab enum + shared `AnyTweak` inclusion of `mat.IsDirty()`).
 
 ---
 
