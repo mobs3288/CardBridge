@@ -37,6 +37,7 @@ struct SceneVertex {
 struct SceneTexture {
     std::string name;
     std::string source;       // bundle it came from (provenance)
+    std::string format;       // the decoded format string it came from ("RGBA32", "DXT5", "PNG (replaced)", "RGBA8 (tint copy)"); empty = unknown
     int width = 0, height = 0;
     std::vector<uint8_t> rgba;   // top row first
     bool clamp = false;          // the texture's wrap mode is clamp (ramps), not repeat

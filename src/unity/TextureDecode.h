@@ -14,4 +14,8 @@ namespace cardbridge::unity {
 // format so the material can be reported untextured.
 std::vector<uint8_t> DecodeTexture(int unityFormat, int width, int height, const uint8_t* data, size_t size);
 
+// The format string recorded on SceneTexture::format for a Unity format id.
+// Unknown ids keep their raw form ("UnityFormat 42") so provenance survives.
+std::string FormatName(int unityFormat);
+
 } // namespace cardbridge::unity

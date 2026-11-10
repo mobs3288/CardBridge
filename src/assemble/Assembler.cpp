@@ -2,6 +2,7 @@
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
+#include "unity/TextureDecode.h"
 
 #include "core/Bytes.h"
 #include "shape/Shape.h"
@@ -617,6 +618,7 @@ struct Builder {
             SceneTexture st;
             st.name = t->name;
             st.source = uf.name();
+            st.format = unity::FormatName(t->unityFormat);
             st.width = t->width;
             st.height = t->height;
             st.pixelHash = Fnv1a64(t->rgba.data(), t->rgba.size());
@@ -737,6 +739,7 @@ struct Builder {
             result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
             scene.textures[static_cast<size_t>(result)].clamp = t->wrapMode == 1;
             scene.textures[static_cast<size_t>(result)].srgb = t->colorSpace == 1;
+            scene.textures[static_cast<size_t>(result)].format = unity::FormatName(t->unityFormat);
         }
         shaderTexCache[key] = result;
         return result;
@@ -794,6 +797,7 @@ struct Builder {
         SceneTexture st;
         st.name = name;
         st.source = source;
+        st.format = "RGBA8";
         st.width = w;
         st.height = h;
         st.pixelHash = Fnv1a64(rgba.data(), rgba.size());
@@ -1115,7 +1119,7 @@ struct Builder {
     // Every transform of an item that works as a bone becomes a scene bone, not only those a mesh is skinned to: the loose joints and
     // end nodes of hair and accessory chains (the DynamicBone chains) and the helper nodes under skin bones. A transform that carries a
     // renderer is geometry, not a bone.
-    void addItemBones(UnityFile& uf, int64_t prefabRoot, const std::string& partId, const Mat4& placement, int staticBone, bool accessoryMode) {
+    void addItemBones(UnityFile& uf, int64_t prefabRoot, const std::string& partId, const Mat4& placement, int staticBone, bool accessoryMode, bool noShake = false) {
         std::set<int64_t> geometry, seeds, bones;
         for (const auto& r : uf.renderersUnder(prefabRoot)) {
             geometry.insert(r.xformId);
@@ -1137,13 +1141,16 @@ struct Builder {
             if (accessoryMode) accessoryBone(uf, id, prefabRoot, placement, staticBone, partId);
             else itemBone(uf, id, prefabRoot, placement, partId);
         }
-        addChains(uf, prefabRoot, partId, accessoryMode);
+        addChains(uf, prefabRoot, partId, accessoryMode, noShake);
     }
 
     // The DynamicBone chains of an item (hair strands, skirt and ribbon joints, the body's breast and hip jiggle) as scene chains, for
     // the PMX rigid bodies and joints. Handles the classic component (a root and everything under it) and the character's Ver02 one
     // (a root, a list of bones, per-bone parameters in the selected pattern).
-    void addChains(UnityFile& uf, int64_t prefabRoot, const std::string& partId, bool accessoryMode) {
+    void addChains(UnityFile& uf, int64_t prefabRoot, const std::string& partId, bool accessoryMode, bool noShake = false) {
+        // ChaFile noShake: the maker marked this accessory/hair item rigid (no DynamicBone sway).
+        // The game creates no chains for it; keep it rigid so hair does not droop in PMX.
+        if (noShake) return;
         auto sceneBoneOf = [&](int64_t id) -> int {
             const unity::Xform* x = uf.xform(id);
             if (!x) return -1;
@@ -2237,6 +2244,28 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // --- card items ------------------------------------------------------
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
     log("assembling " + std::to_string(work.size()) + " card item(s)");
+    auto itemWhere = [](const resolve::ItemRef& ref, const resolve::ResolvedItem& item) {
+        // A name of where this item is supposed to come from, with the mod identity when
+        // we know it (the card names a GUID; the mod index gives the display name when installed):
+        // "outfit top (id 100106001; mod 'Heavy Ribbons' by hnrocemii v1.0 (com.foo.bar))"
+        std::string s = ref.label.empty() ? ref.partId : ref.label;
+        s += " (id " + std::to_string(ref.id);
+        if (!item.modGuid.empty()) {
+            s += "; mod '";
+            if (!item.modName.empty()) {
+                s += item.modName;
+                if (!item.modVersion.empty()) s += " v" + item.modVersion;
+                if (!item.modAuthor.empty()) s += " by " + item.modAuthor;
+                if (!item.modGuid.empty()) s += " (" + item.modGuid + ")";
+            } else {
+                s += item.modGuid;
+            }
+            s += ')';
+        } else {
+            s += ')';
+        }
+        return s;
+    };
     report(0.15, "resolving items");
     for (const auto& wr : work) {   // which installed mods ship the same bundle path (the one loaded last is what the game uses)
         resolve::ResolvedItem probe = resolver.resolve(card, wr);
@@ -2304,9 +2333,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.modPath = item.modPath;
         int partIdx = static_cast<int>(scene.parts.size());
 
-        if (item.ambiguous) scene.warn(ref.partId, "more than one installed file matches mod '" + item.modGuid + "'; the first was used");
+        if (item.ambiguous) scene.warn(ref.partId, "more than one installed file matches " + itemWhere(ref, item) + "; the first was used");
         if (!item.ok()) {
-            scene.warn(ref.partId, item.detail);
+            // The card names a mod we cannot find, or one we installed that does not provide this item:
+            // say exactly what is missing (which item, which id, and which mod) and why it is out.
+            scene.warn(ref.partId, "missing: " + itemWhere(ref, item) + "; the item was skipped (" + item.detail + ")");
+            part.detail = "missing: " + itemWhere(ref, item) + "; the item was skipped";
             scene.parts.push_back(std::move(part));
             continue;
         }
@@ -2315,8 +2347,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         auto uf = resolver.openBundle(item, &whyOpen);
         if (!uf) {
             part.status = "missing-bundle";
-            part.detail = whyOpen;
-            scene.warn(ref.partId, "bundle not loaded: " + whyOpen);
+            part.detail = "missing data for " + itemWhere(ref, item) + ": " + whyOpen;
+            scene.warn(ref.partId, part.detail);
             scene.parts.push_back(std::move(part));
             continue;
         }
@@ -2375,7 +2407,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         const int64_t itemRoot = uf->findPrefabRoot(item.assetName());
         if (!itemRoot) {
             part.status = "missing-bundle";
-            part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel();
+            part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel() + " (" + itemWhere(ref, item) + ")";
             scene.warn(ref.partId, part.detail);
             scene.parts.push_back(std::move(part));
             continue;
@@ -2397,6 +2429,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         bool accessoryMode = ref.group == "Accessories";
         bool garmentAsAccessory = false;
+        // ChaFile noShake (accessories and hair parts): rigid in the game, no DynamicBone sway.
+        bool itemNoShake = false;
+        if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
+            const Value& ap = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex));
+            if (ap.isMap()) itemNoShake = ap.at("noShake").asBool(false);
+        } else if (ref.group == "Hair") {
+            size_t kind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
+            itemNoShake = card.hair.at("parts").at(kind).at("noShake").asBool(false);
+        }
         if (accessoryMode) {
             // A garment prefab (cf_o_root with the body's own bone names) worn through an accessory slot is bound to the
             // character's skeleton by bone name like any garment; it does not hang on the slot's attach node, whose offset
@@ -2872,7 +2913,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.simW = nullptr;
         // Off by default: against the game dumps the settle helped one card in four and hurt the others (docs: sidecar notes), so hair and accessory chains
         // stay at their authored pose unless CARDBRIDGE_DYNBONE=1.
-        if (std::getenv("CARDBRIDGE_DYNBONE") && ((ref.group == "Hair" && b.hairParent) || accessoryMode)) {
+        if (!itemNoShake && std::getenv("CARDBRIDGE_DYNBONE") && ((ref.group == "Hair" && b.hairParent) || accessoryMode)) {
             const Mat4 anchor = placement;
             Mat4 start;
             const Mat4* startPtr = nullptr;
@@ -3115,7 +3156,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             int mi = b.addRenderer(*uf, r, itemRoot, partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr, hairTintColorForRenderer);
             if (mi >= 0) part.meshes.push_back(mi);
         }
-        b.addItemBones(*uf, itemRoot, ref.partId, placement, staticBone, accessoryMode);
+        b.addItemBones(*uf, itemRoot, ref.partId, placement, staticBone, accessoryMode, itemNoShake);
         if (ref.group == "Head") {   // the expressions the face component can play: every pattern of brows, eyes and mouth, closed and open
             for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "FaceBlendShape") continue;

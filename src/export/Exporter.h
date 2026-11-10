@@ -24,6 +24,8 @@ struct ExportOptions {
     int outfit = 0;                // recorded in the manifest
     std::string assetLibrary;      // recorded as provenance only
     std::string modsFolder;        // recorded as provenance only
+    std::string materialFile;      // --materials provenance ("" = none)
+    nlohmann::json materialWorkbench;   // the cardbridge-materials object for the manifest (null = none)
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative

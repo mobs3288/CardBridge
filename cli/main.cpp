@@ -20,6 +20,7 @@
 #include "core/MemoryProbe.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
+#include "material/MaterialWorkbench.h"
 #include <stb_image_write.h>
 
 #include "export/GpuView.h"
@@ -113,6 +114,7 @@ void usage() {
         "             [--apose-degrees N] [--tpose]   the rest pose has the arms N degrees down from the T-pose (40 by default,\n"
         "                                             what a MikuMikuDance motion expects); --tpose keeps the T-pose\n"
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
+        "             [--materials <file.json>]      a material workbench file (cardbridge-materials v1), applied to the export\n"
         "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
         "                                             standard (Japanese) names so a motion (VMD) finds them\n"
@@ -513,6 +515,11 @@ int cmdConvert(const Args& a) {
     auto t0 = std::chrono::steady_clock::now();
     assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
     auto t1 = std::chrono::steady_clock::now();
+    // Material workbench originals, captured straight after assembly so every
+    // later edit (including --materials below) has an untouched baseline.
+    material::WorkbenchState workbench;
+    material::CaptureOriginals(workbench, scene);
+    nlohmann::json materialWorkbenchJson;
     LogMemory("after assemble");
     // --hide / --nude hide parts for the export: hiding the heeled shoe must drop the foot
     // pitch at once (the viewer's hide/show does the same live). Sync the shoes' preview
@@ -604,6 +611,34 @@ int cmdConvert(const Args& a) {
         const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
                                                      : assemble::CardSagDefault(scene, bustSize);
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt, settleSag);
+    }
+
+    // --materials <file.json>: apply workbench overrides after the pose bake
+    // (so the shader bake below sees the edited colours), before the part
+    // state is fixed for export.
+    if (!a.get("materials").empty()) {
+        std::string err;
+        try {
+            const Bytes raw = fileio::ReadFile(a.get("materials"));
+            material::MaterialFile file;
+            if (!material::MaterialFileFromJson(std::string(raw.begin(), raw.end()), file, &err)) {
+                std::fprintf(stderr, "error: %s: %s\n", a.get("materials").c_str(), err.c_str());
+                return 1;
+            }
+            if (!file.cardSha256.empty() && !c.sha256.empty() && file.cardSha256 != c.sha256)
+                std::fprintf(stderr, "  materials: the file was made for a different card (card_sha256 mismatch); applying anyway\n");
+            std::vector<std::string> unknown;
+            const int applied = material::ApplyMaterialFile(scene, workbench, file, &unknown);
+            for (const auto& u : unknown) std::fprintf(stderr, "  materials: '%s' is not in this scene; skipped\n", u.c_str());
+            material::ReportUnsupported(scene, workbench);
+            std::fprintf(stderr, "  materials: %d override(s) from %s\n", applied, a.get("materials").c_str());
+            materialWorkbenchJson = nlohmann::json::parse(material::MaterialFileToJson(file), nullptr, false);
+            if (materialWorkbenchJson.is_discarded()) materialWorkbenchJson["file"] = fileio::FileName(a.get("materials"));
+            else materialWorkbenchJson["file"] = fileio::FileName(a.get("materials"));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: cannot read the materials file %s: %s\n", a.get("materials").c_str(), e.what());
+            return 1;
+        }
     }
 
     // --hide outfit0.top,outfit0.bra unticks parts and --nude ticks the Nude body box: the picture and the PMX start that way (the viewer's checkboxes); a hidden item is not in the PMX at all, bones included (1:1 with the viewer)
@@ -712,6 +747,8 @@ int cmdConvert(const Args& a) {
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
     eo.assetLibrary = a.get("library");
     eo.modsFolder = a.get("mods");
+    eo.materialFile = a.get("materials");
+    if (!materialWorkbenchJson.is_null()) eo.materialWorkbench = materialWorkbenchJson;
     eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     eo.progress = [](double f, const std::string& stage) { printProgress(f, "exporting: " + stage); };
     try {

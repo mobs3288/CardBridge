@@ -33,7 +33,10 @@
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 #include "library/Library.h"
+#include "material/MaterialWorkbench.h"
+#include "material/UvDiagnostics.h"
 #include "pmx/PmxWriter.h"
+#include "unity/TextureDecode.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
@@ -2581,7 +2584,661 @@ void unitTests() {
         CHECK(std::fabs(heelY - toeY) < 0.003f);   // both contacts flush
         CHECK(heelY > -1e-5f && toeY > -1e-5f);
     });
+
+    // ---- Material Workbench (Stage 1) ----
+    auto makeMatScene = [] {
+        using namespace assemble;
+        Scene s;
+        s.name = "matfixture";
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneTexture t;
+        t.name = "main";
+        t.width = 2; t.height = 2; t.rgba.assign(16, 255);
+        s.textures.push_back(t);
+        SceneMaterial a;
+        a.name = "mf_m_top";
+        a.shader = "Shader Forge/main_item";
+        a.texture = 0;
+        a.diffuse = {0.9f, 0.9f, 0.9f, 1.0f};
+        a.props.emplace_back("_Color", Vec4{0.9f, 0.9f, 0.9f, 1.0f});
+        a.props.emplace_back("_SpecularColor", Vec4{0.1f, 0.1f, 0.1f, 1.0f});
+        a.props.emplace_back("_SpecularPower", Vec4{0.2f, 0, 0, 0});
+        a.texProps.push_back({"_MainTex", 0, {1, 1, 0, 0}});
+        a.specular = {0.02f, 0.02f, 0.02f};
+        s.materials.push_back(a);
+        SceneMaterial b;
+        b.name = "cf_m_hair";
+        b.shader = "Shader Forge/main_hair";
+        b.diffuse = {0.2f, 0.2f, 0.5f, 1.0f};
+        b.props.emplace_back("_Color", Vec4{0.2f, 0.2f, 0.5f, 1.0f});
+        s.materials.push_back(b);
+        auto vert = [](SceneMesh& m, float x) { SceneVertex v; v.pos = {x, 0, 0}; v.normal = {0, 0, 1}; v.uv = {0.5f, 0.5f}; m.vertices.push_back(v); };
+        SceneMesh m0; vert(m0, 0); vert(m0, 1); vert(m0, 0.5f);
+        m0.submeshes.push_back({0, {0, 1, 2}});
+        s.meshes.push_back(m0);
+        vert(m0, 0); vert(m0, 1); vert(m0, 0.5f);
+        m0.submeshes[0].material = 1;
+        s.meshes.push_back(m0);
+        ScenePart p0; p0.id = "outfit0.top"; p0.group = "Outfit"; p0.meshes = {0}; s.parts.push_back(p0);
+        ScenePart p1; p1.id = "hair.back"; p1.group = "Hair"; p1.meshes = {1}; s.parts.push_back(p1);
+        return s;
+    };
+
+    test("workbench: classification guesses old shader names, Generic is the fallback", [&] {
+        using namespace material;
+        CHECK(ClassifyMaterial("Shader Forge/main_skin", "cf_m_body") == MaterialClass::Skin);
+        CHECK(ClassifyMaterial("Shader Forge/main_hair", "cf_m_hair") == MaterialClass::Hair);
+        CHECK(ClassifyMaterial("Shader Forge/main_item", "mf_m_top") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/main_opaque", "x") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/main_alpha", "x") == MaterialClass::Fabric);
+        CHECK(ClassifyMaterial("Shader Forge/toon_eye", "x") == MaterialClass::Eyes);
+        CHECK(ClassifyMaterial("Shader Forge/toon_nose", "x") == MaterialClass::Eyelashes);
+        CHECK(ClassifyMaterial("Shader Forge/glasses", "cf_m_lens") == MaterialClass::Glass);
+        CHECK(ClassifyMaterial("Shader Forge/mnpb", "x") == MaterialClass::Generic);
+        CHECK(ClassifyMaterial("unknown shader", "thing") == MaterialClass::Generic);
+        MaterialClass c;
+        CHECK(ClassFromName("Fabric/Default", c) && c == MaterialClass::Fabric);
+        CHECK(ClassFromName("glass", c) && c == MaterialClass::Glass);
+        CHECK(!ClassFromName("not-a-class", c));
+        CHECK(std::string(ClassName(MaterialClass::Eyelashes)) == "Eyelashes");
+    });
+
+    test("workbench: presets set shading but never overwrite the colour", [&] {
+        using namespace material;
+        for (MaterialClass cls : {MaterialClass::Skin, MaterialClass::Fabric, MaterialClass::Hair, MaterialClass::Eyes, MaterialClass::Eyelashes, MaterialClass::Metal, MaterialClass::Plastic, MaterialClass::Leather, MaterialClass::Glass, MaterialClass::Rubber, MaterialClass::Generic}) {
+            MaterialOverride p = PresetForClass(cls);
+            CHECK(p.class_ && *p.class_ == cls);
+            CHECK(!p.baseColor.has_value());
+            CHECK(p.preset && *p.preset == PresetName(cls));
+        }
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        ApplyPreset(st, 0, MaterialClass::Metal);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].diffuse.x == 0.9f);   // colour untouched
+        CHECK(st.overrides[0]->roughness && std::fabs(*st.overrides[0]->roughness - 0.25f) < 1e-6f);
+        // Effective view reflects the preset.
+        EffectiveMaterial e = EffectiveOf(st, 0);
+        CHECK(e.cls == MaterialClass::Metal && e.metallic == 1.0f && std::fabs(e.roughness - 0.25f) < 1e-5f);
+        // Fabric preset carries transmission; skin carries subsurface.
+        CHECK(PresetForClass(MaterialClass::Fabric).transmission && std::fabs(PresetForClass(MaterialClass::Fabric).transmission->strength - 0.25f) < 1e-6f);
+        CHECK(PresetForClass(MaterialClass::Skin).subsurface && std::fabs(PresetForClass(MaterialClass::Skin).subsurface->strength - 0.35f) < 1e-6f);
+    });
+
+    test("workbench: base colour and opacity write diffuse and _Color, nothing else", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.8f};
+        o.opacity = 0.5f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - 0.2f) < 1e-6f && std::fabs(s.materials[0].diffuse.w - 0.5f) < 1e-6f);
+        bool colorOk = false;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_Color") colorOk = std::fabs(pr.second.x - 0.2f) < 1e-6f && std::fabs(pr.second.w - 0.5f) < 1e-6f;
+        CHECK(colorOk);
+        CHECK(s.materials[1].diffuse.z == 0.5f);   // the other material is untouched
+        CHECK(st.IsDirty() && st.OverrideCount() == 1);
+    });
+
+    test("workbench: the base colour is _Color when stored (diffuse stays white in a real scene), and is written even when absent", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        // A real assembled material keeps its colour in _Color; diffuse is the
+        // PMX-facing fallback and stays white. The inspector must show _Color.
+        s.materials[1].diffuse = {1, 1, 1, 1};
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        EffectiveMaterial e = EffectiveOf(st, 1);
+        CHECK(std::fabs(e.baseColor.x - 0.2f) < 1e-6f && std::fabs(e.baseColor.z - 0.5f) < 1e-6f);
+        CHECK(std::fabs(e.opacity - 1.0f) < 1e-6f);
+        // A create-job material (skin, outfit) has no stored _Color: an edit
+        // must add it, or the game shader sees no tint at all.
+        for (auto& pr : s.materials[1].props) if (pr.first == "_Color") pr.first = "_Removed";
+        WorkbenchState st2;
+        CaptureOriginals(st2, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.25f, 0.5f, 0.75f, 1.0f};
+        SetOverride(st2, 1, o);
+        ApplyOverrides(s, st2);
+        bool added = false;
+        for (const auto& pr : s.materials[1].props) if (pr.first == "_Color") added = std::fabs(pr.second.x - 0.25f) < 1e-6f && std::fabs(pr.second.z - 0.75f) < 1e-6f;
+        CHECK(added);
+    });
+
+    test("workbench: HSV round trip and known colours (colour picker maths)", [&] {
+        using namespace material;
+        auto close3 = [](const Vec3& a, const Vec3& b) {
+            return std::fabs(a.x - b.x) < 1e-5f && std::fabs(a.y - b.y) < 1e-5f && std::fabs(a.z - b.z) < 1e-5f;
+        };
+        CHECK(close3(RgbToHsv(Vec3{1, 0, 0}), Vec3{0, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 1, 0}), Vec3{1.0f / 3.0f, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 0, 1}), Vec3{2.0f / 3.0f, 1, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0, 0, 0}), Vec3{0, 0, 0}));
+        CHECK(close3(RgbToHsv(Vec3{1, 1, 1}), Vec3{0, 0, 1}));
+        CHECK(close3(RgbToHsv(Vec3{0.5f, 0.5f, 0.5f}), Vec3{0, 0, 0.5f}));
+        // h wraps: 1.0 is red again, negatives wrap too.
+        CHECK(close3(HsvToRgb(1.0f, 1, 1), Vec3{1, 0, 0}));
+        CHECK(close3(HsvToRgb(-0.25f, 1, 1), Vec3{0.5f, 0, 1}));
+        for (const Vec3 rgb : {Vec3{1, 0, 0}, Vec3{0.2f, 0.6f, 0.9f}, Vec3{0.9f, 0.8f, 0.2f}, Vec3{0.25f, 0.25f, 0.3f}}) {
+            const Vec3 hsv = RgbToHsv(rgb);
+            CHECK(close3(HsvToRgb(hsv.x, hsv.y, hsv.z), rgb));
+        }
+        // Out-of-range inputs are clamped, never produce garbage.
+        CHECK(close3(HsvToRgb(0, 2.0f, -1.0f), Vec3{0, 0, 0}));
+        CHECK(close3(RgbToHsv(Vec3{2, -1, 0.5f}), RgbToHsv(Vec3{1, 0, 0.5f})));
+    });
+
+    test("workbench: MakeTintedTexture multiplies RGBA, clamps and rehashes the pixels", [&] {
+        using namespace material;
+        assemble::SceneTexture t;
+        t.name = "skin";
+        t.width = 2; t.height = 1;
+        t.rgba = {100, 150, 200, 255, 10, 20, 30, 128};
+        t.pixelHash = 1234;
+        const assemble::SceneTexture out = MakeTintedTexture(t, Vec4{0.5f, 2.0f, 0.0f, 0.5f});
+        CHECK(out.width == 2 && out.height == 1 && out.rgba.size() == 8);
+        CHECK(out.rgba[0] == 50 && out.rgba[1] == 255 && out.rgba[2] == 0 && out.rgba[3] == 128);
+        // 10*0.5 = 5; 20*2 = 40; 30*0 = 0; alpha 128*0.5 = 64.
+        CHECK(out.rgba[4] == 5 && out.rgba[5] == 40 && out.rgba[6] == 0 && out.rgba[7] == 64);
+        // The copy owns fresh pixels: the source is untouched, and the hash
+        // identifies the new pixels (so a consumer can tell the copy changed).
+        CHECK(t.rgba[0] == 100 && t.rgba[1] == 150 && t.rgba[2] == 200 && t.pixelHash == 1234);
+        CHECK(out.pixelHash != 0 && out.pixelHash != t.pixelHash);
+        CHECK(out.pixelHash == Fnv1a64(out.rgba.data(), out.rgba.size()));
+        // Identity ratio keeps the values exactly.
+        const assemble::SceneTexture same = MakeTintedTexture(t, Vec4{1, 1, 1, 1});
+        CHECK(same.rgba == t.rgba);
+        // Malformed pixel data is returned as-is instead of read out of bounds.
+        assemble::SceneTexture broken;
+        broken.name = "broken"; broken.width = 4; broken.height = 4; broken.rgba = {1, 2, 3};
+        const assemble::SceneTexture kept = MakeTintedTexture(broken, Vec4{0, 0, 0, 0});
+        CHECK(kept.rgba == broken.rgba);
+        // The tint copy records its own format so the inspector does not repeat DXT5.
+        CHECK(out.format == "RGBA8 (tint copy)");
+    });
+
+    test("workbench: Unity format names round-trip to the inspector string", [] {
+        CHECK(unity::FormatName(1) == "Alpha8");
+        CHECK(unity::FormatName(3) == "RGB24");
+        CHECK(unity::FormatName(4) == "RGBA32");
+        CHECK(unity::FormatName(12) == "DXT5");
+        CHECK(unity::FormatName(99) == "UnityFormat 99");
+    });
+
+    test("workbench: UV diagnostics flag missing, out-of-range, stretch, overlap, seams", [] {
+        using namespace assemble;
+        auto mkVert = [](float px, float py, float u, float v) {
+            SceneVertex s; s.pos = {px, py, 0}; s.normal = {0, 0, 1}; s.uv = {u, v}; return s;
+        };
+        // One small open sheet (two triangles sharing an edge) + one isolated
+        // triangle with the same UV extent (overlap) + one NaN vertex.
+        SceneMesh m;
+        m.vertices.push_back(mkVert(0, 0, 0, 0));
+        m.vertices.push_back(mkVert(1, 0, 1, 0));
+        m.vertices.push_back(mkVert(0, 1, 0, 1));
+        m.vertices.push_back(mkVert(1, 1, 1, 1));
+        m.vertices.push_back(mkVert(2, 0, std::nan(""), 0.5f));
+        m.vertices.push_back(mkVert(3, 0, 1.5f, 0.5f));   // out of range (u=1.5)
+        m.vertices.push_back(mkVert(2, 1, 0.5f, 0.5f));
+        SceneSubmesh sub;
+        sub.material = 0;
+        sub.indices = {0, 1, 2, 0, 1, 3, 3, 4, 5, 4, 6, 5};
+        m.submeshes.push_back(sub);
+        CHECK(material::CountMissingUv(m) == 1);
+        CHECK(material::FindMissingUv(m).size() == 1 && material::FindMissingUv(m)[0] == 4);
+        float worst = 0;
+        CHECK(material::CountOutOfRange(m, 0.02f, worst) == 1 && std::fabs(worst - 0.48f) < 1e-4f);
+        // With a zero margin the same vertex still counts; with 0.6 it does not.
+        CHECK(material::CountOutOfRange(m, 0.6f, worst) == 0);
+        const material::UvReport rep = material::DiagnoseUv(m, 1024, 1024);
+        CHECK(rep.missingUvVerts == 1 && rep.outOfRangeVerts == 1);
+        CHECK(rep.triangles == 4);
+        CHECK(rep.islands == 1);            // all four share a vertex chain (0-1-3-4-5)
+        CHECK(rep.overlapPairs == 0);       // one island: nothing to overlap with
+        // Two disjoint islands with the same UV extent overlap each other.
+        SceneMesh two;
+        two.vertices.push_back(mkVert(0, 0, 0, 0));
+        two.vertices.push_back(mkVert(1, 0, 1, 0));
+        two.vertices.push_back(mkVert(0, 1, 0, 1));
+        two.vertices.push_back(mkVert(2, 0, 0, 0));
+        two.vertices.push_back(mkVert(3, 0, 1, 0));
+        two.vertices.push_back(mkVert(2, 1, 0, 1));
+        SceneSubmesh tsub;
+        tsub.material = 0;
+        tsub.indices = {0, 1, 2, 3, 4, 5};
+        two.submeshes.push_back(tsub);
+        CHECK(material::UvIslands(two).size() == 2);
+        CHECK(material::UvOverlapPairs(two) == 1);
+        CHECK(rep.boundaryEdges > 0 && rep.totalEdges > 0 && rep.seamTriangles > 0);
+        CHECK(rep.stretchMin >= 0.0f && rep.stretchMax >= rep.stretchMin);
+        CHECK(rep.worstStretchTri >= 0 && rep.worstStretchTri < 4);
+        // A closed tetra (every edge shared by two triangles) has no seams.
+        SceneMesh closed;
+        closed.vertices.push_back(mkVert(0, 0, 0, 0));
+        closed.vertices.push_back(mkVert(1, 0, 1, 0));
+        closed.vertices.push_back(mkVert(0, 1, 0, 1));
+        closed.vertices.push_back(mkVert(1, 1, 0.5f, 0.5f));
+        SceneSubmesh csub;
+        csub.material = 0;
+        csub.indices = {0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3};
+        closed.submeshes.push_back(csub);
+        int total = 0, seamTris = 0;
+        CHECK(material::CountSeams(closed, total, seamTris) == 0 && total == 6 && seamTris == 0);
+        CHECK(material::UvIslands(closed).size() == 1);
+        // Stretch: a dense-UV triangle vs a sparse one — densities differ.
+        SceneMesh st;
+        st.vertices.push_back(mkVert(0, 0, 0, 0));
+        st.vertices.push_back(mkVert(1, 0, 1, 0));
+        st.vertices.push_back(mkVert(0, 1, 0, 1));
+        st.vertices.push_back(mkVert(10, 0, 0.2f, 0));
+        st.vertices.push_back(mkVert(11, 0, 0.4f, 0));
+        st.vertices.push_back(mkVert(10, 1, 0.2f, 0.2f));
+        SceneSubmesh ssub;
+        ssub.material = 0;
+        ssub.indices = {0, 1, 2, 3, 4, 5};
+        st.submeshes.push_back(ssub);
+        float mn, mx, mean;
+        int worst2;
+        std::vector<material::UvStretchTri> per;
+        material::UvStretchAll(st, 1024, 1024, mn, mx, mean, worst2, &per);
+        CHECK(per.size() == 2 && mx > mn * 4.0f && worst2 >= 0);
+        // UvTrisForMaterial picks only the named material's triangles.
+        Scene scene;
+        scene.meshes.push_back(m);
+        SceneMesh other;
+        other.vertices = {mkVert(0, 0, 0, 0), mkVert(1, 0, 1, 0), mkVert(0, 1, 0, 1)};
+        SceneSubmesh osub;
+        osub.material = 1;
+        osub.indices = {0, 1, 2};
+        other.submeshes.push_back(osub);
+        scene.meshes.push_back(other);
+        auto tris0 = material::UvTrisForMaterial(scene, 0);
+        auto tris1 = material::UvTrisForMaterial(scene, 1);
+        CHECK(tris0.size() == 4 && tris1.size() == 1);
+        CHECK(tris0[0].mesh == 0 && tris1[0].mesh == 1);
+    });
+
+    test("workbench: an unanalyseable shader keeps the cheap _Color path, no tint copy", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        s.materials[0].shaderIndex = 0;
+        assemble::SceneShader sh;
+        sh.name = "Shader Forge/main_item";
+        s.shaders.push_back(sh);   // empty blob: cannot be analysed
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.5f, 0.5f, 0.5f, 1.0f};
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(s.textures.size() == 1);            // no tint copy allocated
+        CHECK(st.changedTextures.empty());        // and no texture upload requested
+        CHECK(s.materials[0].texture == 0);       // original main texture still bound
+        CHECK(std::fabs(s.materials[0].diffuse.x - 0.5f) < 1e-6f);
+        bool colorOk = false;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_Color") colorOk = std::fabs(pr.second.x - 0.5f) < 1e-6f;
+        CHECK(colorOk);
+    });
+
+    test("workbench: roughness maps to _SpecularPower, specular writes colour and derived gloss", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.roughness = 0.8f;   // strength 0.2
+        o.specular = Vec3{1, 0.5f, 0};
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        float power = -1;
+        for (const auto& pr : s.materials[0].props) if (pr.first == "_SpecularPower") power = pr.second.x;
+        CHECK(std::fabs(power - 0.2f) < 1e-5f);
+        CHECK(std::fabs(s.materials[0].specular.x - 0.2f) < 1e-5f && std::fabs(s.materials[0].specular.y - 0.1f) < 1e-5f);
+        EffectiveMaterial e = EffectiveOf(st, 0);
+        CHECK(std::fabs(e.roughness - 0.8f) < 1e-5f && std::fabs(e.specularPower - 0.2f) < 1e-5f);
+    });
+
+    test("workbench: reset restores the original bit for bit, reset-parameter keeps siblings", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        const auto before = s.materials[0];
+        MaterialOverride o;
+        o.baseColor = Vec4{1, 0, 0, 1};
+        o.roughness = 0.1f;
+        o.opacity = 0.3f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].diffuse.x == 1.0f && s.materials[0].diffuse.y == 0.0f);
+        ResetParameter(st, 0, ResetParam::BaseColor);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - before.diffuse.x) < 1e-6f);
+        CHECK(std::fabs(s.materials[0].diffuse.w - 0.3f) < 1e-6f);   // opacity survives the param reset
+        ResetMaterial(st, 0);
+        ApplyOverrides(s, st);
+        CHECK(std::fabs(s.materials[0].diffuse.x - before.diffuse.x) < 1e-6f && s.materials[0].props.size() == before.props.size());
+        CHECK(!st.IsDirty());
+    });
+
+    test("workbench: JSON round trip, version and unknown-field tolerance, unknown material warned", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.class_ = MaterialClass::Fabric;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.75f};
+        o.roughness = 0.8f;
+        o.preset = "Fabric/Default";
+        SetOverride(st, 0, o);
+        MaterialFile f = MakeMaterialFile(s, st, "deadbeef");
+        const std::string text = MaterialFileToJson(f);
+        MaterialFile back;
+        std::string err;
+        CHECK(MaterialFileFromJson(text, back, &err));
+        CHECK(back.entries.size() == 1 && back.cardSha256 == "deadbeef");
+        CHECK(back.entries[0].part == "outfit0.top" && back.entries[0].material == "mf_m_top");
+        // Apply the reloaded file to a fresh state with the same scene.
+        assemble::Scene s2 = makeMatScene();
+        WorkbenchState st2;
+        CaptureOriginals(st2, s2);
+        std::vector<std::string> unknown;
+        CHECK(ApplyMaterialFile(s2, st2, back, &unknown) == 1 && unknown.empty());
+        CHECK(s2.materials[0].diffuse.x == 0.2f && s2.materials[0].diffuse.w == 0.75f);
+        // Unknown material: warned, not fatal.
+        MaterialFile bad;
+        MaterialEntry e; e.part = "outfit0.top"; e.material = "nope"; e.ov.opacity = 0.5f;
+        bad.entries.push_back(e);
+        std::vector<std::string> unk2;
+        CHECK(ApplyMaterialFile(s2, st2, bad, &unk2) == 0 && unk2.size() == 1);
+        bool warned = false;
+        for (const auto& is : s2.issues) warned = warned || is.message.find("nope") != std::string::npos;
+        CHECK(warned);
+        // Version / format rejections with reasons.
+        for (const char* badJson : {"", "not json", "[]", R"({"format":"other","version":1})", R"({"format":"cardbridge-materials","version":2})",
+                                    R"({"format":"cardbridge-materials","version":1,"materials":[{"material":"m","class":"Nope"}]})",
+                                    R"({"format":"cardbridge-materials","version":1,"materials":[{"part":"p"}]})"}) {
+            err.clear();
+            CHECK(!MaterialFileFromJson(badJson, back, &err) && !err.empty());
+        }
+        // Unknown fields are ignored.
+        CHECK(MaterialFileFromJson(R"({"format":"cardbridge-materials","version":1,"future":true,"materials":[{"part":"p","material":"m","opacity":0.5,"future":1}]})", back, &err));
+        CHECK(back.entries.size() == 1 && back.entries[0].ov.opacity && std::fabs(*back.entries[0].ov.opacity - 0.5f) < 1e-6f);
+    });
+
+    test("workbench: undo/redo is one step per edit, redo dies on a new edit", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o1; o1.opacity = 0.2f;
+        MaterialOverride o2; o2.opacity = 0.4f;
+        SetOverride(st, 0, o1);
+        CHECK(CanUndo(st) && !CanRedo(st));
+        SetOverride(st, 0, o2);
+        CHECK(st.undoStack.size() == 2);
+        CHECK(Undo(st) && std::fabs(*st.overrides[0]->opacity - 0.2f) < 1e-6f);
+        CHECK(Undo(st) && !st.IsDirty());
+        CHECK(Redo(st) && std::fabs(*st.overrides[0]->opacity - 0.2f) < 1e-6f);
+        MaterialOverride o3; o3.opacity = 0.9f;
+        SetOverride(st, 0, o3);
+        CHECK(!CanRedo(st));   // the new edit killed the redo branch
+        CHECK(!Redo(st));
+    });
+
+    test("workbench: texture enable/disable, rebind and replace; missing is warned not crashed", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        CHECK(SetTextureEnabled(s, st, 0, "_MainTex", false));
+        CHECK(s.materials[0].texture == -1);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].texture == -1);
+        SetTextureEnabled(s, st, 0, "_MainTex", true);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[0].texture == 0);
+        assemble::SceneTexture rep;
+        rep.name = "rep"; rep.width = 1; rep.height = 1; rep.rgba = {10, 20, 30, 255};
+        CHECK(ReplaceTexture(s, st, 0, "_MainTex", rep) == 1);
+        CHECK(s.materials[0].texture == 1 && s.textures.size() == 2);
+        // Out-of-range rebind is refused with a warning and no state change.
+        const size_t issuesBefore = s.issues.size();
+        CHECK(!RebindTexture(s, st, 0, "_MainTex", 99));
+        CHECK(s.issues.size() > issuesBefore && s.materials[0].texture == 1);
+        // A broken replacement texture is refused.
+        assemble::SceneTexture broken; broken.name = "broken";
+        CHECK(ReplaceTexture(s, st, 0, "_MainTex", broken) == -1);
+    });
+
+    test("workbench: shared materials edit every use; copy/paste and multi-apply keep instances separate", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        // Make material 0 shared: a second submesh on the same mesh names it.
+        s.meshes[0].vertices.push_back(s.meshes[0].vertices[2]);
+        s.meshes[0].submeshes.push_back({0, {0, 1, 2}});
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        CHECK(CountSubmeshesForMaterial(s, 0) == 2);
+        CHECK(PartForMaterial(s, 0) == "outfit0.top");
+        CHECK(FindMaterialIndex(s, "outfit0.top", "mf_m_top") == 0);
+        CHECK(FindMaterialIndex(s, "hair.back", "mf_m_top") == -1);
+        MaterialOverride o; o.opacity = 0.5f;
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        int edited = 0;
+        for (const auto& mesh : s.meshes) for (const auto& sub : mesh.submeshes) if (sub.material == 0) ++edited;
+        CHECK(edited == 2);
+        // Copy/paste + multi-apply.
+        MaterialOverride cp = CopyOverride(st, 0);
+        PasteOverride(st, 1, cp);
+        ApplyOverrides(s, st);
+        CHECK(s.materials[1].diffuse.w == 0.5f);
+        PasteToMultiple(st, {1}, MaterialOverride{});
+        ApplyOverrides(s, st);
+        CHECK(s.materials[1].diffuse.w == 1.0f);
+        CHECK(MaterialIdColor(0).x != MaterialIdColor(1).x || MaterialIdColor(0).y != MaterialIdColor(1).y);
+        CHECK(MaterialIdColor(0).x == MaterialIdColor(0).x);   // deterministic
+    });
+
+    test("workbench: PMX shows the edited colour/alpha and the manifest names the file", [&] {
+        using namespace material;
+        assemble::Scene s = makeMatScene();
+        WorkbenchState st;
+        CaptureOriginals(st, s);
+        MaterialOverride o;
+        o.baseColor = Vec4{0.2f, 0.4f, 0.6f, 0.5f};
+        o.roughness = 0.9f;   // unsupported in PMX: must be reported, not silently dropped
+        o.metallic = 1.0f;    // unsupported too
+        SetOverride(st, 0, o);
+        ApplyOverrides(s, st);
+        ReportUnsupported(s, st);
+        bool reported = false;
+        for (const auto& is : s.issues) reported = reported || is.message.find("metallic") != std::string::npos;
+        CHECK(reported);
+        auto unsupported = UnsupportedFields(o);
+        CHECK(unsupported.size() >= 2);
+        const exporter::MmdLook look = exporter::MmdMaterialLook(s, s.materials[0]);
+        CHECK(std::fabs(look.diffuse.x - 0.2f) < 1e-5f && std::fabs(look.diffuse.w - 0.5f) < 1e-5f);
+        // Real export pairing: the fixture JSON changes the PMX and the manifest says so.
+        card::Card c;
+        c.path = "card.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("material_export");
+        eo.overwrite = true;
+        eo.materialFile = "m.json";
+        eo.materialWorkbench = nlohmann::json::parse(MaterialFileToJson(MakeMaterialFile(s, st, "deadbeef")), nullptr, false);
+        eo.materialWorkbench["file"] = "m.json";
+        const auto r = exporter::ExportScene(s, c, eo);
+        CHECK(fileio::Exists(r.pmxPath) && fileio::Exists(r.manifestPath));
+        Bytes pmxBytes = fileio::ReadFile(r.pmxPath);
+        Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifestText(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifestText.find("\"material_workbench\"") != std::string::npos);
+        CHECK(manifestText.find("mf_m_top") != std::string::npos);
+        CHECK(manifestText.find("\"file\": \"m.json\"") != std::string::npos);
+        // The PMX carries the edited material (via the independent reader's
+        // names) and the edited diffuse reaches it through MmdMaterialLook.
+        const pmxread::Model back = readPmx(pmxBytes);
+        bool sawMaterial = false;
+        for (const auto& m : back.materials) if (m.name.find("outfit0.top") != std::string::npos) sawMaterial = true;
+        CHECK(sawMaterial && back.materials.size() > 0);
+    });
+
+    test("viewport: diagnostic modes render deterministically on a synthetic scene", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        s.materials.push_back({}); s.materials.back().diffuse = {0.9f, 0.1f, 0.1f, 1.0f};
+        s.materials.push_back({}); s.materials.back().diffuse = {0.1f, 0.5f, 0.9f, 1.0f};
+        SceneMesh mesh;
+        auto pv = [&](Vec3 pos, Vec2 uv) { SceneVertex v; v.pos = pos; v.normal = {0, 0, 1}; v.uv = uv; mesh.vertices.push_back(v); };
+        // Triangle A: base colour material 0 (red), left. Triangle B: material 1 (blue), right.
+        pv({-0.9f, -0.7f, 0}, {0.15f, 0.15f}); pv({-0.05f, -0.7f, 0}, {0.45f, 0.15f}); pv({-0.48f, 0.7f, 0}, {0.3f, 0.85f});
+        pv({0.05f, -0.7f, 0}, {0.55f, 0.15f}); pv({0.9f, -0.7f, 0}, {0.85f, 0.15f}); pv({0.48f, 0.7f, 0}, {0.7f, 0.85f});
+        SceneSubmesh smA; smA.material = 0; smA.indices = {0, 1, 2};
+        SceneSubmesh smB; smB.material = 1; smB.indices = {3, 4, 5};
+        mesh.submeshes.push_back(smA); mesh.submeshes.push_back(smB);
+        s.meshes.push_back(mesh);
+        ScenePart part; part.id = "p"; part.meshes = {0}; part.visibleInPreview = true;
+        s.parts.push_back(part);
+        const int W = 128, H = 128;
+        const uint32_t bg = 0xFFE2E4E8u;
+        exporter::ViewCamera cam;
+        exporter::ViewStatePtr st = exporter::NewViewState();
+        std::vector<uint32_t> px;
+        auto render = [&](exporter::ViewMode mode, const std::vector<exporter::DiagnosticMaterial>* diag = nullptr, float yawDeg = 0.0f) {
+            cam.yawDeg = yawDeg;
+            px.clear();
+            exporter::ViewOptions vo;
+            vo.mode = mode;
+            vo.diagnostics = diag;
+            exporter::RenderView(s, cam, W, H, vo, *st, px);
+            return px;
+        };
+        auto nonBg = [&](const std::vector<uint32_t>& p) { int n = 0; for (uint32_t v : p) if (v != bg) ++n; return n; };
+        auto ch = [](uint32_t v, int k) { return static_cast<int>((v >> (16 - 8 * k)) & 255u); };   // 0=R, 1=G, 2=B
+        // Lit renders and is deterministic.
+        const auto lit = render(exporter::ViewMode::Lit);
+        CHECK(nonBg(lit) > 50 && lit == render(exporter::ViewMode::Lit));
+        // BaseColor: pure red-ish / blue-ish pixels, no texture.
+        {
+            const auto p = render(exporter::ViewMode::BaseColor);
+            bool red = false, blue = false;
+            for (uint32_t v : p) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (r > 180 && g < 80 && b < 80) red = true;
+                if (b > 180 && r < 80) blue = true;
+            }
+            CHECK(red && blue);
+        }
+        // Normal: world normal +Z renders as (128, 128, 255).
+        {
+            const auto p = render(exporter::ViewMode::Normal);
+            bool ok = false;
+            for (uint32_t v : p) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (b > 230 && std::abs(r - 128) <= 3 && std::abs(g - 128) <= 3) ok = true;
+            }
+            CHECK(ok);
+        }
+        // Roughness / metallic with diagnostics: exact grays.
+        {
+            std::vector<exporter::DiagnosticMaterial> d(2);
+            d[0].roughness = 0.2f; d[1].roughness = 0.9f; d[0].metallic = 0.8f; d[1].metallic = 0.3f;
+            const auto rp = render(exporter::ViewMode::Roughness, &d);
+            const auto mp = render(exporter::ViewMode::Metallic, &d);
+            bool r51 = false, r230 = false, m204 = false, m77 = false;
+            for (uint32_t v : rp) {
+                const int r = ch(v, 0);
+                if (std::abs(r - 51) <= 2) r51 = true;
+                if (std::abs(r - 230) <= 2) r230 = true;
+            }
+            for (uint32_t v : mp) {
+                const int r = ch(v, 0);
+                if (std::abs(r - 204) <= 2) m204 = true;
+                if (std::abs(r - 77) <= 2) m77 = true;
+            }
+            CHECK(r51 && r230 && m204 && m77);
+        }
+        // MaterialID: one deterministic colour per material, stable across calls, matching MaterialIdColor.
+        {
+            const auto p1 = render(exporter::ViewMode::MaterialID);
+            const auto p2 = render(exporter::ViewMode::MaterialID);
+            const Vec3 c0 = material::MaterialIdColor(0), c1 = material::MaterialIdColor(1);
+            auto q = [](float f) { return static_cast<int>(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            bool found0 = false, found1 = false;
+            for (uint32_t v : p1) {
+                if (std::abs(ch(v, 0) - q(c0.x)) <= 3 && std::abs(ch(v, 1) - q(c0.y)) <= 3 && std::abs(ch(v, 2) - q(c0.z)) <= 3) found0 = true;
+                if (std::abs(ch(v, 0) - q(c1.x)) <= 3 && std::abs(ch(v, 1) - q(c1.y)) <= 3 && std::abs(ch(v, 2) - q(c1.z)) <= 3) found1 = true;
+            }
+            CHECK(found0 && found1 && p1 == p2);
+            CHECK(material::MaterialIdColor(3).x != material::MaterialIdColor(5).x || material::MaterialIdColor(3).y != material::MaterialIdColor(5).y || material::MaterialIdColor(3).z != material::MaterialIdColor(5).z);
+        }
+        // Wireframe: strictly less fill than Lit, deterministic.
+        {
+            const auto wire = render(exporter::ViewMode::Wireframe);
+            const int nWire = nonBg(wire), nFull = nonBg(lit);
+            CHECK(nWire > 20 && nWire * 3 < nFull && wire == render(exporter::ViewMode::Wireframe));
+        }
+        // UVChecker: deterministic and paints the mesh.
+        {
+            const auto p = render(exporter::ViewMode::UVChecker);
+            CHECK(nonBg(p) > 50 && p == render(exporter::ViewMode::UVChecker));
+        }
+        // Transmission with alpha strength 0: the term is black (mesh pixels differ only where it was lit).
+        {
+            const auto p = render(exporter::ViewMode::Transmission);
+            bool anyDark = false;
+            for (uint32_t v : p) if (v != bg && ch(v, 0) < 30) anyDark = true;
+            CHECK(anyDark);
+        }
+        // Transmission with full strength and thin fabric: visible from behind (front light faces -Z here).
+        {
+            std::vector<exporter::DiagnosticMaterial> d(2);
+            for (auto& m : d) { m.transmissionStrength = 1.0f; m.transmissionThickness = 0.0f; }
+            const auto p = render(exporter::ViewMode::Transmission, &d, 180.0f);
+            bool anyLit = false;
+            for (uint32_t v : p) if (v != bg && ch(v, 0) > 30) anyLit = true;
+            CHECK(anyLit);
+        }
+        // Opacity: semantic alpha as gray (own scene, opaque materials kept in the main one).
+        {
+            Scene s2;
+            s2.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+            s2.materials.push_back({}); s2.materials.back().diffuse = {0.9f, 0.1f, 0.1f, 0.5f};
+            SceneMesh m2;
+            auto pv2 = [&](Vec3 pos, Vec2 uv) { SceneVertex v; v.pos = pos; v.normal = {0, 0, 1}; v.uv = uv; m2.vertices.push_back(v); };
+            pv2({-0.9f, -0.7f, 0}, {0.1f, 0.1f}); pv2({0.9f, -0.7f, 0}, {0.9f, 0.1f}); pv2({0.0f, 0.7f, 0}, {0.5f, 0.9f});
+            SceneSubmesh sm2; sm2.material = 0; sm2.indices = {0, 1, 2};
+            m2.submeshes.push_back(sm2);
+            s2.meshes.push_back(m2);
+            ScenePart part2; part2.id = "p2"; part2.meshes = {0}; part2.visibleInPreview = true;
+            s2.parts.push_back(part2);
+            exporter::ViewStatePtr st2 = exporter::NewViewState();
+            px.clear();
+            cam.yawDeg = 0.0f;   // the transmission check above rotates it; stay facing the face
+            exporter::ViewOptions vo2; vo2.mode = exporter::ViewMode::Opacity;
+            exporter::RenderView(s2, cam, W, H, vo2, *st2, px);
+            bool gray128 = false;
+            for (uint32_t v : px) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (std::abs(r - 128) <= 2 && std::abs(g - 128) <= 2 && std::abs(b - 128) <= 2) { gray128 = true; break; }
+            }
+            CHECK(gray128);
+        }
+        // Name table: round trip, unknown is Lit.
+        CHECK(std::string_view{exporter::ViewModeName(exporter::ViewMode::Transmission)} == "transmission");
+        CHECK(exporter::ViewModeFromName("transmission") == exporter::ViewMode::Transmission);
+        CHECK(exporter::ViewModeFromName("not_a_mode") == exporter::ViewMode::Lit);
+    });
 }
+
 
 void integrationTests() {
     std::string lib = env("CARDBRIDGE_TEST_LIBRARY"), mods = env("CARDBRIDGE_TEST_MODS"), cardPath = env("CARDBRIDGE_TEST_CARD");

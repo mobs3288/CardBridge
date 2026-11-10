@@ -151,4 +151,18 @@ std::vector<uint8_t> DecodeTexture(int fmt, int width, int height, const uint8_t
     }
 }
 
+std::string FormatName(int unityFormat) {
+    switch (unityFormat) {
+    case 1: return "Alpha8";
+    case 3: return "RGB24";
+    case 4: return "RGBA32";
+    case 5: return "ARGB32";
+    case 10: return "DXT1";
+    case 12: return "DXT5";
+    case 14: return "BGRA32";
+    case 25: return "BC7";
+    default: return "UnityFormat " + std::to_string(unityFormat);
+    }
+}
+
 } // namespace cardbridge::unity

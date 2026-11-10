@@ -1,4 +1,5 @@
 #include "export/Preview.h"
+#include "material/MaterialWorkbench.h"
 
 #include "assemble/Pose.h"
 
@@ -492,6 +493,11 @@ struct MatTextures : shader::ISm4Textures {
 void ViewStateDeleter::operator()(ViewState* v) const { delete v; }
 ViewStatePtr NewViewState() { return ViewStatePtr(new ViewState()); }
 
+void InvalidateViewTexture(ViewState& st, int textureIndex) {
+    if (textureIndex < 0 || static_cast<size_t>(textureIndex) >= st.built.size()) return;
+    st.built[static_cast<size_t>(textureIndex)] = false;
+}
+
 namespace {
 
 struct PsIn { float r[8][4]; };
@@ -655,7 +661,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             MatTextures mt;
             const bool linear = detail::LinearLight();
             const assemble::SceneMaterial linearMat = (sr && linear) ? detail::LinearColours(mat) : assemble::SceneMaterial{};
-            if (sr) {
+            if (sr && opt.mode == ViewMode::Lit) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                 else {
@@ -698,7 +704,74 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         size_t zi = static_cast<size_t>(y) * W + x;
                         if (z <= zbuf[zi]) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
-                        if (sr) {
+                        // Diagnostic view modes (spec S13): per-pixel substitution of the shading, never touching
+                        // the game's shader path. They fall through to the same write-out below. Lit is unchanged.
+                        const bool diag = opt.mode != ViewMode::Lit && opt.mode != ViewMode::Unlit;
+                        const bool wire = opt.mode == ViewMode::Wireframe;
+                        const int matIdx = static_cast<int>(&mat - scene.materials.data());
+                        const DiagnosticMaterial* dm = (opt.diagnostics && matIdx >= 0 && static_cast<size_t>(matIdx) < opt.diagnostics->size())
+                                                          ? &(*opt.diagnostics)[static_cast<size_t>(matIdx)] : nullptr;
+                        if (wire) {
+                            // Triangle edges only: barycentric distance to the nearest edge, 1.4 px thick.
+                            const double la = std::hypot(b.x - c.x, b.y - c.y), lb = std::hypot(c.x - a.x, c.y - a.y), lc = std::hypot(a.x - b.x, a.y - b.y);
+                            const float ha = static_cast<float>(std::fabs(den) / std::max(1e-5, la));
+                            const float hb = static_cast<float>(std::fabs(den) / std::max(1e-5, lb));
+                            const float hc = static_cast<float>(std::fabs(den) / std::max(1e-5, lc));
+                            if (l0 * ha < 1.4f || l1 * hb < 1.4f || l2 * hc < 1.4f) {
+                                r = g = bl = 0.07f;   // dark charcoal edges over the light background
+                                al = 1.0f;
+                            } else {
+                                continue;   // no fill — only the edges
+                            }
+                        } else if (diag && opt.mode != ViewMode::BaseColor) {
+                            const Vec3& na = mesh.vertices[i0].normal, &nb = mesh.vertices[i1].normal, &nc = mesh.vertices[i2].normal;
+                            const Vec3 n = normalize(Vec3{l0 * na.x + l1 * nb.x + l2 * nc.x, l0 * na.y + l1 * nb.y + l2 * nc.y, l0 * na.z + l1 * nb.z + l2 * nc.z});
+                            switch (opt.mode) {
+                            case ViewMode::Normal:
+                                r = n.x * 0.5f + 0.5f; g = n.y * 0.5f + 0.5f; bl = n.z * 0.5f + 0.5f; break;
+                            case ViewMode::Roughness:
+                                r = g = bl = dm ? dm->roughness : 0.7f; break;
+                            case ViewMode::Metallic:
+                                r = g = bl = dm ? dm->metallic : 0.0f; break;
+                            case ViewMode::Opacity: {
+                                float aa = mat.diffuse.w;
+                                if (mp) {   // the sampled alpha, shown as gray
+                                    const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                                    float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                                    u -= std::floor(u); v -= std::floor(v);
+                                    float tc[4];
+                                    SampleBilinear(*mp, lod, u, v, tc);
+                                    aa = tc[3];
+                                }
+                                r = g = bl = std::clamp(aa, 0.0f, 1.0f); break;
+                            }
+                            case ViewMode::UVChecker: {
+                                const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                                float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                                const bool dark = (static_cast<int>(std::floor(u * 8.0f)) + static_cast<int>(std::floor(v * 8.0f))) & 1;
+                                r = g = bl = dark ? 0.38f : 0.82f; break;
+                            }
+                            case ViewMode::Transmission: {
+                                const float strength = dm ? dm->transmissionStrength : 0.0f;
+                                const float t = 0.5f * (1.0f - strength);
+                                const float lb3[3] = {sn * cp, -sp, -cs * cp};   // light from behind the model
+                                float d = n.x * lb3[0] + n.y * lb3[1] + n.z * lb3[2];
+                                if (dm && dm->doubleSided && (l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]) < 0.0f) d = -d;   // flip the wrap for back faces
+                                const float wrap = std::clamp((d + t) / (1.0f + t), 0.0f, 1.0f);
+                                const float att = std::exp(-(dm ? dm->transmissionThickness : 1.0f));
+                                const float cr = dm ? dm->transmissionColor[0] : 1.0f;
+                                const float cg = dm ? dm->transmissionColor[1] : 1.0f;
+                                const float cb = dm ? dm->transmissionColor[2] : 1.0f;
+                                r = cr * strength * wrap * att; g = cg * strength * wrap * att; bl = cb * strength * wrap * att; break;
+                            }
+                            case ViewMode::MaterialID: {
+                                const Vec3 c = material::MaterialIdColor(matIdx);
+                                r = c.x; g = c.y; bl = c.z; break;
+                            }
+                            default: break;
+                            }
+                        }
+                        if (sr && opt.mode == ViewMode::Lit) {
                             shader::Sm4Io io;
                             io.constantBuffers = psCb.ptr;
                             io.textures = &mt;
@@ -763,7 +836,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                 }
                             continue;
                         }
-                        if (mp) {
+                        if (mp && !diag && !wire) {
                             const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
                             float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
                             u -= std::floor(u); v -= std::floor(v);
@@ -773,14 +846,17 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         }
                         if (al < detail::DiscardBelow(mat, blend)) continue;
                         float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
-                        if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
-                            const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
-                            r *= rr.x; g *= rr.y; bl *= rr.z;
-                        } else {
-                            float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
-                            r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
-                            g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
-                            bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                        // Toon / shadow shading happens only in Lit; diagnostic modes pass their own colour through.
+                        if (opt.mode == ViewMode::Lit) {
+                            if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
+                                const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
+                                r *= rr.x; g *= rr.y; bl *= rr.z;
+                            } else {
+                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                                r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
+                                g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
+                                bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
+                            }
                         }
                         if (highlight) highlightTint(r, g, bl);
                         if (!blend) zbuf[zi] = z;

@@ -7,6 +7,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -49,6 +50,13 @@ public:
     void FillDisc(float cx, float cy, float radius, COLORREF c, int alpha = 255);
     void FillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, COLORREF c);
     void Line(float x0, float y0, float x1, float y1, COLORREF c, float width = 1.0f);
+    // Stretch-samples raw RGBA pixels into dst using the UV→pixel mapping u(x) = uForLeft + (x - dst.left) * duPerPx and
+    // v(y) = vForTop + (y - dst.top) * dvPerPx, wrapping (or clamping) as the sampler does. channel 0 = colour composited
+    // over a solid or checkerboard base; 1..3 = that channel as opaque gray, 4 = alpha as opaque gray. One bitmap and one
+    // blit per call, not one call per pixel - the texture previews and the UV canvas.
+    void BlitWrappedTexture(const RECT& dst, const uint8_t* rgba, int srcW, int srcH,
+                            float uForLeft, float duPerPx, float vForTop, float dvPerPx,
+                            bool clamp, int channel, bool checkerBase);
     // A loading bar: track, fill up to `fraction` (0..1), or an animated
     // sliding chunk when indeterminate (fraction < 0). `phase` animates it.
     void ProgressBar(const RECT& r, double fraction, double phase = 0.0);

@@ -100,12 +100,36 @@ public:
     // character's GPU copy does not stay resident beside the new one.
     void Unload();
 
+    // Re-uploads scene textures whose pixels changed in place, and uploads new
+    // ones (the Material Workbench's tint copies). The indices are
+    // WorkbenchState::changedTextures. Only the named textures are touched: no
+    // shader recompile, mesh upload or full Load. False when a texture could
+    // not be created (the old view stays usable).
+    bool UpdateTextures(const std::vector<int>& textureIndices);
+    // Stage 3 texture-replace helpers: EnsureTexture uploads the texture when
+    // it has never been uploaded (or its slot is missing); UploadTexture
+    // always recreates it. Both touch only the named scene texture. False on
+    // an out-of-range index or a failed create.
+    bool EnsureTexture(int textureIndex);
+    bool UploadTexture(int textureIndex);
+
     // Draws into a top-down BGRA buffer (0xAARRGGBB), framing the model the way RenderView does. hiddenParts as in ViewOptions (1 hides, 2 forces a default-hidden part on).
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                 int highlightPart = -1);
 
+    // Selects a viewport diagnostic mode for the *next* Render call (0 = Lit = the game's shaders, the
+    // default; anything else draws the scene with the runtime-compiled diagnostic fallback shader, so the
+    // game shaders are not used). `interpreted` is indexed by scene.material index (usually the Material
+    // Workbench's EffectiveMaterial); nullptr = defaults. The selection is not persisted by the view —
+    // the caller holds it (ADR-008).
+    void SetDiagnosticMode(int mode, const std::vector<DiagnosticMaterial>* interpreted);
+
     int skippedMaterials() const;
+
+    // The diagnostic mode and the reason the diagnostic shader failed, as read by the layout dump.
+    int DiagnosticMode() const;
+    std::string DiagnosticError() const;
 
     // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
