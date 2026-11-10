@@ -278,6 +278,15 @@ struct App {
     int hoverBone = -1;                       // the bone under the pointer (in the view or the tree), lit up in the overlay
     int dragBone = -1;                        // the bone being turned (or moved) with the left button in the view
     bool dragMove = false;
+    // The accessory move gizmo: shown in the view when an accessory part is selected in the list (its chip);
+    // dragging an axis moves the accessory (as bone edits on its root bones, so undo / save / export see it).
+    int selAccessory = -1;                    // scene.parts index of the accessory the gizmo holds, -1 = none
+    int gizmoHoverAxis = -1;                  // the axis under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
+    int gizmoAxis = -1;                       // the axis being dragged, -1 = none
+    exporter::MoveGizmoState gizmoState;      // where the last picture drew the gizmo (x < 0: not drawn)
+    float gizmoAcc[3] = {0, 0, 0};            // world delta applied during the current drag (for the log line)
+    float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
+    int hoverAccChip = -1;                    // the accessory chip under the pointer in the panel, -1 = none
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;

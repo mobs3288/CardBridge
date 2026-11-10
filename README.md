@@ -1,5 +1,7 @@
 # CardBridge
 
+[![XERJ Corpus Hub](https://hub.xerj.org/contributors/mobs3288/badge.svg)](https://hub.xerj.org/contributors/mobs3288)
+
 <p align="center">
   <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="500">
 </p>
@@ -259,7 +261,10 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 
 # look at a card in a window (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel.
 # Hover a part row to light that part up in the model, click to hide/show it, right-click to solo it, click a group
-# header to fold it. The log panel shows every load/bake/export stage as it happens; E (or Export PMX) exports the
+# header to fold it. Accessory rows carry a move chip (an X/Y/Z gizmo) on their right end: click it to hold that accessory,
+# then drag an axis in the view to reposition it in XYZ (the move is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
+# Export PMX bakes it, and the Bones tab's numbers move with it); right-click the chip to reset the move, Esc deselects.
+# The log panel shows every load/bake/export stage as it happens; E (or Export PMX) exports the
 # scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
 # name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game
 # shaders, G colour grading, X (or the MMD button) as exported (the PMX as MikuMikuDance shows it: toon, edge, self-shadow, ground shadow), F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.

@@ -289,15 +289,18 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
                         }
                         const COLORREF col = off ? ui::kDim : !ok ? ui::kBad : ui::kText;
+                        const bool acc = p.group == "Accessories";   // the gizmo chip on the right end of accessory rows
                         CheckBox(s, 16, y + 3, !off, ok ? ui::kAccent : ui::kBad);
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
                         if (p.fromClothing) name += "  (added)";
+                        if (acc && AccessorySelected() == row.part) name += "  ·  xyz";
                         // Name and the right-aligned triangle count share the row.
-                        const RECT partClip{38, y, kPanel - 64, y + kRowH};
-                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, 44), &partClip);
+                        const RECT partClip{38, y, acc ? kPanel - 110 : kPanel - 64, y + kRowH};
+                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, acc ? 34 : 44), &partClip);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
-                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, kPanel - 16, y + 4, tris);
+                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, acc ? kPanel - 44 : kPanel - 16, y + 4, tris);
+                        if (acc) DrawAccessoryChip(s, y, AccessorySelected() == row.part, g.hoverAccChip == idx);
                     }
                 }
                 ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(rows.size()), visible, g.partPos);
@@ -346,6 +349,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             if (static_cast<size_t>(g.hoverPart) < L->partTriangles.size()) hint += "  ·  " + Count(L->partTriangles[static_cast<size_t>(g.hoverPart)]) + " tris";
             if (!p.modName.empty()) hint += "  ·  " + p.modName;
             if (static_cast<size_t>(g.hoverPart) < g.hidden.size() && g.hidden[static_cast<size_t>(g.hoverPart)]) hint += "  ·  hidden";
+        } else if (const int acc = AccessorySelected(); acc >= 0 && L && static_cast<size_t>(acc) < L->scene.parts.size()) {
+            hint = "gizmo  ·  drag an axis to move " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its chip to reset  ·  Esc deselects";
         } else if (!modsInfo.empty() && !L) {
             hint = modsInfo;
         }

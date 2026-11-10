@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
-  asexported, export, materials, viewmode. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
+  asexported, export, materials, viewmode, gizmo. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
 
@@ -455,6 +455,80 @@ try {
             $lay = Layout
             Check 'pose: load puts the edits back' ($lay.state.edits -ge 1 -and $lay.state.edits -gt $mid -or $lay.state.edits -ge 1) "edits $mid -> $($lay.state.edits)"
             $s = Shot 'pose_loaded'
+        }
+    }
+
+    # ---- the accessory move gizmo: select an accessory with its chip, drag an axis, reset the move ----
+    if (Want 'gizmo') {
+        Write-Host 'accessory gizmo'
+        $WM_MOUSEWHEEL = 0x020A
+        $lay = GoTab 0
+        if ($null -eq $lay) { Check 'gizmo: the Parts tab answers' $false } else { Write-Host ("  GoTab 0    : yaw={0:F1} zoom={1:F2} drag={2}" -f $lay.state.camYaw, $lay.state.camZoom, $lay.state.drag) }
+        # the accessories sit at the bottom of the list: scroll it there first, and wait until the
+        # list's ease has stopped (a click on a stale row position lands on the wrong row)
+        $acc = $null
+        for ($i = 0; $i -lt 40; $i++) {
+            $acc = @($lay.accessories | Where-Object { $_.inView }) | Select-Object -First 1
+            if ($null -ne $acc) { break }
+            [void][V]::PostMessage($script:target, $WM_MOUSEWHEEL, [IntPtr](-7864320), [V]::L(100, 300))
+            Start-Sleep -Milliseconds 180
+            $lay = Layout
+            if ($null -eq $lay) { break }
+            Write-Host ("  wheel {0,2}: yaw={1:F1} zoom={2:F2} drag={3} accInView={4}" -f $i, $lay.state.camYaw, $lay.state.camZoom, $lay.state.drag, @($lay.accessories | Where-Object { $_.inView }).Count)
+        }
+        if ($null -ne $acc) {
+            $prevY = [double]((@($lay.accessories | Where-Object { $_.part -eq $acc.part }))[0].y)
+            for ($i = 0; $i -lt 20; $i++) {
+                Start-Sleep -Milliseconds 250
+                $lay = Layout
+                if ($null -eq $lay) { break }
+                $nowAcc = @($lay.accessories | Where-Object { $_.part -eq $acc.part }) | Select-Object -First 1
+                if ($null -eq $nowAcc) { break }
+                if ([math]::Abs([double]$nowAcc.y - $prevY) -lt 1.0 -and $nowAcc.inView) { $acc = $nowAcc; break }
+                $prevY = [double]$nowAcc.y
+            }
+            $acc = @($lay.accessories | Where-Object { $_.inView }) | Select-Object -First 1
+        }
+        if ($null -eq $acc) { Check 'gizmo: an accessory is visible in the parts list (after scrolling)' $false }
+        else {
+            Write-Host ("  settled     : yaw={0:F1} zoom={1:F2} drag={2} acc={3}" -f $lay.state.camYaw, $lay.state.camZoom, $lay.state.drag, $acc.id)
+            Write-Host "  with $($acc.id)"
+            $a = Shot 'before_gizmo'
+            $l2 = Layout; Write-Host ("  shot a      : yaw={0:F1} zoom={1:F2} drag={2}" -f $l2.state.camYaw, $l2.state.camZoom, $l2.state.drag)
+            Click ([int]$acc.chip[0]) ([int]$acc.chip[1]) 600
+            $l3 = Layout; Write-Host ("  click chip  : yaw={0:F1} zoom={1:F2} drag={2} selAcc={3}" -f $l3.state.camYaw, $l3.state.camZoom, $l3.state.drag, $l3.state.selAccessory)
+            $lay = Layout
+            Write-Host ("  cam yaw={0:F1} pitch={1:F1} zoom={2:F2} drag={3} selAcc={4}" -f $lay.state.camYaw, $lay.state.camPitch, $lay.state.camZoom, $lay.state.drag, $lay.state.selAccessory)
+            $selRow = $lay.accessories | Where-Object { $_.part -eq $acc.part } | Select-Object -First 1
+            Check 'gizmo: the chip selects the accessory' ($null -ne $selRow -and [bool]$selRow.sel)
+            Check 'gizmo: the gizmo is drawn' ($null -ne $lay.gizmo)
+            if ($null -ne $lay.gizmo) {
+                $s = Shot 'gizmo'
+                Check 'gizmo: the picture changed' ([V]::DiffView($a.Path, $s.Path, $lay.panel) -gt 0.0005) ("{0:P2} of the view" -f [V]::DiffView($a.Path, $s.Path, $lay.panel))
+                $best = -1; $bestLen = -1.0
+                for ($i = 0; $i -lt 3; $i++) { if ([double]$lay.gizmo.axisLen[$i] -gt $bestLen) { $bestLen = [double]$lay.gizmo.axisLen[$i]; $best = $i } }
+                $undo0 = $lay.state.undo
+                $o = $lay.gizmo.origin; $t = @($lay.gizmo.tipX[$best], $lay.gizmo.tipY[$best])
+                Drag ([int]$o[0]) ([int]$o[1]) ([int]($o[0] + 1.2 * ($t[0] - $o[0]))) ([int]($o[1] + 1.2 * ($t[1] - $o[1]))) 10
+                $lay = Layout
+                Write-Host ("  cam yaw={0:F1} pitch={1:F1} zoom={2:F2} drag={3} undo={4} edits={5}" -f $lay.state.camYaw, $lay.state.camPitch, $lay.state.camZoom, $lay.state.drag, $lay.state.undo, $lay.state.edits)
+                $b = Shot 'gizmo_drag'
+                Check 'gizmo: the window answers after the drag' ($null -ne $lay)
+                Check 'gizmo: the accessory was edited' ($lay.state.edits -ge 1) "$($lay.state.edits) edit(s)"
+                Check 'gizmo: the picture changed' ([V]::DiffView($a.Path, $b.Path, $lay.panel) -gt 0.0005) ("{0:P2} of the view" -f [V]::DiffView($a.Path, $b.Path, $lay.panel))
+                Check 'gizmo: the drag is one undo step' (($lay.state.undo - $undo0) -eq 1) "undo $undo0 -> $($lay.state.undo)"
+                # right-click the chip to reset the move
+                [void][V]::PostMessage($script:target, 0x204, [IntPtr]0, [V]::L([int]$acc.chip[0], [int]$acc.chip[1])); Start-Sleep -Milliseconds 80
+                [void][V]::PostMessage($script:target, 0x205, [IntPtr]0, [V]::L([int]$acc.chip[0], [int]$acc.chip[1])); Start-Sleep -Milliseconds 700
+                $lay = Layout
+                $c = Shot 'gizmo_reset'
+                Check 'gizmo: the window answers after the reset' ($null -ne $lay)
+                Check 'gizmo: the reset puts the picture back' ([V]::DiffView($s.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($s.Path, $c.Path, $lay.panel))
+                # Esc deselects
+                [void][V]::PostMessage($script:target, $WM_KEYDOWN, [IntPtr]27, [IntPtr]0); Start-Sleep -Milliseconds 400
+                $lay = Layout
+                Check 'gizmo: Esc deselects' ($null -eq $lay.gizmo)
+            }
         }
     }
 

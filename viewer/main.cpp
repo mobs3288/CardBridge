@@ -14,6 +14,9 @@
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
+//          accessory rows (Accessories / Added outfit) carry a move chip on their right end: click it to hold that accessory
+//          with the X/Y/Z gizmo in the view — drag an axis to move it (or the numbers in the Bones tab, like any bone),
+//          right-click the chip to reset the move, Esc (or the chip again) deselects
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
 //          G colour grading on/off, X (or the MMD button) "as exported": the PMX as MikuMikuDance shows it (toon, edge, self-shadow, ground shadow),
 //          K the skeleton over the model (click a bone to select it, Bones tab edits it), P automatic A-pose,
@@ -31,6 +34,7 @@
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include "export/GpuView.h"
+#include "export/MoveGizmo.h"
 #include "card/CardFile.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
@@ -79,6 +83,7 @@ namespace {
 #include "Pose.inc"
 #include "Export.inc"
 #include "Parts.inc"
+#include "Gizmo.inc"
 #include "ModeStrip.inc"
 #include "View.inc"
 #include "Widgets.inc"
