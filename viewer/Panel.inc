@@ -140,17 +140,35 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         if (!L && g.tab != TabSettings) {
             s.Text(g.fontUi, g.busy ? ui::kAccent : ui::kDim, 14, l.partsTop + 4, g.busy ? "loading the card ..." : "no card loaded");
         } else if (g.showIssues) {
+            // Issues, issue by issue: a coloured severity marker, the item's id in brackets, the reason,
+            // wrapped to the panel width. More readable than one clipped log line per message.
             std::vector<std::pair<std::string, LogKind>> lines;
-            for (const auto& i : L->scene.issues) {
-                std::string t = (i.part.empty() ? "" : "[" + i.part + "] ") + i.message;
-                const LogKind k = i.severity == "error" ? LogKind::Error : LogKind::Warn;
-                while (t.size() > 50) {
-                    size_t cut = t.rfind(' ', 50);
-                    if (cut == std::string::npos || cut < 20) cut = 50;
-                    lines.push_back({t.substr(0, cut), k});
-                    t = t.substr(cut + (t[cut] == ' ' ? 1 : 0));
+            const size_t wrapCol = 46;   // fontLog is monospaced ~7 px/char, the panel is 380 px wide
+            auto emit = [&](const std::string& head, const LogKind k, const std::string& msg) {
+                size_t pos = 0;
+                size_t room = wrapCol > head.size() ? wrapCol - head.size() : 0;   // chars left on the first line
+                if (msg.size() <= room) { lines.push_back({head + msg, k}); return; }
+                size_t end = std::min(head.size() + room, msg.size());
+                size_t cut = msg.rfind(' ', end);
+                if (cut == std::string::npos || cut == 0) cut = end;
+                else ++cut;
+                lines.push_back({head + msg.substr(0, cut), k});
+                pos = cut;
+                while (pos < msg.size()) {
+                    while (pos < msg.size() && msg[pos] == ' ') ++pos;
+                    if (msg.size() - pos <= wrapCol) { lines.push_back({std::string("    ") + msg.substr(pos), LogKind::Info}); return; }
+                    size_t e = std::min(pos + wrapCol, msg.size());
+                    size_t c = msg.rfind(' ', e);
+                    if (c == std::string::npos || c <= pos) c = e;
+                    else ++c;
+                    lines.push_back({std::string("    ") + msg.substr(pos, c - pos), LogKind::Info});
+                    pos = c;
                 }
-                lines.push_back({t, k});
+            };
+            for (const auto& i : L->scene.issues) {
+                const LogKind k = i.severity == "error" ? LogKind::Error : LogKind::Warn;
+                const std::string sev = i.severity == "error" ? "ERROR" : "WARN ";
+                emit(sev + "  " + (i.part.empty() ? "(whole card)" : "[" + i.part + "]") + "  ", k, i.message);
             }
             const int visible = std::max(1, (l.partsBottom - l.partsTop) / 16);
             g.partScroll = std::max(0, std::min(g.partScroll, static_cast<int>(lines.size()) - visible));
@@ -161,7 +179,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                 for (int i = 0; i < v.count; ++i) {
                     const int idx = v.first + i;
                     if (idx >= static_cast<int>(lines.size())) break;
-                    s.Text(g.fontLog, KindColor(lines[static_cast<size_t>(idx)].second), 14, l.partsTop - v.offset + i * 16, lines[static_cast<size_t>(idx)].first, &clipText);
+                    const int y = l.partsTop - v.offset + i * 16;
+                    if (!TouchesY(sub, y, y + 16)) continue;
+                    s.Text(g.fontLog, KindColor(lines[static_cast<size_t>(idx)].second), 14, y + 2, lines[static_cast<size_t>(idx)].first, &clipText);
                 }
                 ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(lines.size()), visible, g.partPos);
                 s.Begin(clip);
@@ -237,32 +257,27 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             const RECT repClip{14, y, kPanel - 190, y + kRowH};
                             s.Text(g.fontBold, ui::kAmber, 14, y + 3, "OUTFIT (REPLACED)", &repClip);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, "base outfit replaced by Added outfit");
-                        } else if (row.group == "Added outfit") {   // added clothing: master checkbox + collapse
-                            bool masterOn = true;
+                        } else {
+                            // One master checkbox per group, like the Added outfit row: it shows or hides
+                            // every part of the group at once; the arrow (or the row) collapses the list.
+                            bool allOn = true, someOff = false;
+                            int count = 0;
                             for (const auto& p : L->scene.parts) {
                                 if (DisplayGroup(p) != row.group || p.underPiece) continue;
+                                ++count;
                                 const int pi = static_cast<int>(&p - L->scene.parts.data());
-                                if (static_cast<size_t>(pi) < g.hidden.size() && g.hidden[static_cast<size_t>(pi)]) { masterOn = false; break; }
+                                if (static_cast<size_t>(pi) < g.hidden.size() && g.hidden[static_cast<size_t>(pi)]) { allOn = false; someOff = true; }
                             }
-                            CheckBox(s, 14, y + 3, masterOn, ui::kAmber);
+                            (void)someOff;
+                            const bool added = row.group == "Added outfit";
+                            CheckBox(s, 14, y + 3, allOn, added ? ui::kAmber : ui::kAccent);
                             std::string name = row.group;
                             for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                             const bool collapsed = g.collapsedGroups.count(row.group) != 0;
-                            int count = 0;
-                            for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
+                            const bool isAmber = added;
                             Expander(s, 34, y + kRowH / 2, !collapsed, ui::kAccent);
                             const RECT gClip1{52, y, kPanel - 58, y + kRowH};
-                            s.Text(g.fontBold, ui::kAmber, 52, y + 3, ClipText(name, 44), &gClip1);
-                            s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
-                        } else {
-                            std::string name = row.group;
-                            for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                            const bool collapsed = g.collapsedGroups.count(row.group) != 0;
-                            int count = 0;
-                            for (const auto& p : L->scene.parts) if (DisplayGroup(p) == row.group && !p.underPiece) ++count;
-                            Expander(s, 14, y + kRowH / 2, !collapsed, ui::kAccent);
-                            const RECT gClip2{30, y, kPanel - 58, y + kRowH};
-                            s.Text(g.fontBold, ui::kAccent, 30, y + 3, ClipText(name, 44), &gClip2);
+                            s.Text(g.fontBold, isAmber ? ui::kAmber : ui::kAccent, 52, y + 3, ClipText(name, 44), &gClip1);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
                         }
                     } else {

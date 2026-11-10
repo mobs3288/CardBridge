@@ -39,6 +39,28 @@ int RowIndexAt(size_t count, const PanelLayout& l, int x, int y) {
 }
 int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) { return RowIndexAt(rows.size(), l, x, y); }
 
+// Shows or hides every part of a group at once (the group-header master checkbox, used
+// for Body / Head / Hair / Outfit / Accessories / Added outfit alike).
+void ToggleGroup(const std::string& group, assemble::Scene& scene) {
+    bool allOn = true;
+    for (size_t i = 0; i < scene.parts.size() && i < g.hidden.size(); ++i) {
+        if (DisplayGroup(scene.parts[i]) != group || scene.parts[i].underPiece) continue;
+        if (g.hidden[i]) { allOn = false; break; }
+    }
+    for (size_t i = 0; i < scene.parts.size() && i < g.hidden.size(); ++i)
+        if (DisplayGroup(scene.parts[i]) == group && !scene.parts[i].underPiece) g.hidden[i] = allOn ? 1 : 0;
+    g.soloPart = -1;
+    // Hiding shoes re-drives the foot pitch (settleHeels reads visibleInPreview);
+    // nudging the body through the same re-pose path keeps everything honest.
+    for (size_t i = 0; i < scene.parts.size() && i < g.hidden.size(); ++i)
+        if (scene.parts[i].id.find(".shoes") != std::string::npos) scene.parts[i].visibleInPreview = !g.hidden[i];
+    Log(std::string(allOn ? "hide " : "show ") + group);
+    ReshapeNow(true);
+    g.dirty = true;
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidatePanel();
+}
+
 // A slider row: label on the left, the track, the value on the right. The Material
 // Workbench window has its own, wider track, so the two ends are parameters.
 constexpr int kTrackL = 168, kTrackR = 300;

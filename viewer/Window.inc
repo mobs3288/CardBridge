@@ -180,6 +180,7 @@ void DumpTestLayout() {
     }
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
+                  {"diagMode", g.gpu.DiagnosticMode()}, {"diagError", g.gpu.DiagnosticError()},
                   {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
     {   // the loading bar: title / stage / fraction so scripted runs can check it
@@ -486,26 +487,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     const PartRow& row = rows[static_cast<size_t>(idx)];
                     if (row.part < 0) {
                         if (row.replaced) { /* nothing to expand: the base outfit has no parts left */ }
-                        else if (row.group == "Added outfit" && x < 30) {   // master checkbox: all added parts at once
-                            bool masterOn = true;
-                            for (const auto& p : L->scene.parts) {
-                                if (DisplayGroup(p) != row.group || p.underPiece) continue;
-                                const int pi = static_cast<int>(&p - L->scene.parts.data());
-                                if (static_cast<size_t>(pi) < g.hidden.size() && g.hidden[static_cast<size_t>(pi)]) { masterOn = false; break; }
-                            }
-                            for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
-                                if (DisplayGroup(L->scene.parts[i]) == row.group && !L->scene.parts[i].underPiece)
-                                    g.hidden[i] = masterOn ? 1 : 0;
-                            g.soloPart = -1;
-                            for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
-                                if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
-                                    L->scene.parts[i].visibleInPreview = !g.hidden[i];
-                            Log(masterOn ? "hide Added outfit" : "show Added outfit");
-                            ReshapeNow(true);
-                            g.dirty = true;
-                            InvalidateRect(hwnd, nullptr, FALSE);
-                            InvalidatePanel();
-                        } else {
+                        else if (x < 30) {   // master checkbox: all parts of this group at once
+                            ToggleGroup(row.group, L->scene);
+                        } else {             // elsewhere on the row: collapse / expand
                             if (g.collapsedGroups.count(row.group)) g.collapsedGroups.erase(row.group);
                             else g.collapsedGroups.insert(row.group);
                             g.hoverRow = -1;

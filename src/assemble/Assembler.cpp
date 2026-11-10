@@ -2244,6 +2244,28 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // --- card items ------------------------------------------------------
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
     log("assembling " + std::to_string(work.size()) + " card item(s)");
+    auto itemWhere = [](const resolve::ItemRef& ref, const resolve::ResolvedItem& item) {
+        // A name of where this item is supposed to come from, with the mod identity when
+        // we know it (the card names a GUID; the mod index gives the display name when installed):
+        // "outfit top (id 100106001; mod 'Heavy Ribbons' by hnrocemii v1.0 (com.foo.bar))"
+        std::string s = ref.label.empty() ? ref.partId : ref.label;
+        s += " (id " + std::to_string(ref.id);
+        if (!item.modGuid.empty()) {
+            s += "; mod '";
+            if (!item.modName.empty()) {
+                s += item.modName;
+                if (!item.modVersion.empty()) s += " v" + item.modVersion;
+                if (!item.modAuthor.empty()) s += " by " + item.modAuthor;
+                if (!item.modGuid.empty()) s += " (" + item.modGuid + ")";
+            } else {
+                s += item.modGuid;
+            }
+            s += ')';
+        } else {
+            s += ')';
+        }
+        return s;
+    };
     report(0.15, "resolving items");
     for (const auto& wr : work) {   // which installed mods ship the same bundle path (the one loaded last is what the game uses)
         resolve::ResolvedItem probe = resolver.resolve(card, wr);
@@ -2311,9 +2333,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.modPath = item.modPath;
         int partIdx = static_cast<int>(scene.parts.size());
 
-        if (item.ambiguous) scene.warn(ref.partId, "more than one installed file matches mod '" + item.modGuid + "'; the first was used");
+        if (item.ambiguous) scene.warn(ref.partId, "more than one installed file matches " + itemWhere(ref, item) + "; the first was used");
         if (!item.ok()) {
-            scene.warn(ref.partId, item.detail);
+            // The card names a mod we cannot find, or one we installed that does not provide this item:
+            // say exactly what is missing (which item, which id, and which mod) and why it is out.
+            scene.warn(ref.partId, "missing: " + itemWhere(ref, item) + "; the item was skipped (" + item.detail + ")");
+            part.detail = "missing: " + itemWhere(ref, item) + "; the item was skipped";
             scene.parts.push_back(std::move(part));
             continue;
         }
@@ -2322,8 +2347,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         auto uf = resolver.openBundle(item, &whyOpen);
         if (!uf) {
             part.status = "missing-bundle";
-            part.detail = whyOpen;
-            scene.warn(ref.partId, "bundle not loaded: " + whyOpen);
+            part.detail = "missing data for " + itemWhere(ref, item) + ": " + whyOpen;
+            scene.warn(ref.partId, part.detail);
             scene.parts.push_back(std::move(part));
             continue;
         }
@@ -2382,7 +2407,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         const int64_t itemRoot = uf->findPrefabRoot(item.assetName());
         if (!itemRoot) {
             part.status = "missing-bundle";
-            part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel();
+            part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel() + " (" + itemWhere(ref, item) + ")";
             scene.warn(ref.partId, part.detail);
             scene.parts.push_back(std::move(part));
             continue;
