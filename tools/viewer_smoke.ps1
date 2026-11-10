@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
-  asexported, export, materials, viewmode, gizmo. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
+  asexported, export, materials, viewmode, gizmo, axeswidget. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
 
@@ -529,6 +529,37 @@ try {
                 $lay = Layout
                 Check 'gizmo: Esc deselects' ($null -eq $lay.gizmo)
             }
+        }
+    }
+
+    # ---- the navigation widget (top right): click an axis ball to look from that side ----
+    if (Want 'axeswidget') {
+        Write-Host 'navigation widget'
+        $lay = Layout
+        if ($null -eq $lay -or $null -eq $lay.axesWidget) { Check 'axeswidget: the layout reports the widget' $false }
+        else {
+            $balls = $lay.axesWidget.balls
+            Click ([int]$balls[2][0]) ([int]$balls[2][1]) 400
+            $lay = Layout
+            Check 'axeswidget: the view is at the front after +Z' ([math]::Abs([double]$lay.state.camYaw) -lt 0.01) ("yaw $($lay.state.camYaw)")
+            $balls = $lay.axesWidget.balls
+            Click ([int]$balls[0][0]) ([int]$balls[0][1]) 400
+            $lay = Layout
+            Check 'axeswidget: the view turns to +X' ([math]::Abs([double]$lay.state.camYaw - 90) -lt 0.01) ("yaw $($lay.state.camYaw)")
+            $balls = $lay.axesWidget.balls
+            $c = $lay.axesWidget.center
+            Write-Host ("  drag from ({0},{1}) to ({2},{3})" -f $c[0], $c[1], ([int]$c[0] - 80), $c[1])
+            Drag ([int]$c[0]) ([int]$c[1]) ([int]$c[0] - 80) ([int]$c[1]) 8
+            $lay = Layout
+            Check 'axeswidget: dragging it orbits the view' ([math]::Abs([double]$lay.state.camYaw - 90) -gt 5) ("yaw $($lay.state.camYaw)")
+            $balls = $lay.axesWidget.balls
+            Click ([int]$balls[5][0]) ([int]$balls[5][1]) 400
+            $lay = Layout
+            Check 'axeswidget: -Z snaps to the back view' ([math]::Abs([double]$lay.state.camYaw - 180) -lt 0.01) ("yaw $($lay.state.camYaw)")
+            $balls = $lay.axesWidget.balls
+            Click ([int]$balls[0][0]) ([int]$balls[0][1]) 400
+            $lay = Layout
+            Check 'axeswidget: back to the right view' ([math]::Abs([double]$lay.state.camYaw - 90) -lt 0.01) ("yaw $($lay.state.camYaw)")
         }
     }
 

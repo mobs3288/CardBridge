@@ -261,8 +261,8 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 
 # look at a card in a window (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel.
 # Hover a part row to light that part up in the model, click to hide/show it, right-click to solo it, click a group
-# header to fold it. The view's top-right corner shows an always-on orientation tripod (Blender-style): how the model's X/Y/Z axes point right now
-# (the nearest axis drawn bright, edge-on axes shown as balls); the view is positioned with the left-drag orbit as before.
+# header to fold it. The view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K
+# editor): click an axis ball to look at the model from that side (drag anywhere in it to orbit as before).
 # Accessory rows carry a move chip (an X/Y/Z gizmo) on their right end: click it to hold that accessory,
 # then drag an axis in the view to reposition it in XYZ (the move is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
 # Export PMX bakes it, and the Bones tab's numbers move with it); right-click the chip to reset the move, Esc deselects.

@@ -154,6 +154,16 @@ void DumpTestLayout() {
                       {"tipY", {g.gizmoState.tipY[0], g.gizmoState.tipY[1], g.gizmoState.tipY[2]}},
                       {"axisLen", {g.gizmoState.axisLen[0], g.gizmoState.axisLen[1], g.gizmoState.axisLen[2]}}};
     }
+    j["axesWidget"] = nullptr;   // the navigation widget: its centre and the six balls, for scripted clicks
+    {
+        const int vx = std::max(0, static_cast<int>(rc.right) - kPanel), vh = static_cast<int>(rc.bottom);
+        if (vx >= 170 && vh >= 120) {
+            const AxisWidgetLayout al = AxisWidgetBox(kPanel, vx, vh);
+            nlohmann::json balls = nlohmann::json::array();
+            for (int s = 0; s < 6; ++s) { float bx = 0, by = 0; AxisWidgetBallAt(al, s, bx, by); balls.push_back({bx, by}); }
+            j["axesWidget"] = {{"center", {al.cx, al.cy}}, {"balls", balls}};
+        }
+    }
     j["materials"] = nlohmann::json::object();
     if (L && g.tab == TabMaterials) {
         // The side panel's Materials tab is a launcher: the filter, the list and the
@@ -210,7 +220,7 @@ void DumpTestLayout() {
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
                   {"diagMode", g.gpu.DiagnosticMode()}, {"diagError", g.gpu.DiagnosticError()},
-                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}, {"camYaw", g.cam.yawDeg}, {"camPitch", g.cam.pitchDeg}, {"camZoom", g.cam.zoom}, {"drag", g.drag}, {"selAccessory", g.selAccessory}};
+                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}, {"camYaw", g.cam.yawDeg}, {"camPitch", g.cam.pitchDeg}, {"camZoom", g.cam.zoom}, {"drag", g.drag}, {"selAccessory", g.selAccessory}, {"axesHover", g.viewHoverBall}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
     {   // the loading bar: title / stage / fraction so scripted runs can check it
         const ProgSnapshot ps = GetProgSnapshot();
@@ -575,6 +585,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (x >= kPanel) {   // the navigation widget in the top-right corner wins over the camera (a click there snaps the view, a drag orbits it)
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const AxisWidgetLayout al = AxisWidgetBox(kPanel, static_cast<int>(rc.right) - kPanel, static_cast<int>(rc.bottom));
+            if (AxisWidgetWithin(al, float(x), float(y))) {
+                g.drag = 5; g.last = {x, y}; g.downAt = {x, y}; g.interacting = true; SetCapture(hwnd);
+                return 0;
+            }
+        }
         {   // The diagnostic mode strip over the viewport (spec S13): clicks there do not orbit the camera
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -680,6 +699,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.dragPending = true;
             return 0;
         }
+        if (g.drag == 5) {   // the navigation widget: a click candidate until the pointer moves; then it is simply an orbit
+            if (std::hypot(static_cast<double>(x - g.downAt.x), static_cast<double>(y - g.downAt.y)) > 3.0) g.drag = 1;
+            else return 0;   // the view stays still until the gesture is known
+        }
         if (g.drag == 4) {
             g.gizmoDragDx += static_cast<float>(x - g.last.x);
             g.gizmoDragDy += static_cast<float>(y - g.last.y);
@@ -736,6 +759,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (idx >= 0) InvalidatePanelBand(std::max(l.partsTop, l.partsTop + idx * kRowH - px), std::min(l.partsBottom, l.partsTop + (idx + 1) * kRowH - px));
             }
         }
+        if (x >= kPanel) {   // the navigation widget's hover highlight
+            RECT rc2;
+            GetClientRect(hwnd, &rc2);
+            const int vw = std::max(0, static_cast<int>(rc2.right) - kPanel), vh = static_cast<int>(rc2.bottom);
+            const AxisWidgetLayout al = AxisWidgetBox(kPanel, vw, vh);
+            const int hoverBall = AxisWidgetPick(al, float(x), float(y));
+            if (hoverBall != g.viewHoverBall) { g.viewHoverBall = hoverBall; g.dirty = true; InvalidateView(); }
+        } else if (g.viewHoverBall != -1) { g.viewHoverBall = -1; g.dirty = true; InvalidateView(); }
         if (x >= kPanel && g.selAccessory >= 0 && g.gizmoState.ox >= 0) {   // the axis under the pointer lights up
             const int hoverAxis = exporter::PickMoveGizmoAxis(g.gizmoState, float(x - kPanel), float(y), 10.0f);
             if (hoverAxis != g.gizmoHoverAxis) { g.gizmoHoverAxis = hoverAxis; g.dirty = true; InvalidateView(); }
@@ -806,6 +837,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
         if (g.selAccessory >= 0) { g.gizmoHoverAxis = -1; g.dirty = true; InvalidateView(); }
         if (g.hoverAccChip >= 0) { g.hoverAccChip = -1; InvalidatePanel(); }
+        if (g.viewHoverBall >= 0) { g.viewHoverBall = -1; g.dirty = true; InvalidateView(); }
         if (g.matDropHover >= 0) { g.matDropHover = -1; InvalidatePanel(); }
         if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0 || g.viewHoverCell >= 0) {
             bool part = g.hoverPart >= 0;
@@ -833,6 +865,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ReleaseCapture();
             TweakEdited(released, true);
             InvalidateList();   // the group's "reset" mark follows the sliders
+            return 0;
+        }
+        if (g.drag == 5) {   // a click on the navigation widget: snap the view to the ball's axis
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+            const AxisWidgetLayout al = AxisWidgetBox(kPanel, static_cast<int>(rc.right) - kPanel, static_cast<int>(rc.bottom));
+            const int side = AxisWidgetPick(al, float(mx), float(my));
+            if (side >= 0) AxisWidgetSnapView(side);
+            g.drag = 0; g.interacting = false; ReleaseCapture();
+            g.dirty = true; InvalidateView();
             return 0;
         }
         if (g.drag == 4) {
@@ -934,6 +977,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (p.x >= kPanel) {   // the diagnostic mode strip's cells want the pointing-hand cursor too
                 const int W = std::max(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
                 hand = hand || ModeStripHover(p.x, p.y, kPanel, W, H);
+                const AxisWidgetLayout al = AxisWidgetBox(kPanel, W, H);
+                hand = hand || AxisWidgetWithin(al, float(p.x), float(p.y));   // the navigation widget
             }
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();

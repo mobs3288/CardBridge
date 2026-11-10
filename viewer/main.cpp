@@ -17,7 +17,8 @@
 //          accessory rows (Accessories / Added outfit) carry a move chip on their right end: click it to hold that accessory
 //          with the X/Y/Z gizmo in the view — drag an axis to move it (or the numbers in the Bones tab, like any bone),
 //          right-click the chip to reset the move, Esc (or the chip again) deselects
-//          the view's top-right corner shows an always-on orientation tripod (Blender-style): how the model's X/Y/Z axes point right now
+//          the view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K editor):
+//          click an axis ball to look from that side (drag anywhere in it to orbit)
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
 //          G colour grading on/off, X (or the MMD button) "as exported": the PMX as MikuMikuDance shows it (toon, edge, self-shadow, ground shadow),
 //          K the skeleton over the model (click a bone to select it, Bones tab edits it), P automatic A-pose,

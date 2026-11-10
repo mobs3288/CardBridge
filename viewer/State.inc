@@ -280,6 +280,7 @@ struct App {
     bool dragMove = false;
     // The accessory move gizmo: shown in the view when an accessory part is selected in the list (its chip);
     // dragging an axis moves the accessory (as bone edits on its root bones, so undo / save / export see it).
+    int viewHoverBall = -1;   // the navigation widget's ball under the pointer (0 +X, 1 +Y, 2 +Z, 3 -X, 4 -Y, 5 -Z); -1 = none
     int selAccessory = -1;                    // scene.parts index of the accessory the gizmo holds, -1 = none
     int gizmoHoverAxis = -1;                  // the axis under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
     int gizmoAxis = -1;                       // the axis being dragged, -1 = none
