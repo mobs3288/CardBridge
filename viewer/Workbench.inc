@@ -171,7 +171,7 @@ void DrawMatPicker(ui::Surface& s, const WbLayout& l) {
     s.TextCentered(g.fontUi, ui::kText, dn, "Done");
 }
 
-void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scene);
+void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scene, const RECT& clip);
 
 // ---- draw: the editor -------------------------------------------------------------------------------------------------
 // Heading, class / preset / texture, RGB + HEX, then either the shading sliders or
@@ -292,7 +292,7 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
                 s.Fill(RECT{inner.left + c * cw, inner.top + r * chh, inner.left + (c + 1) * cw + 1, inner.top + (r + 1) * chh + 1}, col);
             }
             if (!tex) s.TextCentered(g.fontUi, ui::kDim, inner, "no texture");
-            DrawUvCanvas(s, l, scene);
+            DrawUvCanvas(s, l, scene, clip);
             // The UV diagnostics under the canvases.
             const auto& r = g.matUvReport;
             char db[160];
@@ -345,18 +345,22 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
 }
 
 // The UV canvas of the inspector: the texture as the mesh's UVs read it, the seams in
-// amber, and the triangles of the selected island in blue.
-void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scene) {
+// amber, and the triangles of the selected island in blue. Everything the canvas draws
+// is clipped to the canvas rectangle: repaints only cover that band, so lines drawn
+// outside it would linger on screen from an older frame. The caller's clip is restored
+// afterwards so the rest of the frame draws normally.
+void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scene, const RECT& clip) {
     const RECT uv = l.uv;
     s.FillRound(uv, 4, RGB(14, 16, 24));
     s.StrokeRound(uv, 4, ui::kLineHi);
+    s.Begin(uv);   // everything below stays inside the canvas; restored to `clip` at the end
     const int meshIdx = MatUvMeshIndex(scene);
     if (meshIdx >= 0 && g.uvScale <= 0) {
         g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
         g.uvPanX = (float(uv.right - uv.left) - g.uvScale) / 2.0f;
         g.uvPanY = (float(uv.bottom - uv.top) - g.uvScale) / 2.0f;
     }
-    if (meshIdx < 0 || g.uvScale <= 0) { s.TextCentered(g.fontUi, ui::kDim, uv, "no triangles"); return; }
+    if (meshIdx < 0 || g.uvScale <= 0) { s.TextCentered(g.fontUi, ui::kDim, uv, "no triangles"); s.Begin(clip); return; }
     const auto& mesh = scene.meshes[static_cast<size_t>(meshIdx)];
     const assemble::SceneTexture* tex = nullptr;
     const MatTexSlotInfo ssel = MatTexSelected(scene);
@@ -423,6 +427,7 @@ void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scen
     }
     if (static_cast<int>(tris.size()) > 2000)
         s.Text(g.fontSmall, ui::kDim, uv.left + 4, uv.bottom - 14, "2000 of " + std::to_string(tris.size()) + " tris", nullptr);
+    s.Begin(clip);   // give the frame its clip back for the rows the canvas does not own
 }
 
 // ---- draw: the whole window --------------------------------------------------------------------------------------------
