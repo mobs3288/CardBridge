@@ -7,6 +7,7 @@ using std::min;
 #include <objidl.h>
 #include <gdiplus.h>
 
+#include <cstdint>
 #include <cstring>
 
 namespace ui {
@@ -84,12 +85,54 @@ struct Surface::Impl {
     std::unique_ptr<Gdiplus::Bitmap> wrap;   // the same pixels, for GDI+
     std::unique_ptr<Gdiplus::Graphics> gfx;
     bool gdiPending = false;                 // GDI drew since GDI+ last did: flush before GDI+ touches the pixels
+    // Persistent scratch DIB for BlitWrappedTexture (owned once, grown as needed).
+    HDC dibDc = nullptr;
+    HBITMAP dibBuf = nullptr;
+    void* dibBits = nullptr;
+    int dibW = 0, dibH = 0;
+    // One reused pen (creating one per Line() costs more than the draw itself when the wireframe is re-stroking).
+    std::unique_ptr<Gdiplus::Pen> penCache;
+    COLORREF penColor = 0;
+    float penWidth = -1.0f;
 
     Gdiplus::Graphics& G() {
         if (gdiPending) { GdiFlush(); gdiPending = false; }
         return *gfx;
     }
+    void ReleaseDib() {
+        if (dibDc) DeleteDC(dibDc);      // detaches the bitmap; it must not be deleted while selected
+        if (dibBuf) DeleteObject(dibBuf);
+        dibDc = nullptr; dibBuf = nullptr; dibBits = nullptr; dibW = dibH = 0;
+    }
+    // Makes the scratch DIB at least w x h. False when a DIB section could not be made.
+    bool EnsureDib(int w, int h) {
+        if (dibDc && dibBuf && dibW >= w && dibH >= h) return true;
+        ReleaseDib();
+        HDC screen = GetDC(nullptr);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;   // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP d = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HDC newdc = d ? CreateCompatibleDC(screen) : nullptr;
+        ReleaseDC(nullptr, screen);
+        if (!d || !newdc) { if (d) DeleteObject(d); return false; }
+        dibBuf = d;
+        dibBits = bits;
+        dibDc = newdc;
+        dibW = w;
+        dibH = h;
+        SelectObject(dibDc, dibBuf);
+        return true;
+    }
     void Release() {
+        ReleaseDib();
+        penCache.reset();
+        penWidth = -1.0f;
         gfx.reset();
         wrap.reset();
         if (dc && old) SelectObject(dc, old);
@@ -209,10 +252,15 @@ void Surface::FillTriangle(float x0, float y0, float x1, float y1, float x2, flo
 }
 
 void Surface::Line(float x0, float y0, float x1, float y1, COLORREF c, float width) {
-    Gdiplus::Pen pen(Col(c), width);
-    pen.SetStartCap(Gdiplus::LineCapRound);
-    pen.SetEndCap(Gdiplus::LineCapRound);
-    impl_->G().DrawLine(&pen, x0, y0, x1, y1);
+    Impl& I = *impl_;
+    if (I.penWidth != width || I.penColor != c || !I.penCache) {
+        I.penCache.reset(new Gdiplus::Pen(Col(c), width));
+        I.penCache->SetStartCap(Gdiplus::LineCapRound);
+        I.penCache->SetEndCap(Gdiplus::LineCapRound);
+        I.penColor = c;
+        I.penWidth = width;
+    }
+    impl_->G().DrawLine(I.penCache.get(), x0, y0, x1, y1);
 }
 
 void Surface::ProgressBar(const RECT& r, double fraction, double phase) {
@@ -236,6 +284,50 @@ void Surface::ProgressBar(const RECT& r, double fraction, double phase) {
         if (IntersectRect(&clipped, &seg, &r)) FillGradient(clipped, h / 2, kAccent, kAccent2);
     }
     StrokeRound(r, h / 2, kLineHi);
+}
+
+void Surface::BlitWrappedTexture(const RECT& dst, const uint8_t* rgba, int srcW, int srcH,
+                                 float uForLeft, float duPerPx, float vForTop, float dvPerPx,
+                                 bool clamp, int channel, bool checkerBase) {
+    if (!rgba || srcW <= 0 || srcH <= 0) return;
+    const int dw = dst.right - dst.left, dh = dst.bottom - dst.top;
+    if (dw <= 0 || dh <= 0) return;
+    if (!impl_->EnsureDib(dw, dh)) return;
+    const int W = impl_->dibW;
+    uint8_t* bits = static_cast<uint8_t*>(impl_->dibBits);
+    for (int r = 0; r < dh; ++r) {
+        const float v = vForTop + r * dvPerPx;
+        uint8_t* row = &bits[static_cast<size_t>(r) * W * 4];
+        for (int c = 0; c < dw; ++c) {
+            float uu = uForLeft + c * duPerPx;
+            float vv = v;
+            if (clamp) { uu = std::clamp(uu, 0.0f, 1.0f); vv = std::clamp(vv, 0.0f, 1.0f); }
+            else { uu -= std::floor(uu); vv -= std::floor(vv); }
+            const int tx = std::min(srcW - 1, std::max(0, static_cast<int>(uu * srcW)));
+            const int ty = std::min(srcH - 1, std::max(0, static_cast<int>((1.0f - vv) * srcH)));
+            const uint8_t* p = &rgba[(static_cast<size_t>(ty) * srcW + tx) * 4];
+            uint8_t* d = &row[c * 4];
+            if (channel == 0) {
+                int br, bg, bb;
+                if (checkerBase) {
+                    const bool light = (((c >> 3) + (r >> 3)) & 1) != 0;   // 8 px cells, like the editor's transparency grid
+                    br = light ? 52 : 32; bg = light ? 56 : 34; bb = light ? 70 : 44;
+                } else { br = 22; bg = 24; bb = 34; }
+                const int a = p[3];
+                d[0] = static_cast<uint8_t>((p[2] * a + bb * (255 - a)) / 255);   // B
+                d[1] = static_cast<uint8_t>((p[1] * a + bg * (255 - a)) / 255);   // G
+                d[2] = static_cast<uint8_t>((p[0] * a + br * (255 - a)) / 255);   // R
+                d[3] = 255;
+            } else {
+                const int gv = channel == 4 ? p[3] : channel == 1 ? p[0] : channel == 2 ? p[1] : p[2];
+                d[0] = d[1] = d[2] = static_cast<uint8_t>(gv);
+                d[3] = 255;
+            }
+        }
+    }
+    SetStretchBltMode(impl_->dc, COLORONCOLOR);
+    StretchBlt(impl_->dc, dst.left, dst.top, dw, dh, impl_->dibDc, 0, 0, dw, dh, SRCCOPY);
+    impl_->gdiPending = true;
 }
 
 void Surface::Logo(const RECT& r, int radius) {

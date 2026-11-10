@@ -174,6 +174,7 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
         const int idx = (y - l.matListTop + ScrollPx(g.matPos)) / kRowH;
         if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return;
         g.selMaterial = rows[static_cast<size_t>(idx)];
+        g.matUvTrisCache = -2;
         g.matTexSlot = -1;
         g.matUvCacheMat = -2;
         g.matTexSlotDropOpen = false;

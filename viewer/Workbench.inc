@@ -272,26 +272,15 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
             s.FillRound(pv, 4, ui::kCardHi);
             s.StrokeRound(pv, 4, ui::kLineHi);
             const RECT inner{pv.left + 2, pv.top + 2, pv.right - 2, pv.bottom - 2};
-            const int cw = 2, chh = 2;
-            const int cols = (inner.right - inner.left) / cw, rows = (inner.bottom - inner.top) / chh;
             const assemble::SceneTexture* tex = nullptr;
             if (sel.texIdx >= 0 && static_cast<size_t>(sel.texIdx) < scene.textures.size()) tex = &scene.textures[static_cast<size_t>(sel.texIdx)];
-            for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) {
-                const bool dark = ((r / 4) + (c / 4)) % 2 == 0;
-                COLORREF base = dark ? RGB(32, 34, 44) : RGB(52, 56, 70);
-                COLORREF col = base;
-                if (tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4) {
-                    const int tx = std::min(tex->width - 1, std::max(0, int(c * tex->width / (double)std::max(1, cols))));
-                    const int ty = std::min(tex->height - 1, std::max(0, int(r * tex->height / (double)std::max(1, rows))));
-                    const uint8_t* p = &tex->rgba[(static_cast<size_t>(ty) * tex->width + tx) * 4];
-                    const int R = p[0], G = p[1], B = p[2], A = p[3];
-                    if (g.matTexChannel == 0) col = RGB((R * A + GetRValue(base) * (255 - A)) / 255, (G * A + GetGValue(base) * (255 - A)) / 255, (B * A + GetBValue(base) * (255 - A)) / 255);
-                    else if (g.matTexChannel == 4) { const int g1 = A; col = RGB(g1, g1, g1); }
-                    else { const int g1 = g.matTexChannel == 1 ? R : g.matTexChannel == 2 ? G : B; col = RGB(g1, g1, g1); }
-                }
-                s.Fill(RECT{inner.left + c * cw, inner.top + r * chh, inner.left + (c + 1) * cw + 1, inner.top + (r + 1) * chh + 1}, col);
-            }
-            if (!tex) s.TextCentered(g.fontUi, ui::kDim, inner, "no texture");
+            const bool texOk = tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4;
+            if (texOk)   // one bitmap + one blit, not one call per 2 px cell
+                s.BlitWrappedTexture(inner, tex->rgba.data(), tex->width, tex->height,
+                                     0.0f, 1.0f / float(inner.right - inner.left), 1.0f, -1.0f / float(inner.bottom - inner.top),
+                                     false, g.matTexChannel, true);
+            else
+                s.TextCentered(g.fontUi, ui::kDim, inner, "no texture");
             DrawUvCanvas(s, l, scene, clip);
             // The UV diagnostics under the canvases.
             const auto& r = g.matUvReport;
@@ -366,24 +355,13 @@ void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scen
     const MatTexSlotInfo ssel = MatTexSelected(scene);
     if (ssel.texIdx >= 0 && static_cast<size_t>(ssel.texIdx) < scene.textures.size()) tex = &scene.textures[static_cast<size_t>(ssel.texIdx)];
     const RECT inn{uv.left + 2, uv.top + 2, uv.right - 2, uv.bottom - 2};
-    const int cw = 2, chh = 2;
-    const int cols = (inn.right - inn.left) / cw, rows = (inn.bottom - inn.top) / chh;
-    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) {
-        const float u = ((inn.left + c * cw + 1 - uv.left) - g.uvPanX) / g.uvScale;
-        // Unity's v=1 is the top row of the upload (the viewer's SampleBilinear uses
-        // (1 - v) * h), so the background is the same picture the 3D view shows.
-        const float v = 1.0f - ((inn.top + r * chh + 1 - uv.top) - g.uvPanY) / g.uvScale;
-        COLORREF col = RGB(22, 24, 34);
-        if (tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4) {
-            float uu = u, vv = v;
-            if (tex->clamp) { uu = std::clamp(uu, 0.0f, 1.0f); vv = std::clamp(vv, 0.0f, 1.0f); }
-            else { uu -= std::floor(uu); vv -= std::floor(vv); }
-            const int tx = std::min(tex->width - 1, std::max(0, int(uu * tex->width)));
-            const int ty = std::min(tex->height - 1, std::max(0, int((1.0f - vv) * tex->height)));
-            const uint8_t* p = &tex->rgba[(static_cast<size_t>(ty) * tex->width + tx) * 4];
-            col = RGB((p[0] * p[3] + 22 * (255 - p[3])) / 255, (p[1] * p[3] + 24 * (255 - p[3])) / 255, (p[2] * p[3] + 34 * (255 - p[3])) / 255);
-        }
-        s.Fill(RECT{inn.left + c * cw, inn.top + r * chh, inn.left + (c + 1) * cw + 1, inn.top + (r + 1) * chh + 1}, col);
+    if (tex && tex->width > 0 && tex->height > 0 && tex->rgba.size() >= static_cast<size_t>(tex->width) * tex->height * 4) {
+        // One bitmap + one blit instead of a call per 2 px cell: the same mapping the
+        // wireframe uses (Unity v=1 = texture row 0, as SampleBilinear does).
+        const float inv = 1.0f / g.uvScale;
+        const float uLeft = (float(inn.left - uv.left) - g.uvPanX) * inv;
+        const float vTop = 1.0f - (float(inn.top - uv.top) - g.uvPanY) * inv;
+        s.BlitWrappedTexture(inn, tex->rgba.data(), tex->width, tex->height, uLeft, inv, vTop, -inv, tex->clamp, 0, false);
     }
     auto toPx = [&](const Vec2& p, float& x, float& y) {
         x = uv.left + p.x * g.uvScale + g.uvPanX;
@@ -398,7 +376,11 @@ void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scen
         if ((x0 < uv.left - 100 && x1 < uv.left - 100) || (x0 > uv.right + 100 && x1 > uv.right + 100)) continue;
         s.Line(x0, y0, x1, y1, ui::kAmber, 2.0f);
     }
-    const auto tris = material::UvTrisForMaterial(scene, g.selMaterial);
+    if (g.matUvTrisCache != g.selMaterial) {
+        g.matUvTris = material::UvTrisForMaterial(scene, g.selMaterial);
+        g.matUvTrisCache = g.selMaterial;
+    }
+    const auto& tris = g.matUvTris;
     const int shown = std::min(2000, static_cast<int>(tris.size()));
     size_t flat = 0;
     for (const auto& dt : tris) {
@@ -440,7 +422,7 @@ void DrawWorkbench(ui::Surface& s, const RECT& clip) {
     s.Fill(clip, ui::kBg);
     if (L) {
         if (g.mat.originals.size() != L->scene.materials.size()) material::CaptureOriginals(g.mat, L->scene);
-        if (g.selMaterial < 0 && !L->scene.materials.empty()) g.selMaterial = 0;
+        if (g.selMaterial < 0 && !L->scene.materials.empty()) { g.selMaterial = 0; g.matUvTrisCache = -2; }
     }
     // Header: what this window is, and the keys it answers.
     if (TouchesY(clip, 0, 40)) {
@@ -578,6 +560,7 @@ bool WbClick(int x, int y, bool right) {
         const int idx = (y - l.listTop + ScrollPx(g.wbMatPos)) / kRowH;
         if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return true;
         g.selMaterial = rows[static_cast<size_t>(idx)];
+        g.matUvTrisCache = -2;
         g.matTexSlot = -1; g.matUvCacheMat = -2; g.matTexSlotDropOpen = false;
         SyncMatBuf();
         g.dirty = true;
@@ -767,11 +750,12 @@ void WbPickUvIsland(int ux, int uy) {
     if (pick >= 0) {
         std::set<std::pair<int, int>> want;
         for (const auto& id : islands[static_cast<size_t>(pick)]) want.insert({id.submesh, id.tri});
-        for (const auto& sub : mesh.submeshes) {
-            const int si = static_cast<int>(&sub - mesh.submeshes.data());
-            for (int ti = 0; ti + 2 < static_cast<int>(sub.indices.size()); ti += 3)
-                g.matUvSelMask.push_back(want.count({si, ti / 3}) ? 1 : 0);
-        }
+        // Index the mask exactly like the triangle list the canvas walks (UvTrisForMaterial,
+        // meshes → submeshes → triangles), so the highlight lands on the picked island.
+        if (g.matUvTrisCache != g.selMaterial) { g.matUvTris = material::UvTrisForMaterial(L->scene, g.selMaterial); g.matUvTrisCache = g.selMaterial; }
+        g.matUvSelMask.assign(g.matUvTris.size(), 0);
+        for (size_t i = 0; i < g.matUvTris.size(); ++i)
+            if (want.count({g.matUvTris[i].submesh, g.matUvTris[i].tri})) g.matUvSelMask[i] = 1;
     }
 }
 

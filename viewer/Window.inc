@@ -367,6 +367,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (L) {
             material::CaptureOriginals(g.mat, L->scene);
             g.selMaterial = L->scene.materials.empty() ? -1 : 0;
+            g.matUvTrisCache = -2;
             g.matFilter = -1;
             g.matScroll = 0; g.matPos = 0;
             for (int k = 0; k < kMatCount; ++k) g.matBuf[k] = 0;

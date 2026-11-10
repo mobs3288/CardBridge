@@ -499,6 +499,30 @@ Two defects surfaced when the user opened the Texture inspector:
 Verified live (screenshot + smoke); the inspector still opens/closes and
 exports fine.
 
+### Workbench performance pass (2026-11-10)
+
+The inspector lagged on every pan/zoom drag of the UV canvas and on picker
+drags over the preview. Two causes, both fixed:
+
+1. **Per-destination-pixel drawing.** The UV background and the preview
+   thumbnail each drew every 2×2 block with its own GDI `ExtTextOut` call —
+   ~130k calls per repaint, and repaints happen on *every* mouse-move frame
+   of a drag. New `ui::Surface::BlitWrappedTexture(...)` bakes the mapping
+   once into a persistent scratch DIB and blits it in one call (channel
+   filter and checkerboard/solid base preserved). ~5× fewer pixels touched
+   than 2×2 cells, one blit instead of a hundred thousand Fill calls.
+2. **`Gdiplus::Pen` created per `Line()`** — every seam and every wireframe
+   edge built a Pen per frame. The Surface keeps a one-entry pen cache.
+
+Also: the draw-triangle list (`UvTrisForMaterial`) is cached per selection
+(cleared at the five selection-change sites) instead of being rebuilt on
+every canvas paint, and the island-pick mask is now indexed exactly like
+that cached list — previously the sel flag read a mesh-flattened ordinal,
+so the highlight could land on the wrong island.
+
+Build + unit tests green (1826 checks). Live feel check pending the game
+(Deadlock) being closed; report whether the pan/zoom is smooth now.
+
 ---
 Status: **not started.**
 

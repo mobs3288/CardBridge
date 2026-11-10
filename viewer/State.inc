@@ -251,9 +251,11 @@ struct App {
     material::UvReport matUvReport;
     std::vector<std::pair<uint32_t, uint32_t>> matUvSeams;
     int matUvCacheMat = -2, matUvCacheMesh = -2;
-    std::vector<char> matUvSelMask;          // per flattened tri of the cached mesh: 1 = selected island
+    std::vector<char> matUvSelMask;          // per draw-triangle of the cached selection: 1 = the selected island
     POINT uvDown{};
     float uvPan0X = 0, uvPan0Y = 0;
+    int matUvTrisCache = -2;                     // selMaterial the cached list belongs to (-2 = nothing cached)
+    std::vector<material::UvDrawTri> matUvTris;   // that material's draw triangles, in draw order (same order as the mask)
     // The Material Workbench window: the full editor lives there, the side panel
     // keeps a launcher (filter + list + open button). Created on first open.
     HWND matHwnd = nullptr;

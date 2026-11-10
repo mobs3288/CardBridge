@@ -42,7 +42,7 @@ void DrawMatList(ui::Surface& s, const RECT& clip, int x0, int x1, int top, int 
 void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const Loaded& L) {
     const assemble::Scene& scene = L.scene;
     if (g.mat.originals.size() != scene.materials.size()) material::CaptureOriginals(g.mat, scene);
-    if (g.selMaterial < 0 && !scene.materials.empty()) g.selMaterial = 0;
+    if (g.selMaterial < 0 && !scene.materials.empty()) { g.selMaterial = 0; g.matUvTrisCache = -2; }
     // Filter row.
     {
         std::string fl = "Filter: All v";
