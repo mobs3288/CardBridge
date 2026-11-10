@@ -15,7 +15,7 @@ It is a standalone C++ Windows application built in the same style as the Projec
 Watch CardBridge's converted PMX models in action in MikuMikuDance (MMD).
 
 <p align="center">
-  <a href="https://youtu.be/z1WUHVzbCjQ">
+  <a href="https://youtu.be/z1WUHVzbCjQ" target="_blank" rel="noopener noreferrer">
     <img src="image/thumb.jpg" alt="CardBridge – Koikatsu to MMD Tech Demo" width="1080">
   </a>
 </p>
