@@ -1563,8 +1563,9 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                             ctx->VSSetConstantBuffers(0, 1, &I.diagCb); ctx->PSSetConstantBuffers(0, 1, &I.diagCb);
                             ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : I.rasterCull));
                             const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
+                            const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
                             ctx->PSSetShaderResources(0, 1, &ft->srv);
-                            ctx->PSSetSamplers(0, 1, &I.samplerWrap);
+                            ctx->PSSetSamplers(0, 1, ftClamp ? &I.samplerClamp : &I.samplerWrap);
                             ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                             ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                             ctx->DrawIndexed(gs.count, 0, 0);
@@ -1611,7 +1612,8 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         ctx->PSSetConstantBuffers(0, 1, &I.fbCb);
                         const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                         ctx->PSSetShaderResources(0, 1, &ft->srv);
-                        ID3D11SamplerState* fs = I.samplerWrap;
+                        const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
+                        ID3D11SamplerState* fs = ftClamp ? I.samplerClamp : I.samplerWrap;
                         ctx->PSSetSamplers(0, 1, &fs);
                         ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                         ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
@@ -1678,8 +1680,6 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         ctx->PSSetShader(layer.ps, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &layer.cb);
         ctx->PSSetConstantBuffers(0, 1, &layer.cb);
-        ID3D11SamplerState* ls = I.samplerWrap;
-        ctx->PSSetSamplers(0, 1, &ls);
         const float seconds = static_cast<float>(GetTickCount64() % 1000000ull) / 1000.0f;
         for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
             if (!visible(pi)) continue;
@@ -1704,7 +1704,10 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     std::memcpy(cbv + 32, info, 16);
                     ctx->UpdateSubresource(layer.cb, 0, nullptr, cbv, 0, 0);
                     const GpuTex* lt = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
+                    const bool ltClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
+                    ID3D11SamplerState* ls = ltClamp ? I.samplerClamp : I.samplerWrap;
                     ctx->PSSetShaderResources(0, 1, &lt->srv);
+                    ctx->PSSetSamplers(0, 1, &ls);
                     ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                     ctx->DrawIndexed(gs.count, 0, 0);
                 }

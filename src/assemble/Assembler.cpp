@@ -624,6 +624,8 @@ struct Builder {
             st.pixelHash = Fnv1a64(t->rgba.data(), t->rgba.size());
             st.rgba = std::move(t->rgba);
             scene.textures.push_back(std::move(st));
+            scene.textures.back().clamp = t->wrapMode == 1;   // the game clamps what the bundle marks as clamp
+            scene.textures.back().srgb = t->colorSpace == 1;
             result = static_cast<int>(scene.textures.size()) - 1;
         }
         textureCache[key] = result;
@@ -816,6 +818,8 @@ struct Builder {
         auto it = bakedCache.find(key);
         if (it != bakedCache.end()) return it->second;
         int idx = addSceneTexture(main->name + "_tint", source, main->width, main->height, tintTexture(*main, mask.get(), c));
+        scene.textures[static_cast<size_t>(idx)].clamp = main->wrapMode == 1;   // the tint copy samples exactly like its source
+        scene.textures[static_cast<size_t>(idx)].srgb = main->colorSpace == 1;
         bakedCache[key] = idx;
         return idx;
     }
