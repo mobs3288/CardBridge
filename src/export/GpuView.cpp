@@ -170,6 +170,7 @@ struct GpuView::Impl {
     ID3D11Buffer* diagCb = nullptr;
     ID3D11RasterizerState* wireRs = nullptr;
     int diagMode = 0;                    // exporter::ViewMode; 0 = Lit
+    std::string diagError;               // why the diagnostic shader could not be built (empty when it works)
     bool diagTried = false;
     std::vector<DiagnosticMaterial> diagMats;   // per-material interpreted params, indexed by scene.materials index
     // Outline: the material's silhouette ring (_LineWidthS, _LineColor) drawn as a copy of the mesh pushed out along its normals in
@@ -304,9 +305,9 @@ float4 ps(VO i) : SV_Target {
         diagTried = true;
         typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
         HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
-        if (!dll) return false;
+        if (!dll) { diagError = "d3dcompiler_47.dll could not be loaded"; return false; }
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
-        if (!compile) return false;
+        if (!compile) { diagError = "d3dcompiler_47.dll does not export D3DCompile"; return false; }
         static const char src[] = R"HLSL(
 cbuffer D : register(b0) {
     float4 r0, r1, r2, r3;   // world -> clip rows (same as the other paths)
@@ -319,7 +320,7 @@ cbuffer D : register(b0) {
 };
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
-struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; bool front : SV_IsFrontFace; };
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; };
 VO vs(VI i) {
     VO o;
     float4 p = float4(i.p, 1);
@@ -328,7 +329,7 @@ VO vs(VI i) {
     o.uv = i.uv;
     return o;
 }
-float4 ps(VO i) : SV_Target {
+float4 ps(VO i, bool front : SV_IsFrontFace) : SV_Target {
     const int mode = (int)modeInfo.x;
     if (mode == 1) {                 // Unlit
         float4 t = t0.Sample(s0, i.uv);
@@ -354,7 +355,7 @@ float4 ps(VO i) : SV_Target {
         float3 n = normalize(i.n);
         float d = dot(n, normalize(-light.xyz));
         const float t = 0.5 * (1.0 - params.z);
-        if (transCol.w > 0.5 && !i.front) d = -d;   // double sided: the wrap side flips for back faces
+        if (transCol.w > 0.5 && !front) d = -d;   // double sided: the wrap side flips for back faces
         const float wrap = clamp((d + t) / (1.0 + t), 0.0, 1.0);
         return float4(transCol.rgb * params.z * wrap * exp(-params.w), 1);
     } else if (mode == 10) {         // MaterialID
@@ -364,8 +365,29 @@ float4 ps(VO i) : SV_Target {
 }
 )HLSL";
         ID3DBlob *vb = nullptr, *pb = nullptr, *err = nullptr;
-        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vb, &err)) || !vb) { Rel(err); return false; }
-        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) { Rel(vb); Rel(err); return false; }
+        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vb, &err)) || !vb) {
+            if (err) {
+                const std::string e = std::string(static_cast<const char*>(err->GetBufferPointer()), err->GetBufferSize());
+                std::fprintf(stderr, "diagnostic HLSL vertex shader compile error:\n%s\n", e.c_str());
+                diagError = e;
+            } else {
+                std::fprintf(stderr, "diagnostic HLSL vertex shader compile failed without an error blob\n");
+                diagError = "vertex shader compile failed without an error blob";
+            }
+            Rel(err);
+            return false;
+        }
+        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) {
+            if (err) {
+                const std::string e = std::string(static_cast<const char*>(err->GetBufferPointer()), err->GetBufferSize());
+                std::fprintf(stderr, "diagnostic HLSL pixel shader compile error:\n%s\n", e.c_str());
+                diagError = e;
+            } else {
+                diagError = "pixel shader compile failed without an error blob";
+            }
+            Rel(vb); Rel(err);
+            return false;
+        }
         bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &diagVs)) &&
                   SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &diagPs));
         const D3D11_INPUT_ELEMENT_DESC el[3] = {
@@ -382,6 +404,8 @@ float4 ps(VO i) : SV_Target {
         rd.DepthClipEnable = TRUE;
         rd.MultisampleEnable = FALSE;
         ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &wireRs));
+        if (!ok) diagError = "creating the diagnostic shader objects failed";
+        else diagError.clear();
         Rel(vb); Rel(pb); Rel(err);
         return ok;
     }
@@ -775,6 +799,8 @@ bool GpuView::ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vect
     return !outPos.empty();
 }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
+int GpuView::DiagnosticMode() const { return impl_->diagMode; }
+std::string GpuView::DiagnosticError() const { return impl_->diagError; }
 void GpuView::SetPlain(bool on) { impl_->plain = on; }
 
 void GpuView::SetSkin(const std::vector<Mat4>* skin) {

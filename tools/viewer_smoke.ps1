@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
-  asexported, export, materials. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
+  asexported, export, materials, viewmode. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
 
@@ -371,6 +371,32 @@ try {
             $lay = Layout
             Check 'materials: the launcher reopens it' ($lay.workbench.open -eq $true -and $lay.workbench.sel -ge 0) "sel $($lay.workbench.sel)"
             $script:target = $hwnd   # the rest of the run drives the viewer again
+        }
+    }
+
+    if (Want 'viewmode') {
+        Write-Host 'viewmode strip'
+        $lay = GoTab 0
+        $a = Shot 'before_viewmode'
+        $client = $lay.client
+        if ($null -eq $client) { Check 'viewmode: the layout reports the client size' $false; }
+        else {
+            $cw = [int]$client[0]; $kPanel = [int]$lay.panel
+            $cellW = [int](($cw - $kPanel - 12 - 64 - 8) / 11)
+            $stripY = [int]$client[1] - 17
+            # M-ID (mode 10) cell centre; the Lit cell is at index 0
+            $mIdX = $kPanel + 6 + 10 * $cellW + [int]($cellW / 2)
+            Click $mIdX $stripY 700
+            $lay = Layout
+            $b = Shot 'viewmode_materialid'
+            Check 'viewmode: switching to MaterialID changes the picture' ([V]::DiffView($a.Path, $b.Path, $lay.panel) -gt 0.002) ("{0:P2} of the view" -f [V]::DiffView($a.Path, $b.Path, $lay.panel))
+            Check 'viewmode: the layout answers with the new mode' ($lay.state.diagMode -eq 10) "diagMode $($lay.state.diagMode)"
+            $litX = $kPanel + 6 + [int]($cellW / 2)
+            Click $litX $stripY 700
+            $lay = Layout
+            $c = Shot 'viewmode_lit'
+            Check 'viewmode: back to Lit restores the picture' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
+            Check 'viewmode: the layout answers with the lit mode' ($lay.state.diagMode -eq 0) "diagMode $($lay.state.diagMode)"
         }
     }
 

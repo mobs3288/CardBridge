@@ -127,6 +127,10 @@ public:
 
     int skippedMaterials() const;
 
+    // The diagnostic mode and the reason the diagnostic shader failed, as read by the layout dump.
+    int DiagnosticMode() const;
+    std::string DiagnosticError() const;
+
     // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
     void SetSkin(const std::vector<Mat4>* skin);
