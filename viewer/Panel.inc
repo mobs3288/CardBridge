@@ -508,6 +508,9 @@ void Paint(HWND hwnd) {
             StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
         }
     }
+    // The diagnostic mode strip over the viewport (spec S13) and, in MaterialID mode, the legend.
+    if (!overlayActive && W > 100 && H > 120) DrawModeLegend(dc, kPanel, W, H);
+    if (!overlayActive && W > 100 && H > 120) DrawModeStrip(dc, kPanel, W, H);
     const double tPanel = NowMs();
     g.prof.blit += tPanel - tBlit;
     // The panel is drawn off screen, only where it changed, then copied.

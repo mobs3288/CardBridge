@@ -89,6 +89,7 @@ add_library(cardbridge_core STATIC
     src/export/SkeletonOverlay.cpp
     src/export/Preview.cpp
     src/export/GpuView.cpp
+    src/export/ViewMode.cpp
     src/export/ShaderLayer.cpp
     src/export/ColourGrade.cpp
     src/library/Library.cpp

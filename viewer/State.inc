@@ -186,6 +186,9 @@ struct App {
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
+    int viewMode = 0;                // exporter::ViewMode (0 = Lit, the default); persisted in viewer.json ("viewMode")
+    bool viewIsolate = false;        // MaterialID mode: hide every part not using the selected material (session only)
+    int viewHoverCell = -1;          // the mode strip cell the cursor is over (-1 = none); repaint only that band
     ULONGLONG lastInput = 0;   // tick of the last camera change: the game shaders run only once the view has been still for a moment
     bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
     POINT last{};

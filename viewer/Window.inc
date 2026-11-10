@@ -536,6 +536,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        {   // The diagnostic mode strip over the viewport (spec S13): clicks there do not orbit the camera
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const int W = std::max(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
+            if (ModeStripClick(x, y, kPanel, W, H)) return 0;
+        }
         if (g.showBones && !g.boneScreen.empty()) {   // a bone under the pointer is grabbed: dragging turns it, Ctrl+drag moves it
             const int hit = exporter::PickBone(g.boneScreen, static_cast<float>(x - kPanel), static_cast<float>(y), 12.0f);
             if (std::shared_ptr<Loaded> L = Current(); L && hit >= 0) {
@@ -687,6 +693,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidatePanelBand(l.open.top - 2, l.tabs[0].bottom + 2);
             if (oldButton == 20 || g.hoverButton == 20) InvalidatePanelBand(l.matFilter.top - 2, l.matListTop - 2);   // the launcher button
         }
+        // The viewport's diagnostic mode strip: hover highlight (repaint only on change).
+        {
+            RECT rc2;
+            GetClientRect(hwnd, &rc2);
+            const int W = std::max(0, static_cast<int>(rc2.right) - kPanel), H = rc2.bottom;
+            const int oldCell = g.viewHoverCell;
+            g.viewHoverCell = x >= kPanel ? ModeStripCellIndex(x, y, kPanel, W, H) : -1;
+            if (oldCell != g.viewHoverCell) InvalidateView();
+        }
         if (oldPart != g.hoverPart) {
             g.lastInput = GetTickCount64();
             g.dirty = true;
@@ -698,10 +713,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
         if (g.matDropHover >= 0) { g.matDropHover = -1; InvalidatePanel(); }
-        if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0) {
+        if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0 || g.viewHoverCell >= 0) {
             bool part = g.hoverPart >= 0;
             g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
             g.hoverButton = 0;
+            if (g.viewHoverCell >= 0) { g.viewHoverCell = -1; InvalidateView(); }
             if (part) { g.dirty = true; InvalidateView(); }
             InvalidatePanel();
         }
@@ -806,6 +822,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const RECT cardNow = ProgOverlayRect(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
                 const RECT cancelNow = ProgCancelRect(cardNow);
                 hand = hand || PtInRect(&cancelNow, p) != 0;
+            }
+            if (p.x >= kPanel) {   // the diagnostic mode strip's cells want the pointing-hand cursor too
+                const int W = std::max(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
+                hand = hand || ModeStripHover(p.x, p.y, kPanel, W, H);
             }
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();

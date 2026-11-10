@@ -187,7 +187,7 @@ not exist for UVs — deferred indefinitely.
 ## ADR-008 — Diagnostic modes are a `ViewOptions::mode`, not new renderers
 
 **Date:** Stage 0.
-**Status:** proposed — implementation in Stage 4.
+**Status:** accepted — implemented in Stage 4 (2026-11-10).
 
 **Context.** `ViewOptions` (`Preview.h:53-63`) already carries `textured`,
 `shaded`, `step`, `highlightPart`, `skin`. The software raster loop
@@ -195,11 +195,24 @@ not exist for UVs — deferred indefinitely.
 
 **Decision.** One enum `ViewMode` with the spec's 11 modes; the software
 path branches per pixel; the GPU path uses the ADR-003 fallback shader. The
-viewport gets a mode strip (`Button` row) and the panel gets a legend
-(`ui::Surface` colour squares) for Material ID.
+viewport gets a mode strip chosen GDI-side (bottom of the 3D view, the
+  same DC the skeleton overlay uses) and the viewport shows a MaterialID
+legend (drawn only in MaterialID mode) for Material ID.
+
+**Stage 4 implementation notes.** The enum lives in `src/export/ViewMode.h`
+with a stable `ViewModeName` token persisted as `viewMode` in `viewer.json`
+(`"lit"` default). The interpreted per-material params come through
+`ViewOptions::diagnostics` / `GpuView::SetDiagnosticMode`, filled from
+`MaterialWorkbench::EffectiveMaterial` every frame — the diagnostic modes
+never re-derive or duplicate interpreted state. Lit never enters the
+diagnostic shader on the GPU path; Lit's output is unchanged.
 
 **Consequences.** No new window, no new renderer, no stored-property
-mutation: diagnostic modes never write back to the scene.
+mutation: diagnostic modes never write back to the scene. GPU wireframe is
+line-fill (overdraw) rather than per-pixel — documented. The one open
+point is verification: unit tests cover the software path deterministically;
+the GPU path has not been seen on screen yet (Deadlock running at session
+end).
 
 ---
 

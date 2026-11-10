@@ -79,6 +79,7 @@ namespace {
 #include "Pose.inc"
 #include "Export.inc"
 #include "Parts.inc"
+#include "ModeStrip.inc"
 #include "View.inc"
 #include "Widgets.inc"
 #include "MaterialsDraw.inc"
@@ -95,6 +96,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     LPWSTR* argvw = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::string card;
     g.settings = LoadSettings();
+    g.viewMode = static_cast<int>(exporter::ViewModeFromName(g.settings.viewMode.c_str()));   // the persisted viewport diagnostic mode (spec S13)
     for (int i = 1; i < argc; ++i) {
         std::string a = WideToUtf8(argvw[i]);
         if (a == "--library" && i + 1 < argc) g.settings.library = Slashes(WideToUtf8(argvw[++i]));

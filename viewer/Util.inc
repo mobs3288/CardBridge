@@ -58,6 +58,7 @@ struct Settings {
     std::string gpu = "auto";   // "auto" (discrete GPU first), "hardware", "warp" (CPU), "software" (software renderer); next start
     std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
+    std::string viewMode = "lit";   // the viewport diagnostic mode (spec S13): see exporter::ViewModeName/FromName
 };
 Settings LoadSettings() {
     Settings s;
@@ -70,6 +71,7 @@ Settings LoadSettings() {
         s.gpu = j.value("gpu", "auto");
         s.skin = j.value("skin", "gpu");
         s.noMods = j.value("noMods", false);
+        s.viewMode = j.value("viewMode", "lit");
     } catch (...) {}
     return s;
 }
@@ -84,6 +86,7 @@ void SaveSettings(const Settings& s) {
         j["gpu"] = s.gpu;
         j["skin"] = s.skin;
         j["noMods"] = s.noMods;
+        j["viewMode"] = s.viewMode;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }

@@ -524,12 +524,82 @@ Build + unit tests green (1826 checks). Live feel check pending the game
 (Deadlock) being closed; report whether the pan/zoom is smooth now.
 
 ---
-Status: **not started.**
 
-- [ ] `ViewMode` enum (11 modes) in software renderer.
-- [ ] GPU fallback shader for the same modes (ADR-003).
-- [ ] Material ID (deterministic colour, legend, isolate via `hiddenParts`).
-- [ ] Mode selector strip.
+## Stage 4 — Rendering diagnostics
+Status: **done, not yet smoke-tested on the user's machine** (2026-11-10,
+branch `feature/material-workbench`). Implemented after Stage 3.5.
+
+**Scope (user's choice):** all eleven modes, with Transmission in Stage 4,
+the mode persisted in `viewer.json`, and the mode strip in the viewport.
+
+**Files changed:**
+- New `src/export/ViewMode.h` + `.cpp` (`cardbridge_core`): `ViewMode`
+  (Lit/Unlit/BaseColor/Wireframe/Normal/Roughness/Metallic/Opacity/
+  UVChecker/Transmission/MaterialID), `ViewModeName`/`Label`/`Tooltip`/
+  `FromName` (Persisted `viewMode` token), `DiagnosticMaterial` (the
+  interpreted params). `ViewOptions::mode` and `ViewOptions::diagnostics`.
+- `src/export/Preview.cpp` (software path): per-pixel branch replaces the
+  shading for every mode ≠ Lit — wireframe by barycentric edge test (1.4 px
+  edges on the light background), normals as N*0.5+0.5, interpreted
+  roughness/metallic as gray, sampled/diffuse alpha as gray, UV checker,
+  wrap-light transmission from a back light with exp(-thickness)
+  attenuation (ADR-004), and `MaterialID` from `material::MaterialIdColor`.
+  Lit and Unlit keep the existing toon/shadow path (Unlit skips the multiply).
+- `src/export/GpuView.cpp` (GPU path, ADR-003): new runtime-compiled
+  `diagview` shader (vs_4_0/ps_4_0) — one shader for the whole scene with a
+  10-row cbuffer (transform, light, mode, diffuse, rough/metallic/
+  transmission params, transmission colour, material-id colour). When
+  `diagMode != Lit` the game's shaders are **skipped** and the diagnostic
+  path draws every submesh (transparent-bucket blending unchanged). Wireframe
+  uses a `FillMode=Wireframe` rasterizer state. `GpuView::SetDiagnosticMode`
+  copies the interpreted array; the game shader path is untouched in Lit.
+- `viewer/ModeStrip.inc` (new): the bottom-of-viewport button strip — one
+  button per mode (`Lit … M-ID`) plus the **Isolate** toggle (hides every
+  part not using the selected material; session only) — drawn with GDI on the
+  window DC, hit-tested for clicks (hover-aware, `WM_SETCURSOR` hand). The
+  **MaterialID legend** (swatch + index + name + `×N`, top-left, only in
+  MaterialID mode) lists every material and marks the current selection.
+  The strip wins clicks before the camera-drag path starts.
+- `viewer/View.inc`: `g.vopt.mode`, `g.vopt.diagnostics` are filled from
+  `EffectiveMaterial` per frame; `g.gpu.SetDiagnosticMode(...)` is called
+  every frame; the isolate filter overrides `g.effHidden` for MaterialID isolate.
+- `viewer/Util.inc`: Settings gains `viewMode` (string; default `"lit"`; round-trips).
+  `g.viewMode` loaded at startup; the mode persists across restarts.
+- `viewer/State.inc`: `viewMode`, `viewIsolate`, `viewHoverCell`.
+- `viewer/Panel.inc`: legend + strip drawn after the view blit, before the
+  panel draws (skipped while the progress overlay is up).
+- `viewer/Window.inc`: strip click (before camera drag), strip hover
+  tracking (ViewMode highlight, `InvalidateView` only on change), `WM_MOUSELEAVE`
+  clears it, `WM_SETCURSOR` hand over the strip.
+- `viewer/main.cpp`: registers the fragment, reads viewMode at startup.
+- `tests/cardbridge_tests.cpp`: `viewport: diagnostic modes render deterministically
+  on a synthetic scene` — two triangles/materials (Lit, BaseColor, Normal,
+  Roughness/Metallic grays, MaterialID incl. `MaterialIdColor` match + call-stable,
+  Wireframe ≪ Lit coverage, UVChecker, Transmission dark/lit-from-behind),
+  opacity gray in its own scene, `ViewModeFromName`/Name round-trip.
+
+**Test results:**
+```
+1840 checks, 0 failed, 1 integration suite(s) skipped   (was 1826)
+viewer_smoke.ps1: NOT RUN — Deadlock is running on the machine; no window was opened.
+```
+**Verification gap (honest):** the build compiles, unit tests pass, but the
+GPU diagnostic shader has not been run at all — nobody has seen a
+MaterialID screenshot yet. The first window run needs the game closed.
+
+**Limitations:**
+- Transmission on both paths is the ADR-004 wrap-light approximation: no
+  refraction, no volume, no multiple scattering; it's a lighting term, not
+  alpha transparency. L_back is fixed as `-light` (coming from behind the
+  model).
+- GPU Wireframe is line-fill wireframe (overdraw, no per-pixel edge test).
+- MaterialID isolate = view-time filter on the parts using the selected
+  material; it does not persist. MaterialID colour is `MaterialIdColor` —
+  deterministic across runs, but not guaranteed unique for every index pair.
+- The strip is not drawn when the viewport comes under ~30 px per cell (by design).
+- The as-exported (X) view is not diagnostic — by design.
+- Every mode rasters at full rate like Lit (the game shaders are skipped in
+  diagnostics). One extra runtime-compiled shader per run; no recompiles during a session.
 
 ---
 

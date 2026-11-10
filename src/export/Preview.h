@@ -2,6 +2,7 @@
 
 #include "assemble/Scene.h"
 #include "core/Bytes.h"
+#include "export/ViewMode.h"
 
 #include <cstdint>
 #include <functional>
@@ -66,6 +67,12 @@ struct ViewOptions {
     // Every vertex is skinned by it before it is drawn; the framing stays that of the rest pose so the picture does not jump while a bone
     // moves. nullptr or empty = the rest pose.
     const std::vector<Mat4>* skin = nullptr;
+    // Which viewport diagnostic to shade by (spec S13, ADR-008): Lit keeps the game's shaders/lookup path untouched.
+    // Unlit = texture x diffuse, no shading. MaterialID = one colour per material. Modes never write back to the scene.
+    ViewMode mode = ViewMode::Lit;
+    // Per-material interpreted parameters (Material Workbench EffectiveMaterial), indexed by scene.materials index.
+    // Used by Roughness / Metallic / Transmission. When nullptr those modes render as their neutral defaults.
+    const std::vector<DiagnosticMaterial>* diagnostics = nullptr;
 };
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's

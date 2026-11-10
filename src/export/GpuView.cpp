@@ -1,5 +1,7 @@
 #include "export/GpuView.h"
 
+#include "material/MaterialWorkbench.h"   // material::MaterialIdColor (the MaterialID diagnostic colour)
+
 #include "export/AdapterSelect.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
@@ -160,6 +162,16 @@ struct GpuView::Impl {
     ID3D11PixelShader* fbPs = nullptr;
     ID3D11InputLayout* fbIl = nullptr;
     ID3D11Buffer* fbCb = nullptr;
+    // Viewport diagnostic modes, spec S13 / ADR-008: one runtime-compiled shader draws the whole scene in a diagnostic
+    // mode (Lit stays on the game shaders). The game's shader path is never touched; wireframe uses a rasterizer state.
+    ID3D11VertexShader* diagVs = nullptr;
+    ID3D11PixelShader* diagPs = nullptr;
+    ID3D11InputLayout* diagIl = nullptr;
+    ID3D11Buffer* diagCb = nullptr;
+    ID3D11RasterizerState* wireRs = nullptr;
+    int diagMode = 0;                    // exporter::ViewMode; 0 = Lit
+    bool diagTried = false;
+    std::vector<DiagnosticMaterial> diagMats;   // per-material interpreted params, indexed by scene.materials index
     // Outline: the material's silhouette ring (_LineWidthS, _LineColor) drawn as a copy of the mesh pushed out along its normals in
     // screen space and slightly back in depth, so only the part beyond the surface shows.
     ID3D11VertexShader* olVs = nullptr;
@@ -281,6 +293,95 @@ float4 ps(VO i) : SV_Target {
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = (7 + 32 + 5) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
+        Rel(vb); Rel(pb); Rel(err);
+        return ok;
+    }
+
+    // Viewport diagnostics (spec S13, ADR-003/ADR-008): one runtime-compiled shader draws the whole scene in a diagnostic
+    // mode instead of the game's shaders; the game path is untouched. Lit mode never routes through here.
+    bool MakeDiagnostic() {
+        if (diagTried) return diagVs != nullptr && diagPs != nullptr && diagIl != nullptr && diagCb != nullptr;
+        diagTried = true;
+        typedef HRESULT(WINAPI * CompileFn)(const void*, SIZE_T, const char*, const void*, void*, const char*, const char*, UINT, UINT, ID3DBlob**, ID3DBlob**);
+        HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (!dll) return false;
+        auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
+        if (!compile) return false;
+        static const char src[] = R"HLSL(
+cbuffer D : register(b0) {
+    float4 r0, r1, r2, r3;   // world -> clip rows (same as the other paths)
+    float4 light;            // xyz: light direction; model is drawn around its centre
+    float4 modeInfo;         // x: mode (exporter::ViewMode)
+    float4 diffuse;          // diffuse incl. alpha
+    float4 params;           // x roughness, y metallic, z transmission strength, w transmission thickness
+    float4 transCol;         // rgb: transmission tint, w: double sided
+    float4 idCol;            // rgb: deterministic material-id colour
+};
+Texture2D t0 : register(t0); SamplerState s0 : register(s0);
+struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; bool front : SV_IsFrontFace; };
+VO vs(VI i) {
+    VO o;
+    float4 p = float4(i.p, 1);
+    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p));
+    o.n = i.n;
+    o.uv = i.uv;
+    return o;
+}
+float4 ps(VO i) : SV_Target {
+    const int mode = (int)modeInfo.x;
+    if (mode == 1) {                 // Unlit
+        float4 t = t0.Sample(s0, i.uv);
+        return float4(diffuse.rgb * t.rgb, 1);
+    } else if (mode == 2) {          // BaseColor
+        return float4(diffuse.rgb, 1);
+    } else if (mode == 3) {          // Wireframe: draw solid; the rasterizer state makes it wireframe
+        return float4(0.07, 0.07, 0.1, 1);
+    } else if (mode == 4) {          // Normal
+        float3 n = normalize(i.n);
+        return float4(n * 0.5 + 0.5, 1);
+    } else if (mode == 5) {          // Roughness
+        return float4(params.x, params.x, params.x, 1);
+    } else if (mode == 6) {          // Metallic
+        return float4(params.y, params.y, params.y, 1);
+    } else if (mode == 7) {          // Opacity
+        return float4(diffuse.w, diffuse.w, diffuse.w, 1);
+    } else if (mode == 8) {          // UVChecker
+        float2 q = floor(i.uv * 8.0);
+        const float d = frac((q.x + q.y) * 0.5);
+        return d < 0.5 ? float4(0.82, 0.82, 0.82, 1) : float4(0.38, 0.38, 0.38, 1);
+    } else if (mode == 9) {          // Transmission: back light wraps around the surface (ADR-004)
+        float3 n = normalize(i.n);
+        float d = dot(n, normalize(-light.xyz));
+        const float t = 0.5 * (1.0 - params.z);
+        if (transCol.w > 0.5 && !i.front) d = -d;   // double sided: the wrap side flips for back faces
+        const float wrap = clamp((d + t) / (1.0 + t), 0.0, 1.0);
+        return float4(transCol.rgb * params.z * wrap * exp(-params.w), 1);
+    } else if (mode == 10) {         // MaterialID
+        return float4(idCol.rgb, 1);
+    }
+    return float4(diffuse.rgb, 1);
+}
+)HLSL";
+        ID3DBlob *vb = nullptr, *pb = nullptr, *err = nullptr;
+        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vb, &err)) || !vb) { Rel(err); return false; }
+        if (FAILED(compile(src, sizeof(src) - 1, "diagview", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) { Rel(vb); Rel(err); return false; }
+        bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &diagVs)) &&
+                  SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &diagPs));
+        const D3D11_INPUT_ELEMENT_DESC el[3] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, nrm), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
+        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &diagIl));
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 10 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &diagCb));
+        D3D11_RASTERIZER_DESC rd{};
+        rd.FillMode = D3D11_FILL_WIREFRAME;
+        rd.CullMode = D3D11_CULL_NONE;
+        rd.DepthClipEnable = TRUE;
+        rd.MultisampleEnable = FALSE;
+        ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &wireRs));
         Rel(vb); Rel(pb); Rel(err);
         return ok;
     }
@@ -423,6 +524,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         ClearLayers();
         Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex);
         Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb);
+        Rel(diagVs); Rel(diagPs); Rel(diagIl); Rel(diagCb);
+        if (wireRs) { wireRs->Release(); wireRs = nullptr; }
         Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb);
         Rel(skCs);
         Rel(benchTsStart); Rel(benchTsEnd); Rel(benchTsDisjoint); Rel(benchEvent);
@@ -558,6 +661,11 @@ void GpuView::SetSkinMode(const std::string& mode) {
     impl_->skinOnGpu = false;
 }
 void GpuView::SetSkinThreshold(size_t verts) { impl_->skinThresholdVerts = verts; }
+void GpuView::SetDiagnosticMode(int mode, const std::vector<DiagnosticMaterial>* interpreted) {
+    Impl& I = *impl_;
+    I.diagMode = std::clamp(mode, 0, static_cast<int>(ViewMode::Count) - 1);
+    if (interpreted) I.diagMats = *interpreted;
+}
 SkinMemoryStats GpuView::SkinMemory() const {
     SkinMemoryStats s;
     const Impl& I = *impl_;
@@ -1400,6 +1508,43 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
                     ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : I.rasterCull);
+                    // Viewport diagnostics GPU path (ADR-003/ADR-008): one runtime-compiled shader instead of the game's shaders.
+                    // Lit stays on the path below; every other mode draws here, game shaders unused.
+                    if (I.diagMode != static_cast<int>(ViewMode::Lit)) {
+                        if (!I.diagTried) I.MakeDiagnostic();
+                        if (I.diagVs && I.diagPs && I.diagIl && I.diagCb) {
+                            const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
+                            float cbv[10 * 4] = {};
+                            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                            cbv[16 + 0] = L[0]; cbv[16 + 1] = L[1]; cbv[16 + 2] = L[2];
+                            cbv[20 + 0] = static_cast<float>(I.diagMode);
+                            cbv[24 + 0] = lin(mat.diffuse.x); cbv[24 + 1] = lin(mat.diffuse.y); cbv[24 + 2] = lin(mat.diffuse.z); cbv[24 + 3] = mat.diffuse.w;
+                            const DiagnosticMaterial* dm = gs.material >= 0 && static_cast<size_t>(gs.material) < I.diagMats.size() ? &I.diagMats[static_cast<size_t>(gs.material)] : nullptr;
+                            cbv[28 + 0] = dm ? dm->roughness : 0.7f;
+                            cbv[28 + 1] = dm ? dm->metallic : 0.0f;
+                            cbv[28 + 2] = dm ? dm->transmissionStrength : 0.0f;
+                            cbv[28 + 3] = dm ? dm->transmissionThickness : 1.0f;
+                            const float tc0 = dm ? dm->transmissionColor[0] : 1.0f, tc1 = dm ? dm->transmissionColor[1] : 1.0f, tc2 = dm ? dm->transmissionColor[2] : 1.0f;
+                            cbv[32 + 0] = lin(tc0); cbv[32 + 1] = lin(tc1); cbv[32 + 2] = lin(tc2);
+                            cbv[32 + 3] = (dm && dm->doubleSided) || mat.doubleSided ? 1.0f : 0.0f;
+                            const Vec3 idc = material::MaterialIdColor(static_cast<int>(gs.material));
+                            cbv[36 + 0] = idc.x; cbv[36 + 1] = idc.y; cbv[36 + 2] = idc.z;
+                            cbv[36 + 3] = 1.0f;
+                            ctx->UpdateSubresource(I.diagCb, 0, nullptr, cbv, 0, 0);
+                            ctx->IASetInputLayout(I.diagIl);
+                            ctx->VSSetShader(I.diagVs, nullptr, 0);
+                            ctx->PSSetShader(I.diagPs, nullptr, 0);
+                            ctx->VSSetConstantBuffers(0, 1, &I.diagCb); ctx->PSSetConstantBuffers(0, 1, &I.diagCb);
+                            ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : I.rasterCull));
+                            const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
+                            ctx->PSSetShaderResources(0, 1, &ft->srv);
+                            ctx->PSSetSamplers(0, 1, &I.samplerWrap);
+                            ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+                            ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                            ctx->DrawIndexed(gs.count, 0, 0);
+                        }
+                        continue;
+                    }
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
                         float cbv[(7 + 32 + 5) * 4] = {};

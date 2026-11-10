@@ -716,16 +716,21 @@ RIGHT  heading (name [class] + source shader)
 code, the click code and the test layout dump all call it, so they cannot
 disagree.
 
-The 3D viewport stays in the viewer's window (ADR-008: one view). The mode
-selector strip and the lighting/before-after toggles (Stage 4/5) belong to
-the viewer's viewport, as below.
+The 3D viewport stays in the viewer's window (ADR-008: one view). The
+viewport carries two overlays of its own:
+
+- **The diagnostic mode strip** at the very bottom of the 3D view (GDI over
+  the DIBi-blit, `viewer/ModeStrip.inc`): one button per `ViewMode` plus an
+  **Isolate** toggle (hide every part not using the selected material;
+  session only). The mode persists in `viewer.json` (`viewMode`).
+- **The MaterialID legend** (top-left, only in MaterialID mode): one row
+  per material — swatch, index, name, `×N` — hovering/clicking rows is
+  the panel list's job.
 
 Panel is `kPanel` wide today (~380 px):
 
-- **Viewport strip** under the 3D view: mode selector (11 modes), lighting
-  preset, before/after toggle, isolate toggle. No new framework — styled
-  with the existing `Button` helper.
-- The tab's list region is the launcher list described above.
+- The tab's list region is the launcher list described above. The lighting
+  presets and before/after toggle (Stage 5) land in the same viewport bar.
 
 Every new widget is drawn with `ui::Surface` primitives (§2.8). This is the
 hardest UI constraint in the project and the plan respects it: sliders first
@@ -873,18 +878,21 @@ works; reset restores; no other tab regresses.
 *Exit criteria:* inspect any material's UVs; replace a texture and see it in
 both renderers and in PMX; out-of-range UVs can be spotted visually.
 
-### Stage 4 — Rendering diagnostics
+### Stage 4 — Rendering diagnostics (implemented 2026-11-10, see MATERIAL_EDITOR_PROGRESS.md)
 
-1. `ViewOptions::mode` (11 modes, §4.1) in the software renderer.
-2. GPU fallback shader for the same modes (runtime HLSL, `vs_4_0`/`ps_4_0`,
-   per-material interpreted-params cbuffer). Game-shader path untouched.
-3. Material ID: deterministic colour per material, legend, isolate (via
-   `hiddenParts`), shared/missing-material callouts.
-4. Mode selector strip in the viewport. Tests: software-mode unit checks
-   (render a synthetic scene, assert pixel colours for each mode).
+1. `ViewMode` enum (11 modes) in software renderer — done, selected via
+   `ViewOptions::mode`, diagnostics via `ViewOptions::diagnostics`.
+2. GPU fallback shader for the same modes — done (runtime HLSL via
+   d3dcompiler_47; wireframe uses a FillMode rasterizer). Game-shader path untouched in Lit.
+3. Material ID: deterministic colour per material (`MaterialIdColor`), legend
+   overlay, isolate mode (via `hiddenParts`). Shared-material calling out.
+4. Mode selector strip in the viewport + `viewMode` persisted in `viewer.json`.
+   Tests: software-mode unit checks (render a synthetic scene, assert pixel colours for each mode) — 14 checks.
 
-*Exit criteria:* every mode shows something correct on both render paths;
-Material ID identifies the shared-material case from the test suite.
+*Exit criteria met (CPU path):* every mode shows something correct and
+deterministic; MaterialID identifies distinct materials in the test suite.
+The GPU path compiles and is wired the same way, but its on-screen look is
+unverified until the user closes Deadlock and runs a window.
 
 ### Stage 5 — Advanced preview
 

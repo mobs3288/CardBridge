@@ -3089,6 +3089,154 @@ void unitTests() {
         for (const auto& m : back.materials) if (m.name.find("outfit0.top") != std::string::npos) sawMaterial = true;
         CHECK(sawMaterial && back.materials.size() > 0);
     });
+
+    test("viewport: diagnostic modes render deterministically on a synthetic scene", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        s.materials.push_back({}); s.materials.back().diffuse = {0.9f, 0.1f, 0.1f, 1.0f};
+        s.materials.push_back({}); s.materials.back().diffuse = {0.1f, 0.5f, 0.9f, 1.0f};
+        SceneMesh mesh;
+        auto pv = [&](Vec3 pos, Vec2 uv) { SceneVertex v; v.pos = pos; v.normal = {0, 0, 1}; v.uv = uv; mesh.vertices.push_back(v); };
+        // Triangle A: base colour material 0 (red), left. Triangle B: material 1 (blue), right.
+        pv({-0.9f, -0.7f, 0}, {0.15f, 0.15f}); pv({-0.05f, -0.7f, 0}, {0.45f, 0.15f}); pv({-0.48f, 0.7f, 0}, {0.3f, 0.85f});
+        pv({0.05f, -0.7f, 0}, {0.55f, 0.15f}); pv({0.9f, -0.7f, 0}, {0.85f, 0.15f}); pv({0.48f, 0.7f, 0}, {0.7f, 0.85f});
+        SceneSubmesh smA; smA.material = 0; smA.indices = {0, 1, 2};
+        SceneSubmesh smB; smB.material = 1; smB.indices = {3, 4, 5};
+        mesh.submeshes.push_back(smA); mesh.submeshes.push_back(smB);
+        s.meshes.push_back(mesh);
+        ScenePart part; part.id = "p"; part.meshes = {0}; part.visibleInPreview = true;
+        s.parts.push_back(part);
+        const int W = 128, H = 128;
+        const uint32_t bg = 0xFFE2E4E8u;
+        exporter::ViewCamera cam;
+        exporter::ViewStatePtr st = exporter::NewViewState();
+        std::vector<uint32_t> px;
+        auto render = [&](exporter::ViewMode mode, const std::vector<exporter::DiagnosticMaterial>* diag = nullptr, float yawDeg = 0.0f) {
+            cam.yawDeg = yawDeg;
+            px.clear();
+            exporter::ViewOptions vo;
+            vo.mode = mode;
+            vo.diagnostics = diag;
+            exporter::RenderView(s, cam, W, H, vo, *st, px);
+            return px;
+        };
+        auto nonBg = [&](const std::vector<uint32_t>& p) { int n = 0; for (uint32_t v : p) if (v != bg) ++n; return n; };
+        auto ch = [](uint32_t v, int k) { return static_cast<int>((v >> (16 - 8 * k)) & 255u); };   // 0=R, 1=G, 2=B
+        // Lit renders and is deterministic.
+        const auto lit = render(exporter::ViewMode::Lit);
+        CHECK(nonBg(lit) > 50 && lit == render(exporter::ViewMode::Lit));
+        // BaseColor: pure red-ish / blue-ish pixels, no texture.
+        {
+            const auto p = render(exporter::ViewMode::BaseColor);
+            bool red = false, blue = false;
+            for (uint32_t v : p) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (r > 180 && g < 80 && b < 80) red = true;
+                if (b > 180 && r < 80) blue = true;
+            }
+            CHECK(red && blue);
+        }
+        // Normal: world normal +Z renders as (128, 128, 255).
+        {
+            const auto p = render(exporter::ViewMode::Normal);
+            bool ok = false;
+            for (uint32_t v : p) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (b > 230 && std::abs(r - 128) <= 3 && std::abs(g - 128) <= 3) ok = true;
+            }
+            CHECK(ok);
+        }
+        // Roughness / metallic with diagnostics: exact grays.
+        {
+            std::vector<exporter::DiagnosticMaterial> d(2);
+            d[0].roughness = 0.2f; d[1].roughness = 0.9f; d[0].metallic = 0.8f; d[1].metallic = 0.3f;
+            const auto rp = render(exporter::ViewMode::Roughness, &d);
+            const auto mp = render(exporter::ViewMode::Metallic, &d);
+            bool r51 = false, r230 = false, m204 = false, m77 = false;
+            for (uint32_t v : rp) {
+                const int r = ch(v, 0);
+                if (std::abs(r - 51) <= 2) r51 = true;
+                if (std::abs(r - 230) <= 2) r230 = true;
+            }
+            for (uint32_t v : mp) {
+                const int r = ch(v, 0);
+                if (std::abs(r - 204) <= 2) m204 = true;
+                if (std::abs(r - 77) <= 2) m77 = true;
+            }
+            CHECK(r51 && r230 && m204 && m77);
+        }
+        // MaterialID: one deterministic colour per material, stable across calls, matching MaterialIdColor.
+        {
+            const auto p1 = render(exporter::ViewMode::MaterialID);
+            const auto p2 = render(exporter::ViewMode::MaterialID);
+            const Vec3 c0 = material::MaterialIdColor(0), c1 = material::MaterialIdColor(1);
+            auto q = [](float f) { return static_cast<int>(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            bool found0 = false, found1 = false;
+            for (uint32_t v : p1) {
+                if (std::abs(ch(v, 0) - q(c0.x)) <= 3 && std::abs(ch(v, 1) - q(c0.y)) <= 3 && std::abs(ch(v, 2) - q(c0.z)) <= 3) found0 = true;
+                if (std::abs(ch(v, 0) - q(c1.x)) <= 3 && std::abs(ch(v, 1) - q(c1.y)) <= 3 && std::abs(ch(v, 2) - q(c1.z)) <= 3) found1 = true;
+            }
+            CHECK(found0 && found1 && p1 == p2);
+            CHECK(material::MaterialIdColor(3).x != material::MaterialIdColor(5).x || material::MaterialIdColor(3).y != material::MaterialIdColor(5).y || material::MaterialIdColor(3).z != material::MaterialIdColor(5).z);
+        }
+        // Wireframe: strictly less fill than Lit, deterministic.
+        {
+            const auto wire = render(exporter::ViewMode::Wireframe);
+            const int nWire = nonBg(wire), nFull = nonBg(lit);
+            CHECK(nWire > 20 && nWire * 3 < nFull && wire == render(exporter::ViewMode::Wireframe));
+        }
+        // UVChecker: deterministic and paints the mesh.
+        {
+            const auto p = render(exporter::ViewMode::UVChecker);
+            CHECK(nonBg(p) > 50 && p == render(exporter::ViewMode::UVChecker));
+        }
+        // Transmission with alpha strength 0: the term is black (mesh pixels differ only where it was lit).
+        {
+            const auto p = render(exporter::ViewMode::Transmission);
+            bool anyDark = false;
+            for (uint32_t v : p) if (v != bg && ch(v, 0) < 30) anyDark = true;
+            CHECK(anyDark);
+        }
+        // Transmission with full strength and thin fabric: visible from behind (front light faces -Z here).
+        {
+            std::vector<exporter::DiagnosticMaterial> d(2);
+            for (auto& m : d) { m.transmissionStrength = 1.0f; m.transmissionThickness = 0.0f; }
+            const auto p = render(exporter::ViewMode::Transmission, &d, 180.0f);
+            bool anyLit = false;
+            for (uint32_t v : p) if (v != bg && ch(v, 0) > 30) anyLit = true;
+            CHECK(anyLit);
+        }
+        // Opacity: semantic alpha as gray (own scene, opaque materials kept in the main one).
+        {
+            Scene s2;
+            s2.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+            s2.materials.push_back({}); s2.materials.back().diffuse = {0.9f, 0.1f, 0.1f, 0.5f};
+            SceneMesh m2;
+            auto pv2 = [&](Vec3 pos, Vec2 uv) { SceneVertex v; v.pos = pos; v.normal = {0, 0, 1}; v.uv = uv; m2.vertices.push_back(v); };
+            pv2({-0.9f, -0.7f, 0}, {0.1f, 0.1f}); pv2({0.9f, -0.7f, 0}, {0.9f, 0.1f}); pv2({0.0f, 0.7f, 0}, {0.5f, 0.9f});
+            SceneSubmesh sm2; sm2.material = 0; sm2.indices = {0, 1, 2};
+            m2.submeshes.push_back(sm2);
+            s2.meshes.push_back(m2);
+            ScenePart part2; part2.id = "p2"; part2.meshes = {0}; part2.visibleInPreview = true;
+            s2.parts.push_back(part2);
+            exporter::ViewStatePtr st2 = exporter::NewViewState();
+            px.clear();
+            cam.yawDeg = 0.0f;   // the transmission check above rotates it; stay facing the face
+            exporter::ViewOptions vo2; vo2.mode = exporter::ViewMode::Opacity;
+            exporter::RenderView(s2, cam, W, H, vo2, *st2, px);
+            bool gray128 = false;
+            for (uint32_t v : px) {
+                const int r = ch(v, 0), g = ch(v, 1), b = ch(v, 2);
+                if (std::abs(r - 128) <= 2 && std::abs(g - 128) <= 2 && std::abs(b - 128) <= 2) { gray128 = true; break; }
+            }
+            CHECK(gray128);
+        }
+        // Name table: round trip, unknown is Lit.
+        CHECK(std::string_view{exporter::ViewModeName(exporter::ViewMode::Transmission)} == "transmission");
+        CHECK(exporter::ViewModeFromName("transmission") == exporter::ViewMode::Transmission);
+        CHECK(exporter::ViewModeFromName("not_a_mode") == exporter::ViewMode::Lit);
+    });
 }
 
 

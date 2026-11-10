@@ -118,6 +118,13 @@ public:
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                 int highlightPart = -1);
 
+    // Selects a viewport diagnostic mode for the *next* Render call (0 = Lit = the game's shaders, the
+    // default; anything else draws the scene with the runtime-compiled diagnostic fallback shader, so the
+    // game shaders are not used). `interpreted` is indexed by scene.material index (usually the Material
+    // Workbench's EffectiveMaterial); nullptr = defaults. The selection is not persisted by the view —
+    // the caller holds it (ADR-008).
+    void SetDiagnosticMode(int mode, const std::vector<DiagnosticMaterial>* interpreted);
+
     int skippedMaterials() const;
 
     // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
