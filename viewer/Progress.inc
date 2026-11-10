@@ -9,6 +9,7 @@ struct ProgSnapshot {
 };
 
 void Log(const std::string& text, LogKind kind);   // defined below
+void InvalidateSliderRow(int id);                 // defined with the frame code (Window.inc)
 
 void ProgBegin(const std::string& title, bool indeterminate = true) {
     {
@@ -129,7 +130,20 @@ void InvalidateView() {
     InvalidateRect(g.hwnd, &rc, FALSE);
 }
 
-void InvalidateAll() { if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE); }
+// The Material Workbench window (created on first open): whole-window repaint.
+void InvalidateWorkbench() { if (g.matHwnd) InvalidateRect(g.matHwnd, nullptr, FALSE); }
+
+void InvalidateAll() {
+    if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidateWorkbench();
+}
+
+// The Material Workbench is a second window: a material change repaints the
+// panel (the counts and the list marks) and the workbench (the editor).
+void InvalidateMat() {
+    InvalidatePanel();
+    InvalidateWorkbench();
+}
 
 void InvalidatePanelBand(int top, int bottom) {
     if (!g.hwnd) return;

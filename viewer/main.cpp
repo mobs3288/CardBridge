@@ -82,6 +82,7 @@ namespace {
 #include "View.inc"
 #include "Widgets.inc"
 #include "MaterialsDraw.inc"
+#include "Workbench.inc"
 #include "BonesDraw.inc"
 #include "Panel.inc"
 #include "Clicks.inc"
@@ -111,6 +112,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
 
     ui::Startup();
     ui::LoadLogo(inst, 2);
+    g.hinst = inst;
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
@@ -118,6 +120,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"CardBridgeViewer";
     RegisterClassW(&wc);
+    {   // the Material Workbench window's class; the window itself opens on first click
+        WNDCLASSW wcm{};
+        wcm.lpfnWndProc = MatWndProc;
+        wcm.hInstance = inst;
+        wcm.hCursor = wc.hCursor;
+        wcm.hIcon = wc.hIcon;
+        wcm.lpszClassName = kWbClassName;
+        RegisterClassW(&wcm);
+    }
     g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge " L"viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
                              CW_USEDEFAULT, 1280, 820, nullptr, nullptr, inst, nullptr);
     if (wc.hIcon) SendMessageW(g.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
@@ -180,6 +191,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else MsgWaitForMultipleObjectsEx(0, nullptr, 33, QS_ALLINPUT, 0);
     }
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
+    g.wb.Reset();
     for (HFONT* f : {&g.fontTitle, &g.fontUi, &g.fontBold, &g.fontMono, &g.fontLog, &g.fontSmall})
         if (*f) DeleteObject(*f);
     ui::Shutdown();

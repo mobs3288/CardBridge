@@ -19,8 +19,10 @@ struct UvReport {
     float margin = 0.02f;
     int outOfRangeVerts = 0;
     float worstOutOfRange = 0.0f;     // max distance outside the range
-    // Stretch: per-triangle texel density (UV area * texel scale vs 3D area).
-    // 1.0 = uniform. Reports extremes; -1 when there are no triangles.
+    // Stretch: per-triangle texel density (UV area * texel scale vs 3D area),
+    // reported as multiples of this mesh's mean density (1.0 = mean; >1 = the
+    // UV covers more pixels per unit surface than average). Near-degenerate
+    // 3D triangles are skipped. -1 when there are no triangles.
     float stretchMin = -1.0f;
     float stretchMax = -1.0f;
     float stretchMean = 0.0f;

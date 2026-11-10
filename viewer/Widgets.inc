@@ -50,18 +50,20 @@ void Expander(ui::Surface& s, int x, int cy, bool open, COLORREF c) {
 }
 
 // One slider row: label, the track filled from the card's value to the current one, the thumb, the value. False when the id names no slider.
-bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y) {
+// trackL / trackR / valueR / labelX default to the side panel's own; the Material Workbench passes a wider track.
+bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int trackL = kTrackL, int trackR = kTrackR,
+                   int valueR = kPanel - 14, int labelX = 12) {
     SliderRef r;
     if (!SliderFor(id, r)) return false;
     const bool changed = TweakChanged(id);
     const COLORREF mark = changed ? ui::kAmber : ui::kAccent;
-    const RECT labelClip{12, y, kTrackL - 8, y + kRowH};
+    const RECT labelClip{labelX, y, trackL - 8, y + kRowH};
     // The label box is only ~148px wide: truncate with … so a long name never
     // hard-cuts mid-word at the track edge.
-    s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, 12, y + 2, ClipText(label, 22), &labelClip);
+    s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, labelX, y + 2, ClipText(label, 22), &labelClip);
     const int mid = y + kRowH / 2;
-    auto xOf = [&](float v) { return kTrackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (kTrackR - kTrackL))); };
-    s.FillRound(RECT{kTrackL, mid - 2, kTrackR, mid + 2}, 2, ui::kLine);
+    auto xOf = [&](float v) { return trackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (trackR - trackL))); };
+    s.FillRound(RECT{trackL, mid - 2, trackR, mid + 2}, 2, ui::kLine);
     const int a = std::min(xOf(r.def), xOf(*r.v)), b = std::max(xOf(r.def), xOf(*r.v));
     if (b > a) s.FillRound(RECT{a, mid - 2, b, mid + 2}, 2, mark);
     s.Line(static_cast<float>(xOf(r.def)), static_cast<float>(mid - 5), static_cast<float>(xOf(r.def)), static_cast<float>(mid + 5), ui::kDim, 1.0f);   // where the card has it
@@ -71,17 +73,17 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y) {
     if (r.fmt) std::snprintf(val, sizeof val, r.fmt, static_cast<double>(*r.v));
     else if (r.percent) std::snprintf(val, sizeof val, "%d", static_cast<int>(std::lround(*r.v * 100)));
     else std::snprintf(val, sizeof val, "%+d", static_cast<int>(std::lround(*r.v)));
-    s.TextRight(g.fontMono, changed ? ui::kAmber : ui::kSub, kPanel - 14, y + 3, val);
+    s.TextRight(g.fontMono, changed ? ui::kAmber : ui::kSub, valueR, y + 3, val);
     return true;
 }
 
-// A thin scroll bar at the right edge of a list.
-void ScrollBar(ui::Surface& s, int top, int bottom, int rows, int visible, float pos) {
+// A thin scroll bar at the right edge of a list (rightEdge = where its thumb ends).
+void ScrollBar(ui::Surface& s, int top, int bottom, int rows, int visible, float pos, int rightEdge = kPanel - 7) {
     if (rows <= visible) return;
     const int trackH = bottom - top;
     const int thumbH = std::max(18, trackH * visible / rows);
     const float span = static_cast<float>(std::max(1, rows - visible));
     const int thumbY = top + static_cast<int>(static_cast<float>(trackH - thumbH) * std::clamp(pos / span, 0.0f, 1.0f));
-    s.FillRound(RECT{kPanel - 11, thumbY, kPanel - 7, thumbY + thumbH}, 2, ui::kLineHi);
+    s.FillRound(RECT{rightEdge - 4, thumbY, rightEdge, thumbY + thumbH}, 2, ui::kLineHi);
 }
 

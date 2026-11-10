@@ -84,16 +84,16 @@ struct PanelLayout {
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
-    int matEditTop = 0, matListTop = 0, matListBottom = 0;       // Materials tab: filter row, list, editor
+    int matListTop = 0, matListBottom = 0;                      // Materials tab (the launcher): the list under the filter + open rows
     RECT clearLog{};
     // Bones tab hit areas (the click code and the drawing use the same ones): the two switches, the reset row, the undo / redo / save / load row
     RECT boneSkeleton{}, boneHelpers{}, boneResetOne{}, boneResetAll{}, boneUndo{}, boneRedo{}, boneSave{}, boneLoad{};
-    // Materials tab hit areas
-    RECT matFilter{}, matClassBtn{}, matPresetBtn{}, matTexBtn{}, matPickBtn{}, matInspectBtn{}, matResetThis{}, matResetAll{}, matUndo{}, matRedo{};
+    // Materials tab hit areas: the filter dropdown and the button that opens the Material Workbench window
+    // (the editor itself lives in that window, so it has no panel hit areas).
+    RECT matFilter{}, matOpen{};
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
-constexpr int kMatEditRows = 13;    // heading, class/preset row, R G B, HEX, 6 shading sliders, reset/undo row
 constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
 
 PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows) {
@@ -128,9 +128,6 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
     l.boneListTop = l.partsTop + kRowH;
     l.boneListBottom = l.boneEditTop - 4;
-    l.matEditTop = l.boneEditTop;
-    l.matListTop = l.boneListTop;
-    l.matListBottom = l.boneListBottom;
     l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
     l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
     l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
@@ -142,17 +139,9 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.boneSave = {114, ay, 190, ay + kRowH};
     l.boneLoad = {194, ay, 268, ay + kRowH};
     l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
-    const int my = l.matEditTop + 1 * kRowH;
-    l.matClassBtn = {10, my, 140, my + kRowH};
-    l.matPresetBtn = {144, my, 240, my + kRowH};
-    l.matTexBtn = {244, my, kPanel - 10, my + kRowH};
-    l.matPickBtn = {260, l.matEditTop + 5 * kRowH, 310, l.matEditTop + 6 * kRowH};
-    l.matInspectBtn = {314, l.matEditTop + 5 * kRowH, kPanel - 10, l.matEditTop + 6 * kRowH};
-    const int mry = l.matEditTop + 12 * kRowH;
-    l.matResetThis = {10, mry, 95, mry + kRowH};
-    l.matResetAll = {99, mry, 184, mry + kRowH};
-    l.matUndo = {188, mry, 244, mry + kRowH};
-    l.matRedo = {248, mry, kPanel - 10, mry + kRowH};
+    l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
+    l.matListTop = l.partsTop + kRowH + 34;
+    l.matListBottom = l.partsBottom;
     return l;
 }
 
@@ -265,6 +254,16 @@ struct App {
     std::vector<char> matUvSelMask;          // per flattened tri of the cached mesh: 1 = selected island
     POINT uvDown{};
     float uvPan0X = 0, uvPan0Y = 0;
+    // The Material Workbench window: the full editor lives there, the side panel
+    // keeps a launcher (filter + list + open button). Created on first open.
+    HWND matHwnd = nullptr;
+    HINSTANCE hinst = nullptr;
+    ui::Surface wb;                          // the workbench's own off-screen surface
+    int wbHoverRow = -1;                     // material list row under the cursor in the workbench
+    int wbHoverBtn = 0;                      // workbench button under the cursor (0 = none)
+    int wbMatScroll = 0;                     // the workbench list's scroll target, in rows
+    float wbMatPos = 0;                      // eased position (the panel's list has its own)
+    int dragTrackL = 0, dragTrackR = 0;      // the track a slider drag is using (0 = the panel's kTrackL / kTrackR)
     std::vector<Mat4> skin;                   // current skin matrices (empty = rest pose)
     std::vector<Vec3> boneWorld;              // posed bone positions, for the overlay
     std::vector<std::pair<float, float>> boneScreen;   // where the overlay put each bone in the last picture (x < 0: not drawn)
@@ -309,7 +308,73 @@ struct App {
 };
 App g;
 
-PanelLayout Lay(int H) { return LayoutFor(H, (g.tab == TabBones || g.tab == TabMaterials) && !g.showIssues, g.tab == TabMaterials ? kMatEditRows : kBoneEditRows); }
+PanelLayout Lay(int H) { return LayoutFor(H, g.tab == TabBones && !g.showIssues, kBoneEditRows); }
+
+// ---- the Material Workbench window's layout ---------------------------------------------------------------------------
+// A material list on the left, the editor of the selected material on the right. Computed from the client size, so the
+// drawing code and the click code can never disagree about where anything is (both call this).
+struct WbLayout {
+    int W = 0, H = 0;
+    RECT filter{};                       // the filter dropdown button (left column)
+    int listTop = 0, listBottom = 0;     // the material list's rows
+    int listX0 = 6, listX1 = 300;        // the list card (its right edge also carries the scroll bar)
+    int edX = 320, edW = 500;            // the editor's content box
+    int edTop = 46;                      // the heading row of the editor
+    RECT classBtn{}, presetBtn{}, texBtn{}, pickBtn{}, inspectBtn{};
+    RECT resetThis{}, resetAll{}, undoBtn{}, redoBtn{}, saveBtn{}, loadBtn{};
+    int trackL = 0, trackR = 0, valueR = 0;   // slider track and where its value is right-aligned
+    int canvasTop = 0, canvasH = 0;      // the texture inspector's canvases
+    RECT preview{}, uv{};
+    RECT chan[5]{}, slotBtn{}, enableBtn{}, replaceBtn{}, fitBtn{};
+};
+
+WbLayout WbLayoutFor(int W, int H) {
+    WbLayout l;
+    l.W = W;
+    l.H = H;
+    l.filter = {10, 46, 210, 46 + kRowH};
+    l.listTop = 76;
+    l.listBottom = std::max(l.listTop + kRowH, H - 14);
+    l.edX = 320;
+    l.edW = std::max(360, W - l.edX - 20);
+    l.edTop = 46;
+    const int x = l.edX, w = l.edW, top = l.edTop;
+    l.trackL = x + 150;
+    l.trackR = x + w - 90;
+    l.valueR = x + w;
+    // Row 1: class / preset / texture.
+    l.classBtn = {x, top + kRowH, x + 130, top + 2 * kRowH};
+    l.presetBtn = {x + 134, top + kRowH, x + 230, top + 2 * kRowH};
+    l.texBtn = {x + 234, top + kRowH, x + w, top + 2 * kRowH};
+    // Row 5: HEX + the colour picker and the texture view toggles.
+    const int hy = top + 5 * kRowH;
+    l.pickBtn = {x + w - 110, hy, x + w - 60, hy + kRowH};
+    l.inspectBtn = {x + w - 56, hy, x + w, hy + kRowH};
+    // Row 2 of the inspector: channel buttons and the texture slot dropdown.
+    const int cy = top + 2 * kRowH;
+    for (int i = 0; i < 5; ++i) l.chan[i] = {x + i * 38, cy, x + i * 38 + 36, cy + kRowH};
+    l.slotBtn = {x + 200, cy, x + w, cy + kRowH};
+    // The canvases take whatever height is left over (rows 6 on).
+    l.canvasTop = top + 6 * kRowH;
+    l.canvasH = std::max(160, H - l.canvasTop - 96);
+    const int pw = std::min(200, w / 3);   // the preview thumbnail's column
+    l.preview = {x, l.canvasTop, x + pw, l.canvasTop + l.canvasH};
+    l.uv = {x + pw + 10, l.canvasTop, x + w, l.canvasTop + l.canvasH};
+    const int ay = l.canvasTop + l.canvasH + 34;   // info, then actions, under the canvases
+    l.enableBtn = {x, ay, x + 20, ay + kRowH};
+    l.replaceBtn = {x + 160, ay, x + 260, ay + kRowH};
+    l.fitBtn = {x + w - 100, ay, x + w, ay + kRowH};
+    // The reset / undo / save / load row: straight under the sliders in the shading
+    // view, pushed down by the canvases in the texture view.
+    const int ry = g.matInspectOpen ? ay + kRowH + 6 : top + 12 * kRowH;
+    l.resetThis = {x, ry, x + 85, ry + kRowH};
+    l.resetAll = {x + 89, ry, x + 174, ry + kRowH};
+    l.undoBtn = {x + 178, ry, x + 234, ry + kRowH};
+    l.redoBtn = {x + 238, ry, x + 300, ry + kRowH};
+    l.saveBtn = {x + w - 184, ry, x + w - 94, ry + kRowH};
+    l.loadBtn = {x + w - 90, ry, x + w, ry + kRowH};
+    return l;
+}
 
 constexpr UINT WM_LOADED = WM_APP + 1;
 constexpr UINT WM_LOG = WM_APP + 2;

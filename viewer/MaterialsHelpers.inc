@@ -72,7 +72,8 @@ void MaterialSliderEdited(int id, bool released) {
     }
     g.dirty = true;
     InvalidateView();
-    if (released) InvalidatePanel(); else InvalidatePanel();
+    InvalidateSliderRow(id);   // the workbench's slider row, and the panel's "edited" count
+    (void)released;
 }
 
 void MaterialUndo(bool redo) {
@@ -83,7 +84,7 @@ void MaterialUndo(bool redo) {
     material::ApplyOverrides(L->scene, g.mat);
     SyncMaterialTextures();
     g.dirty = true;
-    InvalidatePanel();
+    InvalidateMat();
     InvalidateView();
     Log(std::string(redo ? "redo" : "undo") + " (" + std::to_string(g.mat.undoStack.size()) + " step(s) to undo, " + std::to_string(g.mat.redoStack.size()) + " to redo)");
 }
@@ -116,7 +117,7 @@ void ApplyMatHex(const std::string& hex6) {
     if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
     g.dirty = true;
     InvalidateView();
-    InvalidatePanel();
+    InvalidateMat();
 }
 
 // The colour picker's apply: same as HEX but from a picked RGB. Kept separate so
@@ -135,8 +136,7 @@ void ApplyMatRgb(const Vec3& rgb) {
     if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
     g.dirty = true;
     InvalidateView();
-    const PanelLayout l = Lay(ClientHeight());
-    InvalidatePanelBand(l.matEditTop, l.matEditTop + kMatEditRows * kRowH);
+    InvalidateMat();
 }
 
 // Direct class pick (dropdown). One undo step; the class itself is only a label
@@ -164,92 +164,69 @@ void SetMatFilter(int filter) {
     g.matFilter = filter;
     g.matScroll = 0;
     g.matPos = 0;
-    InvalidatePanel();
+    g.wbMatScroll = 0;
+    g.wbMatPos = 0;
+    InvalidateMat();
 }
 
-// ---- Materials tab popup geometry (single source of truth for draw + click) ----
-RECT MatClassDropRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 2 * kRowH;
-    return {10, y, 200, y + 11 * kRowH};
+// ---- Workbench popup geometry (single source of truth for draw + click) ----
+RECT MatClassDropRect(const WbLayout& l) {
+    return {l.classBtn.left, l.classBtn.bottom, l.classBtn.left + 190, l.classBtn.bottom + 11 * kRowH};
 }
-RECT MatFilterDropRect(const PanelLayout& l) {
-    const int y = l.partsTop + kRowH;
-    return {10, y, 200, y + 12 * kRowH};
+// The filter dropdown, below a filter button at (x, y) of width w: the side panel's
+// launcher and the workbench's own list both open one of these.
+RECT MatFilterDropRect(int x, int y, int w) {
+    return {x, y + kRowH, x + w, y + kRowH + 12 * kRowH};
 }
-RECT MatPickerOuter(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {10, y, kPanel - 10, y + 136};
+RECT MatTexDropRect(const WbLayout& l, int rows) {
+    return {l.slotBtn.left, l.slotBtn.bottom, l.slotBtn.right, l.slotBtn.bottom + rows * kRowH};
 }
-RECT MatPickerSV(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {20, y + 8, 200, y + 88};
+// The colour picker: a fixed-height popup on the editor's first free row, as wide as
+// the editor allows (capped so the SV square never becomes a strip).
+RECT MatPickerOuter(const WbLayout& l) {
+    const int w = std::min(l.edW, 560);
+    return {l.edX, l.canvasTop, l.edX + w, l.canvasTop + 240};
 }
-RECT MatPickerHue(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {20, y + 96, 200, y + 110};
-}
-RECT MatPickerPreview(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {210, y + 8, 360, y + 48};
-}
-RECT MatPickerDone(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {210, y + 112, 360, y + 128};
-}
+RECT MatPickerSV(const RECT& o) { return {o.left + 12, o.top + 12, o.right - 182, o.top + 168}; }
+RECT MatPickerHue(const RECT& o) { return {o.left + 12, o.top + 184, o.right - 182, o.top + 212}; }
+RECT MatPickerPreview(const RECT& o) { return {o.right - 170, o.top + 12, o.right - 12, o.top + 96}; }
+RECT MatPickerDone(const RECT& o) { return {o.right - 170, o.top + 184, o.right - 12, o.top + 212}; }
 // Applies the picker colour at a window point inside the SV square or hue bar.
 // kind: 1 = SV (keeps the current hue), 2 = hue (keeps s/v).
-void ApplyPickerAt(int x, int y, int kind, const PanelLayout& l) {
+void ApplyPickerAt(int x, int y, int kind, const RECT& outer) {
     if (g.selMaterial < 0) return;
     material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
     Vec3 hsv = material::RgbToHsv(Vec3{eff.baseColor.x, eff.baseColor.y, eff.baseColor.z});
     if (kind == 1) {
-        const RECT sv = MatPickerSV(l);
+        const RECT sv = MatPickerSV(outer);
         hsv.y = std::clamp((x - sv.left) / float(sv.right - sv.left), 0.0f, 1.0f);
         hsv.z = 1.0f - std::clamp((y - sv.top) / float(sv.bottom - sv.top), 0.0f, 1.0f);
     } else {
-        const RECT hb = MatPickerHue(l);
+        const RECT hb = MatPickerHue(outer);
         hsv.x = std::clamp((x - hb.left) / float(hb.right - hb.left), 0.0f, 1.0f);
     }
     if (!g.matPickerUndoPushed) { material::PushUndo(g.mat); g.matPickerUndoPushed = true; }
     ApplyMatRgb(material::HsvToRgb(hsv.x, hsv.y, hsv.z));
 }
 
+// The class filter dropdown, drawn below a filter button at (x, y) of width w. Both
+// lists own one of these (the panel's launcher and the workbench), so both draw it here.
+void DrawMatFilterDrop(ui::Surface& s, int x, int y, int w) {
+    const RECT drop = MatFilterDropRect(x, y, w);
+    s.FillRound(drop, 5, ui::kCard);
+    s.StrokeRound(drop, 5, ui::kLineHi);
+    static const char* const labels[12] = {"All", "Skin", "Fabric", "Hair", "Eyes", "Eyelashes", "Metal", "Plastic", "Leather", "Glass", "Rubber", "Generic"};
+    for (int i = 0; i < 12; ++i) {
+        const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
+        const int val = i == 0 ? -1 : i - 1;
+        if (val == g.matFilter || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
+        s.Text(g.fontUi, val == g.matFilter ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, labels[i], &row);
+    }
+}
+
 // ---- Texture inspector + UV canvas helpers (Stage 3) ----
-// Geometry (single source of truth for draw + click). Rows 2-4 show channel
-// + slot; row 5 (HEX) stays as the view toggle; rows 6-11 show the preview
-// (left) + UV canvas (right) + one-line info + Enable/Replace/Fit actions.
-RECT MatTexPreviewRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {10, y, 160, y + 60};
-}
-RECT MatUvRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 6 * kRowH;
-    return {170, y, 370, y + 60};
-}
-RECT MatTexChannelRect(const PanelLayout& l, int i) {
-    const int y = l.matEditTop + 2 * kRowH;
-    return {10 + i * 38, y, 10 + i * 38 + 36, y + kRowH};
-}
-RECT MatTexSlotRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 2 * kRowH;
-    return {210, y, 370, y + kRowH};
-}
-RECT MatTexEnableRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 10 * kRowH + 14;
-    return {10, y, 30, y + kRowH};
-}
-RECT MatTexReplaceRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 10 * kRowH + 14;
-    return {170, y, 270, y + kRowH};
-}
-RECT MatUvFitRect(const PanelLayout& l) {
-    const int y = l.matEditTop + 10 * kRowH + 14;
-    return {274, y, 370, y + kRowH};
-}
-RECT MatTexDropRect(const PanelLayout& l, int rows) {
-    const RECT b = MatTexSlotRect(l);
-    return {b.left, b.bottom, b.right, b.bottom + rows * kRowH};
-}
+// The canvas geometry lives in WbLayout (preview, uv, channel buttons, slot,
+// enable / replace / fit), so the draw code and the click code share one source.
 struct MatTexSlotInfo { std::string prop; int texIdx = -1; bool enabled = true; };
 std::vector<MatTexSlotInfo> MatTexSlots(const assemble::SceneMaterial& m) {
     std::vector<MatTexSlotInfo> out;
@@ -309,7 +286,7 @@ std::string PickImageFile() {
     wchar_t file[1024] = L"";
     OPENFILENAMEW of{};
     of.lStructSize = sizeof of;
-    of.hwndOwner = g.hwnd;
+    of.hwndOwner = g.matHwnd ? g.matHwnd : g.hwnd;   // the dialog belongs to the window that asked for it
     of.lpstrFilter = L"Images (*.png;*.jpg;*.jpeg;*.bmp)\0*.png;*.jpg;*.jpeg;*.bmp\0All files\0*.*\0";
     of.lpstrFile = file;
     of.nMaxFile = 1024;
@@ -337,7 +314,7 @@ void ReplaceMatTexture(const std::string& prop) {
     Log("replaced " + prop + ": " + std::to_string(w) + "x" + std::to_string(h) + " (texture " + std::to_string(idx) + ")", LogKind::Good);
     g.dirty = true;
     InvalidateView();
-    InvalidatePanel();
+    InvalidateMat();
 }
 
 std::string MatPathFromUser(bool save) {
@@ -345,7 +322,7 @@ std::string MatPathFromUser(bool save) {
     wchar_t file[1024] = L"materials.json";
     OPENFILENAMEW of{};
     of.lStructSize = sizeof of;
-    of.hwndOwner = g.hwnd;
+    of.hwndOwner = g.matHwnd ? g.matHwnd : g.hwnd;   // owned by the workbench when it is open
     of.lpstrFilter = L"CardBridge materials (*.json)\0*.json\0All files\0*.*\0";
     of.lpstrFile = file;
     of.nMaxFile = 1024;
@@ -387,7 +364,7 @@ void LoadMatFile(const std::string& given = std::string()) {
     for (const auto& u : unknown) Log("materials: '" + u + "' is not in this scene; skipped", LogKind::Warn);
     material::ReportUnsupported(L->scene, g.mat);
     g.dirty = true;
-    InvalidatePanel();
+    InvalidateMat();
     InvalidateView();
     Log("loaded " + std::to_string(n) + " material edit(s) from " + path, LogKind::Good);
 }

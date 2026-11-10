@@ -39,10 +39,11 @@ int RowIndexAt(size_t count, const PanelLayout& l, int x, int y) {
 }
 int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) { return RowIndexAt(rows.size(), l, x, y); }
 
-// A slider row: label on the left, the track, the value on the right.
+// A slider row: label on the left, the track, the value on the right. The Material
+// Workbench window has its own, wider track, so the two ends are parameters.
 constexpr int kTrackL = 168, kTrackR = 300;
-float SliderValueAt(const SliderRef& r, int x) {
-    float t = std::clamp(static_cast<float>(x - kTrackL) / (kTrackR - kTrackL), 0.0f, 1.0f);
+float SliderValueAt(const SliderRef& r, int x, int trackL = kTrackL, int trackR = kTrackR) {
+    float t = std::clamp(static_cast<float>(x - trackL) / std::max(1, trackR - trackL), 0.0f, 1.0f);
     float v = r.lo + t * (r.hi - r.lo);
     return std::clamp(std::round(v / r.step) * r.step, r.lo, r.hi);
 }
@@ -58,6 +59,10 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.clothingReset, p)) return 7;   // reset the imported outfit to the card default
     if (PtInRect(&l.clothingPrev, p)) return 8;    // move the imported outfit to the previous outfit slot
     if (PtInRect(&l.clothingNext, p)) return 9;    // move the imported outfit to the next outfit slot
+    // The Materials tab's launcher button opens the Material Workbench window. Its rect
+    // exists in every layout (one LayoutFor), so it only counts on that tab, and before
+    // the tab branch below (20 would otherwise mean "tab 10").
+    if (g.tab == TabMaterials && PtInRect(&l.matOpen, p)) return 20;
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }

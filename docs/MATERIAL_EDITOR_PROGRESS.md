@@ -379,7 +379,127 @@ an active base-colour edit still tints the replacement.
 
 ---
 
-## Stage 4 — Rendering diagnostics
+## Stage 3.5 — The Material Workbench gets its own window
+Status: **done** (2026-11-10, branch `feature/material-workbench`).
+
+Requested after Stage 3: the Materials tab should open a *dedicated window*
+("as big as the main viewer") instead of editing inside the 380 px panel.
+ADR-010 records the decision; this is the record of the change.
+
+**Files changed:**
+- New `viewer/Workbench.inc` (the whole window):
+  - `WbButtonId`/`WbButtons`/`WbButtonAt`/`WbButtonRect` — one button list the
+    draw code, the click code, the hover repaint and the cursor all read.
+  - `WbNow()`/`WbLayoutFor` — one layout for a given client size.
+    `InvalidateWbBand`/`InvalidateWbList` repaint a band or the list card.
+  - `RevealSelectedMaterial()` — scrolls *both* lists to the selection.
+  - `DrawMatPicker` (HSV popup), `DrawUvCanvas`, `DrawWorkbenchEditor`,
+    `DrawWorkbench` (header, list card, editor card, popups last).
+  - `WbPaint` (update-region split like `Paint`; a new/resized surface
+    redraws everything), `WbClick` (modal popups first, then filter, list,
+    rows, sliders with `g.dragTrackL/R`, inspector, reset/undo/save/load),
+    `WbPickUvIsland`.
+  - `MatWndProc`: paint, size, min size 920×600, `WM_TEST` (10/13–16),
+    `WM_CLOSE` → hide, input (incl. HEX keys, Esc, Ctrl+Z/Y/S/O),
+    `WM_DESTROY` → **no** `PostQuitMessage`.
+  - `OpenWorkbench()` — registers the class (also guarded in `wWinMain`),
+    mirrors the viewer rect to its right clamped to the work area, shows or
+    restores, reveals the selection, focuses.
+  - `DumpWorkbenchLayout()` — the `workbench` section of the layout dump.
+- `viewer/MaterialsDraw.inc` rewritten as the launcher: `DrawMatList`
+  (shared list renderer: rows, selection bar, edited tint, scroll bar) +
+  `DrawMaterialsTab` (filter + count, **Open Material Workbench** button
+  (hover id 20), list, filter dropdown last).
+- `viewer/Clicks.inc`: `MaterialsTabClick` slimmed from ~220 lines to the
+  filter dropdown + hex-end + list select (the editor moved to `WbClick`).
+- `viewer/State.inc`: `PanelLayout` keeps only `matFilter`/`matOpen`/
+  `matListTop`/`matListBottom`; `App` gains `matHwnd`, `hinst`, `wb`
+  (second surface), `wbHoverRow`, `wbHoverBtn`, `wbMatScroll/wbMatPos`,
+  `dragTrackL/R`; new `WbLayout` + `WbLayoutFor`.
+- `viewer/Window.inc`: material slider invalidation goes to the workbench
+  band; `ApplyPending` uses the drag's own track; `Frame` eases the
+  workbench list scroll; `DumpTestLayout` writes a launcher `materials`
+  section + `workbench`; button 20 opens the workbench; hover/picker/UV
+  handling left the main `WndProc`; HEX/Esc now `InvalidateMat()`;
+  `WM_DESTROY` destroys the workbench first, then quits.
+- `viewer/MaterialsHelpers.inc`: popup geometry from `WbLayout`
+  (`MatClassDropRect`, `MatFilterDropRect(x,y,w)`, `MatTexDropRect`,
+  `MatPicker*`), shared `DrawMatFilterDrop`, `InvalidateMat()` (both
+  windows), dialog owners `g.matHwnd ? g.matHwnd : g.hwnd`.
+- `viewer/Parts.inc`: `SliderValueAt(r, x, trackL, trackR)`; `ButtonAt`
+  returns 20 for `l.matOpen` on the Materials tab (checked before the
+  `button >= 10` tab branch).
+- `viewer/Widgets.inc`: `DrawSliderRow` takes track ends + value right +
+  label x; `ScrollBar` takes a right edge.
+- `viewer/Progress.inc`: `InvalidateWorkbench`/`InvalidateMat`;
+  `InvalidateAll` covers both windows; fwd decl `InvalidateSliderRow`.
+- `viewer/main.cpp`: includes `Workbench.inc`, registers the class,
+  `g.hinst`, `g.wb.Reset()` at shutdown.
+- `tools/viewer_smoke.ps1`: `$script:target` (Click/Drag/Hook/Shot aim at
+  the viewer or the workbench; `Shot` takes an optional hwnd so view diffs
+  still shoot the viewer), `V.ByClass` (EnumWindows — PowerShell marshals a
+  `$null` string arg as `""`, so `FindWindowW(cls, $null)` never matches),
+  the materials step retargets to the workbench: open → find by class →
+  `workbench.*` coords → drag/undo/picker/inspector/UV → hide via `WM_CLOSE`
+  → reopen from the launcher → target back to the viewer. Plus an `apose`
+  check fix (see below).
+
+**Decisions:**
+- Same thread and message loop as the viewer (ADR-010): no second state, no
+  lock on `g.mu`, no deadlock risk with the export path.
+- `WM_CLOSE` hides instead of destroying: scroll, selection and the drawn
+  surface survive; only the viewer's `WM_DESTROY` quits the process.
+- Shared: selection, edits, filter, class/picker/inspect flags.
+  Per-window: hover, list scroll, slider drag track.
+- Popup geometry single-sourced from `WbLayout` so draw and click agree.
+
+**Test results:**
+```
+1826 checks, 0 failed, 1 integration suite(s) skipped
+viewer_smoke.ps1 -Only materials,export: 35 checks, 0 failed
+viewer_smoke.ps1 (full):                          69 checks, 0 failed
+```
+The materials step now covers the launcher (list, filter, button), the
+window opening at 1264×781 (as big as the viewer), the workbench's own list
+selecting, a Red drag changing 2.50% of the view in one undo step, undo
+restoring it exactly, the class dropdown picking Metal in one click, the
+picker drag changing 2.55%, the inspector's format/UV drag, save/load row
+present, `WM_CLOSE` hiding and the launcher reopening it (selection kept).
+
+**Two smoke fixes along the way (not regressions):**
+- `apose: the switch is on` failed because commit `9a160c1` made A-pose
+  default *on*, so one `P` press turns it off. The check now asserts the
+  switch *toggled* (it still requires the picture to change).
+- `FindWindowW(cls, $null)` never matched (PowerShell passes `""`), so the
+  workbench was "not found" even when open; `V.ByClass` uses `EnumWindows`.
+
+**Limitations:** the filter dropdown is one shared flag for two windows
+(modal, only one list clickable at a time — documented in ADR-010); the
+workbench is one window per process (no multiple workbenches); the window is
+not persisted (position/size are re-derived from the viewer on first open);
+the panel keeps no editor at all, so with the workbench closed the panel
+shows only the list (by design — the button reopens it).
+
+### Workbench-window fixes found on first live look (2026-11-10)
+
+Two defects surfaced when the user opened the Texture inspector:
+
+1. **The UV canvas's texture was vertically flipped against its own
+   wireframe** ("the mapping is offside"). The background sampler used
+   `ty = v * h` after a `1 - v` flip; the viewer's `SampleBilinear` maps
+   Unity `v=1` to texture row 0 (`fy = (1 - v) * h`), so the background now
+   uses `(1 - vv) * tex->height` — the same picture the 3D view shows, and
+   the same frame as `toPx`, so zoom/pan can never drift the two apart.
+2. **`stretch 48467.3-166219488.0`** — texel density is unit-dependent
+   (`uv area × texels² / 3D area` explodes on near-degenerate 3D triangles).
+   Triangles with `dA <= 1e-9` are now skipped and min/max are reported as
+   multiples of the mesh mean (`meanDensity == 1`; `stretch 0.02-53.72x of
+   mean` on the demo card). Unit tests still green (inequality checks).
+
+Verified live (screenshot + smoke); the inspector still opens/closes and
+exports fine.
+
+---
 Status: **not started.**
 
 - [ ] `ViewMode` enum (11 modes) in software renderer.

@@ -265,6 +265,14 @@ draw surface.
   code and the reason Stage 2 must land a *thin* inspector before richer
   widgets.
 
+> **Note (2026-11-10, ADR-010):** the source was split after Stage 2 —
+> `viewer/main.cpp` is now a hub that `#include`s grouped fragments
+> (`Util/State/Materials*/Parts/Panel/Clicks/Window/Workbench.inc`), and the
+> material *editor* lives in a second top-level window
+> (`viewer/Workbench.inc`); the panel's Materials tab keeps only the filter,
+> the list and the launcher button. The tabs are now 7 (`Parts, Body, Face,
+> Look, Bones, Mats, Setup`).
+
 ### 2.9 Project serialization today
 
 There is no `.cardbridge` project file. Three separate things exist:
@@ -622,8 +630,8 @@ system.
 ### 5.1 Texture Inspector (spec §11)
 
 Data already available: `SceneTexture` pixels + size + `srgb`/`clamp` +
-`source` + `pixelHash`. UI: a 2D canvas (a new `Ui::Surface` region drawing
-into the panel) showing:
+`source` + `pixelHash`. UI: a 2D canvas (a `Ui::Surface` region in the
+workbench window, ADR-010) showing:
 
 - Preview (blit + upscale, checkerboard for alpha).
 - Resolution, format (recorded in `SceneTexture::format` at assembly since
@@ -676,40 +684,53 @@ All five must be unit-testable without a window (pure functions over
 
 ## 6. Viewer layout (spec §17)
 
-Keep the existing single-panel Win32 window. Add **one new tab**:
-`Materials` (tab strip grows from 6 to 7; `TabCount` 6→7,
-`viewer/main.cpp:292-293`). Layout inside the tab reuses the existing
-three-band pattern:
+**Amended by ADR-010 (2026-11-10): the editor now lives in its own window.**
+The original single-panel plan below is kept for what it still describes (the
+tab, the list, the viewport strip); the right-hand inspector and the
+UV/texture area moved into the **Material Workbench** window.
+
+The side panel keeps one new tab, `Materials` (tab strip grows from 6 to 7;
+`TabCount` 6→7). It is a *launcher*, not the editor:
+
+- class filter dropdown (same widget the workbench uses),
+- **Open Material Workbench** button → second top-level window
+  (`viewer/Workbench.inc`, class `CardBridgeMaterialWorkbench`, ADR-010),
+- the material list (index, name, `[Class]`, `xN` shared badge, amber when
+  edited, selection bar) — selecting here reveals the material in the
+  workbench's list and vice versa.
+
+The workbench window mirrors the viewer's size (to its right, inside the
+monitor work area, min 920×600) and holds the whole editor:
 
 ```
-LEFT   (top)   Material hierarchy + mesh list + search + class filter
-CENTER         3D viewport (unchanged window region) + mode selector +
-               lighting presets + before/after toggle
-RIGHT  (top)   Classification + preset + colour (RGB/HSV/HEX) + sliders
-BOTTOM         UV canvas | Texture inspector (channel tabs) | Diagnostics
+LEFT   Filter + material list (own scroll, own hover)
+RIGHT  heading (name [class] + source shader)
+       class / preset / _MainTex row
+       R, G, B sliders · HEX + Color picker + Texture view toggle
+       shading sliders  ──or──  texture inspector (channel + slot,
+                               preview, UV canvas, diagnostics, actions)
+       reset · reset all · undo · redo · Save · Load
 ```
 
-Panel is `kPanel` wide today (~380 px). The spec's LEFT/CENTER/RIGHT/BOTTOM
-split is aspirational; the pragmatic subset for this window is:
+`WbLayoutFor(W, H)` gives both columns for a given client size; the draw
+code, the click code and the test layout dump all call it, so they cannot
+disagree.
 
-- **Materials tab list** (replaces the Parts list region): materials of the
-  selected part, grouped by classification, with shared-instance badges.
-  Click selects → drives the inspector on the right.
-- **Inspector** (the BODY/FACE/LOOK tweak-list region, same `DrawSliderRow`
-  machinery): classification picker, preset picker, colour rows, shading
-  sliders, texture slot rows, Reset buttons. Sliders call
-  `ApplyOverrides` + mark dirty — exactly like `Reshape` for body sliders.
+The 3D viewport stays in the viewer's window (ADR-008: one view). The mode
+selector strip and the lighting/before-after toggles (Stage 4/5) belong to
+the viewer's viewport, as below.
+
+Panel is `kPanel` wide today (~380 px):
+
 - **Viewport strip** under the 3D view: mode selector (11 modes), lighting
-  preset, before/after toggle, isolate toggle. No new window, no new
-  framework — styled with the existing `Button` helper.
-- **UV/Texture area**: a second pop-up-style panel (or a swap of the log
-  region) — see Stage 3. Do not shrink the 3D view; the log region is
-  already collapsible.
+  preset, before/after toggle, isolate toggle. No new framework — styled
+  with the existing `Button` helper.
+- The tab's list region is the launcher list described above.
 
 Every new widget is drawn with `ui::Surface` primitives (§2.8). This is the
 hardest UI constraint in the project and the plan respects it: sliders first
-(Stage 2), colour picker (Stage 2), UV canvas (Stage 3) — each stage ships
-usable without waiting for the others.
+(Stage 2), colour picker (Stage 2), UV canvas (Stage 3), own window
+(ADR-010) — each ships usable without waiting for the others.
 
 ---
 

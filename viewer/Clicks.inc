@@ -134,225 +134,54 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
     }
 }
 
-// A click in the Materials tab: filter, list select, class/preset/texture
-// buttons, HEX, sliders (live), reset/undo.
+// A click in the Materials tab: the launcher, not the editor. It handles the class
+// filter dropdown and picking a material from the list; everything that edits a
+// material lives in the Material Workbench window (Workbench.inc, WbClick).
 void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
     if (g.mat.originals.size() != L->scene.materials.size()) material::CaptureOriginals(g.mat, L->scene);
     const POINT pt{x, y};
-    // Popups first: they are modal. A click inside picks/drags/closes;
-    // a click outside closes and is consumed (the next click acts).
-    if (g.matPickerOpen) {
-        const RECT sv = MatPickerSV(l), hb = MatPickerHue(l), dn = MatPickerDone(l), outer = MatPickerOuter(l);
-        if (!right && PtInRect(&dn, pt)) { g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return; }
-        if (!right && PtInRect(&l.matPickBtn, pt)) { g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return; }
-        if (!right && PtInRect(&sv, pt)) { g.matPickerDrag = 1; ApplyPickerAt(x, y, 1, l); SetCapture(g.hwnd); InvalidatePanel(); return; }
-        if (!right && PtInRect(&hb, pt)) { g.matPickerDrag = 2; ApplyPickerAt(x, y, 2, l); SetCapture(g.hwnd); InvalidatePanel(); return; }
-        if (PtInRect(&outer, pt)) return;
-        g.matPickerOpen = false; g.matPickerDrag = 0; InvalidatePanel(); return;
-    }
-    if (g.matClassDropOpen) {
-        const RECT drop = MatClassDropRect(l);
-        if (!right && PtInRect(&drop, pt)) {
-            const int idx = (y - drop.top) / kRowH;
-            if (idx >= 0 && idx < 11) SetMatClass(idx);
-            g.matClassDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
-        }
-        g.matClassDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
-    }
+    // The filter dropdown is modal: a click inside picks, a click outside closes it.
     if (g.matFilterDropOpen) {
-        const RECT drop = MatFilterDropRect(l);
+        const RECT drop = MatFilterDropRect(l.matFilter.left, l.matFilter.top, l.matFilter.right - l.matFilter.left);
         if (!right && PtInRect(&drop, pt)) {
             const int idx = (y - drop.top) / kRowH;
             if (idx >= 0 && idx < 12) SetMatFilter(idx == 0 ? -1 : idx - 1);
-            g.matFilterDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
+            g.matFilterDropOpen = false;
+            g.matDropHover = -1;
+            InvalidateMat();
+            return;
         }
-        g.matFilterDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
-    }
-    if (g.matTexSlotDropOpen && g.matInspectOpen) {
-        const auto slots = MatTexSlots(L->scene.materials[static_cast<size_t>(g.selMaterial)]);
-        const int rows = std::min(6, static_cast<int>(slots.size()));
-        const RECT drop = MatTexDropRect(l, rows);
-        if (!right && PtInRect(&drop, pt)) {
-            const int idx = (y - drop.top) / kRowH;
-            if (idx >= 0 && idx < rows) { g.matTexSlot = idx; g.matUvCacheMat = -2; }
-            g.matTexSlotDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
-        }
-        g.matTexSlotDropOpen = false; g.matDropHover = -1; InvalidatePanel(); return;
-    }
-    // Leaving HEX entry: any click that is not on the HEX row ends it (Enter/ESC also end it).
-    if (g.matHexEditing && !(y >= l.matEditTop + 5 * kRowH && y < l.matEditTop + 6 * kRowH)) {
-        g.matHexEditing = false; g.matHexUndoPushed = false;
-    }
-    // Filter row.
-    if (!right && PtInRect(&l.matFilter, pt)) {
-        g.matFilterDropOpen = !g.matFilterDropOpen;
+        g.matFilterDropOpen = false;
         g.matDropHover = -1;
-        InvalidatePanel();
+        InvalidateMat();
+        return;
+    }
+    // A click outside the workbench's HEX row ends a HEX entry running over there.
+    if (g.matHexEditing) {
+        g.matHexEditing = false;
+        g.matHexUndoPushed = false;
+    }
+    if (!right && PtInRect(&l.matFilter, pt)) {
+        g.matFilterDropOpen = true;
+        g.matDropHover = -1;
+        InvalidateMat();
         return;
     }
     if (y >= l.matListTop && y < l.matListBottom) {
         const std::vector<int> rows = BuildMatRows(*L);
-        const int idx = (y - l.matListTop + static_cast<int>(std::lround(g.matPos * kRowH))) / kRowH;
+        const int idx = (y - l.matListTop + ScrollPx(g.matPos)) / kRowH;
         if (idx < 0 || static_cast<size_t>(idx) >= rows.size()) return;
         g.selMaterial = rows[static_cast<size_t>(idx)];
-        g.matTexSlot = -1; g.matUvCacheMat = -2; g.matTexSlotDropOpen = false;
+        g.matTexSlot = -1;
+        g.matUvCacheMat = -2;
+        g.matTexSlotDropOpen = false;
         SyncMatBuf();
         g.dirty = true;
+        RevealSelectedMaterial();   // the workbench's list follows the selection
         InvalidateAll();
         return;
-    }
-    if (y < l.matEditTop) return;
-    if (g.selMaterial < 0) return;
-    const int row = (y - l.matEditTop) / kRowH;
-    if (row == 1 && !right) {
-        if (PtInRect(&l.matClassBtn, pt)) {
-            g.matClassDropOpen = !g.matClassDropOpen;
-            g.matDropHover = -1;
-            InvalidatePanel();
-            return;
-        }
-        if (PtInRect(&l.matPresetBtn, pt)) {
-            material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
-            material::ApplyPreset(g.mat, static_cast<size_t>(g.selMaterial), eff.cls);
-            material::ApplyOverrides(L->scene, g.mat);
-            SyncMaterialTextures();
-            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
-            g.dirty = true;
-            Log("preset: " + std::string(material::ClassName(eff.cls)) + "/Default");
-            InvalidateAll();
-            return;
-        }
-        if (PtInRect(&l.matTexBtn, pt)) {
-            // Toggle _MainTex enabled (Stage 2: enable/disable only).
-            const size_t sel = static_cast<size_t>(g.selMaterial);
-            bool on = L->scene.materials[sel].texture >= 0;
-            if (sel < g.mat.overrides.size() && g.mat.overrides[sel])
-                for (const auto& t : g.mat.overrides[sel]->textures) if (t.property == "_MainTex") on = t.enabled;
-            material::SetTextureEnabled(L->scene, g.mat, sel, "_MainTex", !on);
-            SyncMaterialTextures();
-            if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
-            g.dirty = true;
-            InvalidateAll();
-            return;
-        }
-        return;
-    }
-    if (row == 5 && !right) {
-        if (PtInRect(&l.matInspectBtn, pt)) {
-            g.matInspectOpen = !g.matInspectOpen;
-            g.matTexSlotDropOpen = false;
-            g.matDropHover = -1;
-            if (g.matInspectOpen) { g.uvScale = 0; g.uvPanX = 0; g.uvPanY = 0; g.matUvCacheMat = -2; }
-            InvalidatePanel();
-            return;
-        }
-        if (PtInRect(&l.matPickBtn, pt)) {
-            g.matPickerOpen = !g.matPickerOpen;
-            g.matPickerDrag = 0;
-            g.matPickerUndoPushed = false;
-            g.matHexEditing = false;
-            g.matHexUndoPushed = false;
-            InvalidatePanel();
-            return;
-        }
-        // HEX: start text entry.
-        material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(g.selMaterial));
-        g.matHexBuf = MatHexOf(eff);
-        g.matHexEditing = true;
-        InvalidatePanel();
-        return;
-    }
-    // Inspector clicks (channel/slot, UV canvas, actions). The reset row is shared.
-    if (g.matInspectOpen) {
-        if (!right) {
-            for (int i = 0; i < 5; ++i) { const RECT r = MatTexChannelRect(l, i); if (PtInRect(&r, pt)) { g.matTexChannel = i; InvalidatePanel(); return; } }
-            { const RECT r = MatTexSlotRect(l); if (PtInRect(&r, pt)) { g.matTexSlotDropOpen = !g.matTexSlotDropOpen; g.matDropHover = -1; InvalidatePanel(); return; } }
-            { const RECT r = MatTexEnableRect(l);
-            if (PtInRect(&r, pt)) {
-                const MatTexSlotInfo sel = MatTexSelected(L->scene);
-                material::SetTextureEnabled(L->scene, g.mat, static_cast<size_t>(g.selMaterial), sel.prop, !sel.enabled);
-                SyncMaterialTextures();
-                if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
-                g.dirty = true; InvalidateAll(); return;
-            } }
-            { const RECT r = MatTexReplaceRect(l);
-            if (PtInRect(&r, pt)) {
-                const MatTexSlotInfo sel = MatTexSelected(L->scene);
-                ReplaceMatTexture(sel.prop);
-                return;
-            } }
-            { const RECT r = MatUvFitRect(l);
-            if (PtInRect(&r, pt)) {
-                const RECT uv = MatUvRect(l);
-                g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
-                g.uvPanX = (float(uv.right - uv.left) - g.uvScale) / 2.0f;
-                g.uvPanY = (float(uv.bottom - uv.top) - g.uvScale) / 2.0f;
-                InvalidatePanel(); return;
-            } }
-            { const RECT r = MatUvRect(l);
-            if (PtInRect(&r, pt)) {
-                EnsureUvCache(L->scene);
-                g.matUvDrag = 1;
-                g.uvDown = pt;
-                g.uvPan0X = g.uvPanX; g.uvPan0Y = g.uvPanY;
-                if (g.uvScale <= 0) {
-                    const RECT uv = MatUvRect(l);
-                    g.uvScale = std::min(float(uv.right - uv.left), float(uv.bottom - uv.top)) / 1.1f;
-                }
-                SetCapture(g.hwnd);
-                InvalidatePanel(); return;
-            } }
-            { const RECT r = MatTexPreviewRect(l); if (PtInRect(&r, pt)) return; }
-        }
-        if (row == 12 && !right) { /* fall through to the reset row below */ }
-        else return;
-    }
-    if (row >= 2 && row <= 4) {
-        const int id = kMatBase + (row - 2);
-        SliderRef r;
-        if (!SliderFor(id, r)) return;
-        if (right) { ResetTweak(id); TweakEdited(id, true); return; }
-        if (x < kTrackL - 8) return;
-        if (g.sliderDrag != id) material::PushUndo(g.mat);
-        g.sliderDrag = id;
-        *r.v = SliderValueAt(r, x);
-        MaterialSliderEdited(id, false);
-        SetCapture(g.hwnd);
-        InvalidatePanel();
-        return;
-    }
-    if (row >= 6 && row <= 11) {
-        const int id = kMatBase + 3 + (row - 6);
-        SliderRef r;
-        if (!SliderFor(id, r)) return;
-        if (right) { ResetTweak(id); TweakEdited(id, true); return; }
-        if (x < kTrackL - 8) return;
-        if (g.sliderDrag != id) material::PushUndo(g.mat);
-        g.sliderDrag = id;
-        *r.v = SliderValueAt(r, x);
-        MaterialSliderEdited(id, false);
-        SetCapture(g.hwnd);
-        InvalidatePanel();
-        return;
-    }
-    if (row == 12 && !right) {
-        if (PtInRect(&l.matResetThis, pt)) {
-            material::ResetMaterial(g.mat, static_cast<size_t>(g.selMaterial));
-            material::ApplyOverrides(L->scene, g.mat);
-            SyncMaterialTextures();
-        } else if (PtInRect(&l.matResetAll, pt)) {
-            material::ResetAll(g.mat);
-            material::ApplyOverrides(L->scene, g.mat);
-            SyncMaterialTextures();
-        } else if (PtInRect(&l.matUndo, pt)) { MaterialUndo(false); return; }
-        else if (PtInRect(&l.matRedo, pt)) { MaterialUndo(true); return; }
-        else return;
-        if (g.expOk) { g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload(); }
-        SyncMatBuf();
-        g.dirty = true;
-        InvalidateAll();
     }
 }
 

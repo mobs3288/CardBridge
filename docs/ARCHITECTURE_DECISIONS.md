@@ -248,3 +248,62 @@ material sharing it); a runtime HLSL replacement shader for the whole
 character (ADR-003 reserves that for Workbench-only shading, not for live
 colour edits); recolouring only in the PMX (leaves the inspector preview
 lying).
+
+---
+
+## ADR-010 — The editor lives in a second top-level window; the panel's Materials tab is a launcher
+
+**Date:** workbench-window change (2026-11-10).
+**Status:** accepted — implemented, unit + smoke tested.
+
+**Context.** Stage 2/3 put the whole editor (13 rows, the colour picker, the
+texture inspector and its UV canvas) inside the 380 px side panel. The spec
+asks for a workbench "as big as the main viewer"; squeezing a list, a
+600 px-wide editor, two canvases and a picker into 380 px made every row
+fight for space, and the 3D view could never be shown next to the edits.
+
+**Decision.** One second top-level window, `CardBridgeMaterialWorkbench`,
+created lazily by the panel's **Open Material Workbench** button:
+
+- **Same thread, same message loop, same `App`.** No second render loop and
+  no second state: `WbPaint` draws `g.wb` (a second `ui::Surface`) from the
+  same globals the panel reads. `MatWndProc` handles paint/input only;
+  `Frame`, `ApplyPending` and the export/GPU paths stay in the viewer's.
+- **Geometry.** It mirrors the viewer's window rect to its right, clamped to
+  the monitor's work area, minimum 920×600 (client) — so it is "as big as
+  the main viewer" without ever covering it. `WbLayoutFor(W, H)` is the one
+  source of layout for draw, click and the test dump.
+- **Lifetime.** `WM_CLOSE` *hides* (scroll, selection and the drawn surface
+  survive; the launcher shows it again). Only the viewer's `WM_DESTROY`
+  ends the process: it destroys the workbench first, then posts quit. The
+  workbench's own `WM_DESTROY` never posts quit.
+- **Shared vs. per-window state.** Selection, edits, filter, class/picker/
+  inspect flags are shared (there is one selection and one edit set, so both
+  windows always agree). Hover, list scroll and the slider drag track are
+  per-window (`g.hoverRow` vs `g.wbHoverRow`, `g.matPos` vs `g.wbMatPos`,
+  `g.dragTrackL/R` recorded by whichever window started the drag).
+- **Popup geometry** (class/filter/slot dropdowns, colour picker) is
+  single-sourced in `MaterialsHelpers.inc` from a `WbLayout`, so the window
+  that draws a popup hits exactly what it drew.
+
+**Rejected alternatives.**
+
+- *Enlarging the side panel* — rejected: it is `kPanel` wide by design for
+  every other tab; widening it for one tab changes the whole layout.
+- *A second thread / second message pump* — rejected: two pumps over one `App`
+  need locks on every shared field (the export path already takes `g.mu`);
+  a same-thread window costs nothing and cannot deadlock.
+- *Moving the 3D view into the workbench* — rejected: the viewport belongs to
+  the viewer (ADR-008 keeps one view), and the edits must be visible in it.
+- *Destroying the window on close* — rejected: it drops scroll/selection and
+  re-registers the class on every open for no benefit.
+
+**Consequences.** The panel's Materials tab keeps the class filter, the
+material list and the count (it stays useful while the workbench is open, and
+selecting a material in either list reveals it in both). Every material edit
+moved out of `Panel.inc`/`Clicks.inc` into `viewer/Workbench.inc`; the panel
+lost ~300 lines. The scripted run drives the second window by class name
+(`WM_TEST` is answered by both), and the layout dump gained a `workbench`
+section beside `materials`. Known cost: `g.matFilterDropOpen` is one flag for
+two windows — acceptable because the dropdown is modal and only one list is
+clickable at a time.

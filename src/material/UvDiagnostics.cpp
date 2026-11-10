@@ -77,9 +77,8 @@ float UvStretchAll(const assemble::SceneMesh& mesh, int texW, int texH,
         const Vec3 pa = mesh.vertices[t.a].pos, pb = mesh.vertices[t.b].pos, pc = mesh.vertices[t.c].pos;
         const float uvA = TriUvArea(ua, ub, uc);
         const float dA = Tri3dArea(pa, pb, pc);
-        float dens = 1.0f;
-        if (dA > 1e-12f) dens = uvA * texelScale / dA;
-        else if (uvA > 1e-12f) dens = 1e6f;   // degenerate 3D tri with real UV area
+        if (dA <= 1e-9f) continue;   // numerically degenerate 3D triangle: texel density is meaningless here
+        const float dens = uvA * texelScale / dA;
         float er = 1.0f;
         const float uvEdges[3] = {Len2(ua, ub), Len2(ub, uc), Len2(uc, ua)};
         const float dEdges[3] = {Len3(pa, pb), Len3(pb, pc), Len3(pc, pa)};
@@ -91,6 +90,15 @@ float UvStretchAll(const assemble::SceneMesh& mesh, int texW, int texH,
     }
     if (n == 0) { minDensity = -1.0f; return 0.0f; }
     meanDensity = static_cast<float>(sum / n);
+    // The raw density is unit-dependent (it is uv-area × texel count over 3D area),
+    // so report min/max as multiples of this mesh's mean density instead. The ratio
+    // is what "stretch" means, and it survives any position-unit choice.
+    if (meanDensity > 0.0f) {
+        const float inv = 1.0f / meanDensity;
+        if (minDensity >= 0.0f) minDensity *= inv;
+        if (maxDensity >= 0.0f) maxDensity *= inv;
+        meanDensity = 1.0f;
+    }
     return meanDensity;
 }
 
