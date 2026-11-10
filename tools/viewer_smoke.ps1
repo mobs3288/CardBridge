@@ -61,6 +61,7 @@ public static class V {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr hAfter, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n);
@@ -218,6 +219,9 @@ try {
     }
     Check 'window opens' ($hwnd -ne [IntPtr]::Zero)
     if ($hwnd -eq [IntPtr]::Zero) { throw 'no window' }
+    # Keep the private window off-screen so it never shows up over the user's game: PrintWindow still captures it
+    # (it does not need the window to be visible on a monitor, only not minimized), and no mouse/key input is ever sent to the desktop.
+    [void][V]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010)   # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
     $script:target = $hwnd   # every step aims at the viewer until the materials step retargets
     $lay = WaitFor { param($l) $l.state.loaded -and -not $l.state.busy } $LoadTimeoutSec
     Check 'card loads' ($null -ne $lay) ($(if ($lay) { "$($lay.state.bones) bones, Direct3D $($lay.state.gpu)" } else { 'timed out or the window stopped answering' }))

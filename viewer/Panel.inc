@@ -529,9 +529,11 @@ void Paint(HWND hwnd) {
         }
     }
     // The diagnostic mode strip over the viewport (spec S13) and, in MaterialID mode, the legend.
-    if (!overlayActive && W > 100 && H > 120) DrawModeLegend(dc, kPanel, W, H);
-    if (!overlayActive && W > 100 && H > 120) DrawModeStrip(dc, kPanel, W, H);
-    if (!overlayActive && W > 170 && H > 120) DrawAxisWidget(dc, kPanel, W, H);   // the orientation tripod, always on, top-right
+    // Only when the view itself is being repainted: on a panel-only repaint the BeginPaint DC is
+    // clipped to the panel band, so these drew onto nothing — or would land over a stale frame.
+    // The view damage always re-blits (or re-renders) the view first, so the pixels they cover are honest.
+    if (viewDamaged && !overlayActive && W > 100 && H > 120) DrawModeLegend(dc, kPanel, W, H);
+    if (viewDamaged && !overlayActive && W > 100 && H > 120) DrawModeStrip(dc, kPanel, W, H);
     const double tPanel = NowMs();
     g.prof.blit += tPanel - tBlit;
     // The panel is drawn off screen, only where it changed, then copied.

@@ -53,10 +53,10 @@ void Render(int w, int h) {
     }
     if (highlight < 0) highlight = AccessorySelected();   // the selected accessory stays lit (all the gizmo touches it)
     g.vopt.highlightPart = highlight;
-    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); return; }   // as exported
+    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); DrawAxisWidget(g.frame, w, h); return; }   // as exported
     if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate (or a diagnostic mode on the GPU fallback shader)
         g.gpu.SetDiagnosticMode(static_cast<int>(g.vopt.mode), diags.empty() ? nullptr : &diags);
-        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); return; }
+        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); DrawAxisWidget(g.frame, w, h); return; }
         g.gpuOk = false;
     }
     g.lastGpu = nullptr;
@@ -69,6 +69,7 @@ void Render(int w, int h) {
     g.vopt.step = g.interacting ? 3 : 1;
     g.vopt.skin = g.skin.empty() ? nullptr : &g.skin;   // the software view shows the pose (and the physics) too
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
+    DrawAxisWidget(g.frame, w, h);   // the orientation tripod, always on, top-right
 }
 
 COLORREF KindColor(LogKind k) {

@@ -123,6 +123,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     ui::Startup();
     ui::LoadLogo(inst, 2);
     g.hinst = inst;
+    // A private test instance (CARDBRIDGE_TEST_HOOKS) never takes the screen: the window is created off-screen, with no activation,
+    // so a script driving it never interrupts whatever the user is doing.
+    const bool testQuiet = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
@@ -139,10 +142,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         wcm.lpszClassName = kWbClassName;
         RegisterClassW(&wcm);
     }
-    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge " L"viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
-                             CW_USEDEFAULT, 1280, 820, nullptr, nullptr, inst, nullptr);
+    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES | (testQuiet ? WS_EX_NOACTIVATE : 0), wc.lpszClassName, L"CardBridge " L"viewer",
+                             WS_OVERLAPPEDWINDOW | (testQuiet ? 0 : WS_VISIBLE), testQuiet ? -32000 : CW_USEDEFAULT, testQuiet ? -32000 : CW_USEDEFAULT,
+                             1280, 820, nullptr, nullptr, inst, nullptr);
     if (wc.hIcon) SendMessageW(g.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
-    ShowWindow(g.hwnd, show);
+    ShowWindow(g.hwnd, testQuiet ? SW_SHOWNOACTIVATE : show);
     g.fontTitle = CreateFontW(-21, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontBold = CreateFontW(-13, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");

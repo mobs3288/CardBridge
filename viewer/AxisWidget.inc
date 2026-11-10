@@ -2,25 +2,73 @@
 // The Blender-style navigation widget, ported from the Project K editor's viewport gizmo (ViewportPanes.cpp): six balls on a
 // circle — the model's +X/+Y/+Z ends in solid colour with a dark letter, the -X/-Y/-Z ends dim with an axis-coloured rim, lines
 // from the centre to the positive balls, far balls under near ones. Click a ball to look at the model from that axis (the view
-// stays zoom and pan), drag anywhere in it to orbit, hover shows a white halo and ring. Anti-aliased GDI+, drawn over the frame
-// after the blit (like the mode strip), over both render paths.
-
-#include <gdiplus.h>
+// stays zoom and pan), drag anywhere in it to orbit, hover shows a halo and a white ring. It is drawn straight into the frame
+// bitmap (like the accessory gizmo and the skeleton), so it is always pixel-consistent with the picture — no window-DC clip or
+// GDI+ alpha quirks can half-draw it. Anti-aliased ring and ball fills are faked with two nested discs.
 
 namespace {
 
-// The six sides, as in Project K: +X +Y +Z -X -Y -Z; a side's axis is axis[side % 3] * (side < 3 ? 1 : -1).
-const Vec3 kSideAxis[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
-const wchar_t kSideLetter[6] = {L'X', L'Y', L'Z', L'X', L'Y', L'Z'};
-Gdiplus::Color SideColourA(int side, BYTE alpha) {   // +X red, +Y green, +Z blue (dimmed by the caller for - sides)
-    static const int rgb[3][3] = {{230, 75, 85}, {120, 200, 60}, {70, 140, 240}};
-    const int k = (side % 3 + 3) % 3;
-    return Gdiplus::Color(alpha, static_cast<BYTE>(rgb[k][0]), static_cast<BYTE>(rgb[k][1]), static_cast<BYTE>(rgb[k][2]));
+constexpr uint32_t kNavAxisA[3] = {0xFFE64B55, 0xFF78C83C, 0xFF468CF0};   // X red, Y green, Z blue (0xAARRGGBB)
+constexpr uint32_t kNavAxisDim[3] = {0xFF783232, 0xFF46692D, 0xFF2D4E80};
+constexpr uint32_t kNavShadow = 0xFF0D0E13, kNavWhite = 0xFFFFFFFF, kNavRingWhite = 0xFFF0F4FA;
+const Vec3 kNavSideAxis[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};   // +X +Y +Z -X -Y -Z
+const char kNavLetter[6] = {'X', 'Y', 'Z', 'X', 'Y', 'Z'};
+
+void navPut(std::vector<uint32_t>& px, int w, int h, int x, int y, uint32_t c) {
+    if (x >= 0 && y >= 0 && x < w && y < h) px[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)] = c;
 }
-Gdiplus::Color SideDimA(int side, BYTE alpha) {
-    static const int rgb[3][3] = {{120, 50, 58}, {70, 105, 45}, {45, 78, 128}};
-    const int k = (side % 3 + 3) % 3;
-    return Gdiplus::Color(alpha, static_cast<BYTE>(rgb[k][0]), static_cast<BYTE>(rgb[k][1]), static_cast<BYTE>(rgb[k][2]));
+
+void navDisc(std::vector<uint32_t>& px, int w, int h, float cx, float cy, float r, uint32_t c) {
+    const int x0 = static_cast<int>(std::floor(cx - r)), x1 = static_cast<int>(std::ceil(cx + r));
+    const int y0 = static_cast<int>(std::floor(cy - r)), y1 = static_cast<int>(std::ceil(cy + r));
+    const float r2 = r * r;
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+            if (dx * dx + dy * dy <= r2) navPut(px, w, h, x, y, c);
+        }
+}
+
+// A ring: fills the band |distance - radius| <= thickness / 2.
+void navRing(std::vector<uint32_t>& px, int w, int h, float cx, float cy, float r, float thickness, uint32_t c) {
+    const int x0 = static_cast<int>(std::floor(cx - r - thickness)), x1 = static_cast<int>(std::ceil(cx + r + thickness));
+    const int y0 = static_cast<int>(std::floor(cy - r - thickness)), y1 = static_cast<int>(std::ceil(cy + r + thickness));
+    const float inner = (r - thickness * 0.5f) * (r - thickness * 0.5f), outer = (r + thickness * 0.5f) * (r + thickness * 0.5f);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d2 = dx * dx + dy * dy;
+            if (d2 >= inner && d2 <= outer) navPut(px, w, h, x, y, c);
+        }
+}
+
+// Simple line with two colours: dark underlay, coloured core.
+void navLine(std::vector<uint32_t>& px, int w, int h, float x0, float y0, float x1, float y1, uint32_t c) {
+    int ix0 = static_cast<int>(x0), iy0 = static_cast<int>(y0);
+    const int ix1 = static_cast<int>(x1), iy1 = static_cast<int>(y1);
+    const int dx = std::abs(ix1 - ix0), dy = -std::abs(iy1 - iy0), sx = ix0 < ix1 ? 1 : -1, sy = iy0 < iy1 ? 1 : -1;
+    int err = dx + dy;
+    for (int guard = 0; guard < 512; ++guard) {
+        navPut(px, w, h, ix0, iy0, c);
+        navPut(px, w, h, ix0 + 1, iy0, c);
+        if (ix0 == ix1 && iy0 == iy1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; ix0 += sx; }
+        if (e2 <= dx) { err += dx; iy0 += sy; }
+    }
+}
+
+// A 5x7 glyph bitmap for X, Y, Z; drawn scaled, in one colour.
+void navGlyph(std::vector<uint32_t>& px, int w, int h, int gx, int gy, int scale, char letter, uint32_t c) {
+    static const uint8_t kGlyph[3][7] = {
+        {0b10001, 0b01010, 0b00100, 0b00100, 0b01010, 0b10001, 0b00000},   // X
+        {0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000},   // Y
+        {0b11111, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000, 0b00000},   // Z
+    };
+    int gi = letter == 'X' ? 0 : letter == 'Y' ? 1 : 2;
+    for (int row = 0; row < 6; ++row)
+        for (int col = 0; col < 5; ++col)
+            if (kGlyph[gi][row] & (1 << (4 - col)))
+                for (int s = 0; s < scale; ++s) navPut(px, w, h, gx + col * scale + s, gy + row * scale + s, c);
 }
 
 } // namespace
@@ -29,9 +77,9 @@ Gdiplus::Color SideDimA(int side, BYTE alpha) {
 struct AxisWidgetLayout {
     int cx = 0, cy = 0, discR = 0, orbitR = 0, ballR = 0;
 };
-AxisWidgetLayout AxisWidgetBox(int x0, int W, int /*H*/) {
+AxisWidgetLayout AxisWidgetBox(int viewW) {
     AxisWidgetLayout l;
-    l.cx = x0 + W - 46;
+    l.cx = viewW - 46;
     l.cy = 45;
     l.discR = 30;
     l.orbitR = 20;
@@ -39,12 +87,12 @@ AxisWidgetLayout AxisWidgetBox(int x0, int W, int /*H*/) {
     return l;
 }
 
-// Screen position of a side's ball (any current camera). -1: off, but always returned via out.
+// Screen position of a side's ball (view coordinates: origin at the view's top-left).
 bool AxisWidgetBallAt(const AxisWidgetLayout& l, int side, float& x, float& y) {
     const float yaw = g.cam.yawDeg * 3.14159265358979323846f / 180.0f, pit = g.cam.pitchDeg * 3.14159265358979323846f / 180.0f;
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const Vec3 right{-cs, 0.0f, -sn}, up{sp * sn, cp, -sp * cs};
-    const Vec3& axis = kSideAxis[side];
+    const Vec3& axis = kNavSideAxis[side];
     x = l.cx + (axis.x * right.x + axis.y * right.y + axis.z * right.z) * l.orbitR;
     y = l.cy - (axis.x * up.x + axis.y * up.y + axis.z * up.z) * l.orbitR;
     return true;
@@ -63,7 +111,7 @@ int AxisWidgetPick(const AxisWidgetLayout& l, float x, float y) {
         AxisWidgetBallAt(l, side, bx, by);
         const float dx = x - bx, dy = y - by;
         if (dx * dx + dy * dy > static_cast<float>(l.ballR + 2) * (l.ballR + 2)) continue;
-        const Vec3& axis = kSideAxis[side];
+        const Vec3& axis = kNavSideAxis[side];
         const float toward = axis.x * toCam.x + axis.y * toCam.y + axis.z * toCam.z;
         if (toward > nearest) { nearest = toward; best = side; }
     }
@@ -84,80 +132,47 @@ void AxisWidgetSnapView(int side) {
     g.cam.pitchDeg = kPitch[side];
     g.dirty = true;
     InvalidateView();
-    Log("view: from " + std::string(side < 3 ? "+" : "-") + static_cast<char>('X' + (side % 3)));
+    Log("view: from " + std::string(side < 3 ? "+" : "-") + kNavLetter[side]);
 }
 
-void DrawAxisWidget(HDC dc, int x0, int W, int H) {
-    if (W < 170 || H < 120) return;   // too small to host it
-    const AxisWidgetLayout l = AxisWidgetBox(x0, W, H);
+// Burns the widget into the frame (called from Render after it drew the scene).
+void DrawAxisWidget(std::vector<uint32_t>& px, int w, int h) {
+    if (w < 170 || h < 120) return;
+    const AxisWidgetLayout l = AxisWidgetBox(w);
     const float yaw = g.cam.yawDeg * 3.14159265358979323846f / 180.0f, pit = g.cam.pitchDeg * 3.14159265358979323846f / 180.0f;
     const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     const Vec3 right{-cs, 0.0f, -sn}, up{sp * sn, cp, -sp * cs}, toCam{-sn * cp, sp, cs * cp};
     float depth[6];
-    for (int s = 0; s < 6; ++s) depth[s] = kSideAxis[s].x * toCam.x + kSideAxis[s].y * toCam.y + kSideAxis[s].z * toCam.z;
+    for (int s = 0; s < 6; ++s) depth[s] = kNavSideAxis[s].x * toCam.x + kNavSideAxis[s].y * toCam.y + kNavSideAxis[s].z * toCam.z;
     int order[6] = {0, 1, 2, 3, 4, 5};
     std::sort(order, order + 6, [&](int a, int b) { return depth[a] < depth[b]; });   // far first, near over them
-
-    Gdiplus::Graphics gp(dc);
-    gp.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    gp.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    gp.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
-    gp.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-    const Gdiplus::Color shadow(255, 13, 14, 19);
-    bool ballAtCenter = false;
     if (g.viewHoverBall >= 0) {   // a soft white halo behind the hovered ball
         float hx, hy;
         AxisWidgetBallAt(l, g.viewHoverBall, hx, hy);
-        Gdiplus::GraphicsPath halo;
-        halo.AddEllipse(static_cast<INT>(hx - l.ballR - 3), static_cast<INT>(hy - l.ballR - 3), 2 * (l.ballR + 3), 2 * (l.ballR + 3));
-        Gdiplus::SolidBrush haloBrush(Gdiplus::Color(46, 255, 255, 255));
-        gp.FillPath(&haloBrush, &halo);
+        navRing(px, w, h, hx, hy, static_cast<float>(l.ballR + 2), 2.0f, kNavRingWhite);
     }
+    bool ballAtCenter = false;
     for (int oi = 0; oi < 6; ++oi) {
         const int side = order[oi];
-        const int k = side % 3;
         const bool positive = side < 3;
         float bx, by;
         AxisWidgetBallAt(l, side, bx, by);
+        const int k = side % 3;
+        if (positive) {
+            navLine(px, w, h, l.cx, l.cy, bx, by, kNavAxisA[k]);
+        }
         {
             const float cdx = bx - l.cx, cdy = by - l.cy;
             if (cdx * cdx + cdy * cdy < static_cast<float>(l.ballR + 2) * (l.ballR + 2)) ballAtCenter = true;
         }
-        if (positive) {   // the lines to the three positive balls, axis-coloured
-            Gdiplus::Pen line(SideColourA(side, 255), 2.0f);
-            line.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
-            gp.DrawLine(&line, static_cast<float>(l.cx), static_cast<float>(l.cy), bx, by);
-        }
-        Gdiplus::GraphicsPath ball;
-        ball.AddEllipse(static_cast<INT>(bx - l.ballR), static_cast<INT>(by - l.ballR), 2 * l.ballR, 2 * l.ballR);
         if (positive) {
-            Gdiplus::SolidBrush fill(SideColourA(side, 255));
-            gp.FillPath(&fill, &ball);
-            Gdiplus::FontFamily fam(L"Segoe UI");
-            Gdiplus::StringFormat fmt;
-            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-            fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-            Gdiplus::GraphicsPath tp;
-            const Gdiplus::RectF layout(bx - l.ballR, by - l.ballR, 2.0f * l.ballR, 2.0f * l.ballR);
-            tp.AddString(&kSideLetter[side], 1, &fam, Gdiplus::FontStyleBold, 8.0f, layout, &fmt);
-            Gdiplus::SolidBrush dark(shadow);
-            gp.FillPath(&dark, &tp);
-        } else {   // the negative ends: a dim fill with an axis-coloured rim, no letter
-            Gdiplus::SolidBrush fill(SideDimA(side, 235));
-            gp.FillPath(&fill, &ball);
-            Gdiplus::Pen ring(SideColourA(side, 220), 1.5f);
-            gp.DrawPath(&ring, &ball);
+            navDisc(px, w, h, bx, by, static_cast<float>(l.ballR), kNavAxisA[k]);
+            navGlyph(px, w, h, static_cast<int>(std::lround(bx)) - 5, static_cast<int>(std::lround(by)) - 5, 2, kNavLetter[side], 0xFF0F1014);
+        } else {
+            navDisc(px, w, h, bx, by, static_cast<float>(l.ballR), kNavAxisDim[k]);
+            navRing(px, w, h, bx, by, static_cast<float>(l.ballR - 1), 1.5f, kNavAxisA[k]);
         }
-        if (side == g.viewHoverBall) {   // the white ring round the hovered ball
-            Gdiplus::Pen ring(Gdiplus::Color(240, 255, 255, 255), 2.0f);
-            gp.DrawPath(&ring, &ball);
-        }
+        if (side == g.viewHoverBall) navRing(px, w, h, bx, by, static_cast<float>(l.ballR + 1), 2.0f, kNavRingWhite);
     }
-    if (!ballAtCenter) {   // a small bright centre dot (skipped when an edge-on ball sits in the middle)
-        Gdiplus::GraphicsPath dot;
-        dot.AddEllipse(l.cx - 2, l.cy - 2, 4, 4);
-        Gdiplus::SolidBrush c(Gdiplus::Color(220, 235, 239, 247));
-        gp.FillPath(&c, &dot);
-    }
+    if (!ballAtCenter) navDisc(px, w, h, static_cast<float>(l.cx), static_cast<float>(l.cy), 2.0f, kNavWhite);
 }

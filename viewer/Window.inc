@@ -158,10 +158,10 @@ void DumpTestLayout() {
     {
         const int vx = std::max(0, static_cast<int>(rc.right) - kPanel), vh = static_cast<int>(rc.bottom);
         if (vx >= 170 && vh >= 120) {
-            const AxisWidgetLayout al = AxisWidgetBox(kPanel, vx, vh);
+            const AxisWidgetLayout al = AxisWidgetBox(vx);
             nlohmann::json balls = nlohmann::json::array();
-            for (int s = 0; s < 6; ++s) { float bx = 0, by = 0; AxisWidgetBallAt(al, s, bx, by); balls.push_back({bx, by}); }
-            j["axesWidget"] = {{"center", {al.cx, al.cy}}, {"balls", balls}};
+            for (int s = 0; s < 6; ++s) { float bx = 0, by = 0; AxisWidgetBallAt(al, s, bx, by); balls.push_back({bx + kPanel, by}); }
+            j["axesWidget"] = {{"center", {al.cx + kPanel, al.cy}}, {"balls", balls}};
         }
     }
     j["materials"] = nlohmann::json::object();
@@ -588,8 +588,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (x >= kPanel) {   // the navigation widget in the top-right corner wins over the camera (a click there snaps the view, a drag orbits it)
             RECT rc;
             GetClientRect(hwnd, &rc);
-            const AxisWidgetLayout al = AxisWidgetBox(kPanel, static_cast<int>(rc.right) - kPanel, static_cast<int>(rc.bottom));
-            if (AxisWidgetWithin(al, float(x), float(y))) {
+            const AxisWidgetLayout al = AxisWidgetBox(std::max(0, static_cast<int>(rc.right) - kPanel));
+            if (AxisWidgetWithin(al, float(x - kPanel), float(y))) {
                 g.drag = 5; g.last = {x, y}; g.downAt = {x, y}; g.interacting = true; SetCapture(hwnd);
                 return 0;
             }
@@ -763,8 +763,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc2;
             GetClientRect(hwnd, &rc2);
             const int vw = std::max(0, static_cast<int>(rc2.right) - kPanel), vh = static_cast<int>(rc2.bottom);
-            const AxisWidgetLayout al = AxisWidgetBox(kPanel, vw, vh);
-            const int hoverBall = AxisWidgetPick(al, float(x), float(y));
+            const AxisWidgetLayout al = AxisWidgetBox(vw);
+            const int hoverBall = AxisWidgetPick(al, float(x - kPanel), float(y));
             if (hoverBall != g.viewHoverBall) { g.viewHoverBall = hoverBall; g.dirty = true; InvalidateView(); }
         } else if (g.viewHoverBall != -1) { g.viewHoverBall = -1; g.dirty = true; InvalidateView(); }
         if (x >= kPanel && g.selAccessory >= 0 && g.gizmoState.ox >= 0) {   // the axis under the pointer lights up
@@ -871,8 +871,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
-            const AxisWidgetLayout al = AxisWidgetBox(kPanel, static_cast<int>(rc.right) - kPanel, static_cast<int>(rc.bottom));
-            const int side = AxisWidgetPick(al, float(mx), float(my));
+            const AxisWidgetLayout al = AxisWidgetBox(std::max(0, static_cast<int>(rc.right) - kPanel));
+            const int side = AxisWidgetPick(al, float(mx - kPanel), float(my));
             if (side >= 0) AxisWidgetSnapView(side);
             g.drag = 0; g.interacting = false; ReleaseCapture();
             g.dirty = true; InvalidateView();
@@ -977,8 +977,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (p.x >= kPanel) {   // the diagnostic mode strip's cells want the pointing-hand cursor too
                 const int W = std::max(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
                 hand = hand || ModeStripHover(p.x, p.y, kPanel, W, H);
-                const AxisWidgetLayout al = AxisWidgetBox(kPanel, W, H);
-                hand = hand || AxisWidgetWithin(al, float(p.x), float(p.y));   // the navigation widget
+                const AxisWidgetLayout al = AxisWidgetBox(W);
+                hand = hand || AxisWidgetWithin(al, float(p.x - kPanel), float(p.y));   // the navigation widget
             }
             if (p.x < kPanel && !hand) {
                 std::shared_ptr<Loaded> L = Current();

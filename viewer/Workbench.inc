@@ -999,30 +999,42 @@ void OpenWorkbench() {
         int w = wr.right - wr.left, h = wr.bottom - wr.top;
         if (w < 960) w = 960;
         if (h < 620) h = 620;
-        int x = wr.right, y = wr.top;
-        MONITORINFO mi{sizeof mi};
-        if (GetMonitorInfoW(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
-            if (x + w > mi.rcWork.right) x = mi.rcWork.left + std::max(0L, (mi.rcWork.right - mi.rcWork.left - w) / 2);
-            if (x < mi.rcWork.left) x = mi.rcWork.left;
-            if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
-            if (y < mi.rcWork.top) y = mi.rcWork.top;
+        // the private test instance: the workbench is created off-screen and never activates
+        const bool testQuiet = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
+        int x = testQuiet ? -32000 : wr.right, y = testQuiet ? -32000 : wr.top;
+        if (!testQuiet) {
+            MONITORINFO mi{sizeof mi};
+            if (GetMonitorInfoW(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+                if (x + w > mi.rcWork.right) x = mi.rcWork.left + std::max(0L, (mi.rcWork.right - mi.rcWork.left - w) / 2);
+                if (x < mi.rcWork.left) x = mi.rcWork.left;
+                if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
+                if (y < mi.rcWork.top) y = mi.rcWork.top;
+            }
         }
-        g.matHwnd = CreateWindowExW(0, kWbClassName, L"Material Workbench - CardBridge", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                    x, y, w, h, g.hwnd, nullptr, g.hinst, nullptr);
+        if (testQuiet) {
+            // the private test instance: the workbench stays off-screen and never activates
+            g.matHwnd = CreateWindowExW(WS_EX_NOACTIVATE, kWbClassName, L"Material Workbench - CardBridge", WS_OVERLAPPEDWINDOW,
+                                        x, y, w, h, g.hwnd, nullptr, g.hinst, nullptr);
+        } else {
+            g.matHwnd = CreateWindowExW(0, kWbClassName, L"Material Workbench - CardBridge", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                        x, y, w, h, g.hwnd, nullptr, g.hinst, nullptr);
+        }
         if (!g.matHwnd) {
             Log("the Material Workbench window could not be created", LogKind::Error);
             return;
         }
+        if (testQuiet) ShowWindow(g.matHwnd, SW_SHOWNOACTIVATE);   // mapped but never active
         if (HICON icon = LoadIconW(g.hinst, MAKEINTRESOURCEW(1))) SendMessageW(g.matHwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
         Log("Material Workbench open (the Materials tab keeps the list)", LogKind::Good);
     } else {
+        const bool testQuiet = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
         if (IsIconic(g.matHwnd)) ShowWindow(g.matHwnd, SW_RESTORE);
-        ShowWindow(g.matHwnd, SW_SHOW);
+        ShowWindow(g.matHwnd, testQuiet ? SW_SHOWNOACTIVATE : SW_SHOW);
     }
     RevealSelectedMaterial();
     InvalidateWorkbench();
     InvalidateList();
-    SetForegroundWindow(g.matHwnd);
+    if (!std::getenv("CARDBRIDGE_TEST_HOOKS")) SetForegroundWindow(g.matHwnd);   // the private test instance never steals the user's screen
 }
 
 // ---- the layout a scripted run aims at --------------------------------------------------------------------------------
