@@ -3605,7 +3605,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     log("create materials done");
     exporter::ApplyNippleTint(scene, opt.nippleColour);
     if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
-        exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, true);
+        exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
         log("automatic skin shading baked from the body mesh");
     }
     report(0.96, "finishing");

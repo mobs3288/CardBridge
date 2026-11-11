@@ -145,6 +145,7 @@ struct SceneSkinShade {
     float applied = -1.0f;           // the cleavage strength currently baked into the texture (-1 = never applied)
     float appliedUnder = -1.0f;      // the underboob strength currently baked into the texture (-1 = never applied)
     float appliedTop = 1.0f;         // the cleavage top extent currently baked in (0 = absent, 1 = full height)
+    float appliedWidth = 1.0f;       // the cleavage width currently baked in (1 = the default half-width)
     bool geometryDirty = true;       // the body moved since the map was built (Reshape): rebuild before re-applying
     std::vector<uint8_t> base;       // the texture before shading (same dimensions as the texture)
     std::vector<uint8_t> shade;      // cleavage factors at strength 1 (255 = lit, lower = creased); width * height
