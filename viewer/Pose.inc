@@ -285,6 +285,41 @@ void SelectBone(const assemble::Scene& scene, int bone) {
         if (rows[i].bone == bone) { g.boneScroll = static_cast<int>(i) > 3 ? static_cast<int>(i) - 3 : 0; break; }
 }
 
+// The nipple / areola tint the current switches ask for; w <= 0 means the card's own colour.
+Vec4 NippleTintOption() {
+    if (!g.tw.pinkNipples) return Vec4{0, 0, 0, 0};
+    return Vec4{g.tw.nippleColour.x, g.tw.nippleColour.y, g.tw.nippleColour.z, 1.0f};
+}
+
+// Re-applies the live skin look (automatic body shading and the nipple tint). `rebuild` recomputes the occlusion map
+// from the current body mesh; a plain re-apply only changes the strength. The create texture is pushed to the GPU and
+// the software renderer's cached mips are dropped, as a material tint change does.
+void ApplySkinLook(bool rebuildMap) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return;
+    exporter::ApplyNippleTint(L->scene, NippleTintOption());
+    auto& ss = L->scene.skinShade;
+    if (ss.ready()) {
+        const bool rebuild = rebuildMap;
+        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, rebuild)) {
+            const int ti = ss.texture;
+            if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+            if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+            if (rebuild && g.expOk) {   // the baked "as exported" copy holds the old shading
+                g.expOk = false;
+                g.showExp = false;
+                g.expFor.reset();
+                g.expScene.reset();
+                g.gpuExp.Unload();
+                Log("the skin shading changed: press X to bake the as-exported view again");
+            }
+        }
+    }
+    g.dirty = true;
+    InvalidateView();
+    InvalidatePanel();
+}
+
 // A body or face slider, the nipple switch or offset: re-shapes the assembled scene in place (a few milliseconds, no loading) and re-skins the
 // views. `final` (the slider was let go) also rebuilds the normal map frames, which are left alone while dragging. False when it cannot
 // be done and the character has to be assembled again.
@@ -299,12 +334,21 @@ bool ReshapeNow(bool final) {
         ao.faceShape = g.tw.face;
         ao.nippleInside = g.tw.nippleInside;
         ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+        ao.nippleColour = NippleTintOption();
+        ao.skinShade = g.tw.skinShade;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
     const double t1 = NowMs();
     if (g.gpuOk) g.gpu.Refresh(final);
+    if (final && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
+        const int ti = L->scene.skinShade.texture;
+        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, true)) {
+            if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+            if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+        }
+    }
     g.prof.reshape += t1 - t0;
     g.prof.refresh += NowMs() - t1;
     if (g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
@@ -346,6 +390,12 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
+    if (id == kSkinShade || id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
+        // Body shading re-applies at the new strength at once; the occlusion map is rebuilt only when a shape drag ended
+        // (ReshapeNow) or from this release when the body had moved. The nipple tint is a material property and is live.
+        ApplySkinLook(released && Current() && Current()->scene.skinShade.geometryDirty);
+        return;
+    }
     if (id == kAreola && g.expOk) {   // the baked "as exported" copy has the old areola in its textures
         g.expOk = false;
         g.showExp = false;
@@ -514,6 +564,8 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.faceShape = g.tw.face;
                 ao.nippleInside = g.tw.nippleInside;
                 ao.nippleOffset = g.tw.nippleMm / 1000.0f;
+                ao.nippleColour = NippleTintOption();
+                ao.skinShade = g.tw.skinShade;
                 ao.autoCloth = g.autoCloth;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
             }

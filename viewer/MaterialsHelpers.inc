@@ -385,10 +385,16 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
     else if (tab == TabLook) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
         rows.push_back({1, kHeightCm, "Height (cm)", "Height"});
+        rows.push_back({0, -1, "Skin shading: automatic creases (cleavage, under the breasts, navel)", "Skin shading"});
+        rows.push_back({1, kSkinShade, "Automatic body shading", "Skin shading"});
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
         rows.push_back({1, kAreola, "Areola size", "Nipples"});
+        rows.push_back({2, kNipplePink, "Automatic pink nipple / areola (off: the card's colour)", "Nipples"});
+        rows.push_back({1, kNippleR, "Nipple colour: red", "Nipples"});
+        rows.push_back({1, kNippleG, "Nipple colour: green", "Nipples"});
+        rows.push_back({1, kNippleB, "Nipple colour: blue", "Nipples"});
         rows.push_back({0, -1, "Pose (shows at once, the export carries it)", "Pose"});
         rows.push_back({2, kAPose, "Automatic A-pose: arms down from the T-pose", "Pose"});
         rows.push_back({1, kAPoseDeg, "A-pose angle", "Pose"});
@@ -454,6 +460,7 @@ bool TweakChanged(int id) {
     if (id == kJiggleBust) return g.jiggleBust;
     if (id == kJiggleButt) return g.jiggleButt;
     if (id == kAutoCloth) return g.autoCloth;
+    if (id == kNipplePink) return !g.tw.pinkNipples;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
 
@@ -461,6 +468,8 @@ bool AnyTweak() {
     for (int i = 0; i < kFaceBase; ++i) if (TweakChanged(i)) return true;
     for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
     if (TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside) return true;
+    if (TweakChanged(kSkinShade) || TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
+        TweakChanged(kNippleG) || TweakChanged(kNippleB)) return true;
     if (g.mat.IsDirty()) return true;
     return false;
 }
@@ -494,6 +503,7 @@ void ResetTweak(int id) {
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = true;
     else if (id == kAutoCloth) g.autoCloth = false;
+    else if (id == kNipplePink) g.tw.pinkNipples = true;
     else if (SliderFor(id, r)) *r.v = r.def;
 }
 

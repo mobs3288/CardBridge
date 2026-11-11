@@ -17,6 +17,8 @@
 //          accessory rows (Accessories / Added outfit) carry a move chip on their right end: click it to hold that accessory
 //          with the X/Y/Z gizmo in the view — drag an axis to move it (or the numbers in the Bones tab, like any bone),
 //          right-click the chip to reset the move, Esc (or the chip again) deselects
+//          the view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K editor):
+//          click an axis ball to look from that side (drag anywhere in it to orbit)
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
 //          G colour grading on/off, X (or the MMD button) "as exported": the PMX as MikuMikuDance shows it (toon, edge, self-shadow, ground shadow),
 //          K the skeleton over the model (click a bone to select it, Bones tab edits it), P automatic A-pose,
@@ -39,6 +41,7 @@
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
+#include "export/SkinShade.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -85,6 +88,7 @@ namespace {
 #include "Parts.inc"
 #include "Gizmo.inc"
 #include "ModeStrip.inc"
+#include "AxisWidget.inc"
 #include "View.inc"
 #include "Widgets.inc"
 #include "MaterialsDraw.inc"
@@ -120,6 +124,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     ui::Startup();
     ui::LoadLogo(inst, 2);
     g.hinst = inst;
+    // A private test instance (CARDBRIDGE_TEST_HOOKS) never takes the screen: the window is created off-screen, with no activation,
+    // so a script driving it never interrupts whatever the user is doing.
+    const bool testQuiet = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
@@ -136,10 +143,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         wcm.lpszClassName = kWbClassName;
         RegisterClassW(&wcm);
     }
-    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"CardBridge " L"viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
-                             CW_USEDEFAULT, 1280, 820, nullptr, nullptr, inst, nullptr);
+    g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES | (testQuiet ? WS_EX_NOACTIVATE : 0), wc.lpszClassName, L"CardBridge " L"viewer",
+                             WS_OVERLAPPEDWINDOW | (testQuiet ? 0 : WS_VISIBLE), testQuiet ? -32000 : CW_USEDEFAULT, testQuiet ? -32000 : CW_USEDEFAULT,
+                             1280, 820, nullptr, nullptr, inst, nullptr);
     if (wc.hIcon) SendMessageW(g.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
-    ShowWindow(g.hwnd, show);
+    ShowWindow(g.hwnd, testQuiet ? SW_SHOWNOACTIVATE : show);
     g.fontTitle = CreateFontW(-21, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g.fontBold = CreateFontW(-13, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");

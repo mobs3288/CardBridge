@@ -400,6 +400,15 @@ std::shared_ptr<unity::TextureData> Resolver::openLooseTexture(const ResolvedIte
             t->height = h;
             t->unityFormat = 4;   // RGBA32
             t->rgba = std::move(rgba);
+            // Sideloader serves loose PNGs with the wrap mode picked from the file's path:
+            //   "clamp" in it -> Clamp, "repeat" in it -> Repeat, otherwise Unity's default (Repeat).
+            // (Sideloader.dll GetPng: pngPath.Contains("clamp") / Contains("repeat").)
+            // Decal-style mods (tattoos, lip liners, nip textures) name their image _clamp because the
+            // placement shader samples outside 0..1 and must see the transparent border, not a tile.
+            const std::string pngPath = std::string("abdata/") + stem + "/" + lowerOf(name) + ".png";
+            if (pngPath.find("clamp") != std::string::npos) t->wrapMode = 1;         // Clamp
+            else if (pngPath.find("repeat") != std::string::npos) t->wrapMode = 0;   // Repeat
+            else t->wrapMode = 0;                                                    // Unity's default for a texture loaded from bytes
             {
                 std::lock_guard<std::mutex> lk(cacheMutex_);
                 looseTextures_[key] = t;

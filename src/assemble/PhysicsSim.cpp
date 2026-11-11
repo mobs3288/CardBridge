@@ -44,7 +44,7 @@ void collide(Vec3& p, float r, const WorldCollider& c) {
 
 } // namespace
 
-void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust, bool jiggleButt, float jiggleIntensity, bool jiggleOnly) {
+void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust, bool jiggleButt, float jiggleIntensity, bool jiggleOnly, bool outfitOnly) {
     particles_.clear();
     chains_.clear();
     speed_ = 0.0f;
@@ -52,6 +52,7 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
     for (size_t ci = 0; ci < scene.chains.size(); ++ci) {
         const SceneChain& sc = scene.chains[ci];
         if (jiggleOnly && !sc.characterOwn) continue;   // the static settle moves the body's jiggle only; hair keeps its authored pose
+        if (outfitOnly && sc.part.rfind("outfit", 0) != 0) continue;   // the outfit settle moves the garments only; hair and skin keep their pose
         if (sc.bones.size() < 2) continue;
         bool jiggle = false;
         if (sc.characterOwn) {   // the body's own jiggle: skipped while its switch is off, like the PMX export

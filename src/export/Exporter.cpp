@@ -158,7 +158,7 @@ bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& 
     return total > 0 && reversed * 5 > total;   // over a fifth wound against the normals: a co-located inner layer
 }
 
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment) {
     MmdLook look;
     look.diffuse = mat.diffuse;
     if (mat.shader.find("glasses") != std::string::npos) {   // lenses: the shader's _Color alpha (see-through), not a solid
@@ -186,7 +186,8 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // Transparent (alpha) materials blend over what is behind them: MikuMikuDance's ground shadow, shadow map and self-shadow on such a
     // material draw it as a solid dark shape (the underpants / swimsuit / lace looked like a shadow), so they get none of those, like
     // lenses.
-    const bool transparent = mat.alpha;
+    const bool transparent = mat.alpha || mat.translucent;
+    if (mat.translucent) look.diffuse.w = 0.99f;  // an authored alpha texture needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
     // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
@@ -197,12 +198,15 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // which reads as hair clipping back-to-front. Such a mesh gets no edge; its texture still shows. Single-layer meshes (the skirt) keep theirs.
     const bool innerLayer = HasInnerLayer(scene, mat);
     const bool hair = mat.shader.find("hair") != std::string::npos;
-    if (!overlay && !lens && !transparent) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
+    // The outfit's cloth is drawn like the hair in this respect, not like the skin: a cape or a jacket panel that touches the body turns to
+    // two slices of black edge back-faces and a depth-map stripe of dark shadow wherever it clips into it. The ambient shade (baked from the
+    // game shader) already carries the fold shading; the cloth casts no shadow, takes no shadow and gets no edge (like the hair).
+    if (!overlay && !lens && !transparent && !outfitGarment) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
     // Hair gets no edge either: the game's outline width for hair is mostly 0, and MMD's fixed 0.6 edge, drawn in the
     // card's dark outline colour, covers these thin strands and reads as a second, black, shaggy hair over the real
     // one (in the viewer there is no such outline, so the hair there is purple and clean). Its shading still comes
     // from the toon ramp and the sphere gloss below.
-    if (!overlay && !lens && !tooth && !cutout && !innerLayer && !hair) look.drawFlags |= 0x10;
+    if (!overlay && !lens && !tooth && !cutout && !innerLayer && !hair && !outfitGarment) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
     // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
     // dark skin tone, never the white rim a light colour made round hair strands lying on the face).
@@ -469,6 +473,10 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     std::map<std::string, int> toonFiles;   // ramp bytes -> PMX texture index
     std::map<std::string, int> sphereFiles; // sphere map name -> PMX texture index
     int meshOrdinal = 0;
+    // Parts that move cloth (capes, panels, sleeves, skirts - authored DynamicBone or synthesized auto cloth) get the cloth material pass:
+    // no edge, no cast/receive shadows, so they never paint the black slices against whatever they briefly touch.
+    std::set<std::string> clothParts;
+    for (const auto& ch : scene.chains) if (ch.part.rfind("outfit", 0) == 0) clothParts.insert(ch.part);
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         checkCancel();
         const auto& part = scene.parts[pi];
@@ -488,6 +496,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             uint32_t base = static_cast<uint32_t>(model.vertices.size());
             meshBase[static_cast<size_t>(mi)] = static_cast<int>(base);
+            const bool garment = part.group == "Outfit" || clothParts.count(part.id) != 0;
             for (const auto& v : mesh.vertices) {
                 pmx::Vertex pv;
                 pv.position = v.pos * opt.scale;
@@ -503,7 +512,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 pm.name = part.id + "/" + mesh.name + "#" + std::to_string(sub++);
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
-                const MmdLook look = MmdMaterialLook(scene, mat);
+                const MmdLook look = MmdMaterialLook(scene, mat, garment);
                 pm.diffuse = look.diffuse;
                 pm.ambient = look.ambient;
                 pm.specular = look.specular;

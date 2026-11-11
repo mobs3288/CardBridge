@@ -138,6 +138,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<Core> chainCore;   // per moving chain body
     std::vector<int> chainBody;
     std::vector<char> chainJiggle;   // the same, per body: the body's own jiggle (skin, not a strand: it meets no collider)
+    std::vector<char> chainOutfit;   // per body: whether the chain is an outfit garment (capes, panels, kimonos, skirts - they always meet the body colliders)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -247,11 +248,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             rb.position = l.centre;
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(l.unit);
             rb.mass = jiggle > 0.0f ? std::pow(0.5f, static_cast<float>(k)) : l.mass;   // 1, 1/2, 1/4, ... toward the tip
-            // The component's damping is a fraction of the velocity lost each update; Bullet's is a rate a second (v *= (1 - d)^dt).
-            // 60 * damping is the same decay in both, so the swing dies away at the same pace.
-            float decay = std::max(0.6f, 60.0f * along(ch.boneDamping, ch.damping, l.bone));
-            // Jiggle bodies take the reference models' fixed heavy damping, not the game's: their swing dies out the same way every time.
-            const float damp = jiggle > 0.0f ? 0.9f : std::min(0.9995f, 1.0f - std::exp(-decay));
+            // The component's damping is a fraction of the velocity kept each update; Bullet applies v *= (1 - d)^dt per substep,
+            // so per frame that is (1 - d)^(1/60): the matching export value for the component's per-update retention (1 - c) is
+            // d = 1 - (1 - c)^60 (what 1 - exp(-60*c) approximated - the earlier decay-to-seconds detour was not the same thing).
+            float c = std::min(1.0f, std::max(0.0f, along(ch.boneDamping, ch.damping, l.bone)));
+            float damp = jiggle > 0.0f ? 0.9f : std::min(0.9999f, 1.0f - std::pow(1.0f - c, 60.0f));
+            // The outfit's cloth does not use the game's frozen-still damping (the strict mapping leaves it nearly immobile - the
+            // paper cape); clamp it to a working MMD cloth range so the panel actually sways like fabric.
+            const bool garmentBody = jiggle <= 0.0f && ch.part.rfind("outfit", 0) == 0;
+            if (garmentBody) damp = std::min(damp, 0.75f);
             rb.moveDamping = damp;
             rb.rotDamping = damp;
             rb.friction = jiggle > 0.0f ? 0.0f : 0.5f;
@@ -261,9 +266,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             rb.mode = jiggle > 0.0f ? 2 : (k == 0 ? 0 : 1);
             if (k == 0 && jiggle <= 0.0f) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
+            const bool garmentBody2 = ch.part.rfind("outfit", 0) == 0;
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
                 chainJiggle.push_back(jiggle > 0.0f ? 1 : 0);
+                chainOutfit.push_back(garmentBody2 ? 1 : 0);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
@@ -345,12 +352,19 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // joint is never droop-locked: locked means no jiggle at all, which is worse than a soft hang.
             float range = (holds || jiggle > 0.0f) ? bend : 0.0f;
             if (jiggle > 0.0f) range = std::min(0.9f, range * jiggle);
+            // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: a zero-range joint
+            // carries a zero spring, and on its own gravity folds the panel into a stiff paper slab pinned to the shoulders. Cloth
+            // behaves as a plain hinge inside its bend range with a small centring tug - like the loose-cloth preset - and Bullet
+            // manages the draping by itself. A stop spring on top of a stop limit rail is what reads as tweaking and shivering.
+            const bool garmentChain = ch.part.rfind("outfit", 0) == 0 && jiggle <= 0.0f;
+            if (garmentChain) range = std::max(range, bend);
             // The reference models' breast joints are wide on the flop axis, moderate on the sway, narrow on the twist (about 0.44 / 0.26 /
             // 0.18 rad). A strand keeps the old shape: the twist nearly locked, the two bends wide.
-            const float yF = jiggle > 0.0f ? 0.6f : 0.1f, zF = jiggle > 0.0f ? 0.4f : 1.0f;
+            const bool jigBody = jiggle > 0.0f;
+            const float yF = jigBody ? 0.6f : 0.1f, zF = jigBody ? 0.4f : 1.0f;
             j.rotLower = {-range, -yF * range, -zF * range};
             j.rotUpper = {range, yF * range, zF * range};
-            j.springRot = {stiffnessK, stiffnessK, stiffnessK};
+            j.springRot = garmentChain ? Vec3{5.0f, 5.0f, 5.0f} : Vec3{stiffnessK, stiffnessK, stiffnessK};
             model.joints.push_back(std::move(j));
         }
     }
@@ -364,6 +378,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     const float margin = 0.02f * scale;
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
+    // The outfit's garments (capes, kimono panels, skirt hems) are settled to drape ON the body at export, so they start out touching
+    // the body colliders, never buried in them. They keep every collider (the rest-avoid exclusion only exists to stop a garment launched
+    // out of a buried rest pose); with the colliders kept, cloth slides over the body instead of ghosting through it. Leaving them enabled
+    // also keeps their contact stable (the skip version passed through the torso at the first pose change).
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
         std::vector<int> sig;
         for (size_t bi = 0; bi < chainCore.size(); ++bi)
@@ -380,13 +398,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
     }
+    // The chain collider groups (assigned above for the rest-overlap exclusion) all must be met by the outfit chains.
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
         if (chainJiggle[bi]) continue;   // jiggle masks are set with the arm colliders below (arm only, never the bust spheres)
         uint16_t mask = 0;
+        const bool outfit = chainOutfit[bi] != 0;
         for (int g : usedGroups)
-            if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
+            if (outfit || !overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
     // Generated limb colliders, so cloth slides off arms/hands/shins instead of

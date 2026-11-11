@@ -8,9 +8,11 @@
 #include "shape/Shape.h"
 #include "card/Abmx.h"
 #include "card/MaterialEdits.h"
+#include "material/MaterialWorkbench.h"
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
 #include "export/Preview.h"
+#include "export/SkinShade.h"
 
 #include <algorithm>
 #include <cmath>
@@ -624,6 +626,8 @@ struct Builder {
             st.pixelHash = Fnv1a64(t->rgba.data(), t->rgba.size());
             st.rgba = std::move(t->rgba);
             scene.textures.push_back(std::move(st));
+            scene.textures.back().clamp = t->wrapMode == 1;   // the game clamps what the bundle marks as clamp
+            scene.textures.back().srgb = t->colorSpace == 1;
             result = static_cast<int>(scene.textures.size()) - 1;
         }
         textureCache[key] = result;
@@ -816,6 +820,8 @@ struct Builder {
         auto it = bakedCache.find(key);
         if (it != bakedCache.end()) return it->second;
         int idx = addSceneTexture(main->name + "_tint", source, main->width, main->height, tintTexture(*main, mask.get(), c));
+        scene.textures[static_cast<size_t>(idx)].clamp = main->wrapMode == 1;   // the tint copy samples exactly like its source
+        scene.textures[static_cast<size_t>(idx)].srgb = main->colorSpace == 1;
         bakedCache[key] = idx;
         return idx;
     }
@@ -851,6 +857,11 @@ struct Builder {
             sm.shader = m->shaderName;
             sm.renderQueue = m->renderQueue;
             if (m->shaderPathId) sm.shaderIndex = shaderFor(uf, m->shaderPathId, m->shaderName);
+            // The game's own shader lerps the card's colour into the texture through the
+            // mask at draw time; tinting the copy we feed the bake as well multiplies the
+            // colour in twice and crushes it towards black. Only tint on the CPU when the
+            // shader provably ignores _Color (ADR-009).
+            sm.readsColor = cardbridge::material::ShaderReadsColor(scene, sm.shaderIndex);
             for (const auto& c : m->colors) sm.props.emplace_back(c.first, c.second);
             for (const auto& rp : runtime) {
                 bool found = false;
@@ -935,7 +946,7 @@ struct Builder {
             if (sm.texture < 0) {
                 const PPtr* tp = m->texture("_MainTex");
                 if (tp && !tp->isNull()) {
-                    if (look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) {
+                    if (look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId)) && sm.readsColor != 1) {
                         Vec4 tint[3] = {look->colors[0], look->colors[1], look->colors[2]};
                         if (edits && meType >= 0)   // MaterialEditor colour overrides replace the card's slot colours in the tint
                             for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) {
@@ -977,6 +988,18 @@ struct Builder {
             const unity::MaterialData* m_original = m ? &*m : nullptr;
             for (const auto* e : edits->editsFor(edits->shaders, meCoordinate, meType, meSlot, sm.name)) {
                 int si = shaderByName(e->property);
+                // Some shaders the card switches on only exist inside the card's own
+                // bundle (the author's translucent fabric shader IBL_Shader_alpha / the
+                // IBL set for the same purpose). Falling back to the opaque twin turns
+                // a cutout transparent shape into a solid black lump behind the top.
+                // Prefer a library twin that keeps the alpha semantics instead;
+                // anything without a workable twin stays on the original shader.
+                std::string fallback;
+                if (si < 0) {
+                    if (contains(e->property, "alpha")) fallback = "Shader Forge/main_alpha";
+                    else if (contains(e->property, "item")) fallback = "Shader Forge/main_item";
+                    if (!fallback.empty()) si = shaderByName(fallback);
+                }
                 if (si < 0) { scene.warn(partId, "MaterialEditor shader " + e->property + " for " + sm.name + " is not in the library: kept " + sm.shader); continue; }
                 // Changing a material's shader keeps the values of properties both shaders have; the new shader's own
                 // properties start at its declared defaults (the card's run-time colours are for the old shader).
@@ -994,6 +1017,10 @@ struct Builder {
                 sm.shaderIndex = si;
                 sm.shader = e->property;
                 sm.alpha = contains(e->property, "alpha");
+                // Any shader carrying "alpha" is a translucency shader for the purpose of the export: it stays
+                // blended (not cut out), keeps its own texture as authored, the body behind it stays visible
+                // and MikuMikuDance gets an alpha below 1 so it blends - like the game draws it.
+                if (contains(e->property, "alpha")) sm.translucent = true;
                 if (m_original) sm.doubleSided = twoSided(si, e->property, *m_original);
             }
             auto setProp = [&](const std::string& name, Vec4 v) {
@@ -2209,7 +2236,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                 bodyOverlayTex.emplace_back(texName, idx);
                                 bodyOverlayColors.emplace_back(colName, col);
                             };
-                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", vec4Of(bd.at("nipColor")));
+                            // The card's nipColor is a pale skin tone. The automatic pink tint (opt.nippleColour) makes the
+                            // nipple and areola read as such; colour.w <= 0 restores the card's own colour.
+                            const Vec4 nipColour = opt.nippleColour.w > 0.0f ? Vec4{opt.nippleColour.x, opt.nippleColour.y, opt.nippleColour.z, 1.0f}
+                                                                             : vec4Of(bd.at("nipColor"));
+                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", nipColour);
                             addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
                             bodyOverlayColors.emplace_back("_nipsize", Vec4{opt.areolaSize >= 0 ? opt.areolaSize : static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
                         } else {
@@ -2230,7 +2261,20 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 int mi = b.addRenderer(*base, r, bodyRoot, partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
                 b.extraTex.clear();
                 b.runtime.clear();
-                if (mi >= 0) part.meshes.push_back(mi);
+                if (mi >= 0) {
+                    part.meshes.push_back(mi);
+                    // The automatic skin shade is baked into the body's skin texture; the mesh's own geometry is its source.
+                    if (std::find(scene.skinShade.meshes.begin(), scene.skinShade.meshes.end(), mi) == scene.skinShade.meshes.end())
+                        scene.skinShade.meshes.push_back(mi);
+                    if (scene.skinShade.texture < 0 && bodyLook.tex1 >= 0) scene.skinShade.texture = bodyLook.tex1;
+                    for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes) {
+                        if (sub.material < 0 || static_cast<size_t>(sub.material) >= scene.materials.size()) continue;
+                        auto& sm = scene.materials[static_cast<size_t>(sub.material)];
+                        if (sm.name != "cf_m_body" && sm.name.rfind("cf_m_body", 0) != 0) continue;
+                        sm.cardSkin = true;
+                        sm.cardNippleColour = vec4Of(card.body.at("nipColor"));
+                    }
+                }
             }
             if (scene.createJobs.empty())   // the body's create material did not run
                 scene.warn("body", "body skin texture is built at runtime by the game from the card's skin settings; "
@@ -2439,17 +2483,20 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             itemNoShake = card.hair.at("parts").at(kind).at("noShake").asBool(false);
         }
         if (accessoryMode) {
-            // A garment prefab (cf_o_root with the body's own bone names) worn through an accessory slot is bound to the
-            // character's skeleton by bone name like any garment; it does not hang on the slot's attach node, whose offset
-            // would lift a vest authored in body space by the node's height.
-            for (int64_t xid : uf->subtree(itemRoot))
-                if (const unity::Xform* x = uf->xform(xid); x && x->name == "cf_o_root") {
-                    accessoryMode = false;
-                    garmentAsAccessory = true;
-                    placement = Mat4();
-                    staticBone = 0;
-                    break;
-                }
+            // A garment prefab worn through an accessory slot is packed that way by DeathWeasel's "Accessory
+            // Clothes" mod, which tags it with a ChaAccessoryClothes component: the game rebinds its skinned
+            // meshes to the body bones. Plain accessories routinely carry a cf_o_root transform without being
+            // garments (every Koikatsu accessory prefab does), so the component - not the transform name - marks
+            // one. Anything else stays a rigid piece hanging on its attach node, as the game has it.
+            bool boundAsGarment = false;
+            for (const auto& mb : uf->monoBehavioursUnder(itemRoot))
+                if (mb.className == "ChaAccessoryClothes" || mb.className == "AccessoryClothes") { boundAsGarment = true; break; }
+            if (boundAsGarment) {
+                accessoryMode = false;
+                garmentAsAccessory = true;
+                placement = Mat4();
+                staticBone = 0;
+            }
         }
         if ((ref.group == "Outfit" || ref.group == "Head") && rootXf) {
             // A garment hangs on objTop (the body-space origin); the head model on the head rig root (objHeadBone). The game
@@ -2463,6 +2510,17 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         // local transform under the parent (a cape authored facing back is turned 180 degrees by its root). `rootInv` cancels
         // it again when a transform is expressed relative to the prefab root.
         if (accessoryMode && rootXf) placement = PrefabRootPlacement(placement, rootXf->pos, rootXf->rot, rootXf->scl);
+        if (const char* accDbg = std::getenv("CARDBRIDGE_DEBUG_ACC")) {
+            if (std::strcmp(accDbg, "1") == 0 || std::strstr(ref.partId.c_str(), accDbg)) {
+                Vec3 a = (ref.group == "Accessories" && !ref.attachNode.empty()) ? [&]() -> Vec3 { auto it = rig.world.find(ref.attachNode); return it == rig.world.end() ? Vec3{-999, -999, -999} : it->second.translation(); }() : Vec3{0, 0, 0};
+                std::fprintf(stderr, "accdbg %s attach=%s attachT=(%.3f %.3f %.3f) rootT=(%.4f %.4f %.4f) rootR=(%.1f %.1f %.1f %.1f) rootS=(%.3f %.3f %.3f) finalT=(%.4f %.4f %.4f)\n",
+                             ref.partId.c_str(), ref.attachNode.c_str(), a.x, a.y, a.z,
+                             rootXf ? rootXf->pos.x : 0.0f, rootXf ? rootXf->pos.y : 0.0f, rootXf ? rootXf->pos.z : 0.0f,
+                             rootXf ? rootXf->rot.x : 0.0f, rootXf ? rootXf->rot.y : 0.0f, rootXf ? rootXf->rot.z : 0.0f, rootXf ? rootXf->rot.w : 1.0f,
+                             rootXf ? rootXf->scl.x : 0.0f, rootXf ? rootXf->scl.y : 0.0f, rootXf ? rootXf->scl.z : 0.0f,
+                             placement.translation().x, placement.translation().y, placement.translation().z);
+            }
+        }
 
         // ---- colouring: what the game does at run time with the card's colours ----
         ItemLook look;
@@ -3253,6 +3311,31 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // (one part per set of garments covering them) so the nude body can be shown again, in the viewer and through PMX morphs.
     log("applying clothing masks");
     report(0.78, "clothing masks");
+    // A garment whose materials are all authored translucency does not mask what is behind it: the
+    // skin underneath shows through the fabric (that is the point of it), so its triangles stay.
+    std::map<std::string, bool> allTranslucentByPart;   // part id -> true when every material on it blends
+    for (const auto& p : scene.parts) {
+        if (p.underPiece || p.meshes.empty()) continue;
+        bool all = true;
+        for (int mi : p.meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+            for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes) {
+                const SceneMaterial* mat = sub.material >= 0 && static_cast<size_t>(sub.material) < scene.materials.size() ? &scene.materials[static_cast<size_t>(sub.material)] : nullptr;
+                if (!mat || !mat->translucent) { all = false; break; }
+            }
+            if (!all) break;
+        }
+        allTranslucentByPart[p.id] = all;
+    }
+    auto allCoverTranslucent = [&](const std::vector<std::string>& cover) {
+        if (cover.empty()) return false;
+        for (const auto& id : cover) {
+            if (id.empty()) return false;   // a hidden garment hides the skin the game-way; only visible+translucent ones let it through
+            auto it = allTranslucentByPart.find(id);
+            if (it == allTranslucentByPart.end() || !it->second) return false;
+        }
+        return true;
+    };
     auto applyMasks = [&](const std::string& what, const std::function<bool(const ScenePart&)>& pick,
                           const std::vector<MaskSource>& masks, const std::function<bool(const SceneMesh&)>& meshOk = {}) {
         if (masks.empty()) return;
@@ -3279,7 +3362,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             int x = std::min(mk.tex->width - 1, static_cast<int>(u * mk.tex->width)), y = std::min(mk.tex->height - 1, static_cast<int>((1.0f - v) * mk.tex->height));
                             if (mk.tex->rgba[(static_cast<size_t>(y) * mk.tex->width + x) * 4] < 128 && std::find(cover.begin(), cover.end(), mk.owner) == cover.end()) cover.push_back(mk.owner);
                         }
-                        if (cover.empty()) {
+                        if (cover.empty() || allCoverTranslucent(cover)) {
                             keep.insert(keep.end(), sub.indices.begin() + static_cast<long>(t), sub.indices.begin() + static_cast<long>(t) + 3);
                             continue;
                         }
@@ -3346,6 +3429,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
     applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && !p.underPiece && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
                [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
+    // The body triangles the clothes cover move onto "body.under.*" copies. The skin shading has to follow them:
+    // they hold the chest and the cleavage, and those are exactly the places the shade is for.
+    for (const auto& p : scene.parts)
+        if (p.underPiece && p.underOf == "body")
+            for (int mi : p.meshes)
+                if (std::find(scene.skinShade.meshes.begin(), scene.skinShade.meshes.end(), mi) == scene.skinShade.meshes.end())
+                    scene.skinShade.meshes.push_back(mi);
     {   // the nude switch: one checkbox in the outfit list that brings back all the skin under the clothes
         bool any = false;
         for (const auto& p : scene.parts) any = any || p.underPiece;
@@ -3411,6 +3501,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     LogMemory("assemble before create jobs");
     exporter::RunCreateJobs(scene);
     log("create materials done");
+    exporter::ApplyNippleTint(scene, opt.nippleColour);
+    if (opt.skinShade > 0.0f && !scene.skinShade.meshes.empty()) {
+        exporter::ApplySkinShade(scene, opt.skinShade, true);
+        log("automatic skin shading baked from the body mesh");
+    }
     report(0.96, "finishing");
     LogMemory("assemble after create jobs");
     if (std::getenv("CARDBRIDGE_DEBUG_BODY_UV")) {
@@ -3556,6 +3651,8 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
         scene.bones[i].world = nw[i];
         scene.bones[i].pos = nw[i].translation();
     }
+    if (!scene.skinShade.meshes.empty()) scene.skinShade.geometryDirty = true;   // the viewer rebuilds the map when the drag ends
+    exporter::ApplyNippleTint(scene, opt.nippleColour);
     settleHeels(scene);
     return true;
 }

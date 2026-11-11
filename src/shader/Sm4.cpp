@@ -335,6 +335,9 @@ std::string DisassembleSm4(const Sm4Program& prog) {
         if (in.saturate) out += "_sat";
         for (const Sm4Operand& o : in.operands) {
             out += " " + regOf(o);
+            if (o.selMode == 1) { const char cs[4] = {'x','y','z','w'}; out += "."; for (int c = 0; c < 4; ++c) out += cs[o.swz[c] & 3]; }
+            else if (o.selMode == 0) { const char cs[4] = {'x','y','z','w'}; out += "."; for (int i = 0; i < 4; ++i) out += (o.mask & (1u << i)) ? cs[i] : '-'; }
+            else if (o.selMode == 2) { const char cs[4] = {'x','y','z','w'}; out += "."; for (int c = 0; c < 4; ++c) out += cs[o.swz[c] & 3]; }
             if (o.type == 4) { float f[4]; for (int c = 0; c < 4; ++c) std::memcpy(&f[c], &o.imm[c], 4); out += "("; for (int c = 0; c < 4; ++c) { char buf[16]; std::snprintf(buf, 16, "%.3f", f[c]); out += buf; if (c < 3) out += ","; } out += ")"; }
             if (o.modifier) out += (o.modifier == 1 ? "-x" : o.modifier == 2 ? "|x|" : "-|x|");
         }

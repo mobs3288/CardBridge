@@ -267,8 +267,8 @@ float CardSagDefault(const Scene& scene, float bustSize) {
     if (n > 0.0f) stiff /= n; else return 1.0f;   // no body chains: the old fixed default
     const float loose = std::max(0.0f, 1.0f - std::min(1.0f, std::max(0.0f, stiff)));
     const float size = 0.5f + std::min(1.0f, std::max(0.0f, bustSize));   // 0.5..1.5
-    // loose + medium size -> ~1.0; stiff + small -> near 0; loose + large -> past 1.3
-    return std::min(2.0f, std::max(0.0f, loose * size * 1.11f));
+    // loose + medium size -> ~0.5; stiff + small -> near 0; loose + large -> ~1.0
+    return std::min(1.3f, std::max(0.0f, loose * size * 0.66f));
 }
 
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
@@ -326,6 +326,32 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     }
 }
 
+void BakeGarmentSettle(Scene& scene) {
+    if (scene.bones.empty()) return;
+    // The outfit's DynamicBone cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) rests where the game's sim hangs it, not at
+    // the prefab's authored pose. Without the drape, the joints fight gravity from the first frame: every link locks (zero range) behind
+    // its own stop spring - the paper-stiff cape - and the sim hammers on the pins, which reads as tweaking and shiver. Colliders keep the
+    // cloth off the body. Hair and the body's own jiggle chains keep their pose. Set CARDBRIDGE_NO_GARMENT_SETTLE to keep the authored pose.
+    if (std::getenv("CARDBRIDGE_NO_GARMENT_SETTLE")) return;
+    const Pose rest;
+    const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
+    PhysicsSim sim;
+    sim.Reset(scene, poseWorld, false, false, 0.5f, false, true);   // outfit chains only; the jiggle switches do not apply to cloth
+    if (sim.empty()) return;
+    std::vector<Mat4> skin = SkinMatrices(scene, rest);
+    if (std::getenv("CARDBRIDGE_DEBUG_GARMENT_SETTLE")) {
+        bool any = false;
+        for (const auto& ch : scene.chains) {
+            if (ch.part.rfind("outfit", 0) != 0 || ch.bones.size() < 2) continue;
+            if (!any) { std::fprintf(stderr, "garment settle: chains ["); any = true; }
+            std::fprintf(stderr, "%s ", ch.name.c_str());
+        }
+        if (any) std::fprintf(stderr, "]\n");
+    }
+    for (int step = 0; step < 600 && sim.Step(scene, poseWorld, 1, skin); ++step) {}
+    BakeSkin(scene, skin);
+}
+
 float SagTiltRad(bool bust, float jiggleIntensity) {
     return SagTiltRad(bust, jiggleIntensity, 0.1f, 0.1f, 1.0f);
 }
@@ -333,7 +359,7 @@ float SagTiltRad(bool bust, float jiggleIntensity) {
 float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale) {
     // Per-card hang: stiffness 1 = perky (no droop), 0 = loose (full hang); elasticity pulls back a little;
     // no downward force (gravityScale 0) means no hang at all. Capped so max intensity stays natural.
-    const float maxTilt = bust ? 0.55f : 0.40f;
+    const float maxTilt = bust ? 0.22f : 0.16f;
     const float loose = std::max(0.0f, 1.0f - std::min(1.0f, std::max(0.0f, stiffness)));
     const float elastFactor = 1.0f - 0.4f * std::min(1.0f, std::max(0.0f, elasticity));
     return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale * (0.5f + jiggleIntensity));
@@ -394,7 +420,7 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
         if (i < pose.bones.size() && !IsIdentity(pose.bones[i])) continue;
         float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
                           : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
-        tilt = std::min(bust ? 0.85f : 0.65f, tilt * std::max(0.0f, sag));
+        tilt = std::min(bust ? 0.30f : 0.22f, tilt * std::max(0.0f, sag));
         if (tilt < 0.01f) continue;   // stiff / perky card (or slider at 0): leave it as it is
         (void)clamp01f;
         // Forward for the bust, backward for the butt, both tipped toward straight down.

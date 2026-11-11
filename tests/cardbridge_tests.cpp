@@ -32,6 +32,7 @@
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
+#include "export/SkinShade.h"
 #include "library/Library.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
@@ -100,6 +101,40 @@ std::string tempPath(const std::string& name) {
     if (base.empty()) base = ".";
     for (char& c : base) if (c == '\\') c = '/';
     return base + "/cardbridge_" + name;
+}
+
+// A minimal .zip with stored (uncompressed) entries, written to tempPath for tests that need a loose-texture mod on disk.
+// The reader never checks the CRC, so it stays zero. Returns the path, or "" when the file could not be written.
+std::string writeStoredZip(const std::string& name, const std::vector<std::pair<std::string, Bytes>>& entries) {
+    Bytes zip;
+    auto u16 = [&](uint16_t v) { zip.push_back(static_cast<uint8_t>(v & 0xff)); zip.push_back(static_cast<uint8_t>((v >> 8) & 0xff)); };
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) zip.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff)); };
+    struct Local { std::string name; uint32_t offset; };
+    std::vector<Local> locals;
+    for (const auto& [nm, data] : entries) {
+        locals.push_back({nm, static_cast<uint32_t>(zip.size())});
+        u32(0x04034b50); u16(20); u16(0); u16(0); u16(0); u16(0); u32(0);   // stored, no time
+        u32(static_cast<uint32_t>(data.size())); u32(static_cast<uint32_t>(data.size()));
+        u16(static_cast<uint16_t>(nm.size())); u16(0);
+        zip.insert(zip.end(), nm.begin(), nm.end());
+        zip.insert(zip.end(), data.begin(), data.end());
+    }
+    const uint32_t cdOffset = static_cast<uint32_t>(zip.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& [nm, data] = entries[i];
+        u32(0x02014b50); u16(20); u16(20); u16(0); u16(0); u16(0); u16(0); u32(0);
+        u32(static_cast<uint32_t>(data.size())); u32(static_cast<uint32_t>(data.size()));
+        u16(static_cast<uint16_t>(nm.size())); u16(0); u16(0); u16(0); u16(0); u32(0); u32(locals[i].offset);
+        zip.insert(zip.end(), nm.begin(), nm.end());
+    }
+    const uint32_t cdSize = static_cast<uint32_t>(zip.size()) - cdOffset;
+    u32(0x06054b50); u16(0); u16(0); u16(static_cast<uint16_t>(entries.size())); u16(static_cast<uint16_t>(entries.size())); u32(cdSize); u32(cdOffset); u16(0);
+    const std::string path = tempPath(name);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return "";
+    const size_t written = std::fwrite(zip.data(), 1, zip.size(), f);
+    std::fclose(f);
+    return written == zip.size() ? path : "";
 }
 
 // ---- PMX read-back (tests/PmxReader.h reads the written bytes, independent of the writer) ----
@@ -510,6 +545,37 @@ void unitTests() {
         CHECK(card::DecodeImageBytes(tinyPng(), w, h, rgba));
         CHECK(w == 1 && h == 1 && rgba.size() == 4);
         CHECK(!card::DecodeImageBytes(B({1, 2, 3}), w, h, rgba));
+    });
+
+    test("loose PNGs get Sideloader's wrap rule: clamp/repeat by file name, repeat otherwise", [] {
+        // The game serves loose PNGs from the mod's folder as-is and picks the wrap mode from the png's path
+        // (Sideloader.dll GetPng: "clamp" in the path clamps, "repeat" in it repeats, else Unity's default).
+        // Decal mods (tattoos, nip textures) ship the image named _clamp because the placement shader samples
+        // outside 0..1 and must see the transparent border instead of a tile.
+        const std::string zipPath = writeStoredZip("loose-wrap-rule.zip", {
+            {"abdata/chara/testtatto/mark_clamp.png", tinyPng()},
+            {"abdata/chara/testtatto/mark_repeat.png", tinyPng()},
+            {"abdata/chara/testtatto/mark_plain.png", tinyPng()},
+        });
+        CHECK(!zipPath.empty());
+        if (zipPath.empty()) return;
+        resolve::ModIndex mi;
+        resolve::ListTable lists;
+        const std::string emptyDir = tempPath("empty-mod-root");
+        std::filesystem::create_directories(emptyDir);
+        resolve::Resolver resolver(mi, lists, emptyDir);
+        resolve::ResolvedItem item;
+        item.status = resolve::ItemStatus::ResolvedMod;
+        item.modPath = zipPath;
+        auto wrapOf = [&](const char* ab, const char* texture) {
+            auto t = resolver.openLooseTexture(item, ab, texture, nullptr);
+            return t ? t->wrapMode : -1;
+        };
+        CHECK(wrapOf("chara/testtatto.unity3d", "mark_clamp") == 1);   // clamp when the name says clamp
+        CHECK(wrapOf("chara/testtatto.unity3d", "mark_repeat") == 0);  // repeat when the name says repeat
+        CHECK(wrapOf("chara/testtatto.unity3d", "mark_plain") == 0);   // else Unity's default (repeat)
+        CHECK(wrapOf("chara/testtatto.unity3d", "missing") == -1);     // a name with nothing behind it is not found, not guessed
+        std::remove(zipPath.c_str());
     });
 
     test("sha256", [] {
@@ -3236,6 +3302,139 @@ void unitTests() {
         CHECK(std::string_view{exporter::ViewModeName(exporter::ViewMode::Transmission)} == "transmission");
         CHECK(exporter::ViewModeFromName("transmission") == exporter::ViewMode::Transmission);
         CHECK(exporter::ViewModeFromName("not_a_mode") == exporter::ViewMode::Lit);
+    });
+    test("skin shading: a body crease darkens in UV space, flat skin stays lit and the strength scales", [] {
+        assemble::Scene scene;
+        scene.textures.resize(1);
+        auto& tex = scene.textures[0];
+        tex.name = "body_create_result";
+        tex.width = tex.height = 64;
+        tex.rgba.assign(64 * 64 * 4, 200);
+        for (size_t i = 0; i < 64 * 64; ++i) tex.rgba[i * 4 + 3] = 255;
+        // A smooth valley along z (a cleavage-like crease) on a 17 x 17 grid, with matching normals and UVs.
+        assemble::SceneMesh mesh;
+        mesh.name = "body_skin";
+        const int N = 16;
+        const float A = 0.09f, S = 0.05f;
+        for (int iz = 0; iz <= N; ++iz) {
+            for (int ix = 0; ix <= N; ++ix) {
+                const float x = -0.2f + 0.4f * static_cast<float>(ix) / static_cast<float>(N);
+                const float z = -0.2f + 0.4f * static_cast<float>(iz) / static_cast<float>(N);
+                const float e = std::exp(-(x * x) / (2.0f * S * S));
+                const float dydx = A * x / (S * S) * e;
+                assemble::SceneVertex v;
+                v.pos = {x, -A * e, z};
+                v.normal = normalize(Vec3{-dydx, 1.0f, 0.0f});
+                v.uv = {(x + 0.2f) / 0.4f, (z + 0.2f) / 0.4f};
+                v.uv1 = v.uv2 = v.uv3 = v.uv;
+                mesh.vertices.push_back(v);
+            }
+        }
+        assemble::SceneSubmesh sub;
+        for (int iz = 0; iz < N; ++iz) {
+            for (int ix = 0; ix < N; ++ix) {
+                const uint32_t a = static_cast<uint32_t>(iz * (N + 1) + ix), b = a + 1;
+                const uint32_t d = static_cast<uint32_t>((iz + 1) * (N + 1) + ix), c = d + 1;
+                sub.indices.insert(sub.indices.end(), {a, b, c, a, c, d});
+            }
+        }
+        mesh.submeshes.push_back(std::move(sub));
+        scene.meshes.push_back(std::move(mesh));
+        scene.skinShade.meshes = {0};
+        scene.skinShade.texture = 0;
+        auto pixel = [&](int x, int y) { return static_cast<int>(tex.rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
+        CHECK(exporter::ApplySkinShade(scene, 1.0f, true));
+        const int crease = pixel(32, 32);
+        const int flat = pixel(61, 32);
+        CHECK(crease < flat - 10);   // the valley is darker than the nearly flat side
+        CHECK(flat > 180);           // and the flat skin is essentially untouched
+        CHECK(exporter::ApplySkinShade(scene, 0.0f, false));
+        CHECK(pixel(32, 32) == 200);  // strength 0 restores the create result exactly
+        CHECK(exporter::ApplySkinShade(scene, 1.0f, false));
+        const int one = pixel(32, 32);
+        CHECK(exporter::ApplySkinShade(scene, 2.0f, false));
+        CHECK(pixel(32, 32) < one);   // more strength digs the crease deeper
+    });
+    test("skin shading: an overhang's dark underside darkens, flat skin does not", [] {
+        assemble::Scene scene;
+        scene.textures.resize(1);
+        auto& tex = scene.textures[0];
+        tex.name = "body_create_result";
+        tex.width = tex.height = 64;
+        tex.rgba.assign(64 * 64 * 4, 200);
+        for (size_t i = 0; i < 64 * 64; ++i) tex.rgba[i * 4 + 3] = 255;
+        // A down-facing patch of skin (like the underside of a breast) at y = 0.
+        assemble::SceneMesh under;
+        under.name = "body_skin";
+        const Vec3 pos[4] = {{-0.2f, 0.0f, -0.2f}, {0.2f, 0.0f, -0.2f}, {0.2f, 0.0f, 0.2f}, {-0.2f, 0.0f, 0.2f}};
+        const Vec2 uv[4] = {{0.05f, 0.05f}, {0.45f, 0.05f}, {0.45f, 0.45f}, {0.05f, 0.45f}};
+        for (int i = 0; i < 4; ++i) {
+            assemble::SceneVertex v;
+            v.pos = pos[i];
+            v.normal = {0.0f, -1.0f, 0.0f};   // facing down, away from the sky
+            v.uv = uv[i];
+            v.uv1 = v.uv2 = v.uv3 = v.uv;
+            under.vertices.push_back(v);
+        }
+        assemble::SceneSubmesh usub;
+        usub.indices = {0, 1, 2, 0, 2, 3};
+        under.submeshes.push_back(std::move(usub));
+        scene.meshes.push_back(std::move(under));
+        // A slab of body above it, blocking every ray to the sky; its own UVs sit elsewhere on the tile.
+        assemble::SceneMesh slab;
+        slab.name = "slab";
+        const Vec3 sPos[4] = {{-0.5f, 0.03f, -0.5f}, {0.5f, 0.03f, -0.5f}, {0.5f, 0.03f, 0.5f}, {-0.5f, 0.03f, 0.5f}};
+        const Vec2 sUv[4] = {{0.6f, 0.6f}, {0.95f, 0.6f}, {0.95f, 0.95f}, {0.6f, 0.95f}};
+        for (int i = 0; i < 4; ++i) {
+            assemble::SceneVertex v;
+            v.pos = sPos[i];
+            v.normal = {0.0f, 1.0f, 0.0f};
+            v.uv = sUv[i];
+            v.uv1 = v.uv2 = v.uv3 = v.uv;
+            slab.vertices.push_back(v);
+        }
+        assemble::SceneSubmesh ssub;
+        ssub.indices = {0, 1, 2, 0, 2, 3};
+        slab.submeshes.push_back(std::move(ssub));
+        scene.meshes.push_back(std::move(slab));
+        scene.skinShade.meshes = {0, 1};
+        scene.skinShade.texture = 0;
+        auto pixel = [&](int x, int y) { return static_cast<int>(tex.rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
+        CHECK(exporter::ApplySkinShade(scene, 1.0f, true));
+        const int covered = pixel(16, 48);   // the down-facing patch is darkened by the overhang
+        const int open = pixel(48, 16);    // the up-facing slab keeps the full base colour
+        CHECK(covered < 200 - 20);
+        CHECK(open == 200);
+        CHECK(exporter::ApplySkinShade(scene, 0.0f, false));
+        CHECK(pixel(16, 16) == 200);
+    });
+    test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
+        assemble::Scene scene;
+        assemble::SceneMaterial mat;
+        mat.name = "cf_m_body";
+        mat.cardSkin = true;
+        mat.cardNippleColour = {0.95f, 0.77f, 0.73f, 1.0f};
+        mat.props.emplace_back("_overcolor1", mat.cardNippleColour);
+        scene.materials.push_back(mat);
+        auto prop = [&](const char* name) {
+            for (const auto& pr : scene.materials[0].props) if (pr.first == name) return pr.second;
+            return Vec4{};
+        };
+        CHECK(exporter::ApplyNippleTint(scene, assemble::kDefaultNippleColour) == 1);
+        Vec4 got = prop("_overcolor1");
+        CHECK(std::fabs(got.x - assemble::kDefaultNippleColour.x) < 1e-6f);
+        CHECK(std::fabs(got.y - assemble::kDefaultNippleColour.y) < 1e-6f);
+        CHECK(std::fabs(got.z - assemble::kDefaultNippleColour.z) < 1e-6f);
+        CHECK(exporter::ApplyNippleTint(scene, assemble::kDefaultNippleColour) == 0);   // already the same
+        CHECK(exporter::ApplyNippleTint(scene, Vec4{0, 0, 0, 0}) == 1);                 // w <= 0: card's own colour
+        got = prop("_overcolor1");
+        CHECK(std::fabs(got.x - 0.95f) < 1e-6f && std::fabs(got.y - 0.77f) < 1e-6f && std::fabs(got.z - 0.73f) < 1e-6f);
+        assemble::SceneMaterial other;   // a non-skin material is never touched
+        other.name = "cf_m_hair";
+        other.props.emplace_back("_overcolor1", Vec4{0.1f, 0.2f, 0.3f, 1.0f});
+        scene.materials.push_back(other);
+        CHECK(exporter::ApplyNippleTint(scene, assemble::kDefaultNippleColour) == 1);   // only the body material
+        CHECK(std::fabs(scene.materials[1].props[0].second.x - 0.1f) < 1e-6f);
     });
 }
 
