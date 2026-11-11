@@ -41,6 +41,7 @@
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
+#include "export/SkinShade.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"

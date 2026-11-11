@@ -60,6 +60,10 @@ struct Tweaks {
     bool nippleInside = false;
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
+    float skinShade = 1.0f;                               // automatic body crease shading baked into the skin texture (0..2)
+    bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
+    Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
+                      assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
 enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabMaterials, TabSettings, TabCount };
 const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Mats", "Setup"};
@@ -70,7 +74,10 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 void SettingsAction(int id);
-constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204, kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306, kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
+              kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
+              kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
+              kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
     int id = 0;

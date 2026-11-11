@@ -9,6 +9,11 @@
 
 namespace cardbridge::assemble {
 
+// The automatic nipple / areola tint: the card's own nipColor is a pale skin tone, so it reads as a slightly darker
+// patch rather than a pink areola. This is the default tint; an explicit colour overrides it (see AssembleOptions).
+// A natural, muted dusty rose, like a real areola on fair skin; set w <= 0 with --card-nipples to keep the card's own colour.
+inline constexpr Vec4 kDefaultNippleColour{0.72f, 0.50f, 0.51f, 1.0f};
+
 struct AssembleOptions {
     int outfit = -1;                       // -1: the card's current outfit (Status.coordinateType)
     std::string bodyPrefab = "p_cf_body_00";
@@ -26,6 +31,12 @@ struct AssembleOptions {
     bool nippleInside = false;
     float nippleInsideOffset = -0.008f;
     float areolaSize = -1.0f;              // the areola size (a property of the body's material: shader _nipsize); negative = the card's
+    // Nipple / areola colour. w > 0: use rgb; w <= 0: keep the card's own nipColor. The default is a natural, muted dusty rose:
+    // the card's pale skin tone leaves a flat, nearly invisible areola, and a fully saturated pink reads as an anime cue rather than a body.
+    Vec4 nippleColour = kDefaultNippleColour;
+    // Automatic body shading from the mesh's own creases (cleavage, under the breasts, the navel, the armpits) baked into
+    // the skin texture. 0 = off, 1 = the default depth, up to 2.
+    float skinShade = 1.0f;
     bool autoCloth = false;                // DISABLED by default (revert to last good look): synthesised chains were rebinding hanging cloth
                                            // onto new bones and collapsing it toward the body. Opt-in with --auto-cloth / CARDBRIDGE_AUTO_CLOTH=1;
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables

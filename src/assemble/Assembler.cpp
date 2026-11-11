@@ -12,6 +12,7 @@
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
 #include "export/Preview.h"
+#include "export/SkinShade.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2235,7 +2236,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                 bodyOverlayTex.emplace_back(texName, idx);
                                 bodyOverlayColors.emplace_back(colName, col);
                             };
-                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", vec4Of(bd.at("nipColor")));
+                            // The card's nipColor is a pale skin tone. The automatic pink tint (opt.nippleColour) makes the
+                            // nipple and areola read as such; colour.w <= 0 restores the card's own colour.
+                            const Vec4 nipColour = opt.nippleColour.w > 0.0f ? Vec4{opt.nippleColour.x, opt.nippleColour.y, opt.nippleColour.z, 1.0f}
+                                                                             : vec4Of(bd.at("nipColor"));
+                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", nipColour);
                             addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
                             bodyOverlayColors.emplace_back("_nipsize", Vec4{opt.areolaSize >= 0 ? opt.areolaSize : static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
                         } else {
@@ -2256,7 +2261,20 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 int mi = b.addRenderer(*base, r, bodyRoot, partIdx, "body", Mat4{}, 0, &skin, false, bodyLookPtr);
                 b.extraTex.clear();
                 b.runtime.clear();
-                if (mi >= 0) part.meshes.push_back(mi);
+                if (mi >= 0) {
+                    part.meshes.push_back(mi);
+                    // The automatic skin shade is baked into the body's skin texture; the mesh's own geometry is its source.
+                    if (std::find(scene.skinShade.meshes.begin(), scene.skinShade.meshes.end(), mi) == scene.skinShade.meshes.end())
+                        scene.skinShade.meshes.push_back(mi);
+                    if (scene.skinShade.texture < 0 && bodyLook.tex1 >= 0) scene.skinShade.texture = bodyLook.tex1;
+                    for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes) {
+                        if (sub.material < 0 || static_cast<size_t>(sub.material) >= scene.materials.size()) continue;
+                        auto& sm = scene.materials[static_cast<size_t>(sub.material)];
+                        if (sm.name != "cf_m_body" && sm.name.rfind("cf_m_body", 0) != 0) continue;
+                        sm.cardSkin = true;
+                        sm.cardNippleColour = vec4Of(card.body.at("nipColor"));
+                    }
+                }
             }
             if (scene.createJobs.empty())   // the body's create material did not run
                 scene.warn("body", "body skin texture is built at runtime by the game from the card's skin settings; "
@@ -3411,6 +3429,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
     applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && !p.underPiece && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
                [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
+    // The body triangles the clothes cover move onto "body.under.*" copies. The skin shading has to follow them:
+    // they hold the chest and the cleavage, and those are exactly the places the shade is for.
+    for (const auto& p : scene.parts)
+        if (p.underPiece && p.underOf == "body")
+            for (int mi : p.meshes)
+                if (std::find(scene.skinShade.meshes.begin(), scene.skinShade.meshes.end(), mi) == scene.skinShade.meshes.end())
+                    scene.skinShade.meshes.push_back(mi);
     {   // the nude switch: one checkbox in the outfit list that brings back all the skin under the clothes
         bool any = false;
         for (const auto& p : scene.parts) any = any || p.underPiece;
@@ -3476,6 +3501,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     LogMemory("assemble before create jobs");
     exporter::RunCreateJobs(scene);
     log("create materials done");
+    exporter::ApplyNippleTint(scene, opt.nippleColour);
+    if (opt.skinShade > 0.0f && !scene.skinShade.meshes.empty()) {
+        exporter::ApplySkinShade(scene, opt.skinShade, true);
+        log("automatic skin shading baked from the body mesh");
+    }
     report(0.96, "finishing");
     LogMemory("assemble after create jobs");
     if (std::getenv("CARDBRIDGE_DEBUG_BODY_UV")) {
@@ -3621,6 +3651,8 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
         scene.bones[i].world = nw[i];
         scene.bones[i].pos = nw[i].translation();
     }
+    if (!scene.skinShade.meshes.empty()) scene.skinShade.geometryDirty = true;   // the viewer rebuilds the map when the drag ends
+    exporter::ApplyNippleTint(scene, opt.nippleColour);
     settleHeels(scene);
     return true;
 }

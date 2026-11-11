@@ -27,6 +27,7 @@
 #include "export/SkinBench.h"
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
+#include "export/SkinShade.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -126,6 +127,10 @@ void usage() {
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
+        "             [--skin-shade F]              automatic body crease shading strength baked into the skin (0 = off,\n"
+        "                                             1 = default, up to 2: cleavage, under the breasts, navel, armpits)\n"
+        "             [--nipple-colour R,G,B]       nipple / areola tint, 0..255 each (default: the automatic dusty-rose pink)\n"
+        "             [--card-nipples]              keep the card's own nipColor instead of the automatic pink tint\n"
         "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
         "                                             in the preview or the PMX at all, bones included; --nude ticks the\n"
         "                                             Nude body box (skin under the clothes shows)\n"
@@ -508,6 +513,22 @@ int cmdConvert(const Args& a) {
     }
     ao.nippleInside = a.has("nipple-inside");
     if (a.opt.count("nipple-offset")) ao.nippleOffset = static_cast<float>(std::atof(a.get("nipple-offset").c_str()));
+    if (a.opt.count("skin-shade")) ao.skinShade = std::clamp(static_cast<float>(std::atof(a.get("skin-shade").c_str())), 0.0f, 2.0f);
+    if (a.has("card-nipples")) {
+        ao.nippleColour = Vec4{0, 0, 0, 0};   // keep the card's own nipColor
+    } else if (a.opt.count("nipple-colour")) {
+        const std::string spec = a.get("nipple-colour");
+        float rgb[3] = {ao.nippleColour.x, ao.nippleColour.y, ao.nippleColour.z};
+        int got = 0;
+        for (size_t at = 0; at < spec.size() && got < 3;) {
+            size_t end = spec.find(',', at);
+            if (end == std::string::npos) end = spec.size();
+            rgb[got++] = std::clamp(static_cast<float>(std::atof(spec.substr(at, end - at).c_str())), 0.0f, 255.0f) / 255.0f;
+            at = end + 1;
+        }
+        if (got == 3) ao.nippleColour = Vec4{rgb[0], rgb[1], rgb[2], 1.0f};
+        else std::fprintf(stderr, "  (--nipple-colour needs R,G,B in 0..255; keeping the default pink)\n");
+    }
     ao.autoCloth = a.has("auto-cloth") && !a.has("no-auto-cloth") && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH") &&
                    std::string(std::getenv("CARDBRIDGE_AUTO_CLOTH") ? std::getenv("CARDBRIDGE_AUTO_CLOTH") : "1") != "0";
     ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
@@ -537,6 +558,8 @@ int cmdConvert(const Args& a) {
         }
         if (shoeHidden) { std::fprintf(stderr, "  (heel re-pose after --hide: reshaping...)\n"); fflush(stderr); if (!assemble::Reshape(scene, c, *ctx.resolver, ao)) std::fprintf(stderr, "  (heel re-pose after --hide needs a re-assemble)\n"); std::fprintf(stderr, "  (heel re-pose done)\n"); fflush(stderr); }
     }
+    if (scene.skinShade.geometryDirty && ao.skinShade > 0.0f)   // a re-shape moved the body: keep the skin shading on it
+        exporter::ApplySkinShade(scene, ao.skinShade, true);
     std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0); fflush(stderr);
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {
@@ -780,7 +803,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

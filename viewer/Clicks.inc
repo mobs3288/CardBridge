@@ -55,6 +55,12 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         ScheduleApplyTweaks();
         return;
     }
+    if (row.kind == 2 && row.id == kNipplePink) {
+        if (right) ResetTweak(row.id); else g.tw.pinkNipples = !g.tw.pinkNipples;
+        Log(row.label + ": " + (g.tw.pinkNipples ? "on" : "off"));
+        TweakEdited(row.id, true);
+        return;
+    }
     if (row.kind == 2) {
         if (right) ResetTweak(row.id); else g.tw.nippleInside = !g.tw.nippleInside;
         Log(row.label + ": " + (g.tw.nippleInside ? "on" : "off"));

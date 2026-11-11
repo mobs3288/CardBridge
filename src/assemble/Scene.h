@@ -79,6 +79,8 @@ struct SceneMaterial {
     std::vector<Vec3> toon;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
     bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
+    bool cardSkin = false;                   // the body's skin material (cf_m_body): _overcolor1 tints the nipple / areola overlay
+    Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)
     bool hairTinted = false;                 // _Color holds the card's measured hair tint (sRGB): the standard views linearise it like any colour, the bake feeds it raw like every other colour (see BakeShaderTextures)
 };
 
@@ -132,6 +134,20 @@ struct SceneMesh {
     std::vector<SceneSubmesh> submeshes;
     std::vector<SceneBlendShape> shapes;
     bool reshapable = false;          // the vertices carry local / nlocal
+};
+
+// Automatic skin shading, computed from the body's own geometry instead of a hand-painted texture: rays cast from each
+// skin vertex plus its local concavity darken the creases (cleavage, under the breasts, the navel, the armpits) in the
+// body's skin texture in UV space. The result is a multiplier map the texture can be re-shaded from at any strength.
+struct SceneSkinShade {
+    std::vector<int> meshes;         // Scene::meshes the body's skin geometry comes from (index into Scene::meshes)
+    int texture = -1;                // Scene::textures the shade was baked into (the body's create result)
+    float applied = -1.0f;           // the strength currently baked into the texture (-1 = never applied)
+    bool geometryDirty = true;       // the body moved since the map was built (Reshape): rebuild before re-applying
+    std::vector<uint8_t> base;       // the texture before shading (same dimensions as the texture)
+    std::vector<uint8_t> shade;      // per-texel multiplier at strength 1: 255 = lit, lower = creased; width * height
+    std::vector<uint8_t> covered;    // 1 where a body triangle reached the texel, parallel to `shade`
+    bool ready() const { return texture >= 0 && !meshes.empty(); }
 };
 
 // An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the
@@ -233,6 +249,7 @@ struct Scene {
     std::vector<SceneTexBinding> globalTextures;
     std::vector<std::pair<std::string, Vec4>> globalProps;
     std::vector<SceneMesh> meshes;
+    SceneSkinShade skinShade;
     std::vector<ScenePart> parts;
     std::vector<SceneExpression> expressions;
     std::vector<SceneChain> chains;
