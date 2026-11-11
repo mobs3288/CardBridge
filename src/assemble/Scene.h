@@ -142,10 +142,13 @@ struct SceneMesh {
 struct SceneSkinShade {
     std::vector<int> meshes;         // Scene::meshes the body's skin geometry comes from (index into Scene::meshes)
     int texture = -1;                // Scene::textures the shade was baked into (the body's create result)
-    float applied = -1.0f;           // the strength currently baked into the texture (-1 = never applied)
+    float applied = -1.0f;           // the cleavage strength currently baked into the texture (-1 = never applied)
+    float appliedUnder = -1.0f;      // the underboob strength currently baked into the texture (-1 = never applied)
+    float appliedTop = 1.0f;         // the cleavage top extent currently baked in (0 = absent, 1 = full height)
     bool geometryDirty = true;       // the body moved since the map was built (Reshape): rebuild before re-applying
     std::vector<uint8_t> base;       // the texture before shading (same dimensions as the texture)
-    std::vector<uint8_t> shade;      // per-texel multiplier at strength 1: 255 = lit, lower = creased; width * height
+    std::vector<uint8_t> shade;      // cleavage factors at strength 1 (255 = lit, lower = creased); width * height
+    std::vector<uint8_t> shadeU;     // underboob factors at strength 1 (255 = lit, lower = creased); width * height
     std::vector<uint8_t> covered;    // 1 where a body triangle reached the texel, parallel to `shade`
     bool ready() const { return texture >= 0 && !meshes.empty(); }
 };

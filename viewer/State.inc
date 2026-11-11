@@ -60,7 +60,9 @@ struct Tweaks {
     bool nippleInside = false;
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
-    float skinShade = 1.5f;                                // automatic body crease shading baked into the skin texture (0..2); saved in the viewer's settings, see Settings
+    float skinShade = 1.5f;                                // automatic cleavage shading baked into the skin texture (0..2); saved in the viewer's settings, see Settings
+    float skinShadeUnder = 1.0f;                           // the fold under the breasts (0..2); saved in the viewer's settings
+    float skinShadeTop = 1.0f;                              // how far up the chest the cleavage shading reaches (0..1); saved in the viewer's settings
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
@@ -76,6 +78,7 @@ constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014,
 void SettingsAction(int id);
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
+              kSkinShadeUnder = 210, kSkinShadeTop = 211,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
 struct TweakRow {

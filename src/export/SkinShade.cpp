@@ -181,9 +181,15 @@ const SampleDir* SkySampleDirs() {
 // Which vertices are breast? The breast skin is skinned to the bust chain (bones carrying "bnip" / "bust").
 // Only those are shaded: armpits, the groin, the navel and the back stay untouched. A character with no bust chains
 // falls back to shading everything (the pre-existing behaviour, used by the tests' synthetic scenes).
-std::vector<char> BreastMask(const assemble::Scene& scene, const assemble::SceneMesh& mesh) {
+struct BreastMaskResult {
+    std::vector<char> keep;         // 1 = vertex in the breast region
+    bool hasBustBones = false;      // true when the card carries a bust chain we can recognise
+};
+
+BreastMaskResult BreastMask(const assemble::Scene& scene, const assemble::SceneMesh& mesh) {
     const size_t n = mesh.vertices.size();
-    std::vector<char> keep(n, 0);
+    BreastMaskResult out;
+    out.keep.assign(n, 0);
     std::vector<char> bustBone(scene.bones.size(), 0);
     size_t nBust = 0;
     for (size_t bi = 0; bi < scene.bones.size(); ++bi)
@@ -191,9 +197,10 @@ std::vector<char> BreastMask(const assemble::Scene& scene, const assemble::Scene
             bustBone[bi] = 1;
             ++nBust;
         }
+    out.hasBustBones = nBust > 0;
     if (nBust == 0) {   // nothing on this card says "breast": shade the whole body as before
-        std::fill(keep.begin(), keep.end(), char{1});
-        return keep;
+        std::fill(out.keep.begin(), out.keep.end(), char{1});
+        return out;
     }
     for (size_t i = 0; i < n; ++i) {
         const assemble::SceneVertex& v = mesh.vertices[i];
@@ -202,15 +209,27 @@ std::vector<char> BreastMask(const assemble::Scene& scene, const assemble::Scene
             const int b = v.bone[k];
             if (b >= 0 && static_cast<size_t>(b) < bustBone.size() && bustBone[static_cast<size_t>(b)]) w += v.weight[k];
         }
-        if (w >= 0.12f) keep[i] = 1;   // at least a bit of bust-chain influence: the breast sheet, its fold and its crease
+        if (w >= 0.12f) out.keep[i] = 1;   // at least a bit of bust-chain influence: the breast sheet, its fold and its crease
     }
-    return keep;
+    return out;
 }
 
-// One mesh's per-vertex shade (multiplier at strength 1: 1 = untouched).
-std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, const assemble::Scene& scene) {
+// One mesh's per-vertex shade factors (multipliers at strength 1: 1 = untouched).
+struct ShadeFactors {
+    std::vector<float> cleavage;   // cleavage fold darkness, ahead of the apply pass's strength scaling
+    std::vector<float> underboob;  // under-breast fold darkness
+};
+
+ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, const assemble::Scene& scene, float topExtent) {
     const size_t n = mesh.vertices.size();
-    std::vector<float> shade(n, 1.0f);
+    // Bounds of the breast-weight-kept region, for the top extent of the cleavage falloff.
+    float yMin = 1e30f, yMax = -1e30f;
+    for (const auto& sub : mesh.submeshes) (void)sub;
+    for (size_t i = 0; i < n; ++i) { yMin = std::min(yMin, mesh.vertices[i].pos.y); yMax = std::max(yMax, mesh.vertices[i].pos.y); }
+    const float ySpan = std::max(yMax - yMin, 0.05f);
+    const float topPos = yMin + clampf(topExtent, 0.0f, 1.0f) * ySpan;   // shading reaches up to here
+    const float band = std::max(ySpan * 0.12f, 0.015f);                  // the fade-out zone up to the chest's top
+    std::vector<float> shade(n, 1.0f), shadeU(n, 1.0f);
     std::vector<std::vector<int>> adjacency(n);
     for (const auto& sub : mesh.submeshes) {
         for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
@@ -222,7 +241,9 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
         }
     }
-    std::vector<char> keepMask = BreastMask(scene, mesh);
+    BreastMaskResult bmask = BreastMask(scene, mesh);
+    std::vector<char> keepMask = bmask.keep;
+    const bool hasBustBones = bmask.hasBustBones;
     // Two one-ring expansions pull the spine-weighted seam between the breasts into the shaded region
     // (the skin is bust-weighted nearly everywhere there).
     for (int pass = 0; pass < 2; ++pass) {
@@ -281,13 +302,19 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
             const float skyOcc = static_cast<float>(skyBlocked) / static_cast<float>(kSamples);
             const float down = clampf(-nrm.y, 0.0f, 1.0f);   // only skin facing down goes darker, never the up-facing top
-            // Two folds: the crease between the breasts, and the fold at the breast base facing down into the torso junction.
-            // Both are real creases (cavity), just facing different directions; the broad under-breast slope stays at base colour.
-            const bool cleavage = cavity > 0.12f;
+            // The cleavage is a fold facing the viewer (-Z); the arm pit crease faces sideways, so the normal filter removes it.
+            const bool front = !hasBustBones || nrm.z < -0.15f;   // the cleavage is a fold facing the viewer (front = -Z); side-facing creases stay untouched
+            // The cleavage falls off toward the top of the chest: `topPos` is the world-space height the shading reaches to.
+            float fade = 1.0f;
+            if (v.pos.y > topPos) fade = clampf((yMax - v.pos.y) / band, 0.0f, 1.0f);
+            // Two folds: the crease between the breasts (front-facing), and the fold at the breast base (down-facing with overhead occlusion).
+            const bool cleavage = front && cavity > 0.12f;
             const bool underboob = down > 0.25f && skyOcc > 0.35f && cavity > 0.28f;
-            if (!cleavage && !underboob) { shade[i] = 1.0f; continue; }   // everything else keeps the card's colour
-            const float occ = 1.1f * (1.0f - ao) + 1.4f * cavity + 0.4f * skyOcc * down;
-            shade[i] = clampf(1.0f - 0.55f * occ, 0.28f, 1.0f);
+            if (!cleavage && !underboob) { shade[i] = 1.0f; shadeU[i] = 1.0f; continue; }   // everything else keeps the card's colour
+            const float occC = front ? (1.05f * (1.0f - ao) + 1.35f * cavity) * fade : 0.0f;
+            const float occU = (down > 0.25f && skyOcc > 0.35f && cavity > 0.28f) ? 0.35f * (1.0f - ao) + 0.35f * cavity + 0.35f * skyOcc : 0.0f;
+            shade[i] = clampf(1.0f - 0.55f * occC, 0.28f, 1.0f);
+            shadeU[i] = clampf(1.0f - 0.4f * occU, 0.28f, 1.0f);
         }
     };
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
@@ -298,25 +325,28 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
     // Smooth the per-vertex values: the map moves from vertex resolution to texel resolution, and faceting reads as
     // dirt. Two rings are enough at the body's density.
     for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> next = shade;
+        std::vector<float> next = shade, nextU = shadeU;
         for (size_t i = 0; i < n; ++i) {
             if (adjacency[i].empty()) continue;
-            float sum = shade[i];
+            float sumC = shade[i], sumU = shadeU[i];
             float weights = 1.0f;
             for (int j : adjacency[i]) {
                 if (j < 0 || static_cast<size_t>(j) >= n) continue;
-                sum += shade[static_cast<size_t>(j)];
+                sumC += shade[static_cast<size_t>(j)];
+                sumU += shadeU[static_cast<size_t>(j)];
                 weights += 1.0f;
             }
-            next[i] = sum / weights;
+            next[i] = sumC / weights;
+            nextU[i] = sumU / weights;
         }
         shade.swap(next);
+        shadeU.swap(nextU);
     }
-    return shade;
+    return {shade, shadeU};
 }
 
-void RasterizeToUv(const assemble::SceneMesh& mesh, const std::vector<float>& shade, int W, int H,
-                   std::vector<uint8_t>& map, std::vector<uint8_t>& covered) {
+void RasterizeToUv(const assemble::SceneMesh& mesh, const std::vector<float>& shade, const std::vector<float>& shadeU, int W, int H,
+                   std::vector<uint8_t>& map, std::vector<uint8_t>& mapU, std::vector<uint8_t>& covered) {
     auto texel = [&](float u, float v) {
         return std::pair<int, int>{std::min(W - 1, std::max(0, static_cast<int>(u * static_cast<float>(W)))),
                                   std::min(H - 1, std::max(0, static_cast<int>((1.0f - v) * static_cast<float>(H))))};
@@ -336,6 +366,7 @@ void RasterizeToUv(const assemble::SceneMesh& mesh, const std::vector<float>& sh
             const int x0 = std::max(0, std::min({ax, bx, cx})), x1 = std::min(W - 1, std::max({ax, bx, cx}));
             const int y0 = std::max(0, std::min({ay, by, cy})), y1 = std::min(H - 1, std::max({ay, by, cy}));
             const float sv[3] = {shade[idx[0]], shade[idx[1]], shade[idx[2]]};
+            const float su[3] = {shadeU[idx[0]], shadeU[idx[1]], shadeU[idx[2]]};
             for (int y = y0; y <= y1; ++y) {
                 for (int x = x0; x <= x1; ++x) {
                     const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
@@ -347,7 +378,9 @@ void RasterizeToUv(const assemble::SceneMesh& mesh, const std::vector<float>& sh
                     if (covered[at]) continue;   // overlapping UV islands: the first triangle owns the texel, as the bake does
                     covered[at] = 1;
                     const float s = l0 * sv[0] + l1 * sv[1] + l2 * sv[2];
+                    const float u = l0 * su[0] + l1 * su[1] + l2 * su[2];
                     map[at] = static_cast<uint8_t>(clampf(s, 0.0f, 1.0f) * 255.0f + 0.5f);
+                    mapU[at] = static_cast<uint8_t>(clampf(u, 0.0f, 1.0f) * 255.0f + 0.5f);
                 }
             }
         }
@@ -414,7 +447,7 @@ void BlurMap(std::vector<uint8_t>& map, const std::vector<uint8_t>& covered, int
 
 }  // namespace
 
-bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
+bool ApplySkinShade(assemble::Scene& scene, float strengthC, float strengthU, float topExtent, bool rebuild) {
     auto& ss = scene.skinShade;
     if (!ss.ready()) return false;
     if (static_cast<size_t>(ss.texture) >= scene.textures.size()) return false;
@@ -423,7 +456,9 @@ bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
     const int W = tex.width, H = tex.height;
     if (ss.base.size() != tex.rgba.size()) ss.base = tex.rgba;   // first call: the untouched create result
 
-    if (rebuild || ss.shade.size() != static_cast<size_t>(W) * static_cast<size_t>(H)) {
+    const float te = clampf(topExtent, 0.0f, 1.0f);
+    const bool topChanged = ss.appliedTop != te;
+    if (rebuild || topChanged || ss.shade.size() != static_cast<size_t>(W) * static_cast<size_t>(H)) {
         std::vector<ShadeTri> tris;
         for (int mi : ss.meshes) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
@@ -437,51 +472,62 @@ bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
         SkinBvh bvh;
         bvh.build(std::move(tris));
         ss.shade.assign(static_cast<size_t>(W) * static_cast<size_t>(H), 255);
+        ss.shadeU.assign(static_cast<size_t>(W) * static_cast<size_t>(H), 255);
         ss.covered.assign(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
         for (int mi : ss.meshes) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             if (mesh.vertices.empty()) continue;
-            const std::vector<float> shade = ShadeMesh(mesh, bvh, scene);
-            RasterizeToUv(mesh, shade, W, H, ss.shade, ss.covered);
+            const ShadeFactors factors = ShadeMesh(mesh, bvh, scene, te);
+            RasterizeToUv(mesh, factors.cleavage, factors.underboob, W, H, ss.shade, ss.shadeU, ss.covered);
         }
         FeatherMap(ss.shade, ss.covered, W, H, 8);
+        FeatherMap(ss.shadeU, ss.covered, W, H, 8);
         BlurMap(ss.shade, ss.covered, W, H);
+        BlurMap(ss.shadeU, ss.covered, W, H);
         BlurMap(ss.shade, ss.covered, W, H);
+        BlurMap(ss.shadeU, ss.covered, W, H);
         BlurMap(ss.shade, ss.covered, W, H);
+        BlurMap(ss.shadeU, ss.covered, W, H);
         ss.geometryDirty = false;
     }
 
-    const float st = clampf(strength, 0.0f, 2.0f);
-    if (ss.applied == st) {
+    const float sc = clampf(strengthC, 0.0f, 2.0f), su = clampf(strengthU, 0.0f, 2.0f);
+    if (ss.applied == sc && ss.appliedUnder == su && ss.appliedTop == te) {
         tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
         return true;
     }
     for (size_t i = 0; i < ss.covered.size(); ++i) {
         if (!ss.covered[i]) continue;
-        const float lit = static_cast<float>(ss.shade[i]) / 255.0f;   // the map is the look at strength 1
-        const float mul = clampf(1.0f - st * (1.0f - lit), 0.04f, 1.0f);
+        const float litC = static_cast<float>(ss.shade[i]) / 255.0f;
+        const float litU = static_cast<float>(ss.shadeU[i]) / 255.0f;
+        const float mulC = clampf(1.0f - sc * (1.0f - litC), 0.04f, 1.0f);
+        const float mulU = clampf(1.0f - su * (1.0f - litU), 0.04f, 1.0f);
+        const float mul = mulU < mulC ? mulU : mulC;
         for (int c = 0; c < 3; ++c) {
             const size_t at = i * 4 + static_cast<size_t>(c);
             tex.rgba[at] = static_cast<uint8_t>(clampf(static_cast<float>(ss.base[at]) * mul, 0.0f, 255.0f) + 0.5f);
         }
         tex.rgba[i * 4 + 3] = ss.base[i * 4 + 3];
     }
-    ss.applied = st;
+    ss.applied = sc;
+    ss.appliedUnder = su;
+    ss.appliedTop = te;
     tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
     if (std::getenv("CARDBRIDGE_DEBUG_SKIN")) {
         size_t n = 0;
-        double sum = 0;
-        int lo = 255, hi = 0;
+        double sumC = 0, sumU = 0;
+        int loC = 255, loU = 255, hiC = 0, hiU = 0;
         for (size_t i = 0; i < ss.shade.size(); ++i) {
             if (!ss.covered[i]) continue;
             ++n;
-            sum += ss.shade[i];
-            lo = std::min<int>(lo, ss.shade[i]);
-            hi = std::max<int>(hi, ss.shade[i]);
+            sumC += ss.shade[i]; sumU += ss.shadeU[i];
+            loC = std::min<int>(loC, ss.shade[i]); hiC = std::max<int>(hiC, ss.shade[i]);
+            loU = std::min<int>(loU, ss.shadeU[i]); hiU = std::max<int>(hiU, ss.shadeU[i]);
         }
-        std::fprintf(stderr, "skin shade: %zu texel(s), mean %.1f, min %d, max %d, strength %.2f\n", n,
-                     n ? sum / static_cast<double>(n) : 0.0, lo, hi, static_cast<double>(st));
+        std::fprintf(stderr, "skin shade: %zu texels, mean C %.1f/U %.1f, min C %d/U %d, max C %d/U %d, strength C %.2f/U %.2f, top %.2f\n",
+                     n, n ? sumC / static_cast<double>(n) : 0.0, n ? sumU / static_cast<double>(n) : 0.0,
+                     loC, loU, hiC, hiU, static_cast<double>(sc), static_cast<double>(su), static_cast<double>(te));
     }
     return true;
 }

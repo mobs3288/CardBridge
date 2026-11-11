@@ -443,6 +443,22 @@ void alphaOver(std::vector<uint8_t>& dst, int dw, int dh, const card::MaterialEd
         }
 }
 
+// The KSOX "under" layers (BodyUnder/FaceUnder): full-coverage skin repaints the card paints beneath the skin's own detail.
+// They belong on the base texture before the create shader runs (source-over onto the flat base); drawn over the finished
+// skin they would bury the mask-derived shading, the paint and (for the face) the makeup the create shader draws. `composited`,
+// when given, reports whether an image was actually laid over the base.
+std::shared_ptr<unity::TextureData> skinWithUnder(const std::shared_ptr<unity::TextureData>& baseTex, int overlayType,
+                                                  const card::MaterialEdits* edits, bool* composited = nullptr) {
+    if (composited) *composited = false;
+    if (!baseTex || !edits) return baseTex;
+    card::MaterialEdits::Image ov;
+    if (!edits->decodeSkinOverlay(overlayType, ov)) return baseTex;
+    auto comp = std::make_shared<unity::TextureData>(*baseTex);
+    alphaOver(comp->rgba, comp->width, comp->height, ov);
+    if (composited) *composited = true;
+    return comp;
+}
+
 // Runs the DynamicBone components of an item's prefab to rest, as the game's still character does, and returns the world matrices (in the
 // prefab's own space, like UnityFile::worldMatrix) of every transform they move. `P` is the world matrix the prefab's root hangs on.
 bool settleItem(UnityFile& uf, int64_t prefabRoot, const Mat4& P, const Mat4* P0, const std::vector<DbCollider>& colliders,
@@ -2237,7 +2253,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             out.w = lerp(num("CenterScale") - num("AddScale"), num("CenterScale") + num("AddScale"), v.w);
                             return out;
                         };
-                        std::vector<TexInput> texs = {{"_MainTex", b.decode(*base, bt, "body")}, {"_ColorMask", b.decode(*base, bm, "body")}};
+                        // KSOX BodyUnder: the card's full-coverage skin repaint goes under the create shader's own detail,
+                        // onto the base (source-over on the flat white base the game's base texture is), not on top of the result.
+                        std::shared_ptr<unity::TextureData> bodyBase = skinWithUnder(b.decode(*base, bt, "body"), card::MaterialEdits::OverlayBodyUnder, b.edits);
+                        std::vector<TexInput> texs = {{"_MainTex", bodyBase}, {"_ColorMask", b.decode(*base, bm, "body")}};
                         std::vector<std::pair<std::string, Vec4>> props = {{"_Color", vec4Of(sk)}, {"_Color2", c[1]}, {"_Color4", vec4Of(bd.at("sunburnColor"))}, {"_Color5", vec4Of(bd.at("nailColor"))}};
                         const char* paintTex[2] = {"_Texture3", "_Texture6"};
                         const char* paintCol[2] = {"_Color3", "_Color6"};
@@ -2290,7 +2309,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                             addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
                             bodyOverlayColors.emplace_back("_nipsize", Vec4{opt.areolaSize >= 0 ? opt.areolaSize : static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
                         } else {
-                            bodyLook.tex1 = b.bake(b.decode(*base, bt, "body"), "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
+                            bool underComposited = false;
+                            std::shared_ptr<unity::TextureData> bodyBase = skinWithUnder(b.decode(*base, bt, "body"), card::MaterialEdits::OverlayBodyUnder, b.edits, &underComposited);
+                            bodyLook.tex1 = b.bake(bodyBase, underComposited ? "body_t_under" : "body_t", b.decode(*base, bm, "body"), "body_mc", c, base->name());
                             card::MaterialEdits::Image ov;
                             if (bodyLook.tex1 >= 0 && b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayBody, ov)) {
                                 auto& st = scene.textures[static_cast<size_t>(bodyLook.tex1)];
@@ -2794,7 +2815,9 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 return b.decode(*tb, tp, ref.partId);
             };
             std::string k1, k2;
-            auto base = fromHead("MainTexAB", "MainTex", k1);
+            std::shared_ptr<unity::TextureData> base = fromHead("MainTexAB", "MainTex", k1);
+            // KSOX FaceUnder: the card's full-coverage face repaint goes under the create shader's own detail.
+            base = skinWithUnder(base, card::MaterialEdits::OverlayFaceUnder, b.edits);
             if (!base) return -1;
             auto mask = fromHead("ColorMaskAB", "ColorMaskTex", k2);
             const auto& oc = card.outfits[static_cast<size_t>(std::max(0, ref.outfit < 0 ? 0 : ref.outfit))];
@@ -3581,8 +3604,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     exporter::RunCreateJobs(scene);
     log("create materials done");
     exporter::ApplyNippleTint(scene, opt.nippleColour);
-    if (opt.skinShade > 0.0f && !scene.skinShade.meshes.empty()) {
-        exporter::ApplySkinShade(scene, opt.skinShade, true);
+    if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
+        exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, true);
         log("automatic skin shading baked from the body mesh");
     }
     report(0.96, "finishing");

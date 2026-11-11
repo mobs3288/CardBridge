@@ -301,7 +301,7 @@ void ApplySkinLook(bool rebuildMap) {
     auto& ss = L->scene.skinShade;
     if (ss.ready()) {
         const bool rebuild = rebuildMap;
-        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, rebuild)) {
+        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, g.tw.skinShadeUnder, g.tw.skinShadeTop, rebuild)) {
             const int ti = ss.texture;
             if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
             if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
@@ -336,6 +336,8 @@ bool ReshapeNow(bool final) {
         ao.nippleOffset = g.tw.nippleMm / 1000.0f;
         ao.nippleColour = NippleTintOption();
         ao.skinShade = g.tw.skinShade;
+        ao.skinShadeUnder = g.tw.skinShadeUnder;
+        ao.skinShadeTop = g.tw.skinShadeTop;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
     }
     const double t0 = NowMs();
@@ -344,7 +346,7 @@ bool ReshapeNow(bool final) {
     if (g.gpuOk) g.gpu.Refresh(final);
     if (final && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
         const int ti = L->scene.skinShade.texture;
-        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, true)) {
+        if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, g.tw.skinShadeUnder, g.tw.skinShadeTop, true)) {
             if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
             if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
         }
@@ -390,11 +392,14 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
-    if (id == kSkinShade || id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
+    if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop ||
+        id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
         // Body shading re-applies at the new strength at once; the occlusion map is rebuilt only when a shape drag ended
         // (ReshapeNow) or from this release when the body had moved. The nipple tint is a material property and is live.
-        if (id == kSkinShade) {   // this slider's value is the persisted default for new cards — save it with the other settings
-            g.settings.skinShade = g.tw.skinShade;
+        if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop) {   // persisted default for new cards — save it with the other settings
+            if (id == kSkinShade) g.settings.skinShade = g.tw.skinShade;
+            else if (id == kSkinShadeUnder) g.settings.skinShadeUnder = g.tw.skinShadeUnder;
+            else if (id == kSkinShadeTop) g.settings.skinShadeTop = g.tw.skinShadeTop;
             SaveSettings(g.settings);
         }
         ApplySkinLook(released && Current() && Current()->scene.skinShade.geometryDirty);
@@ -556,7 +561,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
                     g.tw = Tweaks();
-                    g.tw.skinShade = g.settings.skinShade;   // persisted default from the Setup tab (and the Look slider); share value with the settings file
+                    g.tw.skinShade = g.settings.skinShade;          // persisted default from the Setup tab (and the Look slider); share value with the settings file
+                    g.tw.skinShadeUnder = g.settings.skinShadeUnder;
+                    g.tw.skinShadeTop = g.settings.skinShadeTop;
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));

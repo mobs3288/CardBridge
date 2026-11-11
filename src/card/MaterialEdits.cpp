@@ -136,6 +136,19 @@ MaterialEdits LoadMaterialEdits(const Value& extended, int coordinate) {
                 if (img.isBin() && img.size() > 0) me.skinOverlays[static_cast<int>(kv.first.asInt())] = img.asBin();
             }
     }
+    // The older layout (BodyOver/BodyUnder/FaceUnder instead of a Lookup): "under" images are full-coverage skin repaints drawn
+    // under the skin's own detail (the create shader's base input); "over" images sit on top of the finished skin, like the
+    // Lookup's body/face slots (3/4). A Lookup wins the slots it fills; the under slots have no Lookup equivalent.
+    if (ksox.isMap()) {
+        if (ksox.at("BodyUnder").isBin() && ksox.at("BodyUnder").asBin().size() > 0 && !me.skinOverlays.count(MaterialEdits::OverlayBodyUnder))
+            me.skinOverlays[MaterialEdits::OverlayBodyUnder] = ksox.at("BodyUnder").asBin();
+        if (ksox.at("FaceUnder").isBin() && ksox.at("FaceUnder").asBin().size() > 0 && !me.skinOverlays.count(MaterialEdits::OverlayFaceUnder))
+            me.skinOverlays[MaterialEdits::OverlayFaceUnder] = ksox.at("FaceUnder").asBin();
+        if (ksox.at("BodyOver").isBin() && ksox.at("BodyOver").asBin().size() > 0 && !me.skinOverlays.count(MaterialEdits::OverlayBody))
+            me.skinOverlays[MaterialEdits::OverlayBody] = ksox.at("BodyOver").asBin();
+        if (ksox.at("FaceOver").isBin() && ksox.at("FaceOver").asBin().size() > 0 && !me.skinOverlays.count(MaterialEdits::OverlayFace))
+            me.skinOverlays[MaterialEdits::OverlayFace] = ksox.at("FaceOver").asBin();
+    }
     // The older layout (three images instead of a Lookup): BodyOver, FaceUnder and EyeOver. EyeOver is the iris paint,
     // one image laid over both eyes' iris textures. Without it the card's empty "no iris" pupil texture leaves blank eyes.
     if (ksox.isMap() && ksox.at("EyeOver").isBin() && ksox.at("EyeOver").asBin().size() > 0) {
