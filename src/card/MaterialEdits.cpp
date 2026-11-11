@@ -2,6 +2,7 @@
 
 #include "core/MsgPack.h"
 #include <cstdlib>
+#include <cstring>
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -41,6 +42,24 @@ std::vector<const MaterialEdits::MainTex*> MaterialEdits::texEditsFor(int coordi
 
 namespace {
 
+// A PNG/JPEG the character maker wrote is an authoring image: its pixels are sRGB meant for display.
+// Unity's Texture2D.LoadImage marks them sRGB too. Sniff the colour-space hints the file carries so
+// MaterialEditor's embedded images are not treated as raw linear data (that lifts every dark tone).
+bool imageCarriesSrgb(const unsigned char* d, size_t n) {
+    if (n >= 3 && d[0] == 0xff && d[1] == 0xd8 && d[2] == 0xff) return true;   // JPEG: sRGB by default
+    if (n < 8 || std::memcmp(d, "\x89PNG\r\n\x1a\n", 8) != 0) return false;
+    size_t p = 8;
+    while (p + 8 <= n) {
+        const uint32_t len = (uint32_t(d[p]) << 24) | (uint32_t(d[p + 1]) << 16) | (uint32_t(d[p + 2]) << 8) | uint32_t(d[p + 3]);
+        if (p + 12 + len > n) return false;
+        const uint32_t typ = (uint32_t(d[p + 4]) << 24) | (uint32_t(d[p + 5]) << 16) | (uint32_t(d[p + 6]) << 8) | uint32_t(d[p + 7]);
+        if (typ == 0x73524742 || typ == 0x69434350 || typ == 0x67414d41) return true;   // sRGB, iCCP, gAMA
+        if (typ == 0x49444154) return false;   // IDAT: no colour-space hint in the file
+        p += 12 + len;
+    }
+    return false;
+}
+
 bool decodeImage(const Bytes& bytes, MaterialEdits::Image& out) {
     int w = 0, h = 0, n = 0;
     stbi_uc* px = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &n, 4);
@@ -48,6 +67,7 @@ bool decodeImage(const Bytes& bytes, MaterialEdits::Image& out) {
     out.width = w;
     out.height = h;
     out.rgba.assign(px, px + static_cast<size_t>(w) * h * 4);
+    out.srgb = imageCarriesSrgb(bytes.data(), bytes.size());
     stbi_image_free(px);
     return true;
 }

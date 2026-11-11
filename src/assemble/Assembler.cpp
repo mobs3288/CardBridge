@@ -601,11 +601,11 @@ struct Builder {
         int result = -1;
         if (edits && edits->decode(texId, img)) {
             result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
-            // The embedded images are linear dumps, not sRGB authoring images: the game displays them unconverted (the whole
-            // "colour", too, is what the editor's render produced in linear light), so they are stored linear like the masks.
-            // A replaced main texture instead keeps its original's colour space (see the call site): an sRGB albedo would
-            // otherwise be encoded like a linear dump and wash out.
-            scene.textures[static_cast<size_t>(result)].srgb = forceSrgb > 0;
+            // A replaced main texture keeps the colour space of the material's original main texture when the call site
+            // knows it (forceSrgb 1/0). Otherwise the image's own colour-space hints decide: the character maker's PNGs are
+            // sRGB authoring images (they carry sRGB/gAMA/iCCP chunks, as does any JPEG), and treating them as linear lifts
+            // every dark tone. Only a file with no colour-space chunk stays on the old linear default.
+            scene.textures[static_cast<size_t>(result)].srgb = forceSrgb >= 0 ? forceSrgb > 0 : img.srgb;
         } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
         meTextures[slot] = result;
         return result;
@@ -1390,10 +1390,22 @@ struct Builder {
                 int64_t bid = r.boneXforms[i];
                 if (!uf.xform(bid)) { boneIdx.push_back(staticBone); boneMat.push_back(placement * (rootInv * rendererW)); continue; }
                 const unity::Xform* bx = uf.xform(bid);
-                const bool isFoot = bx && (bx->name == "cf_j_foot_L" || bx->name == "cf_j_foot_R");
-                boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
+                const std::string bname = bx ? bx->name : std::string();
+                const bool isFoot = bname == "cf_j_foot_L" || bname == "cf_j_foot_R";
                 Mat4 bp = mesh->bindPoses[i];
                 if (warpOn && isFoot) bp = warpMat * bp;
+                // A garment worn through an accessory slot is bound to the body skeleton: Unity ignores the accessory node's
+                // transform for skinned meshes, so the attach anchor must not move it. Only a bone this item creates of its own
+                // hangs on the anchor; a bone the body rig already has is the rig's (like the clothing slots' path).
+                const int rigBi = bname.empty() ? -1 : scene.boneIndex(bname);
+                if (rigBi >= 0) {
+                    const auto rw = rig.world.find(bname);
+                    const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, bid, prefabRoot, placement);
+                    boneIdx.push_back(rigBi);
+                    boneMat.push_back(bw * bp);
+                    continue;
+                }
+                boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
                 boneMat.push_back(placement * (rootInv * Wp(uf, bid)) * bp);
             }
         } else if (skinned) {
