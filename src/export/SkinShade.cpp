@@ -178,8 +178,37 @@ const SampleDir* SkySampleDirs() {
     return kDirs.data();
 }
 
+// Which vertices are breast? The breast skin is skinned to the bust chain (bones carrying "bnip" / "bust").
+// Only those are shaded: armpits, the groin, the navel and the back stay untouched. A character with no bust chains
+// falls back to shading everything (the pre-existing behaviour, used by the tests' synthetic scenes).
+std::vector<char> BreastMask(const assemble::Scene& scene, const assemble::SceneMesh& mesh) {
+    const size_t n = mesh.vertices.size();
+    std::vector<char> keep(n, 0);
+    std::vector<char> bustBone(scene.bones.size(), 0);
+    size_t nBust = 0;
+    for (size_t bi = 0; bi < scene.bones.size(); ++bi)
+        if (scene.bones[bi].name.find("bnip") != std::string::npos || scene.bones[bi].name.find("bust") != std::string::npos) {
+            bustBone[bi] = 1;
+            ++nBust;
+        }
+    if (nBust == 0) {   // nothing on this card says "breast": shade the whole body as before
+        std::fill(keep.begin(), keep.end(), char{1});
+        return keep;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const assemble::SceneVertex& v = mesh.vertices[i];
+        float w = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            const int b = v.bone[k];
+            if (b >= 0 && static_cast<size_t>(b) < bustBone.size() && bustBone[static_cast<size_t>(b)]) w += v.weight[k];
+        }
+        if (w >= 0.12f) keep[i] = 1;   // at least a bit of bust-chain influence: the breast sheet, its fold and its crease
+    }
+    return keep;
+}
+
 // One mesh's per-vertex shade (multiplier at strength 1: 1 = untouched).
-std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh) {
+std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, const assemble::Scene& scene) {
     const size_t n = mesh.vertices.size();
     std::vector<float> shade(n, 1.0f);
     std::vector<std::vector<int>> adjacency(n);
@@ -193,15 +222,29 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
         }
     }
+    std::vector<char> keepMask = BreastMask(scene, mesh);
+    // Two one-ring expansions pull the spine-weighted seam between the breasts into the shaded region
+    // (the skin is bust-weighted nearly everywhere there).
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<char> next = keepMask;
+        for (size_t i = 0; i < n; ++i) {
+            if (!keepMask[i]) continue;
+            for (int j : adjacency[i]) if (j >= 0 && static_cast<size_t>(j) < n) next[static_cast<size_t>(j)] = 1;
+        }
+        keepMask.swap(next);
+    }
     const SampleDir* dirs = SampleDirs();
     const float eps = 0.0015f;      // 1.5 mm off the skin: no self-hit, still catches a touching fold
     const float maxDist = 0.11f;    // 11 cm: the breast's own size, not the other arm across the body
     auto worker = [&](size_t begin) {
         for (size_t i = begin; i < n; i += static_cast<size_t>(std::max(1u, std::thread::hardware_concurrency()))) {
             const assemble::SceneVertex& v = mesh.vertices[i];
+            if (!keepMask[i]) { shade[i] = 1.0f; continue; }   // outside the breast: the skin keeps its base colour
             Vec3 nrm = normalize(v.normal);
             if (length(nrm) < 0.5f) { shade[i] = 1.0f; continue; }
-            // Local concavity: neighbours above the tangent plane mean a crease (a convex surface curves away below it).
+            // Local concavity: neighbours above the tangent plane mean a crease. Measured as the tangent-plane slope of the
+            // neighbour direction (sin of the turning angle), not the raw height, so a deep fold reads strongly and a shallow,
+            // nearly flat seam fades; a threshold keeps gentle folds from shading at all.
             float concavity = 0.0f;
             int count = 0;
             for (int j : adjacency[i]) {
@@ -209,11 +252,14 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
                 const Vec3 d = sub(mesh.vertices[static_cast<size_t>(j)].pos, v.pos);
                 const float len = length(d);
                 if (len < 1e-7f) continue;
-                concavity += dot(mul(d, 1.0f / len), nrm);
+                const float h = dot(d, nrm);
+                const float out = std::sqrt(std::max(1e-12f, len * len - h * h));   // in-plane (tangent) distance to the neighbour
+                if (out < 1e-7f) continue;
+                concavity += clampf(h / out, -1.0f, 1.0f);
                 ++count;
             }
             concavity = count ? std::max(0.0f, concavity / static_cast<float>(count)) : 0.0f;
-            const float cavity = clampf(concavity * 4.0f, 0.0f, 1.0f);
+            const float cavity = clampf((concavity - 0.18f) * 2.4f, 0.0f, 1.0f);
             // Ambient occlusion: how much of the sky above the vertex the body itself hides.
             const Vec3 up = std::fabs(nrm.y) < 0.92f ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
             const Vec3 tangent = normalize(cross(up, nrm));
@@ -235,8 +281,9 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
             const float skyOcc = static_cast<float>(skyBlocked) / static_cast<float>(kSamples);
             const float down = clampf(-nrm.y, 0.0f, 1.0f);   // only skin facing down goes darker, never the up-facing top
-            const float occ = 0.72f * (1.0f - ao) + 0.28f * cavity + 0.9f * skyOcc * down;
-            shade[i] = clampf(1.0f - 0.68f * occ, 0.18f, 1.0f);
+            // Subtle on purpose: just enough to separate the breasts and the cleavage, never black.
+            const float occ = 0.72f * (1.0f - ao) + 0.28f * cavity + 0.6f * skyOcc * down;
+            shade[i] = clampf(1.0f - 0.45f * occ, 0.3f, 1.0f);
         }
     };
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
@@ -357,7 +404,7 @@ bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             if (mesh.vertices.empty()) continue;
-            const std::vector<float> shade = ShadeMesh(mesh, bvh);
+            const std::vector<float> shade = ShadeMesh(mesh, bvh, scene);
             RasterizeToUv(mesh, shade, W, H, ss.shade, ss.covered);
         }
         BlurMap(ss.shade, ss.covered, W, H);
