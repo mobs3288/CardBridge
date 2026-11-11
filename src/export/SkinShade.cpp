@@ -350,6 +350,40 @@ void RasterizeToUv(const assemble::SceneMesh& mesh, const std::vector<float>& sh
     }
 }
 
+// Feather the boundary of the covered region outward over a few texels. The shade map terminates at triangle edges;
+// interpolating between 255 (uncovered, lit) and the shaded texels turns that hard cut into a soft ramp, so the UV
+// edge and the triangle outline read as one continuous gradient.
+void FeatherMap(std::vector<uint8_t>& map, std::vector<uint8_t>& covered, int W, int H, int passes) {
+    for (int p = 0; p < passes; ++p) {
+        std::vector<uint8_t> nextMap = map;
+        std::vector<uint8_t> nextCovered = covered;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const size_t at = static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x);
+                if (covered[at]) continue;
+                int sum = 0, n = 0;
+                bool touching = false;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                        const size_t ni = static_cast<size_t>(ny) * static_cast<size_t>(W) + static_cast<size_t>(nx);
+                        sum += map[ni];   // uncovered texels hold 255, so the ramp softens toward lit
+                        ++n;
+                        if (covered[ni]) touching = true;
+                    }
+                }
+                if (!touching || n == 0) continue;
+                nextMap[at] = static_cast<uint8_t>((sum + n / 2) / n);
+                nextCovered[at] = 1;
+            }
+        }
+        map.swap(nextMap);
+        covered.swap(nextCovered);
+    }
+}
+
 void BlurMap(std::vector<uint8_t>& map, const std::vector<uint8_t>& covered, int W, int H) {
     std::vector<uint8_t> next = map;
     for (int y = 0; y < H; ++y) {
@@ -407,6 +441,7 @@ bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
             const std::vector<float> shade = ShadeMesh(mesh, bvh, scene);
             RasterizeToUv(mesh, shade, W, H, ss.shade, ss.covered);
         }
+        FeatherMap(ss.shade, ss.covered, W, H, 4);
         BlurMap(ss.shade, ss.covered, W, H);
         BlurMap(ss.shade, ss.covered, W, H);
         ss.geometryDirty = false;
