@@ -222,13 +222,6 @@ struct ShadeFactors {
 
 ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, const assemble::Scene& scene, float topExtent) {
     const size_t n = mesh.vertices.size();
-    // Bounds of the breast-weight-kept region, for the top extent of the cleavage falloff.
-    float yMin = 1e30f, yMax = -1e30f;
-    for (const auto& sub : mesh.submeshes) (void)sub;
-    for (size_t i = 0; i < n; ++i) { yMin = std::min(yMin, mesh.vertices[i].pos.y); yMax = std::max(yMax, mesh.vertices[i].pos.y); }
-    const float ySpan = std::max(yMax - yMin, 0.05f);
-    const float topPos = yMin + clampf(topExtent, 0.0f, 1.0f) * ySpan;   // shading reaches up to here
-    const float band = std::max(ySpan * 0.12f, 0.015f);                  // the fade-out zone up to the chest's top
     std::vector<float> shade(n, 1.0f), shadeU(n, 1.0f);
     std::vector<std::vector<int>> adjacency(n);
     for (const auto& sub : mesh.submeshes) {
@@ -254,6 +247,28 @@ ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, cons
         }
         keepMask.swap(next);
     }
+    // Bounds of the mesh and of the kept (bust) region. The cleavage top extent is measured against the bust region
+    // itself: 1 = the top of the bust (the whole breast line), 2 = a full bust length higher, up toward the neck.
+    float yMeshLo = 1e30f, yMeshHi = -1e30f, yKeepLo = 1e30f, yKeepHi = -1e30f;
+    size_t keptCount = 0;
+    for (size_t i = 0; i < n; ++i) {
+        yMeshLo = std::min(yMeshLo, mesh.vertices[i].pos.y);
+        yMeshHi = std::max(yMeshHi, mesh.vertices[i].pos.y);
+        if (keepMask[i]) {
+            yKeepLo = std::min(yKeepLo, mesh.vertices[i].pos.y);
+            yKeepHi = std::max(yKeepHi, mesh.vertices[i].pos.y);
+            ++keptCount;
+        }
+    }
+    const float yLo = keptCount ? yKeepLo : yMeshLo;
+    const float yHi = keptCount ? yKeepHi : yMeshHi;
+    const float ySpan = std::max(yHi - yLo, 0.05f);
+    const float topPos = yLo + clampf(topExtent, 0.0f, 2.0f) * ySpan;   // shading reaches up to here (1 = the full breast line)
+    const float band = std::max(ySpan * 0.15f, 0.02f);                  // the fade-out zone above the chest's top
+    if (std::getenv("CARDBRIDGE_DEBUG_SKIN"))
+        std::fprintf(stderr, "skin shade: bust region y [%.3f, %.3f], span %.3f, top extent %.2f -> reach %.3f\n",
+                     static_cast<double>(yLo), static_cast<double>(yHi), static_cast<double>(ySpan),
+                     static_cast<double>(topExtent), static_cast<double>(topPos));
     const SampleDir* dirs = SampleDirs();
     const float eps = 0.0015f;      // 1.5 mm off the skin: no self-hit, still catches a touching fold
     const float maxDist = 0.11f;    // 11 cm: the breast's own size, not the other arm across the body
@@ -302,16 +317,27 @@ ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, cons
             }
             const float skyOcc = static_cast<float>(skyBlocked) / static_cast<float>(kSamples);
             const float down = clampf(-nrm.y, 0.0f, 1.0f);   // only skin facing down goes darker, never the up-facing top
-            // The cleavage is a fold facing the viewer (-Z); the arm pit crease faces sideways, so the normal filter removes it.
-            const bool front = !hasBustBones || nrm.z < -0.15f;   // the cleavage is a fold facing the viewer (front = -Z); side-facing creases stay untouched
-            // The cleavage falls off toward the top of the chest: `topPos` is the world-space height the shading reaches to.
+            // The model faces +Z (the breast apex's outward normals point at +Z), so the cleavage - a fold facing the viewer -
+            // is the +Z side of the chest. The sternum is a continuous, shallow depression from the top of the chest down
+            // between the breasts, so the crease threshold is low; the arm pit crease faces sideways and is filtered out by this test.
+            const bool front = !hasBustBones || nrm.z > 0.15f;
+            // The cleavage falls off above `topPos`: a soft band so the line never ends in a hard horizontal cut.
             float fade = 1.0f;
-            if (v.pos.y > topPos) fade = clampf((yMax - v.pos.y) / band, 0.0f, 1.0f);
+            if (v.pos.y > topPos) fade = clampf((topPos + band - v.pos.y) / band, 0.0f, 1.0f);
             // Two folds: the crease between the breasts (front-facing), and the fold at the breast base (down-facing with overhead occlusion).
-            const bool cleavage = front && cavity > 0.12f;
+            // The midline band decides where the shading lives; the cavity term deepens it inside the fold. Every front-facing bust-region
+            // vertex participates (a plain AO-only test missed the shallow sternum entirely).
+            const bool cleavage = front;
             const bool underboob = down > 0.25f && skyOcc > 0.35f && cavity > 0.28f;
             if (!cleavage && !underboob) { shade[i] = 1.0f; shadeU[i] = 1.0f; continue; }   // everything else keeps the card's colour
-            const float occC = front ? (1.05f * (1.0f - ao) + 1.35f * cavity) * fade : 0.0f;
+            // The cleavage wants to read as a line, not just a darkened blob under the fold walls: a soft band along the midline
+            // (x == 0 in the bust region) with a gentle floor, so the whole breast line is shaded and the depth is set by the fold's
+            // own occlusion. The band fades by `fade` at the chosen top extent.
+            const float halfWidth = std::max(ySpan * 0.32f, 0.05f);   // ~6 cm each side of the midline
+            const float ex = v.pos.x / halfWidth;
+            const float midBand = std::exp(-ex * ex);
+            const float occBand = midBand * (0.55f * (1.0f - ao) + 0.42f * cavity + 0.22f) * fade;
+            const float occC = front ? std::max((1.05f * (1.0f - ao) + 1.35f * cavity) * fade, occBand) : 0.0f;
             const float occU = (down > 0.25f && skyOcc > 0.35f && cavity > 0.28f) ? 0.35f * (1.0f - ao) + 0.35f * cavity + 0.35f * skyOcc : 0.0f;
             shade[i] = clampf(1.0f - 0.55f * occC, 0.28f, 1.0f);
             shadeU[i] = clampf(1.0f - 0.4f * occU, 0.28f, 1.0f);
@@ -456,7 +482,7 @@ bool ApplySkinShade(assemble::Scene& scene, float strengthC, float strengthU, fl
     const int W = tex.width, H = tex.height;
     if (ss.base.size() != tex.rgba.size()) ss.base = tex.rgba;   // first call: the untouched create result
 
-    const float te = clampf(topExtent, 0.0f, 1.0f);
+    const float te = clampf(topExtent, 0.0f, 2.0f);
     const bool topChanged = ss.appliedTop != te;
     if (rebuild || topChanged || ss.shade.size() != static_cast<size_t>(W) * static_cast<size_t>(H)) {
         std::vector<ShadeTri> tris;

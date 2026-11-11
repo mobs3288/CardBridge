@@ -464,6 +464,27 @@ void unitTests() {
         CHECK(replace && img.width == 1 && img.height == 1);
         CHECK(!me.decodeClothesOverlay("ct_clothesTop", img, replace));
     });
+    test("KoiSkinOverlayX: the older BodyUnder/BodyOver/FaceUnder layout maps under layers to their own slots", [] {
+        auto extendedWith = [&](Bytes bodyUnder, Bytes bodyOver, Bytes faceUnder) {   // KSOX: [1, {name: bytes}], the older layout
+            Value::Map ksox;
+            if (!bodyUnder.empty()) ksox.emplace_back(Value(std::string("BodyUnder")), Value(std::move(bodyUnder)));
+            if (!bodyOver.empty()) ksox.emplace_back(Value(std::string("BodyOver")), Value(std::move(bodyOver)));
+            if (!faceUnder.empty()) ksox.emplace_back(Value(std::string("FaceUnder")), Value(std::move(faceUnder)));
+            Value::Array arr;
+            arr.emplace_back(int64_t{1});
+            arr.emplace_back(Value(std::move(ksox)));
+            return Value(Value::Map{{Value(std::string("KSOX")), Value(std::move(arr))}});
+        };
+        Bytes png = tinyPng();
+        card::MaterialEdits::Image img;
+        card::MaterialEdits me = card::LoadMaterialEdits(extendedWith(png, png, png), 0);
+        CHECK(me.decodeSkinOverlay(card::MaterialEdits::OverlayBodyUnder, img) && img.width == 1 && img.height == 1);
+        CHECK(me.decodeSkinOverlay(card::MaterialEdits::OverlayFaceUnder, img) && img.width == 1);
+        CHECK(me.decodeSkinOverlay(card::MaterialEdits::OverlayBody, img) && img.width == 1);   // the over layer joins the finished-skin slot
+        card::MaterialEdits underOnly = card::LoadMaterialEdits(extendedWith(png, {}, {}), 0);
+        CHECK(underOnly.decodeSkinOverlay(card::MaterialEdits::OverlayBodyUnder, img));
+        CHECK(!underOnly.decodeSkinOverlay(card::MaterialEdits::OverlayBody, img));   // no over layer: the finished-skin slot stays empty
+    });
 
     test("dynamic bone: a stiff chain keeps its pose, a loose one hangs down, a collider pushes it out", [] {
         using assemble::DbCollider; using assemble::DbParams; using assemble::DbTree;

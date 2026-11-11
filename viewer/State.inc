@@ -62,7 +62,7 @@ struct Tweaks {
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
     float skinShade = 1.5f;                                // automatic cleavage shading baked into the skin texture (0..2); saved in the viewer's settings, see Settings
     float skinShadeUnder = 1.0f;                           // the fold under the breasts (0..2); saved in the viewer's settings
-    float skinShadeTop = 1.0f;                              // how far up the chest the cleavage shading reaches (0..1); saved in the viewer's settings
+    float skinShadeTop = 1.2f;                             // the top extent of the cleavage: 0 = none, 1 = the full breast line, 2 = toward the base of the neck; saved in the viewer's settings
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
