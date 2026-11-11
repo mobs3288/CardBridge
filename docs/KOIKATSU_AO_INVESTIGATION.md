@@ -172,7 +172,8 @@ bool ApplySkinAoBake(assemble::Scene& scene, const SkinAoBakeOptions& opt);
 
 The baking runs **after** `ApplySkinShade` multiplies its crease shade into the
 texture (or fold both into one pass — see 4.5), so the two multiply correctly
-and the "off" path stays bit-exact with today's output.
+and the "off" path stays bit-exact with today's output. They must never
+**stack** into double darkening — see 4.4.
 
 ### 4.3 Getting the game's textures
 
@@ -191,10 +192,45 @@ and the "off" path stays bit-exact with today's output.
   base library; modded rows work the same once the mod's list is installed, which
   matches the game.
 
-### 4.4 Baking model
+### 4.4 Roles, blending contract and baking model
 
-Per covered body texel (UV space — same rasterization order and padding behaviour
-as `ApplySkinShade`):
+**Division of labour (fixed, not configurable):**
+
+- `SkinShade` keeps owning **geometry-driven cleavage and under-bust shading**
+  (ray-cast cavity + midline band + underboob fold). Its controls
+  (`--skin-shade`, `--skin-underboob`, `--skin-top`, `--skin-width`, the Look/Setup
+  rows) are preserved untouched — same semantics, same defaults.
+- The new bake adds **anatomical depth and lighting** from Koikatsu's own data
+  (base body normal map lit once with a fixed light) and **Koikatsu's original
+  body details** (default line mask `cf_body_00_line`, and the card's `detailId`
+  `_LineMask`/`_NormalMapDetail`).
+
+**Blending contract (mandatory — no stacking):**
+
+- The new bake must not double-darken texels already shaded by `SkinShade`. It
+  reads the same `ss.base` snapshot and the `ss.shade`/`ss.shadeU`/`ss.covered`
+  maps, and **attenuates its own contribution where `SkinShade` already darkened**:
+  - normal-lighting term: `ao' = lerp(ao, 1.0f, w * existingDark)`, where
+    `existingDark = 1 - min(shadeC, shadeU)` is how much `SkinShade` darkened
+    this texel and `w` a tunable overlap weight (~0.7); where SkinShade painted a
+    strong fold, the new bake fades toward no-op instead of adding depth on top.
+  - line mask term: multiplied in with the cleavage/fold band's attenuation factor
+    (same `shade` band structure), so the ink line never lands on the already-dark
+    crease and produces an artificial black stripe — it only draws where the skin
+    is (near-)lit or weakly shaded.
+  - the detailId `_NormalMapDetail` inherits the same base-normal attenuation.
+- Hard floor: the final per-texel multiply never goes below **0.30** combined
+  (both bakes together), so no fold can crush skin tones to black; SkinShade's
+  existing 0.04 floor is respected by keeping its factor authoritative inside its
+  own band (the new bake yields to it, never the reverse).
+- No new crease/line drawing into SkinShade's midline band at all — the sternum
+  line from a mod's `_LineMask.R` (if any) is attenuated by the same band factor.
+- Alpha channel always untouched (write RGB only), skin colour customization
+  preserved (the bake multiplies the composed colour; it never writes the base
+  colour).
+
+**Per covered body texel** (UV space — same rasterization order and padding
+behaviour as `ApplySkinShade`):
 
 1. Sample `cf_body_00_base_n` at UV (x,y like the other bakes: row 0 = v=1).
 2. Convert tangent-space normal via the mesh tangent frame at the nearest vertex
@@ -203,52 +239,72 @@ as `ApplySkinShade`):
    GPU viewer; the CPU path computes `ComputeMeshTangents` when absent).
 3. Light: one fixed key light from the front, slightly above, *soft* wrap lighting
    (like the game's ramp, not a hard cosine): `d = saturate(dot(N, L)*0.5+0.5)`,
-   then `shade = lerp(1.0, pow(d, rampContrast), baseNormalStrength * occlusion)`.
+   then `shade = lerp(1.0, pow(d, rampContrast), baseNormalStrength * occlusion)`,
+   then apply the attenuation from the contract above.
    No need to reproduce the exact Shader Forge curve — this is a static bake and
    MMD/Project K light the model themselves; the aim is "under-bust valley and
    ribs read as form", which a wrapped diffuse does.
 4. Line mask: `line = cf_body_00_line.G` (+ the detail row's `LineMask.G` /
-   `LineMask.R` with separate weights). Multiply `rgb *= (1 - line * lineMaskStrength)`
-   — the ink lines the game draws with `_linewidth`. Keep a floor of e.g.
-   `max(result, 0.35)` so thin lines don't collapse to black on dark skin tones.
+   `LineMask.R` with separate weights). Multiply
+   `rgb *= (1 - line * lineMaskStrength * bandAttenuation)` — the ink lines the
+   game draws with `_linewidth`. Keep a floor (see contract) so thin lines don't
+   collapse to black on dark skin tones.
 5. Detail `_NormalMapDetail` (if present and not the 8×8 blank): blend its normal
    toward the base normal by `_DetailNormalMapScale` (default 1.0) before step 3,
    exactly like the shader does — cheap and reuses step 3.
 
-Order: AO/normal bake → line multiply. Both write into the same texture the PMX
-exporter references; recompute `pixelHash` afterwards (like `ApplySkinShade`).
+Order: `SkinShade` (existing, unchanged) → attenuated normal/AO bake → attenuated
+line multiply. All write into the same texture the PMX exporter references;
+recompute `pixelHash` afterwards (like `ApplySkinShade`).
 
 ### 4.5 Configuration
 
 Consolidate under the existing `--skin-shade` family rather than adding a new
 surface:
 
-- no new mandatory switch; master switch `--skin-shade 0` keeps everything off
-  (the bake runs only when `opt.skinShade > 0 || opt.skinShadeUnder > 0 || skinAoBake > 0`)
-- proposed: `--skin-ao F` (base-normal + default line mask strength, default 1; 0 = off)
-  and fold the detailId bake into it (off only when the whole `--skin-ao` is 0)
+- `SkinShade` knobs stay exactly as they are (control and behaviour preserved).
+- proposed: `--skin-ao F` — the **master strength of the new bake** (base-normal
+  + default line mask + the card's `detailId` masks), default 0.85; 0 = off →
+  output byte-identical to today's export. It scales the *new* contribution
+  only; the overlap attenuation (4.4) is always on and is not a separate knob.
+- the bake runs only when the skin is being composed anyway (after
+  `RunCreateJobs`/`ApplySkinShade`); `--skin-shade 0` with `--skin-ao F > 0`
+  still produces the new-only bake (useful for A/B comparison).
 - viewer Look tab: one new row "Game AO bake (base normal + lines)" wired to the
-  same value; Setup persists it in settings like `skinShade*`
-- if the user prefers separate knobs, split `--skin-ao-normal` and `--skin-ao-line`;
-  decision deferred until the PR
+  same `--skin-ao` value; Setup persists it in settings like `skinShade*`.
+- if the user prefers separate knobs, split `--skin-ao-normal` and
+  `--skin-ao-line`; decision deferred until the PR.
 
 ### 4.6 Validation
 
-Before/after PNGs on the same cards (Sakura + Rin + the modded-detail card):
+Before/after PNGs on the same cards (Sakura + Rin + the modded-detail card),
+compared as **three** exports — off / `--skin-shade` only / combined
+(`--skin-shade` + `--skin-ao`):
 
 - inspect the *exported PMX's referenced* body PNG directly (not the viewer) —
-  the fold under each breast darkens, sternum valley deepens, collarbone/knee
-  lines appear, no dark patches elsewhere, skin colour customization intact
+  the fold under each breast darkens without an extra black seam from the new
+  bake, sternum valley deepens, collarbone/knee lines appear, no dark patches
+  elsewhere, skin colour customization intact
+- **overlap check:** in the texels where `SkinShade` already darkened (the
+  cleavage band and fold), the combined output must stay within a small delta of
+  the SkinShade-only output — no double darkening; the new bake there only adds
+  rib/sternum form shading outside the band
+- **no artificial lines:** the ink line lands nowhere on the painted crease
+  (attenuation works); the sternum cleavage line (detailId cards) reads as the
+  game's line, not a black stripe — compare against the live-game dump's
+  `cf_body_06_line` appearance
 - alpha of the body texture unchanged (body skin is opaque; verify by hashing the
   alpha channel before/after across covered texels)
 - covered-only modification (rasterized coverage) — untouched texels bit-identical
 - seams: `FeatherMap`/edge handling identical to the existing bake; check the UV
   island borders in the PNG
-- disable flag → output bit-identical to current export (test in the suite)
-- male body (`cm_body_00_n`) path on a male card
-- regression tests: `check` alpha preservation, additive-multiply math, coverage
-  of the multiply against a synthetic flat normal map, detail-row resolution from
-  a fake list table entry, and the "off = byte-identical" property
+- disable flag (`--skin-ao 0`) → output bit-identical to current export
+  (test in the suite)
+- existing `SkinShade` tests unchanged and green; new regression tests:
+  attenuation math (strong fold kills the new contribution), line/crease-band
+  interaction, combined floor (≥ 0.30) binding, alpha preservation, coverage
+  of the multiply against a synthetic flat normal map, detail-row resolution
+  from a fake list table entry, and the "off = byte-identical" property
 
 ### 4.7 Definition of Done (revised)
 
@@ -258,6 +314,16 @@ the card has one, its `detailId`) line mask baked in — visible in standalone M
 with no CardBridge support. The spec's literal "extract the AO textures" step is
 struck: they do not exist; the above is the functional equivalent, implemented
 from the game's real data path.
+
+Additionally, the combined result must be **complementary to `SkinShade`, never
+stacked on top of it**: `SkinShade` remains the owner of the geometry-driven
+cleavage/underboob shading and its controls are untouched; the new bake yields to
+it inside its band (4.4), the combined multiply has a hard floor (0.30), no
+texel double-darkens versus the SkinShade-only output in the overlap region, and
+the three-way validation (off / `SkinShade`-only / combined) shows the new
+contribution *adds* anatomical definition without degrading any existing result.
+Both feature sets are baked into the exported PMX's referenced skin PNG, for both
+GUI and CLI exports.
 
 ## 5. Driver notes (hard evidence, for whoever implements)
 
@@ -293,3 +359,8 @@ from the game's real data path.
 **Record:** user chose (2026-11-12): implement base-normal + default line mask bake
 and card `detailId` detail masks, baked permanently into the exported PMX;
 documentation first; `SkinShade` integration; proof in MMD by opening the PMX.
+Amendment (same day): the new bake must *complement* `SkinShade` — it owns
+nothing `SkinShade` owns (§4.4 division of labour), attenuates itself inside
+`SkinShade`'s band, respects a 0.30 combined floor, keeps every `SkinShade`
+knob and default untouched, and is verified by a three-way off / SkinShade-only /
+combined comparison on the exported PMX PNGs (§4.6).
