@@ -428,6 +428,8 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({4, 0, "exports go to: " + shown(g.settings.exportDir, "(asks every time)"), "Export"});
         rows.push_back({5, kSetExportDir, "Always export into one folder ...", "Export"});
         rows.push_back({5, kSetExportAsk, "Ask for the folder every time", "Export"});
+        rows.push_back({0, -1, "Export defaults (new cards)", "Export"});
+        rows.push_back({1, kSkinShade, "Skin shading strength (new cards)", "Export"});
         rows.push_back({0, -1, "Shader layers", "Layers"});
         rows.push_back({4, 0, "extra folder: " + shown(g.settings.layers, "(none)"), "Layers"});
         rows.push_back({5, kSetLayers, "Choose a shader layers folder ...", "Layers"});

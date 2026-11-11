@@ -286,8 +286,8 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             const bool cleavage = cavity > 0.12f;
             const bool underboob = down > 0.25f && skyOcc > 0.35f && cavity > 0.28f;
             if (!cleavage && !underboob) { shade[i] = 1.0f; continue; }   // everything else keeps the card's colour
-            const float occ = 0.9f * (1.0f - ao) + 1.1f * cavity + 0.3f * skyOcc * down;
-            shade[i] = clampf(1.0f - 0.45f * occ, 0.32f, 1.0f);
+            const float occ = 1.1f * (1.0f - ao) + 1.4f * cavity + 0.4f * skyOcc * down;
+            shade[i] = clampf(1.0f - 0.55f * occ, 0.28f, 1.0f);
         }
     };
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());

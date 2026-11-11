@@ -32,6 +32,7 @@ struct MaterialEdits {
     struct Image {
         int width = 0, height = 0;
         std::vector<uint8_t> rgba;   // top row first
+        bool srgb = false;           // the file carries a display colour space (PNG sRGB/gAMA/iCCP, or JPEG): author it as sRGB, not linear
     };
 
     // MaterialEditor's other per-material overrides (property names without the leading underscore: "Color", "rimpower").

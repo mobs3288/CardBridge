@@ -60,7 +60,7 @@ struct Tweaks {
     bool nippleInside = false;
     float nippleMm = 0.0f;                                // nipple bones along the chest normal, millimetres
     float areola = 0.0f, areolaCard = 0.0f;              // areola size (a material property, re-shaped live)
-    float skinShade = 1.0f;                               // automatic body crease shading baked into the skin texture (0..2)
+    float skinShade = 1.5f;                                // automatic body crease shading baked into the skin texture (0..2); saved in the viewer's settings, see Settings
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on

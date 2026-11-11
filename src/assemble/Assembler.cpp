@@ -393,7 +393,10 @@ struct ItemLook {
     int tex1 = -1, tex2 = -1;             // baked scene textures for the clothing main / second texture
     std::set<int64_t> use1, use2;         // renderer component ids that get tex1 / tex2 on material 0
     bool materialTint = false;            // accessories: tint each material's own texture by its _ColorMask
-    std::set<int64_t> tintOnly;           // accessories: the renderers the game colours (rendNormal / rendHair); empty = all
+    std::set<int64_t> tintOnly;           // accessories: the renderers the game colours (rendNormal / rendHair / the custom-hair component); empty = all
+    // accessories: the colour triple the game applies to that renderer (ChaControl.ChangeAccessoryColor, then HairAccessoryCustomizer at run time;
+    // last write wins). A channel whose w is < 0 means the game leaves the prefab's own value for it.
+    std::map<int64_t, std::array<Vec4, 3>> tintByRenderer;
     bool bakedOutfitColors = false;       // the outfit's slot colours are already baked into the clothing texture
     Vec4 colors[3]{{1, 1, 1, 1}, {1, 1, 1, 1}, {1, 1, 1, 1}};
 };
@@ -563,6 +566,7 @@ struct Builder {
     // by Unity property; the shader reads them. Set per renderer before it is added.
     std::vector<std::pair<std::string, Vec4>> runtime;
     bool glossForThisRenderer = false;
+    bool stripHairGloss = false;   // HairAccessoryCustomizer HairGloss=false: clear the prefab's _HairGloss like the game does
     int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
     // Head only: blend-shape weights (0..100) of the character's resting expression, by renderer GameObject id and shape index.
     const std::map<int64_t, std::vector<std::pair<int, float>>>* blend = nullptr;
@@ -597,11 +601,11 @@ struct Builder {
         int result = -1;
         if (edits && edits->decode(texId, img)) {
             result = addSceneTexture("card_tex_" + std::to_string(texId), "card (MaterialEditor)", img.width, img.height, std::move(img.rgba));
-            // The embedded images are linear dumps, not sRGB authoring images: the game displays them unconverted (the whole
-            // "colour", too, is what the editor's render produced in linear light), so they are stored linear like the masks.
-            // A replaced main texture instead keeps its original's colour space (see the call site): an sRGB albedo would
-            // otherwise be encoded like a linear dump and wash out.
-            scene.textures[static_cast<size_t>(result)].srgb = forceSrgb > 0;
+            // A replaced main texture keeps the colour space of the material's original main texture when the call site
+            // knows it (forceSrgb 1/0). Otherwise the image's own colour-space hints decide: the character maker's PNGs are
+            // sRGB authoring images (they carry sRGB/gAMA/iCCP chunks, as does any JPEG), and treating them as linear lifts
+            // every dark tone. Only a file with no colour-space chunk stays on the old linear default.
+            scene.textures[static_cast<size_t>(result)].srgb = forceSrgb >= 0 ? forceSrgb > 0 : img.srgb;
         } else scene.warn(partId, "MaterialEditor texture " + std::to_string(texId) + " stored in the card could not be decoded");
         meTextures[slot] = result;
         return result;
@@ -879,8 +883,7 @@ struct Builder {
                                                         ? fallbackColor
                                                         : nullptr)) {
                 // In the game the character maker's hair colour overwrites the _Color of every hair material
-                // (ChaController), also for the hair pieces an accessory wears. Apply it here - the sign is the same
-                // for hair on any part (base hair, or a hair accessory wearing the character's colour). The tint is
+                // (ChaController). Accessories follow their own rules instead (see the colour block further down). The tint is
                 // already lifted off flat black (see hairTint) so the texture keeps its strand gradient.
                 bool set = false;
                 for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *tint; set = true; }
@@ -909,7 +912,10 @@ struct Builder {
             }
             for (const auto& [name, st] : stOverride)
                 for (auto& tb : sm.texProps) if (tb.name == name) tb.st = st;
-            if (hairGlossTexture >= 0 && glossForThisRenderer) {
+            if (stripHairGloss) {   // HairAccessoryCustomizer with HairGloss off: the game sets the gloss texture to null
+                auto& tp = sm.texProps;
+                tp.erase(std::remove_if(tp.begin(), tp.end(), [](const SceneTexBinding& tb) { return tb.name == "_HairGloss"; }), tp.end());
+            } else if (hairGlossTexture >= 0 && glossForThisRenderer) {
                 bool set = false;
                 for (auto& tb : sm.texProps) if (tb.name == "_HairGloss") { tb.texture = hairGlossTexture; set = true; }
                 if (!set) { SceneTexBinding g; g.name = "_HairGloss"; g.texture = hairGlossTexture; sm.texProps.push_back(g); }
@@ -943,11 +949,26 @@ struct Builder {
                 if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
                 else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
             }
+            // The colour triple the game applies to this renderer (accessory rules; a channel with w < 0 keeps the prefab's own value).
+            auto resolveTint = [&]() -> std::array<Vec4, 3> {
+                if (!look) return {Vec4{1, 1, 1, 1}, Vec4{1, 1, 1, 1}, Vec4{1, 1, 1, 1}};
+                Vec4 t[3] = {look->colors[0], look->colors[1], look->colors[2]};
+                if (const auto it = look->tintByRenderer.find(r.componentId); it != look->tintByRenderer.end()) {
+                    const char* kNames[3] = {"_Color", "_Color2", "_Color3"};
+                    for (int k = 0; k < 3; ++k) {
+                        Vec4 v = it->second[k];
+                        if (v.w < 0.0f) v = (m && m->color(kNames[k])) ? *m->color(kNames[k]) : Vec4{1, 1, 1, 1};
+                        t[k] = v;
+                    }
+                }
+                return {t[0], t[1], t[2]};
+            };
             if (sm.texture < 0) {
                 const PPtr* tp = m->texture("_MainTex");
                 if (tp && !tp->isNull()) {
                     if (look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId)) && sm.readsColor != 1) {
-                        Vec4 tint[3] = {look->colors[0], look->colors[1], look->colors[2]};
+                        std::array<Vec4, 3> tintArr = resolveTint();
+                        Vec4* tint = tintArr.data();
                         if (edits && meType >= 0)   // MaterialEditor colour overrides replace the card's slot colours in the tint
                             for (const auto* e : edits->editsFor(edits->colors, meCoordinate, meType, meSlot, sm.name)) {
                                 int k = e->property == "Color" ? 0 : e->property == "Color2" ? 1 : e->property == "Color3" ? 2 : -1;
@@ -975,7 +996,7 @@ struct Builder {
                     }
                 }
             }
-            if (sm.texture < 0 && look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) sm.diffuse = {look->colors[0].x, look->colors[0].y, look->colors[0].z, 1.0f};
+            if (sm.texture < 0 && look && look->materialTint && (look->tintOnly.empty() || look->tintOnly.count(r.componentId))) { auto t = resolveTint(); sm.diffuse = Vec4{t[0].x, t[0].y, t[0].z, 1.0f}; }
             else if (sm.texture < 0 && fallbackColor) sm.diffuse = *fallbackColor;
         }
         if (sm.texture >= 0) {   // the texture this exporter assigns (baked, tinted or replaced) is what the shader gets as _MainTex
@@ -1369,10 +1390,22 @@ struct Builder {
                 int64_t bid = r.boneXforms[i];
                 if (!uf.xform(bid)) { boneIdx.push_back(staticBone); boneMat.push_back(placement * (rootInv * rendererW)); continue; }
                 const unity::Xform* bx = uf.xform(bid);
-                const bool isFoot = bx && (bx->name == "cf_j_foot_L" || bx->name == "cf_j_foot_R");
-                boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
+                const std::string bname = bx ? bx->name : std::string();
+                const bool isFoot = bname == "cf_j_foot_L" || bname == "cf_j_foot_R";
                 Mat4 bp = mesh->bindPoses[i];
                 if (warpOn && isFoot) bp = warpMat * bp;
+                // A garment worn through an accessory slot is bound to the body skeleton: Unity ignores the accessory node's
+                // transform for skinned meshes, so the attach anchor must not move it. Only a bone this item creates of its own
+                // hangs on the anchor; a bone the body rig already has is the rig's (like the clothing slots' path).
+                const int rigBi = bname.empty() ? -1 : scene.boneIndex(bname);
+                if (rigBi >= 0) {
+                    const auto rw = rig.world.find(bname);
+                    const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, bid, prefabRoot, placement);
+                    boneIdx.push_back(rigBi);
+                    boneMat.push_back(bw * bp);
+                    continue;
+                }
+                boneIdx.push_back(accessoryBone(uf, bid, prefabRoot, placement, staticBone, partId));
                 boneMat.push_back(placement * (rootInv * Wp(uf, bid)) * bp);
             }
         } else if (skinned) {
@@ -3043,20 +3076,40 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 useC[0] = mb.fields.at("useColor01").asInt() != 0;
                 useC[1] = mb.fields.at("useColor02").asInt() != 0;
                 useC[2] = mb.fields.at("useColor03").asInt() != 0;
+                if (std::getenv("CARDBRIDGE_DEBUG_MB")) {
+                    auto dumpIds = [&](const char* label, const std::set<int64_t>& s) {
+                        std::string out;
+                        for (int64_t id : s) { if (!out.empty()) out += ","; out += std::to_string(id); }
+                        return label + std::string("=[") + out + "]";
+                    };
+                    std::fprintf(stderr, "acccmp %s useColor01=%d useColor02=%d useColor03=%d %s %s %s\n", ref.partId.c_str(),
+                                 mb.fields.at("useColor01").asInt(), mb.fields.at("useColor02").asInt(), mb.fields.at("useColor03").asInt(),
+                                 dumpIds("rendNormal", rtNormal).c_str(), dumpIds("rendAlpha", rtAlpha).c_str(), dumpIds("rendHair", rtHair).c_str());
+                }
             } else if (mb.className == "ChaCustomHairComponent") {
                 ids("rendHair", rtHairItem);
                 ids("rendAccessory", rtHairAcs);
+                if (std::getenv("CARDBRIDGE_DEBUG_MB")) {
+                    auto dumpIds = [&](const char* label, const std::set<int64_t>& s) {
+                        std::string out;
+                        for (int64_t id : s) { if (!out.empty()) out += ","; out += std::to_string(id); }
+                        return label + std::string("=[") + out + "]";
+                    };
+                    std::fprintf(stderr, "haircmp %s %s %s\n", ref.partId.c_str(), dumpIds("rendHair", rtHairItem).c_str(), dumpIds("rendAccessory", rtHairAcs).c_str());
+                }
             }
         }
-        if (look.materialTint && haveAccComponent) {   // ChangeAccessoryColor sets colours 1-3 on rendNormal only; rendAlpha gets just _Color4 and rendHair the hair colour
+        if (look.materialTint && haveAccComponent) {   // every renderer with an effective colour (the game's rules: the colour block below)
             look.tintOnly = rtNormal;
             look.tintOnly.insert(rtHair.begin(), rtHair.end());
+            look.tintOnly.insert(rtHairItem.begin(), rtHairItem.end());
+            look.tintOnly.insert(rtHairAcs.begin(), rtHairAcs.end());
             if (look.tintOnly.empty()) look.tintOnly.insert(-1);   // a component that lists none: nothing is tinted
         }
         Vec4 hairColor{1, 1, 1, 1};
         bool haveHairColor = false;
         size_t hairKind = contains(ref.partId, "front") ? 1 : contains(ref.partId, "side") ? 2 : contains(ref.partId, "ext") ? 3 : 0;
-        if (ref.group == "Hair" || ref.group == "Accessories") {   // hair items (and hair accessories): the card's hair colour
+        if (ref.group == "Hair") {   // hair items: the card's hair colour (accessories use the run-time rules below)
             const Value& hp = card.hair.at("parts").at(hairKind);
             if (hp.at("baseColor").size() >= 3) {
                 hairColor = hairTint(kkColor(vec4Of(hp.at("baseColor"))), kkColor(vec4Of(hp.at("startColor"))), kkColor(vec4Of(hp.at("endColor"))));
@@ -3086,8 +3139,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(itemRoot)) {
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
-                std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0);
+                std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d cid=%lld\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0, r.componentId);
             if (!r.enabled) continue;
+            // ChangeAccessoryColor deactivates the accessory's GameObject when its slot colour alpha is 0: the renderer is not drawn at all.
+            if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0 && rtAlpha.count(r.componentId)) {
+                const Value& ac3 = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color").at(size_t(3));
+                if (ac3.size() >= 4 && ac3.at(size_t(3)).asFloat(1.0f) == 0.0f) { skipped.push_back(r.name + " (accessory colour alpha 0; the game hides this renderer)"); continue; }
+            }
             if (b.edits && b.meType >= 0) {   // MaterialEditor can switch a renderer off
                 bool off = false;
                 for (const auto* e : b.edits->editsFor(b.edits->rendererEnabled, b.meCoordinate, b.meType, b.meSlot, r.name))
@@ -3110,7 +3168,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (list.find("," + r.name + ",") != std::string::npos) { skipped.push_back(r.name + " (CARDBRIDGE_SKIP)"); continue; }
             }
             const Vec4* fb = (ref.group == "Head" && contains(r.name, "face")) ? &skinColor : nullptr;
-            if ((ref.group == "Hair" || ref.group == "Accessories") && haveHairColor) fb = &hairColor;   // the card's hair tint (see hairTint)
+            if (ref.group == "Hair" && haveHairColor) fb = &hairColor;   // the card's hair tint (see hairTint)
             ItemLook faceLook;
             const ItemLook* lookPtr = haveLook ? &look : nullptr;
             if (ref.group == "Head") {
@@ -3190,32 +3248,40 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             // Hair accessories: the HairAccessoryCustomizer slot setting decides gloss and colours (ColorMatch = the character's hair colours); a slot
             // without that data keeps the prefab's own.
             b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0 && (ref.group == "Hair" || (hacInfo.isMap() && hacInfo.at("HairGloss").asBool()));
+            b.stripHairGloss = false;
             auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
+            const int64_t cid = r.componentId;
             if (ref.group == "Accessories" && ref.outfit >= 0 && ref.accIndex >= 0) {
+                // The game's colouring for accessories, in the same order the run-time paths apply it (last write wins):
+                // ChaControl.ChangeAccessoryColor - rendNormal takes the slot colours (only the useColor0N channels the prefab asks for), rendAlpha takes
+                // _Color4, rendHair pins all three to the back-hair start colour; then the HairAccessoryCustomizer slot rules at run time - rendHair of the
+                // custom-hair component keeps the hair colours when ColorMatch is on (else the plugin stays silent), rendAccessory takes AccessoryColor.
+                const char* kNames[3] = {"_Color", "_Color2", "_Color3"};
                 const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
-                if (rtNormal.count(r.componentId)) {
-                    if (useC[0]) b.runtime.emplace_back("_Color", vec4Of(col.at(size_t(0))));
-                    if (useC[1]) b.runtime.emplace_back("_Color2", vec4Of(col.at(size_t(1))));
-                    if (useC[2]) b.runtime.emplace_back("_Color3", vec4Of(col.at(size_t(2))));
+                const Value& hp0 = card.hair.at("parts").at(size_t(0));
+                const Vec4 base0 = rawColor(hp0.at("baseColor")), start0 = rawColor(hp0.at("startColor")), end0 = rawColor(hp0.at("endColor"));
+                const bool hac = hacInfo.isMap();
+                const bool hacMatch = hac && hacInfo.at("ColorMatch").asBool();
+                Vec4 eff[3] = {{-1.0f, 0, 0, -1.0f}, {-1.0f, 0, 0, -1.0f}, {-1.0f, 0, 0, -1.0f}};   // w < 0: the game leaves the prefab's own value
+                if (rtNormal.count(cid)) {
+                    if (useC[0]) eff[0] = rawColor(col.at(size_t(0)));
+                    if (useC[1]) eff[1] = rawColor(col.at(size_t(1)));
+                    if (useC[2]) eff[2] = rawColor(col.at(size_t(2)));
                 }
-                if (rtAlpha.count(r.componentId)) b.runtime.emplace_back("_Color4", vec4Of(col.at(size_t(3))));
-                if (hacInfo.isMap()) {
-                    const Value& hp0 = card.hair.at("parts").at(size_t(0));
-                    if (rtHairItem.count(r.componentId)) {
-                        if (hacInfo.at("ColorMatch").asBool()) {
-                            b.runtime.emplace_back("_Color", haveHairColor ? hairColor : rawColor(hp0.at("baseColor")));
-                            b.runtime.emplace_back("_Color2", rawColor(hp0.at("startColor")));
-                            b.runtime.emplace_back("_Color3", rawColor(hp0.at("endColor")));
-                            b.runtime.emplace_back("_LineColor", vec4Of(hp0.at("outlineColor")));
-                        } else {
-                            b.runtime.emplace_back("_LineColor", vec4Of(hacInfo.at("OutlineColor")));
-                        }
-                    }
-                    if (rtHairAcs.count(r.componentId)) {
-                        Vec4 ac = vec4Of(hacInfo.at("AccessoryColor"));
-                        b.runtime.emplace_back("_Color", ac); b.runtime.emplace_back("_Color2", ac); b.runtime.emplace_back("_Color3", ac);
-                    }
+                if (rtHair.count(cid)) { eff[0] = eff[1] = eff[2] = start0; }
+                if (hac && rtHairItem.count(cid)) {
+                    if (hacMatch) { eff[0] = base0; eff[1] = start0; eff[2] = end0; }
+                    b.runtime.emplace_back("_LineColor", hacMatch ? rawColor(hp0.at("outlineColor")) : vec4Of(hacInfo.at("OutlineColor")));
+                    b.stripHairGloss = !hacInfo.at("HairGloss").asBool();
                 }
+                if (hac && rtHairAcs.count(cid)) {
+                    const Vec4 ac = vec4Of(hacInfo.at("AccessoryColor"));
+                    eff[0] = eff[1] = eff[2] = ac;
+                }
+                for (int k = 0; k < 3; ++k)
+                    if (eff[k].w >= 0.0f) b.runtime.emplace_back(kNames[k], eff[k]);
+                look.tintByRenderer[cid] = {eff[0], eff[1], eff[2]};
+                if (rtAlpha.count(cid)) b.runtime.emplace_back("_Color4", vec4Of(col.at(size_t(3))));
             } else if (ref.group == "Hair" && rtHairItem.count(r.componentId)) {
                 const Value& hp = card.hair.at("parts").at(hairKind);
                 b.runtime.emplace_back("_Color", haveHairColor ? hairColor : rawColor(hp.at("baseColor")));
@@ -3223,7 +3289,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 b.runtime.emplace_back("_Color3", rawColor(hp.at("endColor")));
                 b.runtime.emplace_back("_LineColor", vec4Of(hp.at("outlineColor")));
             }
-            const Vec4* hairTintColorForRenderer = (ref.group == "Hair" || rtHairItem.count(r.componentId)) && haveHairColor ? &hairColor : nullptr;
+            const Vec4* hairTintColorForRenderer = ref.group == "Hair" && haveHairColor ? &hairColor : nullptr;
             int mi = b.addRenderer(*uf, r, itemRoot, partIdx, ref.partId, placement, staticBone, fb, accessoryMode, lookPtr, hairTintColorForRenderer);
             if (mi >= 0) part.meshes.push_back(mi);
         }

@@ -393,6 +393,10 @@ void TweakEdited(int id, bool released) {
     if (id == kSkinShade || id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
         // Body shading re-applies at the new strength at once; the occlusion map is rebuilt only when a shape drag ended
         // (ReshapeNow) or from this release when the body had moved. The nipple tint is a material property and is live.
+        if (id == kSkinShade) {   // this slider's value is the persisted default for new cards — save it with the other settings
+            g.settings.skinShade = g.tw.skinShade;
+            SaveSettings(g.settings);
+        }
         ApplySkinLook(released && Current() && Current()->scene.skinShade.geometryDirty);
         return;
     }
@@ -552,6 +556,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
                     g.tw = Tweaks();
+                    g.tw.skinShade = g.settings.skinShade;   // persisted default from the Setup tab (and the Look slider); share value with the settings file
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));
