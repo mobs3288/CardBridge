@@ -63,7 +63,7 @@ struct Settings {
     // how strong the cleavage is, how strong the fold under the breasts is, and how far up the chest the cleavage shading reaches.
     float skinShade = 1.5f;          // cleavage shading strength (0 = off, up to 2)
     float skinShadeUnder = 1.0f;     // under-breast fold shading strength (0 = off, up to 2)
-    float skinShadeTop = 1.0f;       // cleavage extent: 0 = only the apex, 1 = full chest
+    float skinShadeTop = 1.2f;       // cleavage extent: 0 = none, 1 = the full breast line, 2 = toward the base of the neck
 };
 Settings LoadSettings() {
     Settings s;
@@ -79,7 +79,7 @@ Settings LoadSettings() {
         s.viewMode = j.value("viewMode", "lit");
         s.skinShade = static_cast<float>(j.value("skinShade", 1.5));
         s.skinShadeUnder = static_cast<float>(j.value("skinShadeUnder", 1.0));
-        s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.0));
+        s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.2));
     } catch (...) {}
     return s;
 }

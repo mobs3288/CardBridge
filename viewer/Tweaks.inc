@@ -28,7 +28,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kAreola) { r.v = &g.tw.areola; r.def = g.tw.areolaCard; r.lo = 0; r.hi = 1; return true; }
     if (id == kSkinShade) { r.v = &g.tw.skinShade; r.def = 1.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinShadeUnder) { r.v = &g.tw.skinShadeUnder; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
-    if (id == kSkinShadeTop) { r.v = &g.tw.skinShadeTop; r.def = 1.0f; r.lo = 0; r.hi = 1; r.step = 0.05f; return true; }
+    if (id == kSkinShadeTop) { r.v = &g.tw.skinShadeTop; r.def = 1.2f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kNippleR) { r.v = &g.tw.nippleColour.x; r.def = assemble::kDefaultNippleColour.x; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
     if (id == kNippleG) { r.v = &g.tw.nippleColour.y; r.def = assemble::kDefaultNippleColour.y; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
     if (id == kNippleB) { r.v = &g.tw.nippleColour.z; r.def = assemble::kDefaultNippleColour.z; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
