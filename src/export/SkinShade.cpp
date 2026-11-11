@@ -281,9 +281,13 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
             const float skyOcc = static_cast<float>(skyBlocked) / static_cast<float>(kSamples);
             const float down = clampf(-nrm.y, 0.0f, 1.0f);   // only skin facing down goes darker, never the up-facing top
-            // Subtle on purpose: just enough to read as form, never a heavy shadow over the bust.
-            const float occ = 0.72f * (1.0f - ao) + 0.28f * cavity + 0.45f * skyOcc * down;
-            shade[i] = clampf(1.0f - 0.32f * occ, 0.34f, 1.0f);
+            // Two folds: the crease between the breasts, and the fold at the breast base facing down into the torso junction.
+            // Both are real creases (cavity), just facing different directions; the broad under-breast slope stays at base colour.
+            const bool cleavage = cavity > 0.12f;
+            const bool underboob = down > 0.25f && skyOcc > 0.35f && cavity > 0.28f;
+            if (!cleavage && !underboob) { shade[i] = 1.0f; continue; }   // everything else keeps the card's colour
+            const float occ = 0.9f * (1.0f - ao) + 1.1f * cavity + 0.3f * skyOcc * down;
+            shade[i] = clampf(1.0f - 0.45f * occ, 0.32f, 1.0f);
         }
     };
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());

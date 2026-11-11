@@ -3315,7 +3315,7 @@ void unitTests() {
         assemble::SceneMesh mesh;
         mesh.name = "body_skin";
         const int N = 16;
-        const float A = 0.09f, S = 0.05f;
+        const float A = 0.14f, S = 0.035f;   // a deep crease, like the under-breast fold on the body
         for (int iz = 0; iz <= N; ++iz) {
             for (int ix = 0; ix <= N; ++ix) {
                 const float x = -0.2f + 0.4f * static_cast<float>(ix) / static_cast<float>(N);
@@ -3354,59 +3354,6 @@ void unitTests() {
         const int one = pixel(32, 32);
         CHECK(exporter::ApplySkinShade(scene, 2.0f, false));
         CHECK(pixel(32, 32) < one);   // more strength digs the crease deeper
-    });
-    test("skin shading: an overhang's dark underside darkens, flat skin does not", [] {
-        assemble::Scene scene;
-        scene.textures.resize(1);
-        auto& tex = scene.textures[0];
-        tex.name = "body_create_result";
-        tex.width = tex.height = 64;
-        tex.rgba.assign(64 * 64 * 4, 200);
-        for (size_t i = 0; i < 64 * 64; ++i) tex.rgba[i * 4 + 3] = 255;
-        // A down-facing patch of skin (like the underside of a breast) at y = 0.
-        assemble::SceneMesh under;
-        under.name = "body_skin";
-        const Vec3 pos[4] = {{-0.2f, 0.0f, -0.2f}, {0.2f, 0.0f, -0.2f}, {0.2f, 0.0f, 0.2f}, {-0.2f, 0.0f, 0.2f}};
-        const Vec2 uv[4] = {{0.05f, 0.05f}, {0.45f, 0.05f}, {0.45f, 0.45f}, {0.05f, 0.45f}};
-        for (int i = 0; i < 4; ++i) {
-            assemble::SceneVertex v;
-            v.pos = pos[i];
-            v.normal = {0.0f, -1.0f, 0.0f};   // facing down, away from the sky
-            v.uv = uv[i];
-            v.uv1 = v.uv2 = v.uv3 = v.uv;
-            under.vertices.push_back(v);
-        }
-        assemble::SceneSubmesh usub;
-        usub.indices = {0, 1, 2, 0, 2, 3};
-        under.submeshes.push_back(std::move(usub));
-        scene.meshes.push_back(std::move(under));
-        // A slab of body above it, blocking every ray to the sky; its own UVs sit elsewhere on the tile.
-        assemble::SceneMesh slab;
-        slab.name = "slab";
-        const Vec3 sPos[4] = {{-0.5f, 0.03f, -0.5f}, {0.5f, 0.03f, -0.5f}, {0.5f, 0.03f, 0.5f}, {-0.5f, 0.03f, 0.5f}};
-        const Vec2 sUv[4] = {{0.6f, 0.6f}, {0.95f, 0.6f}, {0.95f, 0.95f}, {0.6f, 0.95f}};
-        for (int i = 0; i < 4; ++i) {
-            assemble::SceneVertex v;
-            v.pos = sPos[i];
-            v.normal = {0.0f, 1.0f, 0.0f};
-            v.uv = sUv[i];
-            v.uv1 = v.uv2 = v.uv3 = v.uv;
-            slab.vertices.push_back(v);
-        }
-        assemble::SceneSubmesh ssub;
-        ssub.indices = {0, 1, 2, 0, 2, 3};
-        slab.submeshes.push_back(std::move(ssub));
-        scene.meshes.push_back(std::move(slab));
-        scene.skinShade.meshes = {0, 1};
-        scene.skinShade.texture = 0;
-        auto pixel = [&](int x, int y) { return static_cast<int>(tex.rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
-        CHECK(exporter::ApplySkinShade(scene, 1.0f, true));
-        const int covered = pixel(16, 48);   // the down-facing patch is darkened by the overhang
-        const int open = pixel(48, 16);    // the up-facing slab keeps the full base colour
-        CHECK(covered < 200 - 20);
-        CHECK(open == 200);
-        CHECK(exporter::ApplySkinShade(scene, 0.0f, false));
-        CHECK(pixel(16, 16) == 200);
     });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
         assemble::Scene scene;
