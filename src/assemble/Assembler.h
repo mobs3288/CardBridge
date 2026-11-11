@@ -9,10 +9,9 @@
 
 namespace cardbridge::assemble {
 
-// The automatic nipple / areola tint: the card's own nipColor is a pale skin tone, so it reads as a slightly darker
-// patch rather than a pink areola. This is the default tint; an explicit colour overrides it (see AssembleOptions).
-// A natural, muted dusty rose, like a real areola on fair skin; set w <= 0 with --card-nipples to keep the card's own colour.
-inline constexpr Vec4 kDefaultNippleColour{0.72f, 0.50f, 0.51f, 1.0f};
+// The automatic nipple / areola colour: a natural warm salmon-red areola tone, like the reference photo the user picked;
+// an explicit colour overrides it (see AssembleOptions). Set w <= 0 with --card-nipples to keep the card's own colour.
+inline constexpr Vec4 kDefaultNippleColour{0.79f, 0.46f, 0.43f, 1.0f};
 
 struct AssembleOptions {
     int outfit = -1;                       // -1: the card's current outfit (Status.coordinateType)

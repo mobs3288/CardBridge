@@ -281,9 +281,9 @@ std::vector<float> ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh
             }
             const float skyOcc = static_cast<float>(skyBlocked) / static_cast<float>(kSamples);
             const float down = clampf(-nrm.y, 0.0f, 1.0f);   // only skin facing down goes darker, never the up-facing top
-            // Subtle on purpose: just enough to separate the breasts and the cleavage, never black.
-            const float occ = 0.72f * (1.0f - ao) + 0.28f * cavity + 0.6f * skyOcc * down;
-            shade[i] = clampf(1.0f - 0.45f * occ, 0.3f, 1.0f);
+            // Subtle on purpose: just enough to read as form, never a heavy shadow over the bust.
+            const float occ = 0.72f * (1.0f - ao) + 0.28f * cavity + 0.45f * skyOcc * down;
+            shade[i] = clampf(1.0f - 0.32f * occ, 0.34f, 1.0f);
         }
     };
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
@@ -441,7 +441,8 @@ bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild) {
             const std::vector<float> shade = ShadeMesh(mesh, bvh, scene);
             RasterizeToUv(mesh, shade, W, H, ss.shade, ss.covered);
         }
-        FeatherMap(ss.shade, ss.covered, W, H, 4);
+        FeatherMap(ss.shade, ss.covered, W, H, 8);
+        BlurMap(ss.shade, ss.covered, W, H);
         BlurMap(ss.shade, ss.covered, W, H);
         BlurMap(ss.shade, ss.covered, W, H);
         ss.geometryDirty = false;
