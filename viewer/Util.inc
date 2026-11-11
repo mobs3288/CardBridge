@@ -59,6 +59,8 @@ struct Settings {
     std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
     std::string viewMode = "lit";   // the viewport diagnostic mode (spec S13): see exporter::ViewModeName/FromName
+    // Automatic skin shading (garment of the body): the strength exported for this character lives in Tweaks; this is the default the next card opens with.
+    float skinShade = 1.5f;          // 0 = off, up to 2; default 1.5 — stronger than the shipped look, and saved here for the next card
 };
 Settings LoadSettings() {
     Settings s;
@@ -72,6 +74,7 @@ Settings LoadSettings() {
         s.skin = j.value("skin", "gpu");
         s.noMods = j.value("noMods", false);
         s.viewMode = j.value("viewMode", "lit");
+        s.skinShade = static_cast<float>(j.value("skinShade", 1.5));
     } catch (...) {}
     return s;
 }
@@ -87,6 +90,7 @@ void SaveSettings(const Settings& s) {
         j["skin"] = s.skin;
         j["noMods"] = s.noMods;
         j["viewMode"] = s.viewMode;
+        j["skinShade"] = s.skinShade;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }
