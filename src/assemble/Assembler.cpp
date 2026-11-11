@@ -2224,8 +2224,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                 scene.createJobs.back().overlayWidth = ov.width;
                                 scene.createJobs.back().overlayHeight = ov.height;
                             }
-                            auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const char* prop, const char* key, const char* what, Vec4 col) {
-                                auto t = rowTextureFor("body", category, id, prop, key, what);
+                            auto addOverlayTexture = [&](const char* texName, const char* colName, const std::shared_ptr<unity::TextureData>& t, Vec4 col) {
                                 int idx = -1;
                                 if (t) {
                                     auto copy = t->rgba;
@@ -2235,12 +2234,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                 }
                                 bodyOverlayTex.emplace_back(texName, idx);
                                 bodyOverlayColors.emplace_back(colName, col);
+                                return idx;
                             };
-                            // The card's nipColor is a pale skin tone. The automatic pink tint (opt.nippleColour) makes the
-                            // nipple and areola read as such; colour.w <= 0 restores the card's own colour.
-                            const Vec4 nipColour = opt.nippleColour.w > 0.0f ? Vec4{opt.nippleColour.x, opt.nippleColour.y, opt.nippleColour.z, 1.0f}
-                                                                             : vec4Of(bd.at("nipColor"));
-                            addOverlay("_overtex1", "_overcolor1", 423, bd.at("nipId").asInt(), "ChaFileBody.nipId", "NipTex", "nipple", nipColour);
+                            auto addOverlay = [&](const char* texName, const char* colName, int category, int64_t id, const char* prop, const char* key, const char* what, Vec4 col) {
+                                return addOverlayTexture(texName, colName, rowTextureFor("body", category, id, prop, key, what), col);
+                            };
+                            // The automatic pink nipple is the Clochette mt_nipple03 bump (the nashi "Clochette Nipple" mod — the one the Matou Sakura
+                            // card renders; soft and natural-looking), independent of the card's own NipTex choice. Without that mod installed,
+                            // fall back to the card's own NipTex row so the export still looks as the card author intended.
+                            const bool automaticPink = opt.nippleColour.w > 0.0f;
+                            const int64_t nipId = bd.at("nipId").asInt();
+                            auto nipOverlay = std::shared_ptr<unity::TextureData>{};
+                            if (automaticPink) nipOverlay = rowTextureFor("body", 423, 743, "ChaFileBody.nipId", "NipTex", "nipple");
+                            if (!nipOverlay) {
+                                if (automaticPink)
+                                    scene.warn("body", "default nipple overlay (mt_nipple03, nashi Clochette Nipple mod) not found; fell back to the card's NipTex id " + std::to_string(nipId));
+                                nipOverlay = rowTextureFor("body", 423, nipId, "ChaFileBody.nipId", "NipTex", "nipple");
+                            }
+                            const Vec4 nipColour = automaticPink ? Vec4{opt.nippleColour.x, opt.nippleColour.y, opt.nippleColour.z, 1.0f}
+                                                                   : vec4Of(bd.at("nipColor"));
+                            addOverlayTexture("_overtex1", "_overcolor1", nipOverlay, nipColour);
                             addOverlay("_overtex2", "_overcolor2", 424, bd.at("underhairId").asInt(), "ChaFileBody.underhairId", "UnderhairTex", "underhair", vec4Of(bd.at("underhairColor")));
                             bodyOverlayColors.emplace_back("_nipsize", Vec4{opt.areolaSize >= 0 ? opt.areolaSize : static_cast<float>(bd.at("areolaSize").asFloat()), 0, 0, 0});
                         } else {
