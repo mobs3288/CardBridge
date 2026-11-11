@@ -69,8 +69,10 @@ float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
 
 // A material the game composites in its transparent queue with depth write off (the face's paint layers: eye white, iris,
 // brow, eyelines, nose line — their closeness is meaningless, the queue order is what keeps the iris over the white).
+// An authored translucency shader (a cloth worn see-through) composites the same way: blended, in queue order.
 // The software renderers draw these after the depth-writing materials, alpha-blended and without writing depth, like the game.
 bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.translucent) return true;
     if (mat.alpha || mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
     return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && RenderQueueOf(scene, mat) >= 2500;
 }
@@ -1164,6 +1166,17 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
+        // A material on the alpha-coverage shader with NO _AlphaMask texture bound: our SM4
+        // evaluation can't see a missing texture's implicit default, so every fragment would
+        // discard (alpha=0) and the bake would come out black. Keep the plain texture as it is.
+        const auto alphaMaskMissing = [&mat]() {
+            if (mat.shader.find("alpha") == std::string::npos) return false;
+            for (const auto& tb : mat.texProps)
+                if (tb.name == "_AlphaMask" && tb.texture >= 0) return false;
+            return true;
+        }();
+        if (mat.translucent) continue;  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
+        if (alphaMaskMissing) continue;  // alpha-coverage shader with no mask: the bake would be black; keep the plain texture
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
         if (!sr) continue;
         // A clamped main texture is edge-clamped in the game, not repeated: its triangles must stay at their UVs (the

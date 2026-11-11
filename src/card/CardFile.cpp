@@ -473,6 +473,34 @@ Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
     return MsgPackPack(Value(std::move(rows)));
 }
 
+// Drops the character's rows for the replaced objects: the outfit's clothes
+// replaced the target coordinate's wholesale, and the accessories the outfit
+// replaced took with them whatever MaterialEditor paint was on them (keeping
+// it would repaint the new garments with the old ones' textures). Rows for
+// other coordinates and surviving accessories stay. Returns the filtered
+// list as bytes, or an empty vector when the value is not a bin array.
+Bytes dropReplacedMeRows(const Value& listBin, int outfit, const std::set<int>& replacedAcc, bool* droppedAny = nullptr) {
+    if (droppedAny) *droppedAny = false;
+    if (!listBin.isBin() || listBin.asBin().empty()) return Bytes{};
+    Value list;
+    try { list = MsgPackParse(listBin.asBin()); } catch (const FormatError&) { return Bytes{}; }
+    if (!list.isArray()) return Bytes{};
+    Value::Array kept;
+    bool dropped = false;
+    for (const auto& row : list.asArray()) {
+        if (!row.isMap()) { kept.emplace_back(row); continue; }
+        const int64_t coord = row.at("CoordinateIndex").asInt(-1);
+        if (coord != static_cast<int64_t>(outfit)) { kept.emplace_back(row); continue; }
+        const int64_t objectType = row.at("ObjectType").asInt(-1);
+        const int64_t slot = row.at("Slot").asInt(0);
+        // Clothing (type 1) went wholesale; accessories (type 2) went where the outfit replaced them.
+        if (objectType == 1 || (objectType == 2 && replacedAcc.count(static_cast<int>(slot)))) { dropped = true; continue; }
+        kept.emplace_back(row);
+    }
+    if (droppedAny) *droppedAny = dropped;
+    return dropped ? MsgPackPack(Value(std::move(kept))) : listBin.asBin();
+}
+
 // Appends decoded clothing rows to a character list (a bin of an array) and
 // re-encodes it. When the character list is not a bin array, the clothing
 // rows become it (handled by the caller seeding the character value).
@@ -865,10 +893,18 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
                                              "MaterialKeywordPropertyList", "ProjectorPropertyList"};
             for (const char* key : kMeLists) {
                 const Bytes rows = mergeMeList(clothMe, key, outfit, clothToMerged, texRemap);
-                if (rows.empty()) continue;
                 const Value& cur = charMe.isMap() ? charMe.at(key) : Value::nil();
+                // The coordinate's own paint belonged to the outfit that was replaced:
+                // drop it before merging the file's, or the new garments are repainted with the old ones' textures.
+                bool paintDropped = false;
+                const Bytes kept = dropReplacedMeRows(cur, outfit, replacedAcc, &paintDropped);
+                const Value keptValue = kept.empty() ? cur : Value(std::move(kept));
+                if (rows.empty()) {
+                    if (paintDropped && keptValue.isBin()) setPayloadBin(key, keptValue.asBin());
+                    continue;
+                }
                 Value mergedRows;
-                if (cur.isBin() && !cur.asBin().empty()) mergedRows = appendMeRows(cur, rows);
+                if (keptValue.isBin() && !keptValue.asBin().empty()) mergedRows = appendMeRows(keptValue, rows);
                 else mergedRows = Value(rows);
                 setPayloadBin(key, mergedRows.isBin() ? mergedRows.asBin() : MsgPackPack(mergedRows));
             }

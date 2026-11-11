@@ -25,6 +25,13 @@ namespace cardbridge::material {
 // shader name; the auto-classifier (ClassifyMaterial) only guesses it.
 enum class MaterialClass { Skin, Fabric, Hair, Eyes, Eyelashes, Metal, Plastic, Leather, Glass, Rubber, Generic };
 
+// Whether the forward pixel program provably reads the _Color constant-buffer
+// parameter: 1 = reads it, 0 = provably does not, -1 = unknown (the shader is
+// missing or unparseable). A dead _Color declaration that no instruction reads
+// is treated as "does not read" - main_opaque / main_alpha / main_skin bake
+// their colour into _MainTex and ignore _Color entirely.
+int ShaderReadsColor(const assemble::Scene& scene, int shaderIndex);
+
 const char* ClassName(MaterialClass c);
 bool ClassFromName(const std::string& s, MaterialClass& out);
 // Best-effort guess from the shader and material names, using the same

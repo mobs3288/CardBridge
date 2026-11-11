@@ -72,6 +72,8 @@ struct SceneMaterial {
     std::vector<std::pair<std::string, Vec4>> props;
     std::vector<SceneTexBinding> texProps;
     int shaderIndex = -1;
+    int readsColor = -1;              // whether the forward pixel program reads _Color (1 reads, 0 does not, -1 unknown)
+    bool translucent = false;          // an alpha/translucency shader (the card's IBL_Shader_alpha and friends): the material keeps the texture's alpha and blends over what is behind it
     // The game shader's shade as a function of N.L, measured by BakeShaderTextures: kToonRows rows from N.L = 1 (top, fully lit) to
     // -1 (bottom), each the colour factor the shader gives that light angle relative to the baked front light. Empty = none.
     std::vector<Vec3> toon;

@@ -70,6 +70,32 @@ void BindMainTexture(assemble::SceneMaterial& m, int textureIndex) {
     m.texture = textureIndex;
 }
 
+} // namespace
+
+// Whether the forward pixel program provably reads the _Color constant-buffer
+// parameter: 1 = reads it, 0 = provably does not, -1 = unknown (the shader is
+// missing or unparseable). A dead _Color declaration that no instruction reads
+// is treated as "does not read" - main_opaque / main_alpha / main_skin bake
+// their colour into _MainTex and ignore _Color entirely.
+int ShaderReadsColor(const assemble::Scene& scene, int shaderIndex) {
+    if (shaderIndex < 0 || static_cast<size_t>(shaderIndex) >= scene.shaders.size()) return -1;
+    const auto& sh = scene.shaders[static_cast<size_t>(shaderIndex)];
+    Bytes blob(sh.blob.begin(), sh.blob.end());
+    const std::vector<shader::UnityProgram> progs = shader::ParseUnityShaderBlob(blob, nullptr);
+    size_t pi = 0, vi = 0;
+    shader::Sm4Program ps;
+    if (!shader::PickForwardPass(progs, pi, vi) || !shader::DecodeSm4(progs[pi].code.tokens, ps, nullptr)) return -1;
+    // cbuffer operands carry their slot and the float4 offset in index0/index1.
+    std::set<std::pair<int, int>> used;
+    for (const auto& in : ps.code)
+        for (const auto& o : in.operands)
+            if (o.type == 8) used.insert({o.index0, o.index1});
+    for (const auto& cb : progs[pi].cbuffers)
+        for (const auto& pm : cb.params)
+            if (pm.name == "_Color" && used.count({cb.slot, static_cast<int>(pm.offset / 16)}) != 0) return 1;
+    return 0;
+}
+
 // Whether the material's forward pixel program provably does NOT read the
 // _Color constant-buffer parameter. This is the exact bytecode test the debug
 // dump used (out/mats_debug.txt): a property can be present in the material and
@@ -82,32 +108,10 @@ bool PixelIgnoresColor(const assemble::Scene& scene, WorkbenchState& st, int sha
     uint8_t& state = st.readsColor[static_cast<size_t>(shaderIndex)];
     if (state == 2) return true;          // known: ignores _Color
     if (state == 1 || state == 3) return false;
-    const auto& sh = scene.shaders[static_cast<size_t>(shaderIndex)];
-    Bytes blob(sh.blob.begin(), sh.blob.end());
-    const std::vector<shader::UnityProgram> progs = shader::ParseUnityShaderBlob(blob, nullptr);
-    size_t pi = 0, vi = 0;
-    shader::Sm4Program ps;
-    if (!shader::PickForwardPass(progs, pi, vi) || !shader::DecodeSm4(progs[pi].code.tokens, ps, nullptr)) {
-        state = 3;
-        return false;
-    }
-    // cbuffer operands carry their slot and the float4 offset in index0/index1.
-    std::set<std::pair<int, int>> used;
-    for (const auto& in : ps.code)
-        for (const auto& o : in.operands)
-            if (o.type == 8) used.insert({o.index0, o.index1});
-    bool readsColor = false;
-    for (const auto& cb : progs[pi].cbuffers)
-        for (const auto& pm : cb.params)
-            if (pm.name == "_Color" && used.count({cb.slot, static_cast<int>(pm.offset / 16)}) != 0) {
-                readsColor = true;
-                break;
-            }
-    state = readsColor ? 1 : 2;
+    int reads = ShaderReadsColor(scene, shaderIndex);
+    state = reads == 0 ? 2 : (reads == 1 ? 1 : 3);
     return state == 2;
 }
-
-} // namespace
 
 assemble::SceneTexture MakeTintedTexture(assemble::SceneTexture src, const Vec4& ratio) {
     const size_t pixels = static_cast<size_t>(std::max(0, src.width)) * static_cast<size_t>(std::max(0, src.height));

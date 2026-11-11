@@ -186,7 +186,8 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // Transparent (alpha) materials blend over what is behind them: MikuMikuDance's ground shadow, shadow map and self-shadow on such a
     // material draw it as a solid dark shape (the underpants / swimsuit / lace looked like a shadow), so they get none of those, like
     // lenses.
-    const bool transparent = mat.alpha;
+    const bool transparent = mat.alpha || mat.translucent;
+    if (mat.translucent) look.diffuse.w = 0.99f;  // an authored alpha texture needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
     // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
