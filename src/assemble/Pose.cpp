@@ -326,6 +326,32 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     }
 }
 
+void BakeGarmentSettle(Scene& scene) {
+    if (scene.bones.empty()) return;
+    // The outfit's DynamicBone cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) rests where the game's sim hangs it, not at
+    // the prefab's authored pose. Without the drape, the joints fight gravity from the first frame: every link locks (zero range) behind
+    // its own stop spring - the paper-stiff cape - and the sim hammers on the pins, which reads as tweaking and shiver. Colliders keep the
+    // cloth off the body. Hair and the body's own jiggle chains keep their pose. Set CARDBRIDGE_NO_GARMENT_SETTLE to keep the authored pose.
+    if (std::getenv("CARDBRIDGE_NO_GARMENT_SETTLE")) return;
+    const Pose rest;
+    const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
+    PhysicsSim sim;
+    sim.Reset(scene, poseWorld, false, false, 0.5f, false, true);   // outfit chains only; the jiggle switches do not apply to cloth
+    if (sim.empty()) return;
+    std::vector<Mat4> skin = SkinMatrices(scene, rest);
+    if (std::getenv("CARDBRIDGE_DEBUG_GARMENT_SETTLE")) {
+        bool any = false;
+        for (const auto& ch : scene.chains) {
+            if (ch.part.rfind("outfit", 0) != 0 || ch.bones.size() < 2) continue;
+            if (!any) { std::fprintf(stderr, "garment settle: chains ["); any = true; }
+            std::fprintf(stderr, "%s ", ch.name.c_str());
+        }
+        if (any) std::fprintf(stderr, "]\n");
+    }
+    for (int step = 0; step < 600 && sim.Step(scene, poseWorld, 1, skin); ++step) {}
+    BakeSkin(scene, skin);
+}
+
 float SagTiltRad(bool bust, float jiggleIntensity) {
     return SagTiltRad(bust, jiggleIntensity, 0.1f, 0.1f, 1.0f);
 }

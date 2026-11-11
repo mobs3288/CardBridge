@@ -16,8 +16,10 @@ public:
     // when their switch is on (as the PMX export does), with the intensity as the swing envelope; the defaults match the export's.
     // `jiggleOnly` (the static settle, Pose::BakeSettledPhysics) limits the sim to the body's own jiggle chains: hair and accessory
     // chains keep their authored pose, which is how the game displays them anyway.
+    // `outfitOnly` limits the sim to the clothing and accessory chains (the outfit's DynamicBone cascades): hair and the body's
+    // own jiggle chains keep their pose.
     void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = true, float jiggleIntensity = 0.5f,
-               bool jiggleOnly = false);
+               bool jiggleOnly = false, bool outfitOnly = false);
 
     // Runs `steps` updates (1/60 s each; 0 only refreshes the output after the anchors moved) and writes the skin matrices of the chain bones
     // (every bone of a chain but its first, which follows the pose) into `skin`, sized like the scene's bones. Returns true while any
