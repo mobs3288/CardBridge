@@ -290,6 +290,41 @@ ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, cons
     const float ySpan = std::max(yHi - yLo, 0.05f);
     const float topPos = yLo + clampf(topExtent, 0.0f, 2.0f) * ySpan;   // shading reaches up to here (1 = the full breast line)
     const float band = std::max(ySpan * 0.15f, 0.02f);                  // the fade-out zone above the chest's top
+    // The breast profile: per vertical band, how much the bust protrudes beyond the sternum dip at that height - the z
+    // range of the kept region. Recomputed on every apply, so reshaping the bust deepens and widens the cleavage at the
+    // apex and narrows it toward the collarbone - the line follows the actual shape and stays dynamic with the shape slider.
+    const int kBands = 64;
+    const float bandSpan = ySpan / static_cast<float>(kBands);
+    std::vector<float> depthBand(static_cast<size_t>(kBands), 0.0f);
+    {
+        std::vector<float> zLoB(static_cast<size_t>(kBands), 1e30f), zHiB(static_cast<size_t>(kBands), -1e30f);
+        for (size_t i = 0; i < n; ++i) {
+            if (!keepMask[i]) continue;
+            const int b = static_cast<int>((mesh.vertices[i].pos.y - yLo) / bandSpan);
+            if (b < 0 || b >= kBands) continue;
+            const float z = mesh.vertices[i].pos.z;
+            zLoB[static_cast<size_t>(b)] = std::min(zLoB[static_cast<size_t>(b)], z);
+            zHiB[static_cast<size_t>(b)] = std::max(zHiB[static_cast<size_t>(b)], z);
+        }
+        for (int b = 0; b < kBands; ++b)
+            if (zHiB[static_cast<size_t>(b)] > zLoB[static_cast<size_t>(b)])
+                depthBand[static_cast<size_t>(b)] = zHiB[static_cast<size_t>(b)] - zLoB[static_cast<size_t>(b)];
+        std::vector<float> smooth = depthBand;   // one box pass: a peak does not need to be quantised to one band
+        for (int b = 0; b < kBands; ++b) {
+            const float l = b > 0 ? depthBand[static_cast<size_t>(b - 1)] : depthBand[static_cast<size_t>(b)];
+            const float c = depthBand[static_cast<size_t>(b)];
+            const float r = b + 1 < kBands ? depthBand[static_cast<size_t>(b + 1)] : depthBand[static_cast<size_t>(b)];
+            smooth[static_cast<size_t>(b)] = (l + 2.0f * c + r) * 0.25f;
+        }
+        depthBand.swap(smooth);
+    }
+    float depthMax = 0.1f;
+    int depthTopBand = 0;
+    for (int b = 0; b < kBands; ++b)
+        if (depthBand[static_cast<size_t>(b)] > depthMax) { depthMax = depthBand[static_cast<size_t>(b)]; depthTopBand = b; }
+    if (std::getenv("CARDBRIDGE_DEBUG_SKIN"))
+        std::fprintf(stderr, "skin shade: breast profile depth max %.3f at y %.3f\n",
+                     static_cast<double>(depthMax), static_cast<double>(yLo + (static_cast<float>(depthTopBand) + 0.5f) * bandSpan));
     if (std::getenv("CARDBRIDGE_DEBUG_SKIN"))
         std::fprintf(stderr, "skin shade: bust region y [%.3f, %.3f], span %.3f, top extent %.2f -> reach %.3f\n",
                      static_cast<double>(yLo), static_cast<double>(yHi), static_cast<double>(ySpan),
@@ -397,10 +432,16 @@ ShadeFactors ShadeMesh(const assemble::SceneMesh& mesh, const SkinBvh& bvh, cons
             // The cleavage wants to read as a line, not just a darkened blob under the fold walls: a soft band along the midline
             // (x == 0 in the bust region) with a gentle floor, so the whole breast line is shaded and the depth is set by the fold's
             // own occlusion. The band fades by `fade` at the chosen top extent.
-            const float halfWidth = std::max(ySpan * 0.22f, 0.04f) * clampf(width, 0.1f, 2.0f);   // how wide the cleavage line runs: width scales it around the default ~4 cm
+            // The cleavage follows the breast: each height band's sternum-to-apex range sets how wide and how deep the line
+            // runs. At the apex the seam is wide and deep, toward the collarbone it narrows and fades - and when the bust is
+            // reshaped live, the profile follows.
+            const int biRaw = static_cast<int>((v.pos.y - yLo) / bandSpan);
+            const int bi = std::min(std::max(biRaw, 0), kBands - 1);
+            const float shape = std::clamp(depthBand[static_cast<size_t>(bi)] / depthMax, 0.0f, 1.0f);
+            const float halfWidth = std::max(ySpan * 0.22f, 0.04f) * clampf(width, 0.1f, 2.0f) * (0.35f + 0.85f * shape);   // how wide the cleavage line runs: width scales it around the default ~4 cm
             const float ex = v.pos.x / halfWidth;
             const float midBand = std::exp(-ex * ex);
-            const float occBand = midBand * (0.45f * (1.0f - ao) + 0.38f * cavity + 0.10f) * fade;
+            const float occBand = midBand * (0.45f * (1.0f - ao) + 0.38f * cavity + 0.12f) * fade * (0.30f + 0.75f * shape);
             const float occC = front ? std::max((0.8f * (1.0f - ao) + 1.2f * cavity) * fade * (0.25f + 0.75f * midBand), occBand) : 0.0f;
             const float occU = underboob ? occFold : 0.0f;
             shade[i] = clampf(1.0f - 0.55f * occC, 0.28f, 1.0f);
