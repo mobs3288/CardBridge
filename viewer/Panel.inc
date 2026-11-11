@@ -477,7 +477,8 @@ void Paint(HWND hwnd) {
     const RECT panelRect{0, 0, kPanel, H};
     bool viewDamaged = false;
     for (const RECT& p : parts) { RECT t; viewDamaged = viewDamaged || IntersectRect(&t, &p, &viewport) != 0; }
-    if (g.dirty || g.fw != W || g.fh != H) {
+    const bool renderNeeded = g.dirty || g.fw != W || g.fh != H;
+    if (renderNeeded) {
         Render(W, H);
         g.dirty = false;
         g.prof.render += NowMs() - tPaint;
@@ -485,7 +486,7 @@ void Paint(HWND hwnd) {
     }
     const double tBlit = NowMs();
     const bool overlayActive = GetProgSnapshot().active;
-    if (viewDamaged && !g.frame.empty() && g.fw == W && g.fh == H && W > 0 && H > 0) {
+    if ((viewDamaged || renderNeeded) && !g.frame.empty() && g.fw == W && g.fh == H && W > 0 && H > 0) {
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = W;
@@ -493,47 +494,50 @@ void Paint(HWND hwnd) {
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
-        if (overlayActive) {
-            // Frame + loading card in one off-screen DC, a single BitBlt to
-            // the window: drawing the card over an already-visible blit is
-            // what made every update flash the bare frame first.
-            static HDC compDc = nullptr;
-            static HBITMAP compBmp = nullptr;
-            static HGDIOBJ compOld = nullptr;
-            static int compW = 0, compH = 0;
-            if (compDc && (compW != W || compH != H)) {
-                SelectObject(compDc, compOld);
-                DeleteObject(compBmp);
-                DeleteDC(compDc);
-                compDc = nullptr; compBmp = nullptr; compOld = nullptr;
+        // Compose the frame + the loading card (or the diagnostic strip + legend) into an off-screen DC, then blit once: the picture
+        // underneath never flashes bare between two passes.
+        static HDC compDc = nullptr;
+        static HBITMAP compBmp = nullptr;
+        static HGDIOBJ compOld = nullptr;
+        static int compW = 0, compH = 0;
+        if (compDc && (compW != W || compH != H)) {
+            SelectObject(compDc, compOld);
+            DeleteObject(compBmp);
+            DeleteDC(compDc);
+            compDc = nullptr; compBmp = nullptr; compOld = nullptr;
+        }
+        if (!compDc) {
+            HDC screen = GetDC(nullptr);
+            compDc = CreateCompatibleDC(screen);
+            compBmp = CreateCompatibleBitmap(screen, W, H);
+            ReleaseDC(nullptr, screen);
+            if (compDc && compBmp) {
+                compOld = SelectObject(compDc, compBmp);
+                compW = W; compH = H;
             }
-            if (!compDc) {
-                HDC screen = GetDC(nullptr);
-                compDc = CreateCompatibleDC(screen);
-                compBmp = CreateCompatibleBitmap(screen, W, H);
-                ReleaseDC(nullptr, screen);
-                if (compDc && compBmp) {
-                    compOld = SelectObject(compDc, compBmp);
-                    compW = W; compH = H;
+        }
+        if (compDc && compBmp) {
+            StretchDIBits(compDc, 0, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+            if (overlayActive) {
+                DrawProgressOverlay(compDc, static_cast<int>(rc.right), H);
+            } else {
+                // The diagnostic mode strip and legend: drawn here, on the off-screen DC, so the window never shows a
+                // partially drawn strip (the BeginPaint DC is clipped to the invalidation region).
+                if (W > 100 && H > 120) {
+                    DrawModeLegend(compDc, 0, W, H);
+                    DrawModeStrip(compDc, 0, W, H);
                 }
             }
-            if (compDc && compBmp) {
-                StretchDIBits(compDc, 0, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
-                DrawProgressOverlay(compDc, static_cast<int>(rc.right), H);
-                BitBlt(dc, kPanel, 0, W, H, compDc, 0, 0, SRCCOPY);
-            } else {
-                StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
-            }
+            BitBlt(dc, kPanel, 0, W, H, compDc, 0, 0, SRCCOPY);
         } else {
             StretchDIBits(dc, kPanel, 0, W, H, 0, 0, W, H, g.frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+            if (overlayActive) DrawProgressOverlay(dc, static_cast<int>(rc.right), H);
+            else if (W > 100 && H > 120) {
+                DrawModeLegend(dc, kPanel, W, H);
+                DrawModeStrip(dc, kPanel, W, H);
+            }
         }
     }
-    // The diagnostic mode strip over the viewport (spec S13) and, in MaterialID mode, the legend.
-    // Only when the view itself is being repainted: on a panel-only repaint the BeginPaint DC is
-    // clipped to the panel band, so these drew onto nothing — or would land over a stale frame.
-    // The view damage always re-blits (or re-renders) the view first, so the pixels they cover are honest.
-    if (viewDamaged && !overlayActive && W > 100 && H > 120) DrawModeLegend(dc, kPanel, W, H);
-    if (viewDamaged && !overlayActive && W > 100 && H > 120) DrawModeStrip(dc, kPanel, W, H);
     const double tPanel = NowMs();
     g.prof.blit += tPanel - tBlit;
     // The panel is drawn off screen, only where it changed, then copied.
