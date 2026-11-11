@@ -70,7 +70,7 @@ struct MmdLook {
     int sphere = 0;              // 0 none, 1 the teeth's roundness (multiply), 2 a soft gloss (add), 3 the hair's ring highlight (add)
     float sphereStrength = 0.0f; // the add spheres' peak
 };
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.
 bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
