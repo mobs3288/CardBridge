@@ -110,13 +110,12 @@ Vec3 MeanColour(const assemble::Scene& scene, const assemble::SceneMaterial& mat
 
 } // namespace
 
-bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
-    if (mat.alpha || mat.shader.find("main_item") == std::string::npos || mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+// The texture's alpha where the material's triangles sample it (their centres): empty UV space does not count.
+static bool TextureHasCutTexels(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     if (scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
     const int mi = static_cast<int>(&mat - &scene.materials.front());
     const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
     if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
-    // The texture's alpha where the material's triangles sample it (their centres): empty UV space does not count.
     for (const auto& mesh : scene.meshes)
         for (const auto& sm : mesh.submeshes) {
             if (sm.material != mi) continue;
@@ -129,6 +128,29 @@ bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat)
             }
         }
     return false;
+}
+
+bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.alpha || mat.shader.find("main_item") == std::string::npos || mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+    return TextureHasCutTexels(scene, mat);
+}
+
+// A material whose texture's alpha actually discards texels is not only main_item: clothing items with a
+// cutout lace (the stocking's two-tone boundary, the white's scalloped edge) carry the same binary cutout,
+// e.g. Shader Forge/main_skin of a nakay sock item. MikuMikuDance draws an opaque material without testing
+// its texture's alpha, so those texels drew black. Such a material must join the transparent pass like the rest.
+// (Deliberately whole-texture: a centroid test misses a mesh whose UV island lies entirely inside the opaque part.)
+bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+    const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
+    if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
+    bool haveCut = false, haveOpaque = false;
+    for (size_t i = 3; i < t.rgba.size() && !(haveCut && haveOpaque); i += 4) {
+        const uint8_t a = t.rgba[i];
+        if (a < kItemCutout) haveCut = true;
+        else if (a >= 128) haveOpaque = true;
+    }
+    return haveCut && haveOpaque;
 }
 
 // The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid, the game's
@@ -185,9 +207,11 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     const bool tooth = IsTooth(mat);
     // Transparent (alpha) materials blend over what is behind them: MikuMikuDance's ground shadow, shadow map and self-shadow on such a
     // material draw it as a solid dark shape (the underpants / swimsuit / lace looked like a shadow), so they get none of those, like
-    // lenses.
-    const bool transparent = mat.alpha || mat.translucent;
-    if (mat.translucent) look.diffuse.w = 0.99f;  // an authored alpha texture needs the material below 1 so MikuMikuDance keeps it in its transparent pass
+    // lenses. A material whose texture's alpha actually cuts texels (the stocking's lace) is transparent too: MMD does not test alpha
+    // for an opaque material, so the cut texels would draw black; in the transparent pass its binary alpha works as the cutout it is.
+    const bool alphaCutout = HasAlphaCutout(scene, mat);
+    const bool transparent = mat.alpha || mat.translucent || alphaCutout;
+    if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
     // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).

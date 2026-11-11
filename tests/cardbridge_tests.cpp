@@ -3343,16 +3343,16 @@ void unitTests() {
         scene.skinShade.meshes = {0};
         scene.skinShade.texture = 0;
         auto pixel = [&](int x, int y) { return static_cast<int>(tex.rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
-        CHECK(exporter::ApplySkinShade(scene, 1.0f, true));
+        CHECK(exporter::ApplySkinShade(scene, 1.0f, 1.0f, 1.0f, true));
         const int crease = pixel(32, 32);
         const int flat = pixel(61, 32);
         CHECK(crease < flat - 10);   // the valley is darker than the nearly flat side
         CHECK(flat > 180);           // and the flat skin is essentially untouched
-        CHECK(exporter::ApplySkinShade(scene, 0.0f, false));
+        CHECK(exporter::ApplySkinShade(scene, 0.0f, 0.0f, 1.0f, false));
         CHECK(pixel(32, 32) == 200);  // strength 0 restores the create result exactly
-        CHECK(exporter::ApplySkinShade(scene, 1.0f, false));
+        CHECK(exporter::ApplySkinShade(scene, 1.0f, 1.0f, 1.0f, false));
         const int one = pixel(32, 32);
-        CHECK(exporter::ApplySkinShade(scene, 2.0f, false));
+        CHECK(exporter::ApplySkinShade(scene, 2.0f, 2.0f, 1.0f, false));
         CHECK(pixel(32, 32) < one);   // more strength digs the crease deeper
     });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {

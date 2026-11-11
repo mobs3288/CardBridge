@@ -50,9 +50,12 @@ struct MaterialEdits {
     std::map<int, Bytes> encoded;    // TexID -> PNG/JPEG bytes as stored in the card
 
     // KoiSkinOverlayX (KKEx "KSOX"): painted layers over the skin, stored as images in the card, keyed by overlay type.
-    // Seen in cards: 3 = body skin, 4 = face skin, 8 / 10 = the two eyes' iris paint (types follow KSOX's own numbering).
+    // Seen in cards: 3 = body skin, 4 = face skin, 8 / 10 = the two eyes' iris paint (types follow KSOX's own numbering);
+    // those slots sit on top of the finished skin. The older BodyOver/BodyUnder/FaceUnder/FaceOver layout maps BodyOver and
+    // FaceOver onto the same slots; the *under* layers get their own slots (11/12): full-coverage skin repaints drawn under
+    // the skin's own detail (the create shader's base input), not on top of the finished skin.
     std::map<int, Bytes> skinOverlays;
-    enum SkinOverlayType { OverlayBody = 3, OverlayFace = 4, OverlayEyeL = 8, OverlayEyeR = 10 };
+    enum SkinOverlayType { OverlayBody = 3, OverlayFace = 4, OverlayEyeL = 8, OverlayEyeR = 10, OverlayBodyUnder = 11, OverlayFaceUnder = 12 };
     bool decodeSkinOverlay(int type, Image& out) const;
 
     // KoiClothesOverlayX (KKEx "KCOX"): an image painted over a garment's texture, for this coordinate, keyed by the garment's

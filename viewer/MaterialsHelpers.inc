@@ -386,7 +386,9 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
         rows.push_back({1, kHeightCm, "Height (cm)", "Height"});
         rows.push_back({0, -1, "Skin shading: automatic creases (cleavage, under the breasts, navel)", "Skin shading"});
-        rows.push_back({1, kSkinShade, "Automatic body shading", "Skin shading"});
+        rows.push_back({1, kSkinShade, "Cleavage shading", "Skin shading"});
+        rows.push_back({1, kSkinShadeUnder, "Fold under the breasts", "Skin shading"});
+        rows.push_back({1, kSkinShadeTop, "Cleavage length", "Skin shading"});
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
@@ -429,7 +431,9 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({5, kSetExportDir, "Always export into one folder ...", "Export"});
         rows.push_back({5, kSetExportAsk, "Ask for the folder every time", "Export"});
         rows.push_back({0, -1, "Export defaults (new cards)", "Export"});
-        rows.push_back({1, kSkinShade, "Skin shading strength (new cards)", "Export"});
+        rows.push_back({1, kSkinShade, "Cleavage shading (new cards)", "Export"});
+        rows.push_back({1, kSkinShadeUnder, "Underboob fold shading (new cards)", "Export"});
+        rows.push_back({1, kSkinShadeTop, "Cleavage shading length (new cards)", "Export"});
         rows.push_back({0, -1, "Shader layers", "Layers"});
         rows.push_back({4, 0, "extra folder: " + shown(g.settings.layers, "(none)"), "Layers"});
         rows.push_back({5, kSetLayers, "Choose a shader layers folder ...", "Layers"});
@@ -470,7 +474,8 @@ bool AnyTweak() {
     for (int i = 0; i < kFaceBase; ++i) if (TweakChanged(i)) return true;
     for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
     if (TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside) return true;
-    if (TweakChanged(kSkinShade) || TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
+    if (TweakChanged(kSkinShade) || TweakChanged(kSkinShadeUnder) || TweakChanged(kSkinShadeTop) ||
+        TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
         TweakChanged(kNippleG) || TweakChanged(kNippleB)) return true;
     if (g.mat.IsDirty()) return true;
     return false;

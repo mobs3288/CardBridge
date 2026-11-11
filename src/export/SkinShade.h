@@ -18,10 +18,10 @@
 
 namespace cardbridge::exporter {
 
-// Rebuilds (when `rebuild`) the per-texel skin shade map from the scene's body meshes and writes the texture at
-// `strength` (0 = the untouched create result, 1 = the default depth, up to 2). Returns false when the scene has no
-// body skin mesh or texture to shade.
-bool ApplySkinShade(assemble::Scene& scene, float strength, bool rebuild);
+// Rebuilds (when `rebuild`) the per-texel skin shade maps from the scene's body meshes and writes the texture with both
+// folds at their given strengths (0 = the untouched create result, 1 = default, up to 2). Returns false when the scene
+// has no body skin mesh or texture to shade.
+bool ApplySkinShade(assemble::Scene& scene, float cleavageStrength, float underboobStrength, float topExtent, bool rebuild);
 
 // Applies the automatic nipple / areola tint to every cardSkin material: colour.w > 0 uses colour.rgb, otherwise the
 // card's own _overcolor1 is restored. Returns the number of materials whose colour changed.

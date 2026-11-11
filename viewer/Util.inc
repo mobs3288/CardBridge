@@ -59,8 +59,11 @@ struct Settings {
     std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
     std::string viewMode = "lit";   // the viewport diagnostic mode (spec S13): see exporter::ViewModeName/FromName
-    // Automatic skin shading (garment of the body): the strength exported for this character lives in Tweaks; this is the default the next card opens with.
-    float skinShade = 1.5f;          // 0 = off, up to 2; default 1.5 — stronger than the shipped look, and saved here for the next card
+    // Automatic skin shading (garment of the body): three independent settings, persisted here for new cards and the CLI:
+    // how strong the cleavage is, how strong the fold under the breasts is, and how far up the chest the cleavage shading reaches.
+    float skinShade = 1.5f;          // cleavage shading strength (0 = off, up to 2)
+    float skinShadeUnder = 1.0f;     // under-breast fold shading strength (0 = off, up to 2)
+    float skinShadeTop = 1.0f;       // cleavage extent: 0 = only the apex, 1 = full chest
 };
 Settings LoadSettings() {
     Settings s;
@@ -75,6 +78,8 @@ Settings LoadSettings() {
         s.noMods = j.value("noMods", false);
         s.viewMode = j.value("viewMode", "lit");
         s.skinShade = static_cast<float>(j.value("skinShade", 1.5));
+        s.skinShadeUnder = static_cast<float>(j.value("skinShadeUnder", 1.0));
+        s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.0));
     } catch (...) {}
     return s;
 }
@@ -91,6 +96,8 @@ void SaveSettings(const Settings& s) {
         j["noMods"] = s.noMods;
         j["viewMode"] = s.viewMode;
         j["skinShade"] = s.skinShade;
+        j["skinShadeUnder"] = s.skinShadeUnder;
+        j["skinShadeTop"] = s.skinShadeTop;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }

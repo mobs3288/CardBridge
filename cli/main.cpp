@@ -127,8 +127,11 @@ void usage() {
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
-        "             [--skin-shade F]              automatic bust-region shading strength baked into the skin (0 = off,\n"
-        "                                             1 = default, up to 2; breast region only, everything else untouched)\n"
+        "             [--skin-shade F]              automatic cleavage shading strength baked into the skin (0 = off,\n"
+        "                                             1 = default, up to 2; breast region only)\n"
+        "             [--skin-underboob F]          strength of the fold under the breasts (0 = off, 1 = default, up to 2)\n"
+        "             [--skin-top F]                top extent of the cleavage shading: 0 = only the fold's root,\n"
+        "                                             1 = full chest; 0..1\n"
         "             [--nipple-colour R,G,B]       nipple / areola tint, 0..255 each (default: a natural warm salmon-red)\n"
         "             [--card-nipples]              keep the card's own nipColor instead of the automatic pink tint\n"
         "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
@@ -514,6 +517,8 @@ int cmdConvert(const Args& a) {
     ao.nippleInside = a.has("nipple-inside");
     if (a.opt.count("nipple-offset")) ao.nippleOffset = static_cast<float>(std::atof(a.get("nipple-offset").c_str()));
     if (a.opt.count("skin-shade")) ao.skinShade = std::clamp(static_cast<float>(std::atof(a.get("skin-shade").c_str())), 0.0f, 2.0f);
+    if (a.opt.count("skin-underboob")) ao.skinShadeUnder = std::clamp(static_cast<float>(std::atof(a.get("skin-underboob").c_str())), 0.0f, 2.0f);
+    if (a.opt.count("skin-top")) ao.skinShadeTop = std::clamp(static_cast<float>(std::atof(a.get("skin-top").c_str())), 0.0f, 1.0f);
     if (a.has("card-nipples")) {
         ao.nippleColour = Vec4{0, 0, 0, 0};   // keep the card's own nipColor
     } else if (a.opt.count("nipple-colour")) {
@@ -558,8 +563,8 @@ int cmdConvert(const Args& a) {
         }
         if (shoeHidden) { std::fprintf(stderr, "  (heel re-pose after --hide: reshaping...)\n"); fflush(stderr); if (!assemble::Reshape(scene, c, *ctx.resolver, ao)) std::fprintf(stderr, "  (heel re-pose after --hide needs a re-assemble)\n"); std::fprintf(stderr, "  (heel re-pose done)\n"); fflush(stderr); }
     }
-    if (scene.skinShade.geometryDirty && ao.skinShade > 0.0f)   // a re-shape moved the body: keep the skin shading on it
-        exporter::ApplySkinShade(scene, ao.skinShade, true);
+    if (scene.skinShade.geometryDirty)   // a re-shape moved the body: keep the skin shading on it
+        exporter::ApplySkinShade(scene, ao.skinShade, ao.skinShadeUnder, ao.skinShadeTop, true);
     std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0); fflush(stderr);
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {

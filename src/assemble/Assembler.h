@@ -33,9 +33,12 @@ struct AssembleOptions {
     // Nipple / areola colour. w > 0: use rgb; w <= 0: keep the card's own nipColor. The default is a natural, muted dusty rose:
     // the card's pale skin tone leaves a flat, nearly invisible areola, and a fully saturated pink reads as an anime cue rather than a body.
     Vec4 nippleColour = kDefaultNippleColour;
-    // Automatic body shading from the mesh's own creases (cleavage, under the breasts, the navel, the armpits) baked into
-    // the skin texture. 0 = off, 1 = the default depth, up to 2.
-    float skinShade = 1.0f;
+    // Automatic skin shading baked from the body mesh, applied to the body skin texture in UV space. cleavage is the strength
+    // of the crease between the breasts (0 = off, 1 = default, up to 2); underboob the strength of the fold under the breasts;
+    // top the extent of the cleavage fall-off up the chest (0 = only the fold's root, 1 = full neck). The three are independent.
+    float skinShade = 1.5f;
+    float skinShadeUnder = 1.0f;
+    float skinShadeTop = 1.0f;
     bool autoCloth = false;                // DISABLED by default (revert to last good look): synthesised chains were rebinding hanging cloth
                                            // onto new bones and collapsing it toward the body. Opt-in with --auto-cloth / CARDBRIDGE_AUTO_CLOTH=1;
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables
