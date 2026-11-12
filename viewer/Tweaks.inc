@@ -74,4 +74,95 @@ bool SliderFor(int id, SliderRef& r) {
 
 // Pose controls change the picture at once, no re-assembly.
 bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount); }
+void TweakEdited(int id, bool released);   // defined in Pose.inc
+
+// ---- preset chips: the band + cup pair for the bust size, S..XL for the nipple size ---------------------------------
+// A plain slider is hard to shop for, so the Bust Size row carries a band (65..105) and a cup (AA..G), and the Look tab's
+// nipple row carries simple sizes. The chips write the same sliders a drag would (bust: body 4, mapped linearly across
+// 0..1 as one number, band * 8 cups; nipple: the out/in offset in mm), so everything downstream (re-shape, export, reset,
+// undo) sees an ordinary slider change.
+constexpr int kBustBandCount = 9;                         // 65..105 in steps of 10
+constexpr int kBustCupCount = 8;                          // AA A B C D E F G
+constexpr int kPresetCombos = kBustBandCount * kBustCupCount;   // 72: band and cup as one number
+const char* const kBustBandLabels[kBustBandCount] = {"65", "70", "75", "80", "85", "90", "95", "100", "105"};
+const char* const kBustCupLabels[kBustCupCount] = {"AA", "A", "B", "C", "D", "E", "F", "G"};
+constexpr float kNippleSizeMm[4] = {-4.0f, 0.0f, 4.0f, 8.0f};   // out/in offsets per preset; the card default is 0
+const char* const kNippleSizeLabels[4] = {"S", "M", "L", "XL"};
+
+int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : 0; }
+int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : 32; }
+int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : 2; }
+RECT PresetChipRect(int rowId, int i, int y) {
+    const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
+    const int x = 52 + i * (w + gap);
+    return RECT{x, y + 1, x + w, y + kRowH - 1};
+}
+int PresetChipAt(int rowId, int x) {
+    const int count = PresetChipCount(rowId);
+    if (count <= 0) return -1;
+    const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
+    for (int i = 0; i < count; ++i) {
+        const int cx = 52 + i * (w + gap);
+        if (x >= cx && x < cx + w) return i;
+    }
+    return -1;
+}
+void BustActiveFromValue(float v, int& bandIdx, int& cupIdx) {
+    const int n = static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * static_cast<float>(kPresetCombos - 1)));
+    bandIdx = n / kBustCupCount;
+    cupIdx = n % kBustCupCount;
+}
+// The chip to light up for a row, or -1 when the underlying slider is outside the presets' range.
+int ActivePresetChip(int rowId) {
+    if (rowId == kBustBand || rowId == kBustCup) {
+        SliderRef r;
+        if (!SliderFor(kBodyBust, r) || !r.v) return -1;
+        if (*r.v < -0.005f || *r.v > 1.005f) return -1;   // dragged beyond the presets: no chip is "it"
+        int b = 0, c = 0;
+        BustActiveFromValue(*r.v, b, c);
+        return rowId == kBustBand ? b : c;
+    }
+    if (rowId == kNippleSize) {
+        SliderRef r;
+        if (!SliderFor(kNippleMm, r) || !r.v) return -1;
+        int best = 0;
+        float bestD = 1e30f;
+        for (int i = 0; i < 4; ++i) { const float d = std::fabs(*r.v - kNippleSizeMm[i]); if (d < bestD) { bestD = d; best = i; } }
+        return best;
+    }
+    return -1;
+}
+const char* PresetChipText(int rowId, int i) {
+    if (rowId == kBustBand && i >= 0 && i < kBustBandCount) return kBustBandLabels[i];
+    if (rowId == kBustCup && i >= 0 && i < kBustCupCount) return kBustCupLabels[i];
+    if (rowId == kNippleSize && i >= 0 && i < 4) return kNippleSizeLabels[i];
+    return "";
+}
+void ApplyPresetChip(int rowId, int chip) {
+    if (rowId == kBustBand || rowId == kBustCup) {
+        SliderRef r;
+        if (!SliderFor(kBodyBust, r) || !r.v) return;
+        int b = 0, c = 0;
+        BustActiveFromValue(*r.v, b, c);
+        if (rowId == kBustBand) b = std::clamp(chip, 0, kBustBandCount - 1); else c = std::clamp(chip, 0, kBustCupCount - 1);
+        *r.v = static_cast<float>(b * kBustCupCount + c) / static_cast<float>(kPresetCombos - 1);
+        TweakEdited(kBodyBust, true);
+        char msg[64];
+        std::snprintf(msg, sizeof msg, "bust size: %s%s", kBustBandLabels[b], kBustCupLabels[c]);
+        Log(msg);
+        InvalidatePanel();
+        return;
+    }
+    if (rowId == kNippleSize) {
+        SliderRef r;
+        if (!SliderFor(kNippleMm, r) || !r.v) return;
+        chip = std::clamp(chip, 0, 3);
+        *r.v = std::clamp(kNippleSizeMm[chip], r.lo, r.hi);
+        TweakEdited(kNippleMm, true);
+        char msg[48];
+        std::snprintf(msg, sizeof msg, "nipple size: %s (%+.0f mm)", kNippleSizeLabels[chip], static_cast<double>(kNippleSizeMm[chip]));
+        Log(msg);
+        InvalidatePanel();
+    }
+}
 

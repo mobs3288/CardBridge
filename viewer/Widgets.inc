@@ -49,6 +49,22 @@ void Expander(ui::Surface& s, int x, int cy, bool open, COLORREF c) {
     else s.FillTriangle(fx + 1.0f, fy - 4.0f, fx + 1.0f, fy + 4.0f, fx + 6.0f, fy, c);
 }
 
+// One preset-chips row: a caption ("Band:" / "Cup:" / "Size:") on the left, small buttons on the right that set the
+// value with a single click. The chip matching the underlying slider's current value is lit.
+void DrawPresetChips(ui::Surface& s, int rowId, const std::string& label, int y) {
+    const int count = PresetChipCount(rowId);
+    if (count <= 0) return;
+    s.Text(g.fontSmall, ui::kSub, 12, y + 5, label);
+    const int active = ActivePresetChip(rowId);
+    for (int i = 0; i < count; ++i) {
+        const RECT r = PresetChipRect(rowId, i, y);
+        const bool on = i == active;
+        s.FillRound(r, 5, on ? ui::kLineHi : ui::kCardHi);
+        s.StrokeRound(r, 5, on ? ui::kAccent : ui::kLine);
+        s.TextCentered(g.fontSmall, on ? ui::kAccent : ui::kText, r, PresetChipText(rowId, i));
+    }
+}
+
 // One slider row: label, the track filled from the card's value to the current one, the thumb, the value. False when the id names no slider.
 // trackL / trackR / valueR / labelX default to the side panel's own; the Material Workbench passes a wider track.
 bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int trackL = kTrackL, int trackR = kTrackR,
@@ -61,6 +77,13 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int 
     // The label box is only ~148px wide: truncate with … so a long name never
     // hard-cuts mid-word at the track edge.
     s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, labelX, y + 2, ClipText(label, 22), &labelClip);
+    if (g.sliderEdit == id) {   // Shift+Left-click opened the keyboard box: the track and the value become one input field
+        const RECT box{trackL - 2, y + 1, valueR + 2, y + kRowH - 1};
+        s.FillRound(box, 5, ui::kBg);
+        s.StrokeRound(box, 5, ui::kAccent);
+        s.Text(g.fontMono, ui::kAmber, trackL + 6, y + 3, ClipText(g.sliderEditBuf + "_", 46), nullptr);
+        return true;
+    }
     const int mid = y + kRowH / 2;
     auto xOf = [&](float v) { return trackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (trackR - trackL))); };
     s.FillRound(RECT{trackL, mid - 2, trackR, mid + 2}, 2, ui::kLine);

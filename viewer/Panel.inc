@@ -229,6 +229,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAmber);
                         const RECT swClip{36, y, kPanel - 18, y + kRowH};
                         s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
+                    } else if (row.kind == 6) {
+                        DrawPresetChips(s, row.id, row.label, y);
                     } else {
                         DrawSliderRow(s, row.id, row.label, y);
                     }

@@ -270,6 +270,8 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
 # name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game
 # shaders, G colour grading, X (or the MMD button) as exported (the PMX as MikuMikuDance shows it: toon, edge, self-shadow, ground shadow), F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.
+# Shift+Left-click any slider (the panel, the Bones tab, the Material Workbench) to type its value with the keyboard: Enter commits, Esc restores it, clicking away commits. The typed text is the stored value (percent rows: 0..100).
+# The Body tab's Bust Size row carries a simple "Band:" (65..105) and "Cup:" (AA..G) preset under the slider: one click sets the size, and the chips track the slider (a size not on the grid lights none). The Look tab's Nipples group carries "Size:" (S, M, L, XL: -4 / 0 / +4 / +8 mm) under "Nipple out / in (mm)" the same way.
 # Posing: K shows the skeleton over the model (click a bone to select it), the Bones tab lists the bones as a tree (helper nodes behind a switch)
 # and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
 # P (or Look tab > Pose) is the automatic A-pose, on by default (MMD motions are keyed for it): clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the

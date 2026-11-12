@@ -251,6 +251,13 @@ draw surface.
   from 400, bone fields 10000+, settings actions 20000+). Body/face sliders
   re-shape live via `App::mu` + `Reshape` without reassembly
   (see header comment, main.cpp:1-22).
+- Shift+Left-click on any slider row starts in-place keyboard entry of the
+  value (`BeginSliderEdit` in viewer/SliderEdit.inc): the row draws as a text
+  box, keys are modal (`SliderEditKey`), Enter commits (clamped to the range,
+  snapped to the step) and Esc restores. `kind == 6` rows are preset chips
+  (`DrawPresetChips`): "Band:" / "Cup:" for the bust size (slider 4, mapped
+  linearly over 0..1 in 72 band\u00d7cup steps) and "Size:" (S/M/L/XL) for the
+  nipple offset (kNippleMm, 200).
 - Bone undo/redo exists for poses (`undoStack`/`redoStack`, main.cpp:433-436,
   `CapturePose`/`UndoPose`). It is pose-only; material undo must be a
   separate, analogous stack (see §4).

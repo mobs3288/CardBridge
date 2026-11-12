@@ -25,6 +25,7 @@
 //          R reset view, D reset clothing to the card default, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
+//          Shift+Left-click any slider to type its value with the keyboard (Enter commits, Esc restores)
 
 #include "assemble/Assembler.h"
 #include "material/MaterialWorkbench.h"
@@ -85,6 +86,7 @@ namespace {
 #include "Tweaks.inc"
 #include "MaterialsHelpers.inc"
 #include "Pose.inc"
+#include "SliderEdit.inc"
 #include "Export.inc"
 #include "Parts.inc"
 #include "Gizmo.inc"

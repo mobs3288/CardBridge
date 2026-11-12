@@ -7,6 +7,13 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (idx < 0) return;
     const TweakRow& row = rows[static_cast<size_t>(idx)];
     if (row.kind == 5) { if (!right) SettingsAction(row.id); return; }   // outside the lock: it opens dialogs
+    if (row.kind == 6) {   // a preset-chips row (band / cup / nipple size): one click sets the slider
+        if (!right) {
+            const int chip = PresetChipAt(row.id, x);
+            if (chip >= 0) ApplyPresetChip(row.id, chip);
+        }
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     if (row.kind == 4 || (row.kind == 0 && row.id < 0)) return;
     if (row.kind == 2 && row.id >= kLayerBase && row.id < kBoneEdit) {   // a shader layer: no re-assembly, just another frame
@@ -73,6 +80,7 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
         return;
     }
+    if (GetKeyState(VK_SHIFT) & 0x8000) { BeginSliderEdit(row.id); return; }   // type the value with the keyboard
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
     *r.v = SliderValueAt(r, x);
@@ -125,6 +133,7 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         SliderRef r;
         if (!SliderFor(id, r)) return;
         if (right) { *r.v = r.def; ApplyPoseLive(); InvalidatePanel(); return; }
+        if (GetKeyState(VK_SHIFT) & 0x8000) { BeginSliderEdit(id); return; }   // type the value with the keyboard
         if (x < kTrackL - 8) return;
         g.sliderDrag = id;
         *r.v = SliderValueAt(r, x);

@@ -479,6 +479,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONDOWN: {
+        if (g.sliderEdit >= 0) EndSliderEdit(true);   // any click commits the typed value (Shift+click a slider to type)
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -626,6 +627,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_RBUTTONDOWN: {
+        if (g.sliderEdit >= 0) { EndSliderEdit(false); return 0; }   // right-click puts the typed value back and is swallowed
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -1001,6 +1003,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KEYDOWN: {
         std::shared_ptr<Loaded> L = Current();
+        if (g.sliderEdit >= 0) { SliderEditKey(wp); return 0; }   // Shift+Left-click opened the keyboard box: the row owns the keys now
         if (g.matHexEditing) {
             if (wp == VK_ESCAPE) { g.matHexEditing = false; g.matHexUndoPushed = false; g.matHexBuf.clear(); InvalidateMat(); return 0; }
             if (wp == VK_RETURN) { g.matHexEditing = false; g.matHexUndoPushed = false; InvalidateMat(); return 0; }

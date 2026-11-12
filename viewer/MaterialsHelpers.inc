@@ -380,7 +380,16 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
             rows.push_back({1, base + static_cast<int>(i), list[i].label, cur});
         }
     };
-    if (tab == TabBody) addSliders(shape::BodySliders(), 0, g.tw.body.size());
+    if (tab == TabBody) {
+        addSliders(shape::BodySliders(), 0, g.tw.body.size());
+        // The band + cup pair for the Bust > Size row, right under it (inserting below the Size row, newest first).
+        auto it = std::find_if(rows.begin(), rows.end(), [](const TweakRow& r) { return r.kind == 1 && r.id == kBodyBust; });
+        if (it != rows.end()) {
+            const int at = static_cast<int>(std::distance(rows.begin(), it)) + 1;
+            rows.insert(rows.begin() + at, TweakRow{6, kBustCup, "Cup:", "Bust"});
+            rows.insert(rows.begin() + at, TweakRow{6, kBustBand, "Band:", "Bust"});
+        }
+    }
     else if (tab == TabFace) addSliders(shape::FaceSliders(), kFaceBase, g.tw.face.size());
     else if (tab == TabLook) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
@@ -394,6 +403,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
+        rows.push_back({6, kNippleSize, "Size:", "Nipples"});   // S .. XL presets for the nipple offset above
         rows.push_back({1, kAreola, "Areola size", "Nipples"});
         rows.push_back({2, kNipplePink, "Automatic pink nipple / areola (off: the card's colour)", "Nipples"});
         rows.push_back({1, kNippleR, "Nipple colour: red", "Nipples"});

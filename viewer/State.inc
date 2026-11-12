@@ -82,9 +82,11 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
-              kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+              kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+              kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002;   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
+constexpr int kBodyBust = 4;   // the Bust > Size slider in shape::BodySliders() (body slider ids are the shape's index, 0..43)
 struct TweakRow {
-    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
+    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row), 6 a preset-chips row (band / cup / nipple size)
     int id = 0;
     std::string label, group;
 };
@@ -222,6 +224,14 @@ struct App {
     Tweaks tw;
     int tab = TabParts;
     int sliderDrag = -1;                      // slider id being dragged, or -1
+    // Shift+Left-click on a slider: type its value with the keyboard. The edit is modal for the mouse/keyboard until
+    // Enter commits (the typed number, clamped and snapped to the slider's step), Esc restores the value it had, or any
+    // click ends it (committing). Live upload happens on commit only; the row shows the typed text with a caret.
+    int sliderEdit = -1;                      // slider id being typed into, or -1
+    std::string sliderEditBuf;                // the text typed so far
+    float sliderEditOrig = 0;                 // the stored value when the edit began (Esc restores it)
+    bool sliderEditMatPushed = false;         // one material-undo step per typing session
+    PoseState sliderEditPoseBefore;           // the pose when the edit began (a pose slider pushes one undo step on commit)
     std::vector<exporter::ShaderLayer> layerDefs;   // extra HLSL shading layers found in the layers folder (the GPU view runs them)
     std::map<std::string, char> keepHidden;   // part checkboxes to restore after a tweak reload
     bool applyKeep = false;
