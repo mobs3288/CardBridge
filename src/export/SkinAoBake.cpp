@@ -4,6 +4,7 @@
 #include "core/Math.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -37,9 +38,12 @@ inline const uint8_t* SampleTexel(const std::vector<uint8_t>& rgba, int tw, int 
 
 // Rasterizes the body's (u, v) into the texture grid, keeping each texel's tangent-space normal (the base body normal
 // map, plus the card's detailId detail normal when it has one - the same blend Koikatsu's shader applies through
-// _DetailNormalMapScale) and, separately, the line-mask factor for each texel.
+// _DetailNormalMapScale) and, separately, the line-mask factor for each texel. `vertexDamp` (one value per vertex,
+// 1 = full AO, ~0.25 = a limb-bound vertex) attenuates the bake on arm and leg regions so the elbow and knee crease
+// marks do not read as black smudges.
 void RasterizeAo(const assemble::SceneMesh& mesh, const assemble::SceneSkinAoBake& ao, int W, int H,
-                 std::vector<Vec3>& localNormals, std::vector<float>& aoLine, std::vector<uint8_t>& covered) {
+                 std::vector<Vec3>& localNormals, std::vector<float>& aoLine, std::vector<float>& aoDamp,
+                 std::vector<uint8_t>& covered, const std::vector<float>& vertexDamp) {
     if (ao.baseNormal.empty() || ao.baseNormalWidth <= 0 || ao.baseNormalHeight <= 0) return;
     const bool hasDetail = !ao.detailNormal.empty() && ao.detailNormalWidth > 0 && ao.detailNormalHeight > 0;
     const bool hasLine = !ao.lineMask.empty() && ao.lineMaskWidth > 0 && ao.lineMaskHeight > 0;
@@ -90,6 +94,7 @@ void RasterizeAo(const assemble::SceneMesh& mesh, const assemble::SceneSkinAoBak
                     covered[at] = 1;
                     localNormals[at] = nLocal;
                     aoLine[at] = line;
+                    aoDamp[at] = l0 * vertexDamp[idx[0]] + l1 * vertexDamp[idx[1]] + l2 * vertexDamp[idx[2]];
                 }
             }
         }
@@ -180,13 +185,38 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
         const size_t WH = static_cast<size_t>(W) * static_cast<size_t>(H);
         ao.aoShade.assign(WH, 1.0f);
         ao.aoLine.assign(WH, 0.0f);
+        ao.aoDamp.assign(WH, 1.0f);
         ao.covered.assign(WH, 0);
+        // Limb-bound vertices (arm and leg chains) get their AO damped: the elbow and knee crease
+        // markings on the body atlas are the strongest local-deviation spots and read as black
+        // smudges at full strength; keep them faint instead.
+        std::vector<char> isLimb(scene.bones.size(), 0);
+        int limbBoneCount = 0;
+        for (size_t bi = 0; bi < scene.bones.size(); ++bi) {
+            std::string n = scene.bones[bi].name;
+            std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            for (const char* tag : {"leg", "shin", "thigh", "knee", "arm", "forearm", "elbow", "wrist"}) {
+                if (n.find(tag) != std::string::npos) { isLimb[bi] = 1; ++limbBoneCount; break; }
+            }
+        }
+        if (std::getenv("CARDBRIDGE_DEBUG_AO"))
+            std::fprintf(stderr, "ao debug: %d of %zu bones classified as limb\n", limbBoneCount, scene.bones.size());
         std::vector<Vec3> localNormals(WH, Vec3{0.0f, 0.0f, 1.0f});
         for (int mi : ss.meshes) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             if (mesh.vertices.empty()) continue;
-            RasterizeAo(mesh, ao, W, H, localNormals, ao.aoLine, ao.covered);
+            std::vector<float> vertexDamp(mesh.vertices.size(), 1.0f);
+            for (size_t vi = 0; vi < mesh.vertices.size(); ++vi) {
+                const auto& v = mesh.vertices[vi];
+                float w = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    const int b = v.bone[k];
+                    if (b >= 0 && static_cast<size_t>(b) < isLimb.size() && isLimb[b]) w += v.weight[k];
+                }
+                vertexDamp[vi] = 1.0f - 0.75f * clampf(w, 0.0f, 1.0f);
+            }
+            RasterizeAo(mesh, ao, W, H, localNormals, ao.aoLine, ao.aoDamp, ao.covered, vertexDamp);
         }
         // The cavity factor, from a radius-8 average of neighbouring normals (covered neighbours only).
         const int R = 8;
@@ -215,10 +245,13 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
         }
         FeatherAoMap(ao.aoShade, ao.covered, W, H, 4);
         FeatherAoMap(ao.aoLine, ao.covered, W, H, 4);
+        FeatherAoMap(ao.aoDamp, ao.covered, W, H, 4);
         BlurAoMap(ao.aoShade, ao.covered, W, H);
         BlurAoMap(ao.aoLine, ao.covered, W, H);
+        BlurAoMap(ao.aoDamp, ao.covered, W, H);
         BlurAoMap(ao.aoShade, ao.covered, W, H);
         BlurAoMap(ao.aoLine, ao.covered, W, H);
+        BlurAoMap(ao.aoDamp, ao.covered, W, H);
         ao.built = true;
         if (std::getenv("CARDBRIDGE_DEBUG_AO")) {
             size_t n = 0;
@@ -259,8 +292,9 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
             // Attenuate where SkinShade already darkened this texel: the new bake yields to it, never stacks on top.
             const float existingDark = 1.0f - splitMul;
             const float att = clampf(1.0f - 0.7f * existingDark, 0.0f, 1.0f);
-            const float aoMul = std::max(0.30f, 1.0f - s * (1.0f - ao.aoShade[i]) * att);
-            const float lineMul = std::max(0.45f, 1.0f - s * ao.aoLine[i] * att);
+            const float damp = i < ao.aoDamp.size() ? ao.aoDamp[i] : 1.0f;   // limb joints: elbows/knees stay faint
+            const float aoMul = std::max(0.30f, 1.0f - s * (1.0f - ao.aoShade[i]) * att * damp);
+            const float lineMul = std::max(0.45f, 1.0f - s * ao.aoLine[i] * att * damp);
             mul = splitMul * aoMul * lineMul;
         }
         for (int c = 0; c < 3; ++c) {

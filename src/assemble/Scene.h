@@ -171,6 +171,7 @@ struct SceneSkinAoBake {
     int detailNormalWidth = 0, detailNormalHeight = 0;
     std::vector<float> aoShade;        // per-texel normal-lighting factor at strength 1 (1 = lit); width * height
     std::vector<float> aoLine;         // per-texel ink-line factor at strength 1 (1 = fully line-covered); width * height
+    std::vector<float> aoDamp;         // per-texel limb damp factor (1 = full AO, ~0.25 = fully limb-bound arm/leg); parallel to aoShade
     std::vector<uint8_t> covered;      // 1 where a body triangle reached the texel, parallel to aoShade
     float applied = -1.0f;             // the strength currently baked into the texture (-1 = never applied)
     bool built = false;                // aoShade / aoLine are current for the body geometry
