@@ -1050,29 +1050,33 @@ void unitTests() {
         }
         { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 2, 1, 3}; mouth.submeshes.push_back(sub); }
         s.meshes.push_back(mouth);
-        // meshes 1 and 2: the two eyes; the white is the flat cap in front, the iris a patch just above it (as the game builds them)
-        for (const char* eye : {"cf_Ohitomi_L", "cf_Ohitomi_R"}) {
-            const float cx = std::string(eye).find('L') != std::string::npos ? 1.0f : -1.0f;
-            assemble::SceneMesh em;
-            em.name = eye;
-            for (int i = 0; i < 3; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f, 0.05f + 0.01f * static_cast<float>(i)}; em.vertices.push_back(v); }   // the white
-            for (int i = 0; i < 2; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f + 0.02f * static_cast<float>(i), 0.06f}; em.vertices.push_back(v); }   // the iris
+        // The eyes as the game builds them: a white mesh (cf_Ohitomi_L / _R) in front and a separate iris mesh (cf_Ohitomi_L02 / _R02);
+        // the def_cl shape squeezes the white, the lid goes with it and the iris takes the white's mean offset (the PMX's follow).
+        for (const char* side : {"L", "R"}) {
+            const bool left = std::string(side) == "L";
+            const float cx = left ? 1.0f : -1.0f;
             {
-                assemble::SceneBlendShape sh;
-                sh.name = "def_cl";   // squeezes the white with the lid
-                for (int i = 0; i < 3; ++i) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, -1.0f, 0});
-                em.shapes.push_back(sh);
+                assemble::SceneMesh white;
+                white.name = std::string("cf_Ohitomi_") + side;
+                for (int i = 0; i < 3; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f, 0.05f + 0.01f * static_cast<float>(i)}; white.vertices.push_back(v); }
+                {
+                    assemble::SceneBlendShape sh;
+                    sh.name = "def_cl";   // squeezes the white with the lid
+                    for (int i = 0; i < 3; ++i) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, -1.0f, 0});
+                    white.shapes.push_back(sh);
+                }
+                { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2}; white.submeshes.push_back(sub); }
+                s.meshes.push_back(white);
             }
-            { assemble::SceneSubmesh sub; sub.material = cx > 0 ? 1 : 3; sub.indices = {0, 1, 2}; em.submeshes.push_back(sub); }   // cf_Ohitomi_L: the white
-            { assemble::SceneSubmesh sub; sub.material = cx > 0 ? 2 : 4; sub.indices = {3, 4, 4}; em.submeshes.push_back(sub); }   // cf_Ohitomi_L02: the iris
-            s.meshes.push_back(em);
+            {
+                assemble::SceneMesh iris;
+                iris.name = std::string("cf_Ohitomi_") + side + "02";   // cf_Ohitomi_L02: the digits mark it as the iris
+                for (int i = 0; i < 2; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f + 0.02f * static_cast<float>(i), 0.06f}; iris.vertices.push_back(v); }   // no shapes: the iris is flat
+                { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1}; iris.submeshes.push_back(sub); }
+                s.meshes.push_back(iris);
+            }
         }
-        assemble::SceneMaterial m0; m0.name = "cf_O_kuti";
-        assemble::SceneMaterial wl; wl.name = "cf_Ohitomi_L";
-        assemble::SceneMaterial il; il.name = "cf_Ohitomi_L02";
-        assemble::SceneMaterial wr; wr.name = "cf_Ohitomi_R";
-        assemble::SceneMaterial ir; ir.name = "cf_Ohitomi_R02";
-        s.materials = {m0, wl, il, wr, ir};
+        s.materials.push_back(assemble::SceneMaterial{});
         // the patterns the game's FaceBlendShape mouth and eye components play (both eyes, closed and open states)
         assemble::SceneExpression mouthEx;
         mouthEx.name = "Mouth 0 open";
@@ -1083,8 +1087,8 @@ void unitTests() {
         assemble::SceneExpression eyeEx;
         eyeEx.name = "Eyes 0 closed";
         eyeEx.panel = 2;
-        eyeEx.targets.push_back({1, 0, 100.0f});
-        eyeEx.targets.push_back({2, 0, 100.0f});
+        eyeEx.targets.push_back({1, 0, 100.0f});   // the white meshes (1 = L, 3 = R)
+        eyeEx.targets.push_back({3, 0, 100.0f});
         eyeEx.shape = "def_cl";
         s.expressions.push_back(eyeEx);
 
@@ -1103,25 +1107,26 @@ void unitTests() {
         CHECK(mouth0 && std::fabs(offAt(*mouth0, 0, 0).y + 1.2f) < 1e-4f && std::fabs(offAt(*mouth0, 0, 2).y + 0.6f) < 1e-4f);
         const LiveMorph* raw = find("cf_O_kuti.a_l_op");
         CHECK(raw && raw->panel == 3 && offAt(*raw, 0, 0).y == -2.0f && offAt(*raw, 0, 2).y == -1.0f);
-        // the blink: white squeezes (the game's shape), the iris takes the white's mean offset per shape (the PMX's follow)
+        // meshes: 0 = mouth, 1 = white L, 2 = iris L, 3 = white R, 4 = iris R
+        // the blink: whites squeeze (the game's shape), the iris takes the white's mean offset per shape (the PMX's follow)
         const LiveMorph* blink = find("Eyes 0 closed");
         CHECK(blink && blink->panel == 2);
-        CHECK(blink && blink->byMesh.at(1).size() == 5 && blink->byMesh.at(2).size() == 5);   // 3 whites + 2 iris, per eye
-        CHECK(blink && offAt(*blink, 1, 3).y == -1.0f && offAt(*blink, 2, 3).y == -1.0f);   // the iris follows (per-mesh vertex indices)
+        CHECK(blink && blink->byMesh.at(1).size() == 3 && blink->byMesh.at(2).size() == 2 && blink->byMesh.at(3).size() == 3 && blink->byMesh.at(4).size() == 2);   // 3 whites + 2 iris, per eye
+        CHECK(blink && offAt(*blink, 2, 0).y == -1.0f && offAt(*blink, 4, 0).y == -1.0f);   // the iris follows (per-mesh vertex indices)
         // the raw eye shapes are their own morphs too (the exporter's panel keywords do not name "ohitomi", so these are "Other", like in the PMX;
         // and the iris follow applies to them, like in the export)
         const LiveMorph* eyeRaw = find("cf_Ohitomi_L.def_cl");
-        CHECK(eyeRaw && eyeRaw->panel == 4 && eyeRaw->byMesh.at(1).size() == 5);   // 3 whites + 2 iris
+        CHECK(eyeRaw && eyeRaw->panel == 4 && eyeRaw->byMesh.at(1).size() == 3 && eyeRaw->byMesh.at(2).size() == 2);   // 3 whites + 2 iris
         // the MMD standard morphs: the vowels from a_l_op (the game's open mouth) and まばたき from def_cl (the closed eyes)
         const LiveMorph* a = find("あ");
         CHECK(a && a->panel == 3 && a->byMesh.at(0).size() == 2);
         const LiveMorph* b = find("まばたき");
-        CHECK(b && b->panel == 2 && b->byMesh.at(1).size() == 5 && b->byMesh.at(2).size() == 5);
+        CHECK(b && b->panel == 2 && b->byMesh.at(1).size() == 3 && b->byMesh.at(2).size() == 2 && b->byMesh.at(3).size() == 3 && b->byMesh.at(4).size() == 2);
         // the one-eyed versions: the closed eyes cut on the rig's left eye side (+x here)
         const LiveMorph* winkL = find("ウィンク２");
         const LiveMorph* winkR = find("ｳｨﾝｸ２右");
-        CHECK(winkL && winkL->byMesh.at(1).size() == 5 && winkL->byMesh.at(2).size() == 0);
-        CHECK(winkR && winkR->byMesh.at(2).size() == 5 && winkR->byMesh.at(1).size() == 0);
+        CHECK(winkL && winkL->byMesh.at(1).size() == 3 && winkL->byMesh.at(2).size() == 2 && winkL->byMesh.at(3).size() == 0);
+        CHECK(winkR && winkR->byMesh.at(3).size() == 3 && winkR->byMesh.at(4).size() == 2 && winkR->byMesh.at(1).size() == 0);
         // the outfit toggles are material morphs in the PMX: not in the vertex catalog (the Parts tab hides things)
         for (const auto& m : morphs) CHECK(m.name.find("Hide ") != 0 && m.name.find("Take off ") != 0 && m.name != "Nude body");
         // 2 expressions + 3 raw shapes + 5 vowels + まばたき + 2 winks

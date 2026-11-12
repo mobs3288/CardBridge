@@ -56,21 +56,23 @@ std::vector<LiveMorph> BuildLiveMorphs(const assemble::Scene& scene) {
             base += static_cast<uint32_t>(m.vertices.size());
         }
     }
-    // indices and one material per submesh, with the names the exporter writes (part/mesh#sub): the eye pass looks for
-    // the mesh's own name inside them to tell the white ("cf_Ohitomi_L") from the iris ("cf_Ohitomi_L02"). The scene's submesh
-    // indices are mesh-local; the PMX (and this scratch model) is one vertex array, so they are offset by the mesh's base.
+    // indices and one material per submesh, named the way the exporter names them (part/mesh#sub): the eye pass looks for
+    // the mesh's own name inside the material name to tell the white ("cf_Ohitomi_L") from the iris ("cf_Ohitomi_L02").
+    // The scene's submesh indices are mesh-local; the PMX (and this scratch model) is one vertex array, so they are offset
+    // by the mesh's base.
     {
+        std::vector<std::string> partOf(scene.meshes.size());
+        for (const auto& part : scene.parts)
+            for (int mi : part.meshes)
+                if (mi >= 0 && static_cast<size_t>(mi) < partOf.size() && partOf[static_cast<size_t>(mi)].empty()) partOf[static_cast<size_t>(mi)] = part.id;
         for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
             const auto& m = scene.meshes[mi];
             const uint32_t base = static_cast<uint32_t>(mb.base[mi]);
+            const std::string partId = partOf[mi].empty() ? std::string("mesh") : partOf[mi];
             for (size_t si = 0; si < m.submeshes.size(); ++si) {
                 const auto& sm = m.submeshes[si];
                 pmx::Material pm;
-                if (sm.material >= 0 && static_cast<size_t>(sm.material) < scene.materials.size())
-                    // The scene material's own name (the shader property material, e.g. "cf_Ohitomi_L02"): the substring the
-                    // eye pass searches for. Falling back to the submesh ordinal keeps a missing material index harmless.
-                    pm.name = scene.materials[static_cast<size_t>(sm.material)].name;
-                if (pm.name.empty()) pm.name = "part/mesh#" + std::to_string(si);
+                pm.name = partId + "/" + m.name + "#" + std::to_string(si);
                 pm.indexCount = static_cast<uint32_t>(sm.indices.size());
                 for (uint32_t idx : sm.indices) model.indices.push_back(base + idx);
                 model.materials.push_back(std::move(pm));
