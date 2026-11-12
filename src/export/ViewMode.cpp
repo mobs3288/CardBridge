@@ -53,7 +53,7 @@ const char* ViewModeTooltip(ViewMode m) {
     case ViewMode::UVChecker: return "UV checkerboard";
     case ViewMode::Transmission: return "wrap-light fabric transmission (back light)";
     case ViewMode::MaterialID: return "one colour per material";
-    case ViewMode::SkinAO: return "the Koikatsu AO factor on the body skin — white = untouched, dark = darkened; the rest plain unlit";
+    case ViewMode::SkinAO: return "the Koikatsu AO baked into the body skin — white = untouched, dark = darkened";
     default: return "the game's shader";
     }
 }

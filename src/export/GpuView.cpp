@@ -364,9 +364,9 @@ float4 ps(VO i, bool front : SV_IsFrontFace) : SV_Target {
         return float4(transCol.rgb * params.z * wrap * exp(-params.w), 1);
     } else if (mode == 10) {         // MaterialID
         return float4(idCol.rgb, 1);
-    } else if (mode == 11) {        // SkinAO: AO factor on the skin; everything else plain unlit (light context, not a dark dummy)
+    } else if (mode == 11) {        // SkinAO: the factor the bake applies (t1 = factor map, gray; only for the body skin)
         if (aoCtl.x > 0.5) return float4(t1.Sample(s0, i.uv).rrr, 1);
-        return float4(diffuse.rgb * t0.Sample(s0, i.uv).rgb, 1);
+        return float4(0.35, 0.35, 0.35, 1);
     }
     return float4(diffuse.rgb, 1);
 }
