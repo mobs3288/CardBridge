@@ -66,6 +66,7 @@ struct Settings {
     float skinShadeUnder = 1.0f;     // under-breast fold shading strength (0 = off, up to 2)
     float skinShadeTop = 1.2f;       // cleavage extent: 0 = none, 1 = the full breast line, 2 = toward the base of the neck
     float skinShadeWidth = 0.6f;     // cleavage width: 0.1 = hairline, 1 = the default, 2 = a broad gradient
+    float skinAo = 0.85f;              // Koikatsu's own look baked into the skin (base body normal lighting + the detailId line mask); 0 = off
 };
 Settings LoadSettings() {
     Settings s;
@@ -83,6 +84,7 @@ Settings LoadSettings() {
         s.skinShadeUnder = static_cast<float>(j.value("skinShadeUnder", 1.0));
         s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.2));
         s.skinShadeWidth = static_cast<float>(j.value("skinShadeWidth", 0.6));
+        s.skinAo = static_cast<float>(j.value("skinAo", 0.85));
     } catch (...) {}
     return s;
 }
@@ -102,6 +104,7 @@ void SaveSettings(const Settings& s) {
         j["skinShadeUnder"] = s.skinShadeUnder;
         j["skinShadeTop"] = s.skinShadeTop;
         j["skinShadeWidth"] = s.skinShadeWidth;
+        j["skinAo"] = s.skinAo;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }

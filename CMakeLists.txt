@@ -90,6 +90,7 @@ add_library(cardbridge_core STATIC
     src/export/MoveGizmo.cpp
     src/export/Preview.cpp
     src/export/SkinShade.cpp
+    src/export/SkinAoBake.cpp
     src/export/GpuView.cpp
     src/export/ViewMode.cpp
     src/export/ShaderLayer.cpp

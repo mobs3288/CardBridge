@@ -12,6 +12,7 @@
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
 #include "export/Preview.h"
+#include "export/SkinAoBake.h"
 #include "export/SkinShade.h"
 
 #include <algorithm>
@@ -3597,6 +3598,51 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto cl = [&](int c) { return std::sqrt(m.m[c] * m.m[c] + m.m[4 + c] * m.m[4 + c] + m.m[8 + c] * m.m[8 + c]); };
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
+    // Koikatsu's own body skin look: the base body normal map (always bound by the game as _NormalMap) and the
+    // card's detailId detail normal / line mask pair (bound as _NormalMapDetail / _LineMask, category 420).
+    // Decoded here, once, so the bake below - and the viewer's later re-applications - can use them without
+    // re-opening the bundles. When the card is unmodified, the line mask is cf_body_00_line (its G channel carries
+    // the clavicle/knee ink lines; the breast region stays clean, exactly as in the game).
+    if (!scene.skinShade.meshes.empty() && scene.aoBake.baseNormal.empty()) {
+        std::string w;
+        if (auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w)) {
+            const PPtr p = mm->findTexture("cf_body_00_base_n");
+            if (!p.isNull()) {
+                std::string why;
+                if (auto t = mm->readTexture(p, &why)) {
+                    scene.aoBake.baseNormal = t->rgba;
+                    scene.aoBake.baseNormalWidth = t->width;
+                    scene.aoBake.baseNormalHeight = t->height;
+                }
+            }
+            const PPtr pl = mm->findTexture("cf_body_00_line");
+            if (!pl.isNull()) {
+                std::string why;
+                if (auto t = mm->readTexture(pl, &why)) {
+                    scene.aoBake.lineMask = t->rgba;
+                    scene.aoBake.lineMaskWidth = t->width;
+                    scene.aoBake.lineMaskHeight = t->height;
+                }
+            }
+        } else {
+            scene.warn("body", "mm_base.unity3d not loaded: " + w + " (the Koikatsu skin look bake is skipped)");
+        }
+        try {
+            const int64_t detailId = card.body.at("detailId").asInt();
+            if (auto t = rowTextureFor("body", 420, detailId, "ChaFileBody.detailId", "NormallMapDetail", "body detail normal")) {
+                scene.aoBake.detailNormal = t->rgba;
+                scene.aoBake.detailNormalWidth = t->width;
+                scene.aoBake.detailNormalHeight = t->height;
+            }
+            if (auto t = rowTextureFor("body", 420, detailId, "ChaFileBody.detailId", "LineMask", "body detail lines")) {
+                scene.aoBake.lineMask = t->rgba;
+                scene.aoBake.lineMaskWidth = t->width;
+                scene.aoBake.lineMaskHeight = t->height;
+            }
+        } catch (const std::exception& e) {
+            scene.warn("body", std::string("body detailId: ") + e.what());
+        }
+    }
     log("running " + std::to_string(scene.createJobs.size()) + " game create material(s)");
     report(0.88, "create materials");
     checkCancel();
@@ -3607,6 +3653,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
         exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
         log("automatic skin shading baked from the body mesh");
+    }
+    // The Koikatsu skin look goes on top of the create result x the cleavage shading (it yields to SkinShade's own
+    // darkening, never stacks); both are multiplied into the texture the PMX references.
+    if (!scene.skinShade.meshes.empty() && (opt.skinAo > 0.0f || scene.aoBake.applied >= 0.0f)) {
+        exporter::ApplySkinAoBake(scene, opt.skinAo, true);
+        log("Koikatsu skin look baked (base body normal map + detailId line mask)");
     }
     report(0.96, "finishing");
     LogMemory("assemble after create jobs");

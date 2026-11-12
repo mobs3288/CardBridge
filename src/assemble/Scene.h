@@ -154,6 +154,28 @@ struct SceneSkinShade {
     bool ready() const { return texture >= 0 && !meshes.empty(); }
 };
 
+// Koikatsu's own skin look, baked into the body's skin texture the way the game's Shader Forge/main_skin does it:
+// the always-bound base body normal map (cf_body_00_base_n) - a local curvature (cavity) factor is lifted from its
+// neighbourhood contrast, and the card's body normal map blended through _DetailNormalMapScale in the game shader -
+// plus the ink-line channel of the line mask the game binds to _LineMask (the card's body detailId row, category 420;
+// cf_body_00_line for the default).
+// Held here so the bake can be re-applied at a new strength without re-opening the bundles it came from; the maps
+// are per-texel factors at strength 1 and are multiplied in after ApplySkinShade's cleavage/underboob factors,
+// yielding to SkinShade's own darkening - never stacking with it.
+struct SceneSkinAoBake {
+    std::vector<uint8_t> baseNormal;   // decoded base body normal map (cf_body_00_base_n), RGBA32; empty when unavailable
+    int baseNormalWidth = 0, baseNormalHeight = 0;
+    std::vector<uint8_t> lineMask;     // decoded _LineMask for the card's body detailId (cf_body_00_line at default), RGBA32
+    int lineMaskWidth = 0, lineMaskHeight = 0;
+    std::vector<uint8_t> detailNormal; // decoded detailId NormallMapDetail; empty when none (e.g. the 8x8 blank at default)
+    int detailNormalWidth = 0, detailNormalHeight = 0;
+    std::vector<float> aoShade;        // per-texel normal-lighting factor at strength 1 (1 = lit); width * height
+    std::vector<float> aoLine;         // per-texel ink-line factor at strength 1 (1 = fully line-covered); width * height
+    std::vector<uint8_t> covered;      // 1 where a body triangle reached the texel, parallel to aoShade
+    float applied = -1.0f;             // the strength currently baked into the texture (-1 = never applied)
+    bool built = false;                // aoShade / aoLine are current for the body geometry
+};
+
 // An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the
 // blend shape weights it sets on the face meshes. Exported as a vertex morph (offsets relative to the resting expression).
 struct SceneExpression {
@@ -254,6 +276,7 @@ struct Scene {
     std::vector<std::pair<std::string, Vec4>> globalProps;
     std::vector<SceneMesh> meshes;
     SceneSkinShade skinShade;
+    SceneSkinAoBake aoBake;
     std::vector<ScenePart> parts;
     std::vector<SceneExpression> expressions;
     std::vector<SceneChain> chains;

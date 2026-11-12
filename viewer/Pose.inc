@@ -314,6 +314,13 @@ void ApplySkinLook(bool rebuildMap) {
                 Log("the skin shading changed: press X to bake the as-exported view again");
             }
         }
+        if (!L->scene.aoBake.baseNormal.empty() && (g.tw.skinAo > 0.0f || L->scene.aoBake.applied >= 0.0f)) {
+            if (exporter::ApplySkinAoBake(L->scene, g.tw.skinAo, rebuild)) {
+                const int ti = ss.texture;
+                if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+                if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+            }
+        }
     }
     g.dirty = true;
     InvalidateView();
@@ -339,6 +346,7 @@ bool ReshapeNow(bool final) {
         ao.skinShadeUnder = g.tw.skinShadeUnder;
         ao.skinShadeTop = g.tw.skinShadeTop;
         ao.skinShadeWidth = g.tw.skinShadeWidth;
+        ao.skinAo = g.tw.skinAo;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
     }
     const double t0 = NowMs();
@@ -350,6 +358,12 @@ bool ReshapeNow(bool final) {
         if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, g.tw.skinShadeUnder, g.tw.skinShadeTop, g.tw.skinShadeWidth, true)) {
             if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
             if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+        }
+        if (!L->scene.aoBake.baseNormal.empty() && (g.tw.skinAo > 0.0f || L->scene.aoBake.applied >= 0.0f)) {
+            if (exporter::ApplySkinAoBake(L->scene, g.tw.skinAo, true)) {
+                if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+                if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+            }
         }
     }
     g.prof.reshape += t1 - t0;
@@ -393,16 +407,17 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
-    if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth ||
+    if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
         id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
         // Body shading re-applies at the new strength at once; the occlusion map is rebuilt only when a shape drag ended
         // (ReshapeNow) or from this release when the body had moved, or when the width changed (the band depends on it).
         // The nipple tint is a material property and is live.
-        if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth) {   // persisted default for new cards — save it with the other settings
+        if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo) {   // persisted default for new cards — save it with the other settings
             if (id == kSkinShade) g.settings.skinShade = g.tw.skinShade;
             else if (id == kSkinShadeUnder) g.settings.skinShadeUnder = g.tw.skinShadeUnder;
             else if (id == kSkinShadeTop) g.settings.skinShadeTop = g.tw.skinShadeTop;
             else if (id == kSkinShadeWidth) g.settings.skinShadeWidth = g.tw.skinShadeWidth;
+            else if (id == kSkinAo) g.settings.skinAo = g.tw.skinAo;
             SaveSettings(g.settings);
         }
         ApplySkinLook(id == kSkinShadeWidth || (released && Current() && Current()->scene.skinShade.geometryDirty));
@@ -568,6 +583,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     g.tw.skinShadeUnder = g.settings.skinShadeUnder;
                     g.tw.skinShadeTop = g.settings.skinShadeTop;
                     g.tw.skinShadeWidth = g.settings.skinShadeWidth;
+                    g.tw.skinAo = g.settings.skinAo;
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));
@@ -582,6 +598,10 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.nippleOffset = g.tw.nippleMm / 1000.0f;
                 ao.nippleColour = NippleTintOption();
                 ao.skinShade = g.tw.skinShade;
+                ao.skinShadeUnder = g.tw.skinShadeUnder;
+                ao.skinShadeTop = g.tw.skinShadeTop;
+                ao.skinShadeWidth = g.tw.skinShadeWidth;
+                ao.skinAo = g.tw.skinAo;
                 ao.autoCloth = g.autoCloth;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
             }

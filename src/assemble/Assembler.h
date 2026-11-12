@@ -43,6 +43,13 @@ struct AssembleOptions {
     float skinShadeUnder = 1.0f;
     float skinShadeTop = 1.2f;
     float skinShadeWidth = 0.6f;
+    // Koikatsu's own skin look, baked into the body's skin texture on top of the cleavage shading: a local-curvature
+    // (cavity) factor from the base body normal map (form shading from the game's data, orientation-independent, never
+    // re-authoring the lighting MMD does) plus the ink lines of the line
+    // mask the game binds to _LineMask for the card's body detailId (cf_body_00_line at the default). The bake yields to
+    // SkinShade where skinShade darkened (no stacking); 0 = off, 1 = default, up to 2. Both are multiplied into the same
+    // texture the PMX exporter references, so every viewer of the exported model sees them.
+    float skinAo = 0.85f;
     bool autoCloth = false;                // DISABLED by default (revert to last good look): synthesised chains were rebinding hanging cloth
                                            // onto new bones and collapsing it toward the body. Opt-in with --auto-cloth / CARDBRIDGE_AUTO_CLOTH=1;
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables

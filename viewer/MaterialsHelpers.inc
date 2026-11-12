@@ -390,6 +390,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kSkinShadeUnder, "Fold under the breasts", "Skin shading"});
         rows.push_back({1, kSkinShadeTop, "Cleavage length", "Skin shading"});
         rows.push_back({1, kSkinShadeWidth, "Shading width", "Skin shading"});
+        rows.push_back({1, kSkinAo, "Koikatsu AO (base body normal + detail lines)", "Skin shading"});
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
@@ -436,6 +437,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kSkinShadeUnder, "Underboob fold shading (new cards)", "Export"});
         rows.push_back({1, kSkinShadeTop, "Cleavage shading length (new cards)", "Export"});
         rows.push_back({1, kSkinShadeWidth, "Cleavage shading width (new cards)", "Export"});
+        rows.push_back({1, kSkinAo, "Koikatsu AO (new cards)", "Export"});
         rows.push_back({0, -1, "Shader layers", "Layers"});
         rows.push_back({4, 0, "extra folder: " + shown(g.settings.layers, "(none)"), "Layers"});
         rows.push_back({5, kSetLayers, "Choose a shader layers folder ...", "Layers"});
@@ -477,7 +479,7 @@ bool AnyTweak() {
     for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
     if (TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside) return true;
     if (TweakChanged(kSkinShade) || TweakChanged(kSkinShadeUnder) || TweakChanged(kSkinShadeTop) ||
-        TweakChanged(kSkinShadeWidth) ||
+        TweakChanged(kSkinShadeWidth) || TweakChanged(kSkinAo) ||
         TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
         TweakChanged(kNippleG) || TweakChanged(kNippleB)) return true;
     if (g.mat.IsDirty()) return true;

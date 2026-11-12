@@ -28,6 +28,7 @@
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
 #include "export/SkinShade.h"
+#include "export/SkinAoBake.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -133,7 +134,9 @@ void usage() {
         "             [--skin-top F]                top extent of the cleavage: 0 = nothing, 1 = the full breast line (top of the\n"
         "                                             bust), 2 = a full bust length higher, toward the base of the neck; 0..2\n"
         "             [--skin-width F]              how wide the cleavage shading runs: 0.1 = a hairline, 1 = the default\n"
-        "                                             half-width, 2 = a broad gradient; 0.1..2 (the underboob fold is ray-gated, unchanged)\n"
+        "             [--skin-ao F]                 Koikatsu's own look baked into the skin (cavity AO from the base body normal map,\n"
+        "                                             Koikatsu's ink lines from the card's body detailId; 0 = off, 1 = default, up to 2,\n"
+        "                                             complements --skin-shade, never stacks with it\n"
         "             [--nipple-colour R,G,B]       nipple / areola tint, 0..255 each (default: a natural warm salmon-red)\n"
         "             [--card-nipples]              keep the card's own nipColor instead of the automatic pink tint\n"
         "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
@@ -522,6 +525,7 @@ int cmdConvert(const Args& a) {
     if (a.opt.count("skin-underboob")) ao.skinShadeUnder = std::clamp(static_cast<float>(std::atof(a.get("skin-underboob").c_str())), 0.0f, 2.0f);
     if (a.opt.count("skin-top")) ao.skinShadeTop = std::clamp(static_cast<float>(std::atof(a.get("skin-top").c_str())), 0.0f, 2.0f);
     if (a.opt.count("skin-width")) ao.skinShadeWidth = std::clamp(static_cast<float>(std::atof(a.get("skin-width").c_str())), 0.1f, 2.0f);
+    if (a.opt.count("skin-ao")) ao.skinAo = std::clamp(static_cast<float>(std::atof(a.get("skin-ao").c_str())), 0.0f, 2.0f);
     if (a.has("card-nipples")) {
         ao.nippleColour = Vec4{0, 0, 0, 0};   // keep the card's own nipColor
     } else if (a.opt.count("nipple-colour")) {
@@ -566,8 +570,11 @@ int cmdConvert(const Args& a) {
         }
         if (shoeHidden) { std::fprintf(stderr, "  (heel re-pose after --hide: reshaping...)\n"); fflush(stderr); if (!assemble::Reshape(scene, c, *ctx.resolver, ao)) std::fprintf(stderr, "  (heel re-pose after --hide needs a re-assemble)\n"); std::fprintf(stderr, "  (heel re-pose done)\n"); fflush(stderr); }
     }
-    if (scene.skinShade.geometryDirty)   // a re-shape moved the body: keep the skin shading on it
+    if (scene.skinShade.geometryDirty) {   // a re-shape moved the body: keep the skin shading (and the AO bake) on it
         exporter::ApplySkinShade(scene, ao.skinShade, ao.skinShadeUnder, ao.skinShadeTop, ao.skinShadeWidth, true);
+        if (!scene.aoBake.baseNormal.empty() && (ao.skinAo > 0.0f || scene.aoBake.applied >= 0.0f))
+            exporter::ApplySkinAoBake(scene, ao.skinAo, true);
+    }
     std::fprintf(stderr, "  bundle cache: %.1f MB\n", static_cast<double>(ctx.resolver->cacheBytes()) / 1048576.0); fflush(stderr);
     size_t parts = 0, failed = 0;
     for (const auto& p : scene.parts) {

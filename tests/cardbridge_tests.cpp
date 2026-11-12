@@ -33,6 +33,7 @@
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
+#include "export/SkinAoBake.h"
 #include "library/Library.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
@@ -3375,6 +3376,114 @@ void unitTests() {
         const int one = pixel(32, 32);
         CHECK(exporter::ApplySkinShade(scene, 2.0f, 2.0f, 1.0f, 1.0f, false));
         CHECK(pixel(32, 32) < one);   // more strength digs the crease deeper
+    });
+    test("koikatsu AO bake: the base body normal shades the valley, the line mask darkens and strength 0 restores exactly", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "body_create_result";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 200);
+            for (size_t i = 0; i < 64 * 64; ++i) tex.rgba[i * 4 + 3] = 244;
+            assemble::SceneMesh mesh;
+            mesh.name = "body_skin";
+            const int N = 16;
+            const float A = 0.14f, S = 0.035f;
+            for (int iz = 0; iz <= N; ++iz) {
+                for (int ix = 0; ix <= N; ++ix) {
+                    const float x = -0.2f + 0.4f * static_cast<float>(ix) / static_cast<float>(N);
+                    const float z = -0.2f + 0.4f * static_cast<float>(iz) / static_cast<float>(N);
+                    const float e = std::exp(-(x * x) / (2.0f * S * S));
+                    const float dydx = A * x / (S * S) * e;
+                    assemble::SceneVertex v;
+                    v.pos = {x, -A * e, z};
+                    v.normal = normalize(Vec3{-dydx, 1.0f, 0.0f});
+                    v.uv = {(x + 0.2f) / 0.4f, (z + 0.2f) / 0.4f};
+                    v.uv1 = v.uv2 = v.uv3 = v.uv;
+                    mesh.vertices.push_back(v);
+                }
+            }
+            assemble::SceneSubmesh sub;
+            for (int iz = 0; iz < N; ++iz)
+                for (int ix = 0; ix < N; ++ix) {
+                    const uint32_t a = static_cast<uint32_t>(iz * (N + 1) + ix), b = a + 1;
+                    const uint32_t d = static_cast<uint32_t>((iz + 1) * (N + 1) + ix), c = d + 1;
+                    sub.indices.insert(sub.indices.end(), {a, b, c, a, c, d});
+                }
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            scene.skinShade.meshes = {0};
+            scene.skinShade.texture = 0;
+            return scene;
+        };
+        // A striped base body normal map (DXT5nm convention: X in alpha as 0..255, Y in green). Flat left half,
+        // alternating +/-0.4 slopes on the right: the neighbourhood-average deviation the cavity bake keys on.
+        auto fillFlatNormal = [](std::vector<uint8_t>& out, int w, int h) {
+            out.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 128);
+            for (size_t i = 0; i < static_cast<size_t>(w) * static_cast<size_t>(h); ++i) { out[i * 4 + 3] = 128; out[i * 4 + 1] = 128; }
+        };
+        auto fillStripes = [&](std::vector<uint8_t>& out, int w, int h, bool everywhere) {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * w + static_cast<size_t>(x)) * 4;
+                    if (!everywhere && x < 32) { out[i + 3] = 128; out[i + 1] = 128; out[i + 0] = 128; out[i + 2] = 128; continue; }
+                    const int stripe = (x / 3) % 2;
+                    out[i + 3] = stripe ? 76 : 178;   // X in alpha: -0.4 / +0.4
+                    out[i + 1] = 128;                 // Y in green: 0
+                    out[i + 0] = 128;
+                    out[i + 2] = 128;
+                }
+        };
+        auto pixel = [&](assemble::Scene& s, int x, int y) { return static_cast<int>(s.textures[0].rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
+        {   // flat skin stays untouched, the striped half darkens (the cavity factor), alpha preserved, strength 0 restores
+            assemble::Scene scene = makeScene();
+            fillFlatNormal(scene.aoBake.baseNormal, 64, 64);
+            fillStripes(scene.aoBake.baseNormal, 64, 64, false);
+            scene.aoBake.baseNormalWidth = scene.aoBake.baseNormalHeight = 64;
+            CHECK(exporter::ApplySkinAoBake(scene, 1.0f, true));
+            const int flatZone = pixel(scene, 10, 32);
+            const int stripeZone = pixel(scene, 50, 32);
+            CHECK(flatZone == 200);              // flat skin: exactly untouched
+            CHECK(stripeZone < 200 - 20);        // striped (high-deviation) areas shade darker
+            CHECK(stripeZone < flatZone);
+            for (size_t i = 0; i < scene.textures[0].rgba.size(); i += 4) CHECK(scene.textures[0].rgba[i + 3] == 244);
+            CHECK(exporter::ApplySkinAoBake(scene, 0.0f, false));
+            CHECK(pixel(scene, 50, 32) == 200);
+            CHECK(pixel(scene, 10, 32) == 200);
+        }
+        {   // a vertical ink line through the valley centre (G channel, like cf_body_00_line): the line darkens at strength 1
+            assemble::Scene scene = makeScene();
+            fillFlatNormal(scene.aoBake.baseNormal, 64, 64);
+            scene.aoBake.baseNormalWidth = scene.aoBake.baseNormalHeight = 64;
+            scene.aoBake.lineMask.assign(64 * 64 * 4, 0);
+            scene.aoBake.lineMaskWidth = scene.aoBake.lineMaskHeight = 64;
+            for (int y = 0; y < 64; ++y) for (int x = 30; x <= 34; ++x) {   // a 5-texel line at u ~ 0.47-0.53
+                const size_t i = static_cast<size_t>(y) * 64 + static_cast<size_t>(x);
+                scene.aoBake.lineMask[i * 4 + 1] = 255;
+            }
+            CHECK(exporter::ApplySkinAoBake(scene, 1.0f, true));
+            const int onLine = pixel(scene, 32, 32);
+            CHECK(exporter::ApplySkinAoBake(scene, 0.0f, false));
+            CHECK(pixel(scene, 32, 32) == 200);
+            CHECK(onLine < 200 - 15);
+        }
+        {   // the new bake yields to SkinShade's darkening (attenuation: no stacking in a full crease)
+            assemble::Scene shadeOnly = makeScene();
+            CHECK(exporter::ApplySkinShade(shadeOnly, 2.0f, 2.0f, 1.0f, 1.0f, true));
+            const int creaseShade = pixel(shadeOnly, 32, 32);
+            assemble::Scene shadeThenAo = makeScene();
+            fillFlatNormal(shadeThenAo.aoBake.baseNormal, 64, 64);
+            fillStripes(shadeThenAo.aoBake.baseNormal, 64, 64, true);   // stripes everywhere: the valley centre is strongly marked too
+            shadeThenAo.aoBake.baseNormalWidth = shadeThenAo.aoBake.baseNormalHeight = 64;
+            CHECK(exporter::ApplySkinShade(shadeThenAo, 2.0f, 2.0f, 1.0f, 1.0f, true));
+            CHECK(exporter::ApplySkinAoBake(shadeThenAo, 1.0f, false));
+            const int creaseCombined = pixel(shadeThenAo, 32, 32);
+            if (std::getenv("CARDBRIDGE_TEST_DEBUG_AO"))
+                std::fprintf(stderr, "crease debug: shade %d combined %d\n", creaseShade, creaseCombined);
+            CHECK(creaseCombined < creaseShade);               // the AO pass still contributes, a little
+            CHECK(creaseCombined >= static_cast<int>(creaseShade * 0.6f) - 1);   // but never at full strength: it yields to SkinShade (att scales the AO contribution down further as SkinShade's darkening deepens)
+        }
     });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
         assemble::Scene scene;
