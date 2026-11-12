@@ -1,7 +1,6 @@
 #include "export/GpuView.h"
 
 #include "material/MaterialWorkbench.h"   // material::MaterialIdColor (the MaterialID diagnostic colour)
-#include "export/SkinAoBake.h"           // BuildSkinAoFactor (the SkinAO diagnostic)
 
 #include "export/AdapterSelect.h"
 #include "export/ColourGrade.h"
@@ -174,8 +173,6 @@ struct GpuView::Impl {
     std::string diagError;               // why the diagnostic shader could not be built (empty when it works)
     bool diagTried = false;
     std::vector<DiagnosticMaterial> diagMats;   // per-material interpreted params, indexed by scene.materials index
-    GpuTex diagAo;                             // the SkinAO diagnostic's factor map (one byte per body texel, gray; 255 = untouched)
-    uint64_t diagAoKey = 0;                    // the strengths/geometry the uploaded map was built from; 0 = never uploaded
     // Outline: the material's silhouette ring (_LineWidthS, _LineColor) drawn as a copy of the mesh pushed out along its normals in
     // screen space and slightly back in depth, so only the part beyond the surface shows.
     ID3D11VertexShader* olVs = nullptr;
@@ -245,7 +242,7 @@ cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4
 // sph.x: the PMX sphere map in t2, 1 multiplies, 2 adds (looked up by the normal's screen x and y, as MMD does).
 // MikuMikuDance's look (the "as exported" view): mmd.x = 1 the material takes self-shadow (l0..l2: world -> shadow map, z = depth),
 // mmd.y = 1 the ground shadow pass (the mesh flattened along the light onto the floor at height mmd.z, drawn in `diffuse`), mmd.w the model's radius.
-Texture2D t0 : register(t0); Texture2D t1 : register(t1); SamplerState s0 : register(s0);
+Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 Texture2D<float> sm : register(t1); SamplerComparisonState sc : register(s1);
 Texture2D t2 : register(t2);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
@@ -320,9 +317,8 @@ cbuffer D : register(b0) {
     float4 params;           // x roughness, y metallic, z transmission strength, w transmission thickness
     float4 transCol;         // rgb: transmission tint, w: double sided
     float4 idCol;            // rgb: deterministic material-id colour
-    float4 aoCtl;            // x: 1 = the t1 factor map holds meaningful data for this material (body skin), 0 = not this draw
 };
-Texture2D t0 : register(t0); Texture2D t1 : register(t1); SamplerState s0 : register(s0);
+Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
 struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; };
 VO vs(VI i) {
@@ -364,9 +360,6 @@ float4 ps(VO i, bool front : SV_IsFrontFace) : SV_Target {
         return float4(transCol.rgb * params.z * wrap * exp(-params.w), 1);
     } else if (mode == 10) {         // MaterialID
         return float4(idCol.rgb, 1);
-    } else if (mode == 11) {        // SkinAO: the factor the bake applies (t1 = factor map, gray; only for the body skin)
-        if (aoCtl.x > 0.5) return float4(t1.Sample(s0, i.uv).rrr, 1);
-        return float4(0.35, 0.35, 0.35, 1);
     }
     return float4(diffuse.rgb, 1);
 }
@@ -403,7 +396,7 @@ float4 ps(VO i, bool front : SV_IsFrontFace) : SV_Target {
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
         ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &diagIl));
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 11 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = 10 * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &diagCb));
         D3D11_RASTERIZER_DESC rd{};
         rd.FillMode = D3D11_FILL_WIREFRAME;
@@ -556,7 +549,6 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Rel(smDsv); Rel(smSrv); Rel(smCmp); Rel(smTex);
         Rel(fbVs); Rel(fbPs); Rel(fbIl); Rel(fbCb);
         Rel(diagVs); Rel(diagPs); Rel(diagIl); Rel(diagCb);
-        Rel(diagAo.tex); Rel(diagAo.srv);
         if (wireRs) { wireRs->Release(); wireRs = nullptr; }
         Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb);
         Rel(skCs);
@@ -1546,41 +1538,9 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                     // Lit stays on the path below; every other mode draws here, game shaders unused.
                     if (I.diagMode != static_cast<int>(ViewMode::Lit)) {
                         if (!I.diagTried) I.MakeDiagnostic();
-                        if (I.diagMode == static_cast<int>(ViewMode::SkinAO)) {
-                            // Rebuild the factor map only when the body skin texture changed since the last upload
-                            // (strength drags, a re-shape, a re-bake all rewrite it and change its pixel hash)
-                            uint64_t aoKey = 1469598103934665603ULL;
-                            const int ti = scene.skinShade.texture;
-                            if (ti >= 0 && static_cast<size_t>(ti) < scene.textures.size()) {
-                                const auto& bt = scene.textures[static_cast<size_t>(ti)];
-                                aoKey ^= bt.pixelHash + 0x9e3779b97f4a7c15ULL;
-                                aoKey *= 1099511628211ULL;
-                                aoKey ^= static_cast<uint64_t>(static_cast<uint32_t>(bt.width) << 16 | static_cast<uint32_t>(bt.height));
-                                aoKey *= 1099511628211ULL;
-                            }
-                            if (aoKey != I.diagAoKey || !I.diagAo.srv) {
-                                if (I.diagAo.srv) { Rel(I.diagAo.tex); Rel(I.diagAo.srv); }
-                                const int ti2 = scene.skinShade.texture;
-                                int tw = 1, th = 1;
-                                if (ti2 >= 0 && static_cast<size_t>(ti2) < scene.textures.size()) { tw = scene.textures[static_cast<size_t>(ti2)].width; th = scene.textures[static_cast<size_t>(ti2)].height; }
-                                const auto factor = BuildSkinAoFactor(scene);
-                                if (!factor.empty()) {
-                                    std::vector<uint8_t> rgba(factor.size() * 4);
-                                    for (size_t i = 0; i < factor.size(); ++i) {
-                                        rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = factor[i];
-                                        rgba[i * 4 + 3] = 255;
-                                    }
-                                    I.MakeTexture(tw, th, rgba.data(), I.diagAo, true, false);   // Unity v-up: rows top-first
-                                } else {
-                                    static constexpr uint8_t kWhite[4] = {255, 255, 255, 255};
-                                    I.MakeTexture(1, 1, kWhite, I.diagAo, false, false);           // AO absent / off: white map
-                                }
-                                I.diagAoKey = aoKey;
-                            }
-                        }
                         if (I.diagVs && I.diagPs && I.diagIl && I.diagCb) {
                             const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
-                            float cbv[11 * 4] = {};
+                            float cbv[10 * 4] = {};
                             for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                             cbv[16 + 0] = L[0]; cbv[16 + 1] = L[1]; cbv[16 + 2] = L[2];
                             cbv[20 + 0] = static_cast<float>(I.diagMode);
@@ -1596,7 +1556,6 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                             const Vec3 idc = material::MaterialIdColor(static_cast<int>(gs.material));
                             cbv[36 + 0] = idc.x; cbv[36 + 1] = idc.y; cbv[36 + 2] = idc.z;
                             cbv[36 + 3] = 1.0f;
-                            cbv[40 + 0] = mat.cardSkin ? 1.0f : 0.0f;   // SkinAO mode: t1 holds the AO factor for the body skin
                             ctx->UpdateSubresource(I.diagCb, 0, nullptr, cbv, 0, 0);
                             ctx->IASetInputLayout(I.diagIl);
                             ctx->VSSetShader(I.diagVs, nullptr, 0);
@@ -1605,9 +1564,7 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                             ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : I.rasterCull));
                             const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                             const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
-                            const GpuTex* at = I.diagAo.srv ? &I.diagAo : &I.defaults[0];
                             ctx->PSSetShaderResources(0, 1, &ft->srv);
-                            ctx->PSSetShaderResources(1, 1, &at->srv);
                             ctx->PSSetSamplers(0, 1, ftClamp ? &I.samplerClamp : &I.samplerWrap);
                             ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                             ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);

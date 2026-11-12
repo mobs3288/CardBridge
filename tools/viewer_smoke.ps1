@@ -386,7 +386,7 @@ try {
         if ($null -eq $client) { Check 'viewmode: the layout reports the client size' $false; }
         else {
             $cw = [int]$client[0]; $kPanel = [int]$lay.panel
-            $cellW = [int](($cw - $kPanel - 12 - 64 - 8) / 12)
+            $cellW = [int](($cw - $kPanel - 12 - 64 - 8) / 11)
             $stripY = [int]$client[1] - 17
             # M-ID (mode 10) cell centre; the Lit cell is at index 0
             $mIdX = $kPanel + 6 + 10 * $cellW + [int]($cellW / 2)
@@ -401,16 +401,6 @@ try {
             $c = Shot 'viewmode_lit'
             Check 'viewmode: back to Lit restores the picture' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
             Check 'viewmode: the layout answers with the lit mode' ($lay.state.diagMode -eq 0) "diagMode $($lay.state.diagMode)"
-            $aoX = $kPanel + 6 + 11 * $cellW + [int]($cellW / 2)
-            Click $aoX $stripY 700
-            $lay = Layout
-            $d = Shot 'viewmode_skinAO'
-            Check 'viewmode: switching to SkinAO changes the picture' ([V]::DiffView($a.Path, $d.Path, $lay.panel) -gt 0.002) ("{0:P2} of the view" -f [V]::DiffView($a.Path, $d.Path, $lay.panel))
-            Check 'viewmode: the layout answers with the SkinAO mode' ($lay.state.diagMode -eq 11) "diagMode $($lay.state.diagMode)"
-            $litX = $kPanel + 6 + [int]($cellW / 2)
-            Click $litX $stripY 700
-            $lay = Layout
-            Check 'viewmode: restoring Lit re-answers with lit mode' ($lay.state.diagMode -eq 0) "diagMode $($lay.state.diagMode)"
         }
     }
 
