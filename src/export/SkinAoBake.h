@@ -45,4 +45,10 @@ namespace cardbridge::exporter {
 // base body normal map for the card's body, is unavailable - the caller keeps the texture untouched.
 bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild);
 
+// The viewer's diagnostic strip ("SkinAO") renders this gray: one byte per body-skin texel with the
+// multiplier the current bake applies (255 = no effect, 0 = fully darkened). Uncovered texels are
+// 255. Empty when there is no body skin texture or no AO data - the viewer then renders the body
+// flat (the correct look for "AO off").
+std::vector<uint8_t> BuildSkinAoFactor(const assemble::Scene& scene);
+
 }  // namespace cardbridge::exporter

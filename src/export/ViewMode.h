@@ -26,6 +26,7 @@ enum class ViewMode {
     UVChecker,      // UV checkerboard
     Transmission,   // wrap-light fabric transmission from a back light (ADR-004)
     MaterialID,     // one deterministic colour per material
+    SkinAO,         // the baked Koikatsu AO contribution on the body skin (white = untouched, dark = darkened)
     Count
 };
 

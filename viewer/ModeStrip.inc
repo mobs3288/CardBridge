@@ -15,7 +15,7 @@ constexpr int kModeStripH = 22, kModeStripSide = 6, kModeStripGap = 8, kModeIsol
 std::vector<ModeStripCell> ModeStripCells(int x0, int W, int H) {
     std::vector<ModeStripCell> cells;
     if (!Current() || W < 8 || H < 60) return cells;
-    const int n = static_cast<int>(exporter::ViewMode::MaterialID) + 1;
+    const int n = static_cast<int>(exporter::ViewMode::Count);
     const int cellW = (W - 2 * kModeStripSide - kModeIsolateW - kModeStripGap) / n;
     if (cellW < 30) return cells;
     const int y0 = H - kModeStripH - kModeStripSide;
@@ -76,7 +76,7 @@ void DrawModeStrip(HDC dc, int x0, int W, int H) {
         DeleteObject(bg);
         DeleteObject(rgn);
     }
-    static constexpr const char* const labels[11] = {"Lit", "Unlit", "Base", "Wire", "Normal", "Rough", "Metal", "Opacity", "UV", "Trans", "M-ID"};
+    static constexpr const char* const labels[12] = {"Lit", "Unlit", "Base", "Wire", "Normal", "Rough", "Metal", "Opacity", "UV", "Trans", "M-ID", "SkinAO"};
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, g.fontSmall));
     for (size_t i = 0; i < cells.size(); ++i) {
         const ModeStripCell& c = cells[i];

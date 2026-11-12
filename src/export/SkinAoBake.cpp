@@ -274,4 +274,35 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
     return true;
 }
 
+std::vector<uint8_t> BuildSkinAoFactor(const assemble::Scene& scene) {
+    auto& ss = scene.skinShade;
+    auto& ao = scene.aoBake;
+    if (!ao.built || ss.texture < 0 || static_cast<size_t>(ss.texture) >= scene.textures.size()) return {};
+    const auto& tex = scene.textures[static_cast<size_t>(ss.texture)];
+    if (tex.width <= 0 || tex.height <= 0) return {};
+    const size_t WH = static_cast<size_t>(tex.width) * static_cast<size_t>(tex.height);
+    std::vector<uint8_t> out(WH, 255);
+    const float s = clampf(ao.applied < 0.0f ? 0.0f : ao.applied, 0.0f, 2.0f);
+    const float sc = ss.applied >= 0.0f ? clampf(ss.applied, 0.0f, 2.0f) : 0.0f;
+    const float su = ss.applied >= 0.0f ? clampf(ss.appliedUnder, 0.0f, 2.0f) : 0.0f;
+    const bool shadeLo = !ss.shade.empty() && !ss.shadeU.empty() && !ss.covered.empty() && ss.shade.size() == ao.covered.size();
+    for (size_t i = 0; i < ao.covered.size(); ++i) {
+        if (!ao.covered[i]) continue;
+        float splitMul = 1.0f;
+        if (shadeLo && ss.covered[i]) {
+            const float litC = static_cast<float>(ss.shade[i]) / 255.0f;
+            const float litU = static_cast<float>(ss.shadeU[i]) / 255.0f;
+            const float mulC = clampf(1.0f - sc * (1.0f - litC), 0.04f, 1.0f);
+            const float mulU = clampf(1.0f - su * (1.0f - litU), 0.04f, 1.0f);
+            splitMul = mulU < mulC ? mulU : mulC;
+        }
+        const float existingDark = 1.0f - splitMul;
+        const float att = clampf(1.0f - 0.7f * existingDark, 0.0f, 1.0f);
+        const float aoMul = std::max(0.30f, 1.0f - s * (1.0f - ao.aoShade[i]) * att);
+        const float lineMul = std::max(0.45f, 1.0f - s * ao.aoLine[i] * att);
+        out[i] = static_cast<uint8_t>(clampf(aoMul * lineMul, 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+    return out;
+}
+
 }  // namespace cardbridge::exporter

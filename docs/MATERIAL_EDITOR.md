@@ -880,7 +880,7 @@ both renderers and in PMX; out-of-range UVs can be spotted visually.
 
 ### Stage 4 — Rendering diagnostics (implemented 2026-11-10, see MATERIAL_EDITOR_PROGRESS.md)
 
-1. `ViewMode` enum (11 modes) in software renderer — done, selected via
+1. `ViewMode` enum (in the software renderer; 12 modes since 2026-11-12 added `SkinAO`) — done, selected via
    `ViewOptions::mode`, diagnostics via `ViewOptions::diagnostics`.
 2. GPU fallback shader for the same modes — done (runtime HLSL via
    d3dcompiler_47; wireframe uses a FillMode rasterizer). Game-shader path untouched in Lit.

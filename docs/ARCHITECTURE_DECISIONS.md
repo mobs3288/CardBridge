@@ -193,8 +193,9 @@ not exist for UVs — deferred indefinitely.
 `shaded`, `step`, `highlightPart`, `skin`. The software raster loop
 (`Preview.cpp:644-800`) is per-pixel and already branches on those flags.
 
-**Decision.** One enum `ViewMode` with the spec's 11 modes; the software
-path branches per pixel; the GPU path uses the ADR-003 fallback shader. The
+**Decision.** One enum `ViewMode` with the spec's 11 modes plus `SkinAO`
+(2026-11-12, added to check the baked Koikatsu AO on the body skin); the
+software path branches per pixel; the GPU path uses the ADR-003 fallback shader. The
 viewport gets a mode strip chosen GDI-side (bottom of the 3D view, the
   same DC the skeleton overlay uses) and the viewport shows a MaterialID
 legend (drawn only in MaterialID mode) for Material ID.
