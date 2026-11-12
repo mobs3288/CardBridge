@@ -208,6 +208,10 @@ and the "off" path stays bit-exact with today's output. They must never
   normal folded into the same local vector, exactly as `_DetailNormalMapScale`
   does) and **Koikatsu's original body details** (the ink-line channel `G` of the
   default line mask `cf_body_00_line`, and of the card's `detailId` `LineMask`).
+  **Collarbone damping:** the line mask used with this bake finds its own
+  clavicle band (the top-third row with the widest G\>60 run, no fixed atlas
+  coordinates) and damps the ink-line multiplier inside it to \~0.35 so the
+  collarbone strokes stay subtle without muting any other ink.
   **Limb dampening:** vertices bound mostly to the arm or leg chains (any bone
   whose name contains `leg`, `shin`, `thigh`, `knee`, `arm`, `forearm`, `elbow`,
   `wrist`) take ~25% of the bake's effect so the elbow and knee joints stay

@@ -66,8 +66,12 @@ void RasterizeAo(const assemble::SceneMesh& mesh, const assemble::SceneSkinAoBak
             if (std::fabs(den) < 1e-7f) continue;
             const int x0 = std::max(0, std::min({ax, bx, cx})), x1 = std::min(W - 1, std::max({ax, bx, cx}));
             const int y0 = std::max(0, std::min({ay, by, cy})), y1 = std::min(H - 1, std::max({ay, by, cy}));
+            // Collardbone damp applies to rows inside the band the clavicle arcs occupy in the line mask (computed once per rebuild).
+            const bool hasCollarBand = ao.collarLo >= 0.0f;
             for (int y = y0; y <= y1; ++y) {
                 const float py = static_cast<float>(y) + 0.5f;
+                const bool inCollarBand = hasCollarBand && static_cast<float>(y) >= ao.collarLo && static_cast<float>(y) <= ao.collarHi;
+                const float collarFactor = inCollarBand ? ao.collarDamp : 1.0f;
                 for (int x = x0; x <= x1; ++x) {
                     const size_t at = static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x);
                     if (covered[at]) continue;   // overlapping islands: the first triangle wins, as the skin bake does
@@ -89,8 +93,9 @@ void RasterizeAo(const assemble::SceneMesh& mesh, const assemble::SceneSkinAoBak
                         const float g = lp[1] * (1.0f / 255.0f);
                         // Only the pure ink-line channel (G) is baked - the R/B passes are faint rim/carve data for the
                         // game's lighting, not ink, and multiply all wrong into a diffuse texture. Scaled down so the navel,
-                        // clavicle and knee strokes read as faint accents without dominating.
-                        line = clampf(g * 0.55f, 0.0f, 1.0f);
+                        // clavicle and knee strokes read as faint accents without dominating. The clavicle band gets an
+                        // extra damp so it stays subtle without muting anything else.
+                        line = clampf(g * 0.55f, 0.0f, 1.0f) * collarFactor;
                     }
                     covered[at] = 1;
                     localNormals[at] = nLocal;
@@ -203,6 +208,23 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
         if (std::getenv("CARDBRIDGE_DEBUG_AO"))
             std::fprintf(stderr, "ao debug: %d of %zu bones classified as limb\n", limbBoneCount, scene.bones.size());
         std::vector<Vec3> localNormals(WH, Vec3{0.0f, 0.0f, 1.0f});
+        // Find the collarbone band from the line mask itself: the row in the upper third with the widest G>60 run.
+        // Matches the mask we are multiplying, works for any atlas variant, and keeps the collarbone subtle
+        // without touching any other part of the body. Only needed once per bake; if it fails, nothing is damped.
+        if (ao.collarLo < 0.0f && !ao.lineMask.empty() && ao.lineMaskWidth > 0 && ao.lineMaskHeight > 0) {
+            int bestSpan = 0, bestY = -1;
+            for (int y = 0; y < ao.lineMaskHeight / 3; ++y) {
+                const uint8_t* row = ao.lineMask.data() + static_cast<size_t>(y) * static_cast<size_t>(ao.lineMaskWidth) * 4;
+                int first = -1, last = -1;
+                for (int x = 0; x < ao.lineMaskWidth; ++x)
+                    if (row[static_cast<size_t>(x) * 4 + 1] > 60) { if (first < 0) first = x; last = x; }
+                if (first >= 0 && last - first + 1 > bestSpan) { bestSpan = last - first + 1; bestY = y; }
+            }
+            if (bestSpan >= 100 && bestY >= 0) { ao.collarLo = static_cast<float>(bestY - 10); ao.collarHi = static_cast<float>(bestY + 10); }
+            else ao.collarLo = ao.collarHi = -2.0f;   // sentinel: band looked for, none found
+            if (std::getenv("CARDBRIDGE_DEBUG_AO"))
+                std::fprintf(stderr, "ao debug: collarbone band %g..%g (widest run %d)\n", ao.collarLo, ao.collarHi, bestSpan);
+        }
         for (int mi : ss.meshes) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];

@@ -167,6 +167,8 @@ struct SceneSkinAoBake {
     int baseNormalWidth = 0, baseNormalHeight = 0;
     std::vector<uint8_t> lineMask;     // decoded _LineMask for the card's body detailId (cf_body_00_line at default), RGBA32
     int lineMaskWidth = 0, lineMaskHeight = 0;
+    float collarLo = -1.0f, collarHi = -1.0f;   // the row band the clavicle arcs occupy in the line mask (found from the mask itself, no fixed atlas coords); < 0 = no band
+    float collarDamp = 0.35f;                    // factor applied to the ink-line multiplier inside the band
     std::vector<uint8_t> detailNormal; // decoded detailId NormallMapDetail; empty when none (e.g. the 8x8 blank at default)
     int detailNormalWidth = 0, detailNormalHeight = 0;
     std::vector<float> aoShade;        // per-texel normal-lighting factor at strength 1 (1 = lit); width * height
