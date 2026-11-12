@@ -35,8 +35,9 @@ model" format to export into — the mesh, skeleton and materials all live in
 the game's AssetBundles and the zipmods, not in the card or the outfit file.
 The image part is cosmetic (an icon); the data part is what makes it outfit
 data. CardBridge writes it the same way Koikatsu and `--clothes` already read
-it: copy the card's own face thumbnail through as the icon (or embed any
-PNG the user chooses), then append the coordinate payload after IEND.
+it: a rendered, bald, grey-faced mannequin in the outfit as the icon (or the
+face thumbnail, or any PNG the user chooses), then the coordinate payload
+appended after IEND.
 
 CardBridge today can **apply** an outfit file to a character (`--clothes` on
 the CLI, drag-and-drop in the viewer). It cannot **produce** one.
@@ -129,8 +130,7 @@ length, then UTF-8 (`src/core/Bytes.h:83-94`). Writing it is a few lines.
 
 `pngEnd(file)` (`CardFile.cpp:68-83`) finds the first byte after IEND; the
 reader validates PNG signature and complete chunks on the way out — the
-writer can rely on copying the source card's thumbnail bytes through IEND
-unchanged.
+writer embeds the mannequin icon verbatim (it is already a valid PNG).
 
 ### 2.2 Outfit files are self-contained about ids
 
@@ -238,9 +238,9 @@ namespace cardbridge::card {
 struct ClothingExportOptions {
     int outfit = -1;               // -1: the card's current (Status.coordinateType), like convert
     std::string name;              // empty: default derived from character + outfit, §5.6
-    std::string thumbnailPngPath;  // empty: use the source card's faceThumbnail
+    std::string thumbnailPngPath;  // empty: render or use `thumbnailBytes`; empty there too: reuse the card's faceThumbnail
+    Bytes thumbnailBytes;           // empty: render via the mannequin path (viewer/--render-thumbnail) or fall back to the face thumbnail
     bool withAbmx = false;         // KKABMPlugin.ABMData verbatim; default off, §5.5
-    bool keepCardThumbnail = true; // thumbnail policy, §5.2
     bool includeHidden = false;    // keep accessories the card hides (showAccessory==0); default off (§5.9)
     bool withHairAccessories = false;  // keep hair-type accessories (type 122/123); default off (§5.9)
     std::set<int> hiddenSlots;          // extra accessory slots to omit (viewer untick / CLI --hide), §5.9
@@ -306,23 +306,29 @@ through temp files where needed).
 ### 5.2 The PNG the outfit file carries
 
 Reader doesn't care about the image; the game shows it as the outfit's icon.
-Policy:
+Policy (current, shipped):
 
-1. Default: **copy `Card::faceThumbnail` through unchanged** — it is already a
-   valid PNG (the container slice starts at `pngEnd`), zero re-encode, zero
-   cost, byte-reproducible output. Visually it shows the character's face, not
-   the outfit; harmless.
-2. `--thumbnail <file.png>` CLI / a checkbox in the viewer save path: use the
-   provided image (validated: PNG signature + `pngEnd` succeeds, so a JPEG
+1. **The icon is a faceless, bald mannequin wearing exactly what the file
+   carries** — a render through the same software path the preview uses
+   (`exporter::RenderOutfitIcon`). Bald, because an outfit file never carries
+   the character's hair; grey-flat, because skin is not the outfit. This is the
+   same convention Koikatsu itself uses for its own coordinate .png files
+   (verified on real game-produced files: a bald grey mannequin in the outfit,
+   no face, on the preview-coloured background). Deterministic: same card +
+   same outfit → same bytes.
+2. `--thumbnail <file.png>` CLI / an option in the viewer's save dialog: use
+   the provided image (validated: PNG signature + `pngEnd` succeeds, so a JPEG
    with a renamed extension is rejected with a clear error rather than
    silently embedded).
-3. Optional later: render the *shown outfit* as a 640×800 RGBA preview through
-   the existing `Preview`-style software path and embed it. This is real work
-   and needs the scene; it is explicitly **not** in this plan's scope.
-   (Called out here so the first version does not accrete it silently.)
-
-`stb_image_write` is available (`cli/main.cpp`, `Preview.cpp`) if anything ever
-needs re-encoding; the byte-copy path does not.
+3. `--render-thumbnail` CLI: assemble the scene like `convert` does (the same
+   `--library` / `--mods` requirement) and render the mannequin icon (1).
+   The viewer's **Export clothes** button always does (1).
+4. Face thumbnail (`Card::faceThumbnail`) remains the fallback path only when
+   neither thumbnail option is set and rendering is not available — kept for
+   `BuildClothingFileBytes` callers with no scene at all.
+5. `--with-hair-accessories` keeps the hair on too: hair-type accessories
+   (122/123) and the character's own hair show on the mannequin (and enter the
+   file), off by default.
 
 ### 5.3 Re-localising ids (author Slot → LocalSlot)
 
@@ -464,10 +470,11 @@ Source shape (character): `{coordinate → {garment → [png, replace]}}` (a bar
 
 ### 5.7 Determinism and safety
 
-- **Deterministic:** pure function of the loaded `Card`. The thumbnail is
-  copied, `MsgPackPack` is a pure function of the `Value`, map order is
-  preserved — two runs on the same card produce the same SHA-256. Tested
-  (§8, test T7).
+- **Deterministic:** pure function of the loaded `Card` *and* of the scene the
+  icon renderer draws (grey mannequin + the outfit, fixed cameras/lights/
+  background — the same renderer that draws `out/preview*.png`). `MsgPackPack`
+  is a pure function of the `Value`, map order is preserved — two runs on the
+  same card produce the same SHA-256. Tested (§8, test T7).
 - **Never overwrites the source card:** `ExportClothingToFile` compares
   `_fullpath`s and throws when they match. With `--overwrite` absent, an
   existing target is an error (`exit 3`), not a silent clobber.
@@ -774,14 +781,19 @@ Findings (each changed a detail of the plan, all folded back in):
 
 ```
 cardbridge clothes <card.png> [--outfit N] [--name <name>]
-                              [--out <file.png>] [--thumbnail <file.png>]
+                              [--out <file.png>] [--thumbnail <file.png>] [--render-thumbnail]
                               [--with-abmx] [--json] [--overwrite]
                               [--hide 3,7,17] [--include-hidden] [--with-hair-accessories]
 ```
 
 - `--hide a,b,c` omits the named accessory slots (additive to the card's own
   hidden state); `--include-hidden` keeps what the card hides;
-  `--with-hair-accessories` keeps hair-type accessories (default: out, §5.9).
+  `--with-hair-accessories` keeps hair-type accessories **in the file and on
+  the mannequin icon** (default: out, §5.9 / §5.2).
+- The icon is the faceless mannequin by default (§5.2/1); `--render-thumbnail`
+  assembles the scene like `convert` does (`--library` required, `--mods` or
+  `--no-mods`) and renders it; without it the card's face thumbnail is used.
+  The viewer's button always renders the mannequin icon.
 - Prints (to stdout, and as JSON with `--json`): the written path, size,
   outfit index/name, counts from `ClothingExportReport` (including hidden and
   hair-accessory omissions), warnings, dropped plugin keys — the same shape
@@ -902,7 +914,8 @@ gates, conflict with, or depend on this plan.
   verbatim for users who want e.g. pushup/DynamicBoneEditor settings in the
   round trip (slots unchanged by omissions only; rejected when slots were
   renumbered).
-- **M9 — full preview thumbnail** through the software renderer (§5.2/3).
+- **Batch export**: every outfit of a card → one file each (`--all-outfits`),
+  after the single-outfit path is proven.
 - **Batch export**: every outfit of a card → one file each (`--all-outfits`),
   after the single-outfit path is proven.
 - **Clothing import→export round-trip fuzz**: apply many real outfit files,
@@ -990,11 +1003,14 @@ how it actually went.
   game writes the flat form — fixed to accept the flat shape (all elements are
   the single coordinate), plus the same double-write guard.
 - **Writer** (`src/card/ClothingExport.{h,cpp}`): `ClothingExportOptions`
-  (`outfit`, `name`, `thumbnailPngPath`, `withAbmx`, `includeHidden`,
-  `withHairAccessories`, `hiddenSlots`), `BuildClothingFileBytes`,
-  `ExportClothingToFile` — exactly the plan's API (the `KeepThumbnail` flag
-  was dropped: the thumbnail is always the copied face PNG or `--thumbnail`).
-- **CLI**: `cardbridge clothes <card.png> [--outfit N] [--name X] [--out <f.png>] [--thumbnail <f.png>] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]`.
+  (`outfit`, `name`, `thumbnailPngPath`, `thumbnailBytes`, `withAbmx`,
+  `includeHidden`, `withHairAccessories`, `hiddenSlots`), `BuildClothingFileBytes`,
+  `ExportClothingToFile`. The icon is the faceless grey mannequin
+  (`exporter::RenderOutfitIcon`, the same software renderer as the preview);
+  the `KeepThumbnail` flag was dropped — the thumbnail comes from the caller
+  (`thumbnailBytes` "rendered mannequin" or `thumbnailPngPath` from the user),
+  else from `Card::faceThumbnail`.
+- **CLI**: `cardbridge clothes <card.png> [--outfit N] [--name X] [--out <f.png>] [--thumbnail <f.png>] [--render-thumbnail] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]`.
   Exit codes: 0 written, 1 usage, 2 unsupported / out-of-range / corrupt, 3 write failure.
   Default output: `<card stem> - <outfit name>.png` next to the card; `--overwrite` refuses to clobber without it; refusing to overwrite the source card itself.
 - **Viewer**: a second button in the outfit row — **Export clothes** (Shift+E),
@@ -1002,7 +1018,7 @@ how it actually went.
   `CARDBRIDGE_CLOTHES_PATH` for scripted runs); unticked accessory slots in the
   Parts list become empty parts; hidden (card `showAccessory`) and hair-type
   accessories are omitted; the log names every omission and every dropped
-  plugin block.
+  plugin block. The icon is always the mannequin render (§5.2).
 - **Verification**
   - `cardbridge_tests`: 6 065 checks, 0 failed. The clothing-export suite
     covers: round trip with `LoadClothingFile` + `ApplyClothing` re-apply
@@ -1012,8 +1028,12 @@ how it actually went.
     layout, and the guards (outfit index, overwrite, Sunshine).
   - Real-card run (private test instance, off-screen): the viewer's
     **Export clothes** button wrote the file; byte-identical to the CLI run on
-    the same card; `inspect` round trip reads it back correctly.
-  - Determinism: two exporter runs on the same card produce the same SHA-256.
+    the same card; `inspect` round trip reads it back correctly. The icon is
+    the mannequin render (§5.2); with `--with-hair-accessories` the hair and the
+    hair accessories show on it and in the exported file (verified on the
+    Akeno card: 24 accessories carried, twin-tails visible).
+  - Determinism: two exporter runs on the same card produce the same SHA-256;
+    the viewer and the CLI write identical bytes.
   - Determinism: exported file re-applies to the card it came from via
     `--clothes` (`ApplyClothing` counted "0 slots replaced, 3 accessories added"
     — an idempotent round trip, as expected).

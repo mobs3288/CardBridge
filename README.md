@@ -153,7 +153,7 @@ An outfit file is a Koikatsu `.png` whose payload after the image is a single co
 
 **Command line.** `convert <card.png> --clothes <outfit.png> ...` and `inspect <card.png> --clothes <outfit.png>` do the same one-shot merge for the export. `inspect <outfit.png>` shows an outfit file's name, garment ids and resolver rows. `--outfit N` chooses the target slot (default: the card's current outfit); `--replace-accessories` opts into wholesale accessory replacement.
 
-**Exporting an outfit file from a character card.** The reverse direction exists too: `cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [--thumbnail <file.png>] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]` writes the shown outfit back out as a `【KoiKatuClothes】` `.png` — the same format `--clothes` applies and the game reads. The viewer does the same from **Export clothes** (or `Shift+E`) in the outfit section next to Reset clothing. The file carries the clothes (with jacket sub-parts and pattern ids), the accessories, the makeup, the Sideloader resolver rows, the garment paint (`KCOX`) and the MaterialEditor main-texture edits, rebased to coordinate 0; MoreAccessories extras past slot 20 travel by copying the card's own XML, never by re-serialising it. Hidden accessories (the card's per-slot show/hide state in `Status.showAccessory`, the viewer's unticked slots, or `--hide a,b,c`) and hair-type accessories are **not exported**, by default — the same "hidden leaves the export" rule as the PMX; `--include-hidden` / `--with-hair-accessories` keep them, and the report names every slot omitted. The card on disk is never written; no library and no mods folder are needed, and the output is byte-reproducible: the same card always yields the same file.
+**Exporting an outfit file from a character card.** The reverse direction exists too: `cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [--render-thumbnail] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]` writes the shown outfit back out as a `【KoiKatuClothes】` `.png` — the same format `--clothes` applies and the game reads. The viewer does the same from **Export clothes** (or `Shift+E`) in the outfit section next to Reset clothing. The file carries the clothes (with jacket sub-parts and pattern ids), the accessories, the makeup, the Sideloader resolver rows, the garment paint (`KCOX`) and the MaterialEditor main-texture edits, rebased to coordinate 0; MoreAccessories extras past slot 20 travel by copying the card's own XML, never by re-serialising it. Hidden accessories (the card's per-slot show/hide state in `Status.showAccessory`, the viewer's unticked slots, or `--hide a,b,c`) and hair-type accessories are **not exported**, by default — the same "hidden leaves the export" rule as the PMX; `--include-hidden` / `--with-hair-accessories` keep them, and the report names every slot omitted. The icon in the file is a faceless, bald grey mannequin wearing the outfit — the same convention Koikatsu itself uses for its own coordinate files — rendered by the same software path as the preview; `--render-thumbnail` does this on the CLI (needs `--library` and `--mods`, like `convert`), and the viewer's button always does. The card on disk is never written; the export is byte-reproducible: the same card always yields the same file (viewer and CLI agree byte-for-byte).
 
 **Hair is never deleted.** In Koikatsu the hair can live entirely in the accessory slots (a "no hair" back slot, with the hair front and back worn as accessories, categories 122/123). The merge therefore keeps every hair accessory in its slot: an empty outfit slot never clears the character, and an outfit accessory that wants a slot taken by hair moves to the first empty slot instead (its attach node still decides where it hangs). The character's hair slots (back / front / side / extension) are untouched, because an outfit file has no hair. `--replace-accessories` on the CLI is the only way to overwrite them, for users who really want it.
 
@@ -253,7 +253,8 @@ cardbridge library check  --library "<library folder>" --hashes
 # export one outfit of a character card as an outfit file (the reverse of --clothes; nothing is written to the card)
 cardbridge clothes "<card.png>"                                        # current outfit; default out: <card stem> - <outfit name>.png next to the card
 cardbridge clothes "<card.png>" --outfit 2 --out "<outfit.png>"          # another outfit slot
-cardbridge clothes "<card.png>" --hide 3,7 --with-hair-accessories     # include hidden/hair slots too
+cardbridge clothes "<card.png>" --hide 3,7 --with-hair-accessories     # include hidden/hair slots too (and your hair on the mannequin icon)
+cardbridge clothes "<card.png>" --render-thumbnail --library "<lib>" --mods "<mods>"   # the mannequin icon (it needs the scene, like convert)
 # the viewer writes the same file from the "Export clothes" button (Shift+E) in the outfit section
 
 # look at a card: family, outfits, which items resolve to which mod
@@ -269,7 +270,8 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 
 # look at a card in a window (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel.
 # Hover a part row to light that part up in the model, click to hide/show it, right-click to solo it, click a group
-# header to fold it. The view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K
+# header to fold it. The lists under the panel (Parts, and every slider tab) scroll with the wheel or by dragging them
+# with the left button: a vertical drag picks the list up and moves it; the click under it is swallowed. The view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K
 # editor): click an axis ball to look at the model from that side (drag anywhere in it to orbit as before).
 # Accessory rows carry a move chip (an X/Y/Z gizmo) on their right end: click it to hold that accessory,
 # then drag an axis in the view to reposition it in XYZ (the move is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
@@ -278,17 +280,24 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
 # name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game
 # shaders, G colour grading, X (or the MMD button) as exported (the PMX as MikuMikuDance shows it: toon, edge, self-shadow, ground shadow), F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.
-# Shift+Left-click any slider (the panel, the Bones tab, the Material Workbench) to type its value with the keyboard: Enter commits, Esc restores it, clicking away commits. The typed text is the stored value (percent rows: 0..100).
+# Shift+Left-click any slider (the panel, the Bones tab, the Material Workbench) to type its value with the keyboard: Enter commits, Esc restores it, clicking away commits. The typed text is the stored value (percent rows: 0..100). On the Morphs tab, Shift+Left-click a row to rename its displayed name instead (display only, kept in the settings; the PMX keeps the original names).
 # The Body tab's Bust Size row carries a simple "Band:" (65..105) and "Cup:" (AA..G) preset under the slider: one click sets the size, and the chips track the slider (a size not on the grid lights none). The Look tab's Nipples group carries "Size:" (S, M, L, XL: -4 / 0 / +4 / +8 mm) under "Nipple out / in (mm)" the same way.
 # Posing: K shows the skeleton over the model (click a bone to select it), the Bones tab lists the bones as a tree (helper nodes behind a switch)
 # and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
 # The Morphs tab lists every morph the exported PMX would carry for this scene - the game's FaceBlendShape expressions (Brow / Eyes / Mouth, closed and open),
 # one morph per raw blend shape, the MMD standard names (あ い う え お, ん, まばたき, ウィンク, 真面目 ...) as copies of the game's pattern of the same meaning and the
-# one-eyed versions (ウィンク / ｳｨﾝｸ２右) - grouped into brows / eyes / mouth / other like MMD's morph panels, with live 0..100 sliders. The offsets are applied
+# one-eyed versions (ウィンク / ｳｨﾝｸ２右) - with live 0..100 sliders. The offsets are applied
 # bind-space before skinning, exactly the way the game applies blend shapes and MMD applies PMX vertex morphs, and the iris follows the lid (the white's mean
 # offset per shape) as it does in the PMX; so what you see is what the exported model does. The weights are not exported (no pose is baked - MMD plays them);
 # bones move in the Bones tab, the DynamicBone physics in the Look tab (Y), so every way the PMX can move is checkable in the viewer. The outfit / nude toggles are
 # material morphs in the PMX; the Parts list hides and shows the same meshes.
+# The list is organized like MMD's morph panels - Brows / Eyes / Mouth / Other - and every section that has them is split into Left and Right sub-groups for the
+# morphs that have a twin on the other side (winkl / winkr, gyul / gyur, gimoL / gimoR, the white-eye meshes cf_Ohitomi_L / _R, ウィンク / ｳｨﾝｸ２右 ...), with the rest
+# under Other. Every header folds its group (click the header to collapse and expand; the "reset" text on its right edge - or a right-click -
+# resets that group's sliders), the whole panel scrolls with the wheel or by dragging it with the left button, and the Shift+Left-click on any
+# morph row edits its displayed name - the new name is kept in the viewer's settings (%LOCALAPPDATA%\CardBridge\viewer.json, "morphAliases") so it
+# survives restarts, and it is display only: the PMX still carries the original names, because MikuMikuDance motions key morphs by them.
+# Right-clicking a renamed row restores the original name (if it was not renamed, right-click resets the slider).
 # P (or Look tab > Pose) is the automatic A-pose, on by default (MMD motions are keyed for it): clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
 # pose as the model's rest pose and lists it in the manifest's "pose". CLI: on by default, --apose-degrees N, --tpose to keep the T-pose; --gpu-view --gpu-bones draws the skeleton on the picture.
 # With the skeleton on, the bone under the pointer is ringed and a click-drag on a bone turns it (Ctrl+drag moves it): the tip follows the pointer, the bone and

@@ -28,6 +28,7 @@
 
 #include "export/GpuView.h"
 #include "export/SkinBench.h"
+#include "export/OutfitIcon.h"
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
 #include "export/SkinShade.h"
@@ -149,11 +150,15 @@ void usage() {
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
         "  cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>]\n"
-        "                                     [--thumbnail <file.png>] [--json] [--overwrite]\n"
+        "                                     [--thumbnail <file.png>] [--render-thumbnail] [--json] [--overwrite]\n"
         "                                     [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]\n"
+        "                                             --with-hair-accessories keeps hair-type accessories (type 122/123) in the file\n"
+        "                                             and shows the character's hair on the mannequin icon (off by default);\n"
         "                                             export one outfit of a character card as an outfit file (【KoiKatuClothes】\n"
         "                                             .png — the same file --clothes applies); default out: <card stem> - <outfit name>.png\n"
         "                                             next to the card; the card on disk is never modified\n"
+        "                                             --render-thumbnail: the icon is rendered as a faceless, bald mannequin wearing\n"
+        "                                             the outfit (like Koikatsu's own coordinate files); needs --library and --mods\n"
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
@@ -438,6 +443,44 @@ int cmdClothes(const Args& a) {
     }
     if (!a.get("name").empty()) opt.name = a.get("name");
     if (!a.get("thumbnail").empty()) opt.thumbnailPngPath = normalizeSlashes(a.get("thumbnail"));
+    if (a.has("render-thumbnail")) {
+        if (a.get("library").empty()) { std::fprintf(stderr, "--render-thumbnail needs --library (it assembles the scene like convert does)\n"); return 1; }
+        if (!a.has("no-mods") && a.get("mods").empty()) { std::fprintf(stderr, "--render-thumbnail needs --mods, or --no-mods when the card only uses base-game items\n"); return 1; }
+        Context ctx;
+        if (!buildContext(a, ctx)) return 3;
+        card::Card mc = c;   // assemble mutates in place (pose baked, briefs re-coloured); never touch the caller's card
+        assemble::AssembleOptions ao;
+        if (a.get("outfit").empty()) ao.outfit = -1;
+        else ao.outfit = opt.outfit;
+        if (!a.get("clothes").empty()) {
+            try { const int t = applyClothes(a, mc); if (t >= 0) ao.outfit = t; }
+            catch (const std::exception& e) { std::fprintf(stderr, "clothing: %s\n", e.what()); return 3; }
+        }
+        if (ao.outfit < 0) ao.outfit = mc.status.isMap() ? static_cast<int>(mc.status.at("coordinateType").asInt()) : 0;
+        assemble::Scene scene = assemble::Assemble(mc, *ctx.resolver, ao);
+        {   // rest pose like convert writes it: arms down, so the icon shows the outfit as worn
+            assemble::PoseFile pose;
+            pose.aPose = true;
+            pose.aPoseDegrees = 40.0f;
+            assemble::BakePose(scene, assemble::MakePose(scene, pose, nullptr));
+        }
+        const int iconOutfit = ao.outfit >= 0 && ao.outfit < static_cast<int>(c.outfits.size()) ? ao.outfit : 0;
+        const std::string prefix = "outfit" + std::to_string(iconOutfit) + ".acc";
+        std::vector<char> base(scene.parts.size(), 0);
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+            const std::string& id = scene.parts[pi].id;
+            if (id.rfind(prefix, 0) != 0) continue;
+            const std::string tail = id.substr(prefix.size());
+            if (tail.empty()) continue;
+            bool digits = true;
+            for (unsigned char ch : tail) if (!std::isdigit(ch)) { digits = false; break; }
+            if (digits && opt.hiddenSlots.count(std::atoi(tail.c_str()))) base[pi] = 1;
+        }
+        std::vector<char> flags = exporter::OutfitIconHiddenParts(scene, mc, iconOutfit, base, a.has("with-hair-accessories"));
+        exporter::OutfitIconOptions ipo;
+        ipo.hiddenParts = &flags;
+        opt.thumbnailBytes = exporter::RenderOutfitIcon(scene, ipo);
+    }
     if (a.has("include-hidden")) opt.includeHidden = true;
     if (a.has("with-hair-accessories")) opt.withHairAccessories = true;
     if (a.has("with-abmx")) opt.withAbmx = true;
@@ -499,10 +542,12 @@ int cmdClothes(const Args& a) {
         j["hair_accessories_dropped"] = rep.hairAccessoriesDropped;
         j["dropped_plugins"] = rep.droppedPlugins;
         j["warnings"] = rep.warnings;
+        j["icon"] = a.has("render-thumbnail") ? "mannequin_render" : (a.get("thumbnail").empty() ? "card_face_thumbnail" : "custom_file");
         std::puts(j.dump(2).c_str());
         return 0;
     }
     std::printf("clothing: wrote %s (%llu bytes), outfit %d — %s\n", outPath.c_str(), (unsigned long long)bytes, rep.outfit + 1, rep.outfitName.c_str());
+    if (a.has("render-thumbnail")) std::printf("  icon: rendered the outfit on a faceless mannequin\n");
     std::printf("  clothes re-localised: %d (+ %d sub-part id(s)), accessories: %d\n", rep.clothesIdsLocalized, rep.subPartsLocalized, rep.accessoryIdsLocalized);
     std::printf("  hidden/hair omitted: %d/%d   resolver rows kept: %d\n", rep.hiddenAccessoriesDropped, rep.hairAccessoriesDropped, rep.uarRowsKept);
     std::printf("  MaterialEditor: %d row(s) rebased, %d texture(s) kept   KCOX: %d garment(s)   MoreAccessories: %d extra(s)\n",
@@ -932,7 +977,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

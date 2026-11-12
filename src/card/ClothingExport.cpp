@@ -671,10 +671,14 @@ Bytes BuildClothingFileBytes(const Card& card, const ClothingExportOptions& opt,
         thumbnail = fileio::ReadFile(opt.thumbnailPngPath);
         if (pngEndOffset(thumbnail) == static_cast<size_t>(-1))
             throw FormatError("--thumbnail is not a complete PNG (signature + IEND): " + opt.thumbnailPngPath);
+    } else if (!opt.thumbnailBytes.empty()) {
+        thumbnail = opt.thumbnailBytes;   // a mannequin icon rendered by the caller
+        if (pngEndOffset(thumbnail) == static_cast<size_t>(-1))
+            throw FormatError("the rendered clothing icon is not a complete PNG");
     } else {
         thumbnail = card.faceThumbnail;
         if (thumbnail.empty() || pngEndOffset(thumbnail) == static_cast<size_t>(-1))
-            throw FormatError("the card has no face thumbnail to reuse; pass --thumbnail <file.png>");
+            throw FormatError("the card has no face thumbnail to reuse; pass --thumbnail <file.png> or --render-thumbnail");
     }
 
     std::vector<uint8_t> out = std::move(thumbnail);

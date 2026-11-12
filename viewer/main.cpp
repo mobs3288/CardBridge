@@ -42,6 +42,7 @@
 #include "card/CardFile.h"
 #include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
+#include "export/OutfitIcon.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
 #include "export/SkinShade.h"

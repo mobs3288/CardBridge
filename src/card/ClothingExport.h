@@ -31,7 +31,8 @@ namespace cardbridge::card {
 struct ClothingExportOptions {
     int outfit = -1;               // -1: the card's current (Status.coordinateType), like convert
     std::string name;              // empty: default derived from character + outfit
-    std::string thumbnailPngPath;  // empty: reuse the card's face thumbnail
+    std::string thumbnailPngPath;  // empty: use `thumbnailBytes`; empty there too: reuse the card's face thumbnail
+    Bytes thumbnailBytes;           // empty: render or fall back to the face thumbnail (see docs)
     bool withAbmx = false;         // carry the whole KKABMPlugin.ABMData table verbatim (default off)
     bool includeHidden = false;    // keep accessories the card hides (showAccessory==0); default off
     bool withHairAccessories = false;  // keep hair-type accessories (type 122/123); default off

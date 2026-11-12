@@ -134,14 +134,27 @@ void StartExportClothing() {
             const bool digitsOnly = !digits.empty() && std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); });
             if (digitsOnly) hiddenSlots.insert(std::atoi(digits.c_str()));
         }
+        // The icon the game ships in an outfit file: a faceless, bald, flat-grey mannequin wearing exactly the outfit on
+        // screen (what --hide unticked is not there, hair never is).
+        // The icon is rendered pose-baked like the export (and like the CLI); bake into a copy.
+        assemble::Scene iconScene = L->scene;
+        const assemble::Pose pose = BuildPose(*L, false);
+        if (!pose.empty() && !iconScene.bones.empty()) assemble::BakePose(iconScene, pose);
+        std::vector<char> base(iconScene.parts.size(), 0);
+        for (size_t i = 0; i < base.size() && i < g.hidden.size(); ++i) base[i] = g.hidden[i] ? 1 : 0;
+        std::vector<char> iconFlags = exporter::OutfitIconHiddenParts(iconScene, L->card, outfit, base);
+        exporter::OutfitIconOptions ipo;
+        ipo.hiddenParts = &iconFlags;
         card::ClothingExportOptions opt;
         opt.outfit = outfit;
         opt.hiddenSlots = std::move(hiddenSlots);
+        opt.thumbnailBytes = exporter::RenderOutfitIcon(iconScene, ipo);
         const card::ClothingExportReport rep = card::ExportClothingToFile(L->card, out, opt, true);   // the save dialog already prompted to overwrite
         char msg[640];
         std::snprintf(msg, sizeof msg, "clothing written: %s (outfit %d \"%s\", %llu bytes)", out.c_str(), rep.outfit + 1, rep.outfitName.c_str(),
                       (unsigned long long)fileio::FileSize(out));
         Log(msg, LogKind::Good);
+        Log("  icon: rendered the outfit on a faceless mannequin (Koikatsu's own convention for outfit files)", LogKind::Info);
         Log("  clothes re-localised: " + std::to_string(rep.clothesIdsLocalized) + " (+ " + std::to_string(rep.subPartsLocalized) + " sub-part(s))   accessories: " +
             std::to_string(rep.accessoryIdsLocalized) + "   hidden/hair omitted: " + std::to_string(rep.hiddenAccessoriesDropped) + "/" + std::to_string(rep.hairAccessoriesDropped), LogKind::Info);
         std::string plugins;
