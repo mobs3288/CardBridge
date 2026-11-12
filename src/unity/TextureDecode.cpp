@@ -2,6 +2,8 @@
 
 #include "core/Bytes.h"
 
+#include <algorithm>
+
 #include <bc7decomp.h>   // third_party/bc7decomp (Richard Geldreich, MIT or public domain)
 
 namespace cardbridge::unity {
@@ -149,6 +151,30 @@ std::vector<uint8_t> DecodeTexture(int fmt, int width, int height, const uint8_t
     default:
         throw FormatError("unsupported Unity texture format " + std::to_string(fmt));
     }
+}
+
+FillSummary AnalyzeFill(const uint8_t* rgba, int width, int height) {
+    FillSummary fs;
+    if (!rgba || width <= 0 || height <= 0) return fs;
+    const size_t n = static_cast<size_t>(width) * static_cast<size_t>(height);
+    double sr = 0.0, sg = 0.0, sb = 0.0, smax = 0.0, sch = 0.0;
+    size_t opaque = 0, achromatic = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t* p = rgba + i * 4;
+        if (p[3] < 10) continue;
+        ++opaque;
+        const int r = p[0], g = p[1], b = p[2];
+        const int hi = std::max({r, g, b}), lo = std::min({r, g, b});
+        sr += r; sg += g; sb += b; smax += hi; sch += hi - lo;
+        if (hi - lo <= 30) ++achromatic;
+    }
+    fs.opaqueFraction = static_cast<float>(opaque) / static_cast<float>(n);
+    if (opaque == 0) { fs.avg = Vec3{0, 0, 0}; return fs; }
+    fs.avg = Vec3{static_cast<float>(sr / opaque / 255.0), static_cast<float>(sg / opaque / 255.0), static_cast<float>(sb / opaque / 255.0)};
+    fs.value = static_cast<float>(smax / opaque / 255.0);
+    fs.achromatic = static_cast<float>(achromatic) / static_cast<float>(opaque);
+    fs.chromaMean = static_cast<float>(sch / opaque);
+    return fs;
 }
 
 std::string FormatName(int unityFormat) {

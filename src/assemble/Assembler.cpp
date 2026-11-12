@@ -2098,7 +2098,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         return Vec4{static_cast<float>(v.at(size_t(0)).asFloat()), static_cast<float>(v.at(size_t(1)).asFloat()),
                     static_cast<float>(v.at(size_t(2)).asFloat()), static_cast<float>(v.size() > 3 ? v.at(size_t(3)).asFloat() : 1.0)};
     };
-    // The texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
+    // A texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
     auto rowTextureFor = [&](const std::string& partId, int category, int64_t id, const std::string& property, const char* texKey, const std::string& what,
                           std::string* keyOut = nullptr, const char* abKey = "MainAB") -> std::shared_ptr<unity::TextureData> {
         resolve::ItemRef fr;
@@ -2108,7 +2108,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         fr.category = category;
         fr.id = id;
         resolve::ResolvedItem fi = resolver.resolve(card, fr);
-        if (fi.status == resolve::ItemStatus::Empty) return nullptr;
+        if (fi.status == resolve::ItemStatus::Empty) {
+            if (category >= 406 && category <= 414)
+                scene.warn(partId, what + ": face item id " + std::to_string(id) + " has no row in the lists (library missing or a mod row that no longer exists); the item is left out");
+            return nullptr;
+        }
+        // The pupil is the one face item whose colour lives entirely in a texture: flag the mods that ship a blank one
+        // (a white eyeball, an empty png), so the issues tab says why the eyes render like that instead of looking broken.
+        auto blankPupil = [&](const std::shared_ptr<unity::TextureData>& t, const std::string& texName) {
+            if (!t || category != 408 || t->rgba.empty()) return;
+            const unity::FillSummary fs = unity::AnalyzeFill(t->rgba.data(), t->width, t->height);
+            const std::string where = fi.modName.empty() ? ("the base lists (" + fi.listItem.get("Name") + ", row " + std::to_string(id) + ")")
+                                                         : ("mod " + fi.modName + (fi.modGuid.empty() ? "" : " (" + fi.modGuid + ")") + ", row " + std::to_string(id) + " '" + fi.listItem.get("Name") + "'");
+            if (fs.opaqueFraction == 0.0f) {
+                scene.warn(partId, what + ": iris texture '" + texName + "' from " + where + " is fully transparent — the eyes render with no pupil at all");
+                return;
+            }
+            if (fs.achromatic >= 0.55f && fs.value >= 0.59f) {   // base game's flat-white skin (0.66 achromatic); every shipped hitomi <= 0.31
+                scene.warn(partId, what + ": iris texture '" + texName + "' from " + where + " is achromatic (a white/grey fill with no iris colour) — the eyes render washed out (the card's picture likely used a coloured iris; pick another in the maker or restore a coloured mod)");
+            }
+        };
         if (!fi.ok()) {
             scene.warn(partId, what + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
             return nullptr;
@@ -2120,19 +2139,21 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::string w;
         auto tb = resolver.openItemBundle(fi, ab, &w);
         if (!tb) {   // a mod can ship the texture as a loose image instead of a bundle (Sideloader)
-            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; blankPupil(loose, texName); return loose; }
             scene.warn(partId, what + ": texture bundle not loaded: " + w);
             return nullptr;
         }
         PPtr tp = tb->findAsset(texName);
         if (tp.isNull()) tp = tb->findTexture(texName);
         if (tp.isNull()) {   // not in the bundle of that name: a mod may ship the image loose next to where the bundle would be
-            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; blankPupil(loose, texName); return loose; }
             scene.warn(partId, what + ": texture '" + texName + "' not found in " + ab);
             return nullptr;
         }
         if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
-        return b.decode(*tb, tp, partId);
+        auto tex = b.decode(*tb, tp, partId);
+        blankPupil(tex, texName);
+        return tex;
     };
 
     // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
