@@ -142,14 +142,14 @@ if(WIN32)
             OUTPUT ${VIEWER_RES}
             COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc viewer_res.o
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.manifest
             VERBATIM)
     endif()
     add_executable(cardbridge_viewer WIN32 viewer/main.cpp viewer/Ui.cpp ${VIEWER_RES})
     target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)
     if(NOT MSVC)
         target_link_options(cardbridge_viewer PRIVATE -municode -static)
-        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32 gdiplus)
+        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32 gdiplus comctl32)
     endif()
 endif()
 

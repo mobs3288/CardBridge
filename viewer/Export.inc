@@ -120,6 +120,30 @@ void StartExportClothing() {
     if (!L) { Log("open a card first", LogKind::Warn); return; }
     if (g.busy || g.exporting.exchange(true)) { Log("still busy; wait for the current job to finish", LogKind::Warn); return; }
     try {
+        // "Export clothes" asks first, like a Windows confirm: the outfit's data, and whether to keep hair.
+        // A verification checkbox (the same checkbox Win10 dialog has) offers to keep hair-type accessories
+        // (type 122/123, worn as hair) and to show the character's hair on the mannequin icon.
+        BOOL withHairDialog = FALSE;
+        if (std::getenv("CARDBRIDGE_TEST_HOOKS")) {
+            // Scripted runs: no dialog; CARDBRIDGE_CLOTHES_WITH_HAIR=1 keeps hair on.
+            const char* wh = std::getenv("CARDBRIDGE_CLOTHES_WITH_HAIR");
+            withHairDialog = (wh && *wh == '1') ? TRUE : FALSE;
+        } else {
+            TASKDIALOGCONFIG cfg{};
+            cfg.cbSize = sizeof(cfg);
+            cfg.hwndParent = g.hwnd;
+            cfg.pszWindowTitle = L"CardBridge";
+            cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;   // starts unchecked: hair inclusion is opt-in
+            cfg.pszMainInstruction = L"Export the outfit on screen as a Koikatsu clothing file?";
+            cfg.pszContent = L"The outfit's clothes, accessories and makeup are written to a \u3010KoiKatuClothes\u3011 .png — the same format --clothes applies. "
+                              L"It never contains the character's face, body or hair meshes; only hair worn as accessories, and only when the switch below is on.";
+            cfg.pszVerificationText = L"Include hair-type accessories (and show the hair on the mannequin icon)";
+            int pressed = 0;
+            BOOL wasChecked = FALSE;
+            if (TaskDialogIndirect(&cfg, &pressed, nullptr, &wasChecked) != S_OK || pressed != IDOK) { g.exporting = false; return; }
+            withHairDialog = wasChecked;
+        }
+        const bool withHairFile = withHairDialog != FALSE;
         const std::string out = ClothingPathFromUser();
         if (out.empty()) { g.exporting = false; return; }
         const int outfit = std::clamp(L->outfit, 0, std::max(0, L->outfits - 1));
@@ -135,19 +159,20 @@ void StartExportClothing() {
             if (digitsOnly) hiddenSlots.insert(std::atoi(digits.c_str()));
         }
         // The icon the game ships in an outfit file: a faceless, bald, flat-grey mannequin wearing exactly the outfit on
-        // screen (what --hide unticked is not there, hair never is).
+        // screen (what unticked is not there; hair only with the checkbox).
         // The icon is rendered pose-baked like the export (and like the CLI); bake into a copy.
         assemble::Scene iconScene = L->scene;
         const assemble::Pose pose = BuildPose(*L, false);
         if (!pose.empty() && !iconScene.bones.empty()) assemble::BakePose(iconScene, pose);
         std::vector<char> base(iconScene.parts.size(), 0);
         for (size_t i = 0; i < base.size() && i < g.hidden.size(); ++i) base[i] = g.hidden[i] ? 1 : 0;
-        std::vector<char> iconFlags = exporter::OutfitIconHiddenParts(iconScene, L->card, outfit, base);
+        std::vector<char> iconFlags = exporter::OutfitIconHiddenParts(iconScene, L->card, outfit, base, withHairFile);
         exporter::OutfitIconOptions ipo;
         ipo.hiddenParts = &iconFlags;
         card::ClothingExportOptions opt;
         opt.outfit = outfit;
         opt.hiddenSlots = std::move(hiddenSlots);
+        opt.withHairAccessories = withHairFile;
         opt.thumbnailBytes = exporter::RenderOutfitIcon(iconScene, ipo);
         const card::ClothingExportReport rep = card::ExportClothingToFile(L->card, out, opt, true);   // the save dialog already prompted to overwrite
         char msg[640];

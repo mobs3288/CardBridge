@@ -2,6 +2,7 @@
 // header draws (a PNG) and the version information Explorer shows.
 1 ICON "@CMAKE_CURRENT_SOURCE_DIR@/viewer/res/cardbridge.ico"
 2 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/viewer/res/logo.png"
+1 24 "@CMAKE_CURRENT_SOURCE_DIR@/viewer/res/cardbridge.manifest"
 
 1 VERSIONINFO
 FILEVERSION @CARDBRIDGE_VERSION_RC@

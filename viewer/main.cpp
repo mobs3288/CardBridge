@@ -62,6 +62,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commdlg.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <atomic>

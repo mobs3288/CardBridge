@@ -814,10 +814,12 @@ cardbridge clothes <card.png> [--outfit N] [--name <name>]
 
 ### Phase 3 — Viewer
 
-- New **Export clothing…** button: placed next to `Export PMX` in the toolbar
-  (`viewer/Panel.inc:18-25`), `L != nullptr && !g.busy && !g.exporting` to enable;
+- New **Export clothes…** button: placed in the outfit row next to **Reset clothing**, `L != nullptr && !g.busy && !g.exporting` to enable;
   `Shift+E` next to `E` in `viewer/Window.inc` (free today — only
   Ctrl+Shift+Z/Y are bound, for redo).
+- A confirmation task dialog first (`TaskDialogIndirect`, Common Controls v6 via an embedded RT_MANIFEST in the
+  viewer's `.rc`): asks to export the shown outfit as a clothing file, with a verification checkbox
+  **Include hair-type accessories (and show the hair on the mannequin icon)** (default unchecked; cancel writes nothing).
 - Save dialog modelled on `PosePathFromUser` (`viewer/Pose.inc:62-76`):
   `CARDBRIDGE_CLOTHES_PATH` env override for scripted runs (pose/material file
   convention), `OFN_OVERWRITEPROMPT`, filter `*.png`, default path from the
@@ -1014,8 +1016,11 @@ how it actually went.
   Exit codes: 0 written, 1 usage, 2 unsupported / out-of-range / corrupt, 3 write failure.
   Default output: `<card stem> - <outfit name>.png` next to the card; `--overwrite` refuses to clobber without it; refusing to overwrite the source card itself.
 - **Viewer**: a second button in the outfit row — **Export clothes** (Shift+E),
-  writes `<Character> - <slot name>.png` via a save dialog (or
-  `CARDBRIDGE_CLOTHES_PATH` for scripted runs); unticked accessory slots in the
+  writes `<Character> - <slot name>.png`. Before the save dialog it asks a task dialog with a
+  verification checkbox: **Include hair-type accessories (and show the hair on the mannequin icon)**
+  (default unchecked; cancel writes nothing; scripted runs skip it via `CARDBRIDGE_TEST_HOOKS` +
+  `CARDBRIDGE_CLOTHES_PATH`, answering the checkbox with `CARDBRIDGE_CLOTHES_WITH_HAIR=1`); the verification
+  checkbox makes the viewer answers map to `--with-hair-accessories`. Unticked accessory slots in the
   Parts list become empty parts; hidden (card `showAccessory`) and hair-type
   accessories are omitted; the log names every omission and every dropped
   plugin block. The icon is always the mannequin render (§5.2).
