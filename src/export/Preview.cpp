@@ -778,18 +778,21 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                 const Vec3 c = material::MaterialIdColor(matIdx);
                                 r = c.x; g = c.y; bl = c.z; break;
                             }
-                            case ViewMode::SkinAO: {
+                            case ViewMode::SkinAO: {   // the AO factor on the body skin; everything else plain unlit (light context)
                                 const auto& u0 = mesh.vertices[i0].uv, &u1 = mesh.vertices[i1].uv, &u2 = mesh.vertices[i2].uv;
                                 const float u = l0 * u0.x + l1 * u1.x + l2 * u2.x, v = l0 * u0.y + l1 * u1.y + l2 * u2.y;
-                                float f = 1.0f;   // white: the bake contributes nothing (AO off / no body skin)
-                                if (!mat.cardSkin) f = 0.35f;   // context: everything that is not the body skin renders flat dark gray
-                                else if (!aoFactor.empty() && aoFW > 0 && aoFH > 0) {
-                                    int x = static_cast<int>(u * aoFW);      // wrap into the atlas tile
-                                    int y = static_cast<int>((1.0f - v) * aoFH);
-                                    x = std::max(0, std::min(aoFW - 1, x)); y = std::max(0, std::min(aoFH - 1, y));
-                                    f = aoFactor[static_cast<size_t>(static_cast<int64_t>(y)) * static_cast<size_t>(aoFW) + static_cast<size_t>(static_cast<int64_t>(x))] / 255.0f;
+                                if (mat.cardSkin) {
+                                    float f = 1.0f;   // white: the bake contributes nothing (AO off / no body skin)
+                                    if (!aoFactor.empty() && aoFW > 0 && aoFH > 0) {
+                                        int x = static_cast<int>(u * aoFW);      // wrap into the atlas tile
+                                        int y = static_cast<int>((1.0f - v) * aoFH);
+                                        x = std::max(0, std::min(aoFW - 1, x)); y = std::max(0, std::min(aoFH - 1, y));
+                                        f = aoFactor[static_cast<size_t>(static_cast<int64_t>(y)) * static_cast<size_t>(aoFW) + static_cast<size_t>(static_cast<int64_t>(x))] / 255.0f;
+                                    }
+                                    r = g = bl = f;
                                 }
-                                r = g = bl = f; break;
+                                // else: like Unlit — the plain texture x colour context, no shading, no gray dummy
+                                break;
                             }
                             default: break;
                             }
