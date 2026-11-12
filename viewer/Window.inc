@@ -120,7 +120,7 @@ void DumpTestLayout() {
     j["tab"] = g.tab;
     j["tabs"] = nlohmann::json::array();
     for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2});
-    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}};
+    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     j["rows"] = nlohmann::json::array();
     if (L && g.tab != TabParts && g.tab != TabBones && g.tab != TabMaterials) {
@@ -403,6 +403,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
+        // The exported PMX's morphs, for the Morphs tab (all weights at 0 on a fresh character)
+        if (L) LoadMorphCatalog();
+        else { g.morphs.clear(); g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); }
         ProgEnd();
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
@@ -505,6 +508,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 7) { ResetClothing(); return 0; }
             if (button == 8) { MoveClothing(-1); return 0; }
             if (button == 9) { MoveClothing(1); return 0; }
+            if (button == 21) { StartExportClothing(); return 0; }
             if (button == 20 && !g.matFilterDropOpen) { OpenWorkbench(); return 0; }   // the Materials tab's launcher
             if (button >= 10 && button != 20) {
                 g.showIssues = false;
@@ -1084,7 +1088,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'I') { if (L) ToggleIssues(); }
         else if (wp == 'A') { if (L) ShowAll(); }
         else if (wp == 'C') ClearLog();
-        else if (wp == 'E') ExportFolderIfNeeded();
+        else if (wp == 'E') { if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) StartExportClothing(); else ExportFolderIfNeeded(); }
         else if (wp == 'O') OpenCard();
         else if (wp == 'M') ChooseMods();
         else if (wp == 'L') ChooseLibrary();

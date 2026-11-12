@@ -74,6 +74,20 @@ struct GpuTex { ID3D11ShaderResourceView* srv = nullptr; ID3D11Texture2D* tex = 
 
 UINT Round16(UINT n) { return (n + 15u) & ~15u; }
 
+// The viewer's live blend shapes (the Morphs tab): offsets in model space at rest, accumulated at the current weights.
+// Added to the rest vertices before skinning - exactly how the game applies blend shapes to the rendered mesh and how
+// MikuMikuDance applies PMX vertex morphs - never stored back into the Scene, which keeps the rest shape for re-skinning.
+void FoldMorphDelta(const std::vector<std::vector<Vec3>>& delta, size_t mi, std::vector<GVert>& verts) {
+    if (mi >= delta.size()) return;
+    const std::vector<Vec3>& d = delta[mi];
+    if (d.empty() || d.size() != verts.size()) return;   // untouched mesh (or a scene that changed under the delta): draw it as it is
+    for (size_t v = 0; v < d.size(); ++v) {
+        verts[v].pos[0] += d[v].x;
+        verts[v].pos[1] += d[v].y;
+        verts[v].pos[2] += d[v].z;
+    }
+}
+
 } // namespace
 
 struct GpuView::Impl {
@@ -104,6 +118,7 @@ struct GpuView::Impl {
     mutable LARGE_INTEGER benchStartQpc{};
     const assemble::Scene* scene = nullptr;
     std::vector<GpuMesh> meshes;
+    std::vector<std::vector<Vec3>> morphDelta;   // per scene mesh, the accumulated live-morph offsets (empty = no morphs; see SetMorphDelta)
     std::vector<GpuShader> shaders;
     std::vector<GpuTex> textures;                // by scene texture
     GpuTex defaults[4];                          // white, black, gray, bump
@@ -887,6 +902,12 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
     }
 }
 
+void GpuView::SetMorphDelta(const std::vector<std::vector<Vec3>>* delta) {
+    Impl& I = *impl_;
+    // Copy (the caller reuses its buffer per slider tick). Stale deltas from another scene are dropped by size check in Refresh,
+    // but a new scene clears them in Load as well.
+    I.morphDelta = delta ? *delta : std::vector<std::vector<Vec3>>{};
+}
 void GpuView::Refresh(bool tangents) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene) return;
@@ -902,6 +923,7 @@ void GpuView::Refresh(bool tangents) {
             g.rest[v].nrm[0] = sv.normal.x; g.rest[v].nrm[1] = sv.normal.y; g.rest[v].nrm[2] = sv.normal.z;
             if (tangents) { g.rest[v].tan[0] = tan[v].x; g.rest[v].tan[1] = tan[v].y; g.rest[v].tan[2] = tan[v].z; }
         }
+        FoldMorphDelta(I.morphDelta, mi, g.rest);   // re-add the live morphs' offsets on top of the fresh rest
         if (g.restBuf) I.ctx->UpdateSubresource(g.restBuf, 0, nullptr, g.rest.data(), 0, 0);
         if (g.skinInBuf) I.ctx->UpdateSubresource(g.skinInBuf, 0, nullptr, g.rest.data(), 0, 0);
     }
@@ -1194,6 +1216,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
     if (!I.dev) return fail("no device");
     if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     I.Clear();
+    I.morphDelta.clear();   // a new scene: whatever deltas the previous one carried mean nothing now (the viewer re-applies its weights on load)
     I.scene = &scene;
 
     // Shaders: the forward pass of each, straight from the bundle's DXBC.
@@ -1274,6 +1297,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
             const auto& s = m.vertices[v];
             vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}, {s.uv2.x, s.uv2.y}, {s.uv3.x, s.uv3.y}, {s.bone[0], s.bone[1], s.bone[2], s.bone[3]}, {s.weight[0], s.weight[1], s.weight[2], s.weight[3]}};
         }
+        FoldMorphDelta(I.morphDelta, mi, vb);   // the live morphs' offsets, when the caller set them before the load
         const UINT bytes = static_cast<UINT>(vb.size() * sizeof(GVert));
         if (dual) {
             // A structured buffer cannot also be a vertex buffer, so the rest vertices live twice: once in a plain vertex

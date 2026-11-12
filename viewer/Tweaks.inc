@@ -38,6 +38,12 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
     if (id == kSag) { r.v = &g.sag; r.def = g.sagDefault; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())) {   // a morph of the exported PMX
+        const size_t i = static_cast<size_t>(id - kMorphBase);
+        r.v = &g.morphWeights[i];
+        r.def = 0; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; r.fmt = nullptr;
+        return true;
+    }
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {   // a field of the selected bone
         if (g.selBoneName.empty()) return false;
         assemble::BonePose& e = g.boneEdits[g.selBoneName];
@@ -72,8 +78,8 @@ bool SliderFor(int id, SliderRef& r) {
     return false;
 }
 
-// Pose controls change the picture at once, no re-assembly.
-bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount); }
+// Pose controls change the picture at once, no re-assembly. Morphs too: a weight is a live edit, like a pose bone.
+bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount) || (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())); }
 void TweakEdited(int id, bool released);   // defined in Pose.inc
 
 // ---- preset chips: the band + cup pair for the bust size, S..XL for the nipple size ---------------------------------

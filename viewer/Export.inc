@@ -87,8 +87,77 @@ void StartExport() {
     }).detach();
 }
 
-// X: show the character the way the exported PMX looks (baked textures, plain materials). The bake takes a while, so it runs
-// on a thread once per character and grading state; later presses only switch.
+// The file the outfit is saved to: CARDBRIDGE_CLOTHES_PATH when set (scripted runs, no dialog), else the usual save dialog.
+std::string ClothingPathFromUser() {
+    if (const char* env = std::getenv("CARDBRIDGE_CLOTHES_PATH")) return Slashes(env);
+    std::shared_ptr<Loaded> L = Current();
+    const std::string stem = L && !L->title.empty() ? L->title : std::string("character");
+    const int outfit = L ? L->outfit : 0;
+    const std::string slot = (L && L->outfits > 0) ? L->card.outfitName(std::clamp(outfit, 0, L->outfits - 1)) : std::string("Outfit");
+    std::wstring def = Utf8ToWide(SafeStem(stem + " - " + slot) + ".png");
+    wchar_t file[1024] = {0};
+    const size_t copy = std::min<size_t>(def.size(), 1023);
+    std::memcpy(file, def.c_str(), copy * sizeof(wchar_t));
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof of;
+    of.hwndOwner = g.hwnd;
+    of.lpstrFilter = L"Koikatsu clothing file (*.png)\0*.png\0All files\0*.*\0";
+    of.lpstrFile = file;
+    of.nMaxFile = 1024;
+    of.lpstrDefExt = L"png";
+    of.lpstrTitle = L"Export the outfit as a clothing (outfit) file";
+    of.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_OVERWRITEPROMPT;
+    std::wstring initDir;
+    if (!g.settings.exportDir.empty()) { initDir = Utf8ToWide(g.settings.exportDir); of.lpstrInitialDir = initDir.c_str(); }
+    return GetSaveFileNameW(&of) ? Slashes(WideToUtf8(file)) : std::string();
+}
+
+// Shift+E / the "Export clothes" button: write the outfit on screen as a Koikatsu outfit file (【KoiKatuClothes】 .png) —
+// the same file --clothes applies. The shown slot's unticked accessory slots are exported as empty (nothing is forced
+// back into them on apply), and the card's own hidden state (showAccessory) plus hair accessories are omitted by default.
+void StartExportClothing() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) { Log("open a card first", LogKind::Warn); return; }
+    if (g.busy || g.exporting.exchange(true)) { Log("still busy; wait for the current job to finish", LogKind::Warn); return; }
+    try {
+        const std::string out = ClothingPathFromUser();
+        if (out.empty()) { g.exporting = false; return; }
+        const int outfit = std::clamp(L->outfit, 0, std::max(0, L->outfits - 1));
+        // The viewer's untick state for this outfit's accessory slots becomes empty slots in the file.
+        std::set<int> hiddenSlots;
+        const std::string prefix = "outfit" + std::to_string(outfit) + ".acc";
+        for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i) {
+            if (!g.hidden[i]) continue;
+            const std::string& id = L->scene.parts[i].id;
+            if (id.rfind(prefix, 0) != 0) continue;
+            const std::string digits = id.substr(prefix.size());
+            const bool digitsOnly = !digits.empty() && std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); });
+            if (digitsOnly) hiddenSlots.insert(std::atoi(digits.c_str()));
+        }
+        card::ClothingExportOptions opt;
+        opt.outfit = outfit;
+        opt.hiddenSlots = std::move(hiddenSlots);
+        const card::ClothingExportReport rep = card::ExportClothingToFile(L->card, out, opt, true);   // the save dialog already prompted to overwrite
+        char msg[640];
+        std::snprintf(msg, sizeof msg, "clothing written: %s (outfit %d \"%s\", %llu bytes)", out.c_str(), rep.outfit + 1, rep.outfitName.c_str(),
+                      (unsigned long long)fileio::FileSize(out));
+        Log(msg, LogKind::Good);
+        Log("  clothes re-localised: " + std::to_string(rep.clothesIdsLocalized) + " (+ " + std::to_string(rep.subPartsLocalized) + " sub-part(s))   accessories: " +
+            std::to_string(rep.accessoryIdsLocalized) + "   hidden/hair omitted: " + std::to_string(rep.hiddenAccessoriesDropped) + "/" + std::to_string(rep.hairAccessoriesDropped), LogKind::Info);
+        std::string plugins;
+        for (const std::string& p : rep.droppedPlugins) plugins += " " + p;
+        Log("  rows kept: " + std::to_string(rep.uarRowsKept) + "   KCOX garments: " + std::to_string(rep.kcoxGarments) + "   MoreAccessories: " +
+            std::to_string(rep.extraAccessoriesKept) + (plugins.empty() ? "" : "   dropped plugin blocks:" + plugins), LogKind::Info);
+        for (const std::string& w : rep.warnings) Log("  warning: " + w, LogKind::Warn);
+    } catch (const std::exception& e) {
+        Log(std::string("could not write the clothing file: ") + e.what(), LogKind::Error);
+    }
+    g.exporting = false;
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidatePanel();
+}
+
+// X: show the character the way the exported PMX looks (baked textures, plain materials). The bake takes a while, so it runs// on a thread once per character and grading state; later presses only switch.
 void ToggleAsExported() {
     std::shared_ptr<Loaded> L = Current();
     if (!L || L->scene.parts.empty()) return;

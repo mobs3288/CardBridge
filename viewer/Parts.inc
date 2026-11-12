@@ -81,6 +81,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.clothingReset, p)) return 7;   // reset the imported outfit to the card default
     if (PtInRect(&l.clothingPrev, p)) return 8;    // move the imported outfit to the previous outfit slot
     if (PtInRect(&l.clothingNext, p)) return 9;    // move the imported outfit to the next outfit slot
+    if (PtInRect(&l.clothingExport, p)) return 21; // export the shown outfit as an outfit file (【KoiKatuClothes】 png)
     // The Materials tab's launcher button opens the Material Workbench window. Its rect
     // exists in every layout (one LayoutFor), so it only counts on that tab, and before
     // the tab branch below (20 would otherwise mean "tab 10").

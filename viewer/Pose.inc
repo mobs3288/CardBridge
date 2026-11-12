@@ -351,6 +351,7 @@ bool ReshapeNow(bool final) {
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
+    RebuildMorphCatalog();   // the shape offsets moved with the bones (and the rest pose); the export's morphs move with them
     const double t1 = NowMs();
     if (g.gpuOk) g.gpu.Refresh(final);
     if (final && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
@@ -432,6 +433,7 @@ void TweakEdited(int id, bool released) {
         Log("the areola size changed: press X to bake the as-exported view again");
     }
     if (IsShapeId(id)) { if (!ReshapeNow(released)) ScheduleApplyTweaks(); return; }
+    if (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())) { MorphSlideEdited(); return; }   // a live blend shape (live, like a pose bone)
     if (released) ScheduleApplyTweaks();
 }
 

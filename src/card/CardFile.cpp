@@ -130,20 +130,60 @@ std::string xmlAttr(const std::string& tag, const std::string& name) {
     return end == std::string::npos ? std::string() : tag.substr(at, end - at);
 }
 
+// MoreAccessories for a character holds its extra accessories (slots 20+) for
+// the whole card in one XML string. The game double-writes them in current
+// saves: the coordinate chunk carries the extras *and* the XML carries the
+// same elements. Appending the XML on top of the chunk then duplicates
+// every extra (the twin-ribbon case: two identical parts added to the
+// coordinate). Only append as many XML elements as needed to bring a
+// coordinate up to 20 + its own XML count.
 void appendMoreAccessories(Card& c) {
     const Value& more = c.extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories");
     if (!more.isStr()) return;
     const std::string& xml = more.asStr();
+
+    // First pass: how many <accessory> elements does each outfit's XML block hold?
+    std::map<int, int> xmlCount;
+    {
+        int coordinate = -1;
+        size_t pos = 0;
+        while ((pos = xml.find('<', pos)) != std::string::npos) {
+            size_t end = xml.find('>', pos);
+            if (end == std::string::npos) break;
+            std::string tag = xml.substr(pos, end - pos);
+            pos = end + 1;
+            if (tag.compare(0, 13, "<accessorySet") == 0) { coordinate = std::atoi(xmlAttr(tag, "type").c_str()); continue; }
+            if (tag.compare(0, 10, "<accessory") != 0 || tag.compare(0, 13, "<accessorySet") == 0) continue;
+            if (coordinate < 0) continue;   // no wrapper (unsupported shape): nothing to attribute
+            ++xmlCount[coordinate];
+        }
+    }
+
+    // How many elements does each outfit still need from its XML block?
+    // (Computed from the parts state before anything is appended.)
+    std::map<int, int> toAppend;
+    for (const auto& [coord, xmlN] : xmlCount) {
+        int current = 0;
+        if (static_cast<size_t>(coord) < c.outfits.size()) {
+            const auto& acc = c.outfits[static_cast<size_t>(coord)].accessory;
+            if (acc.isMap()) current = std::max(0, static_cast<int>(acc.at("parts").size()) - 20);
+        }
+        toAppend[coord] = std::max(0, xmlN - current);
+    }
+
     int coordinate = -1;
+    int appended = 0;
     size_t pos = 0;
     while ((pos = xml.find('<', pos)) != std::string::npos) {
         size_t end = xml.find('>', pos);
         if (end == std::string::npos) break;
         std::string tag = xml.substr(pos, end - pos);
         pos = end + 1;
-        if (tag.compare(0, 13, "<accessorySet") == 0) { coordinate = std::atoi(xmlAttr(tag, "type").c_str()); continue; }
+        if (tag.compare(0, 13, "<accessorySet") == 0) { coordinate = std::atoi(xmlAttr(tag, "type").c_str()); appended = 0; continue; }
         if (tag.compare(0, 10, "<accessory") != 0 || tag.compare(0, 13, "<accessorySet") == 0) continue;
         if (coordinate < 0 || static_cast<size_t>(coordinate) >= c.outfits.size()) continue;
+        if (appended >= toAppend[coordinate]) continue;   // the chunk already carries these
+        ++appended;
         auto num = [&](const std::string& n, double def) { std::string v = xmlAttr(tag, n); return v.empty() ? def : std::atof(v.c_str()); };
         Value::Array colors;
         for (int k = 0; k < 4; ++k) {
@@ -312,11 +352,43 @@ bool isSunshineClothesMarker(const std::string& marker) {
 
 // MoreAccessories for one outfit (a clothing file has a single coordinate 0).
 // Slots 20 + n are appended to the outfit's accessory parts, same as a card.
+// The game's coordinate files write the flat shape (<additionalAccessories><accessory …/>
+// with no <accessorySet> wrapper); cards write per-coordinate <accessorySet type="N">
+// blocks. Both are accepted: with no wrapper present, every <accessory> child
+// belongs to the one coordinate.
 void appendMoreAccessoriesToOutfit(Outfit& outfit, const Value& extended) {
     const Value& more = extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories");
     if (!more.isStr()) return;
     const std::string& xml = more.asStr();
-    int coordinate = -1;
+    // The game double-writes extras in current coordinate files too (chunk and
+    // XML). Only append as many as needed to bring the coordinate to 20 + XML count.
+    bool anyAccessorySet = false;
+    for (size_t p = 0; (p = xml.find("<accessorySet", p)) != std::string::npos; p += 13) { anyAccessorySet = true; break; }
+    int coordinate = anyAccessorySet ? -1 : 0;   // flat game shape: everything is coordinate 0
+    int toAppend = 0;
+    {
+        int count = 0;
+        if (anyAccessorySet) {
+            // count elements inside the coordinate-0 block
+            size_t p = 0;
+            bool inOutfit0 = false;
+            while ((p = xml.find('<', p)) != std::string::npos) {
+                const size_t end = xml.find('>', p);
+                if (end == std::string::npos) break;
+                const std::string tag = xml.substr(p, end - p);
+                p = end + 1;
+                if (tag.compare(0, 13, "<accessorySet") == 0) { inOutfit0 = std::atoi(xmlAttr(tag, "type").c_str()) == 0; continue; }
+                if (tag.rfind("<accessory", 0) == 0 && inOutfit0) ++count;
+            }
+        } else {
+            size_t p = 0;
+            while ((p = xml.find("<accessory", p)) != std::string::npos) { ++count; p += 10; }
+        }
+        int current = 0;
+        if (outfit.accessory.isMap()) current = std::max(0, static_cast<int>(outfit.accessory.at("parts").size()) - 20);
+        toAppend = std::max(0, count - current);
+    }
+    int appended = 0;
     size_t pos = 0;
     while ((pos = xml.find('<', pos)) != std::string::npos) {
         size_t end = xml.find('>', pos);
@@ -326,6 +398,8 @@ void appendMoreAccessoriesToOutfit(Outfit& outfit, const Value& extended) {
         if (tag.compare(0, 13, "<accessorySet") == 0) { coordinate = std::atoi(xmlAttr(tag, "type").c_str()); continue; }
         if (tag.compare(0, 10, "<accessory") != 0 || tag.compare(0, 13, "<accessorySet") == 0) continue;
         if (coordinate != 0) continue;   // a clothing file's single outfit is coordinate 0
+        if (appended >= toAppend) continue;   // the coordinate chunk already carries these
+        ++appended;
         auto num = [&](const std::string& n, double def) { std::string v = xmlAttr(tag, n); return v.empty() ? def : std::atof(v.c_str()); };
         Value::Array colors;
         for (int k = 0; k < 4; ++k) {

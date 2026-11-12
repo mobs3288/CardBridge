@@ -25,6 +25,13 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
         return;
     }
+    if (row.kind == 0 && g.tab == TabMorphs) {   // a morph group header: reset its group only (no re-shape; morphs are live, not a reshape)
+        size_t n = 0;
+        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
+            if (rows[k].kind == 1 && TweakChanged(rows[k].id)) { ResetTweak(rows[k].id); ++n; }
+        if (n) { MorphSlideEdited(); Log("reset " + row.label + " (" + std::to_string(n) + " morph(s))"); }
+        return;
+    }
     if (row.kind == 0) {
         bool any = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
@@ -486,6 +493,7 @@ void SettingsAction(int id) {
         SaveSettings(g.settings);
         Log("settings forgotten: the library and the mods folder are looked for again at the next start (the library on disk stays)", LogKind::Warn);
         break;
+    case kMorphResetAll: ResetAllMorphs(); break;
     default: break;
     }
     InvalidatePanel();

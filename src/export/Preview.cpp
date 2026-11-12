@@ -628,26 +628,40 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             }
         }
     }
+    // Has a live-morph delta for this mesh (and vm.posed therefore holds the morphed copy)?
+    auto morphedMesh = [&](int mi) {
+        if (!opt.morphDelta || static_cast<size_t>(mi) >= opt.morphDelta->size()) return false;
+        const auto& d = (*opt.morphDelta)[static_cast<size_t>(mi)];
+        return !d.empty() && d.size() == scene.meshes[static_cast<size_t>(mi)].vertices.size();
+    };
     auto meshOf = [&](int mi) -> const assemble::SceneMesh& {
         VM& vm = vms[static_cast<size_t>(mi)];
         if (!vm.done) {
             vm.done = true;
             const auto& restMesh = scene.meshes[static_cast<size_t>(mi)];
             const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-            if (posed) {
+            // The live morphs' offsets ride on the copied mesh, before the pose (bind-space, like the game)
+            const std::vector<Vec3>* md = morphedMesh(mi) ? &(*opt.morphDelta)[static_cast<size_t>(mi)] : nullptr;
+            if (posed || md) {
                 vm.posed = restMesh;
-                for (auto& v : vm.posed.vertices) {
-                    v.pos = assemble::SkinPoint(v, *opt.skin);
-                    v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
-                }
+                if (md)
+                    for (size_t i = 0; i < vm.posed.vertices.size(); ++i) {
+                        Vec3& p = vm.posed.vertices[i].pos;
+                        p.x += (*md)[i].x; p.y += (*md)[i].y; p.z += (*md)[i].z;
+                    }
+                if (posed)
+                    for (auto& v : vm.posed.vertices) {
+                        v.pos = assemble::SkinPoint(v, *opt.skin);
+                        v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
+                    }
             }
-            const auto& mesh = posed ? vm.posed : restMesh;
+            const auto& mesh = (posed || md) ? vm.posed : restMesh;
             vm.P.resize(mesh.vertices.size());
             vm.NZ.resize(mesh.vertices.size());
             for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], vm.P[i], vm.NZ[i]);
         }
         const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-        return posed ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
+        return (posed || morphedMesh(mi)) ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
     };
     auto drawSub = [&](int mi, int subIdx, bool blend, bool highlight) {
             const auto& mesh = meshOf(mi);

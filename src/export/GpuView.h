@@ -135,6 +135,12 @@ public:
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
     void SetSkin(const std::vector<Mat4>* skin);
 
+    // The viewer's live blend shapes (the Morphs tab): per scene mesh, the accumulated offsets at the current weights (parallel to
+    // Scene::meshes; empty vectors for the meshes no active morph touches). Copied, so the caller may reuse its own buffer. Storage only:
+    // call Refresh(false) after setting it - Refresh folds the stored offsets into the rest vertices, re-uploads and re-skins like Reshape does.
+    // The Scene itself is never modified, so a re-shape rebuilds cleanly. nullptr or empty goes back to the rest shape.
+    void SetMorphDelta(const std::vector<std::vector<Vec3>>* delta);
+
     // The scene's vertices changed in place (a re-shape): uploads the new positions and normals, keeping the current skin. Tangents (the normal
     // map frame) are recomputed only when asked; leave them while a slider is being dragged and ask once it is released.
     void Refresh(bool tangents);

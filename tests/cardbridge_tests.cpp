@@ -17,6 +17,7 @@
 #include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
+#include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "core/Inflate.h"
@@ -27,6 +28,7 @@
 #include "export/AdapterSelect.h"
 #include "export/BoneLabels.h"
 #include "export/Exporter.h"
+#include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
@@ -1026,6 +1028,150 @@ void unitTests() {
         CHECK(winkL && winkR && winkL->vertices.size() == 1 && winkL->vertices[0].first == 2 && winkR->vertices.size() == 1 && winkR->vertices[0].first == 0);
         const pmx::Morph* i = get("い");
         CHECK(!get("ワ") && i && i->vertices.size() == 1 && i->vertices[0].first == 0);   // a pattern the head lacks: no morph, except a vowel (the plain open mouth, scaled)
+    });
+
+    test("morphs: the Morphs tab's catalog is the PMX's vertex morphs, offsets and all (expressions, raw shapes, MMD standard, iris follow)", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        auto addBone = [&](const char* n, int parent, float x, float y) { s.bones.push_back({n, parent, {x, y, 0}, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = addBone("p_cf_body_bone", -1, 0, 0);   // the rig's root (the exporter renames it 全ての親)
+        const int head = addBone("cf_j_head", root, 0, 16.0f);
+        addBone("cf_J_hitomi_tx_L", head, 1.0f, 16.4f);   // the left eye (+x in this un-turned build)
+        addBone("cf_J_hitomi_tx_R", head, -1.0f, 16.4f);
+        // mesh 0: the mouth with one raw blend shape (a_l_op moves the lower lip down)
+        assemble::SceneMesh mouth;
+        mouth.name = "cf_O_kuti";
+        for (float x : {-1.0f, 0.6f, 0.0f, 1.2f}) { assemble::SceneVertex v; v.pos = {x, 15.5f, 0.8f}; mouth.vertices.push_back(v); }
+        {
+            assemble::SceneBlendShape sh;
+            sh.name = "a_l_op";
+            sh.offsets = {{0, {0, -2.0f, 0}}, {2, {0, -1.0f, 0}}};
+            mouth.shapes.push_back(sh);
+        }
+        { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 2, 1, 3}; mouth.submeshes.push_back(sub); }
+        s.meshes.push_back(mouth);
+        // meshes 1 and 2: the two eyes; the white is the flat cap in front, the iris a patch just above it (as the game builds them)
+        for (const char* eye : {"cf_Ohitomi_L", "cf_Ohitomi_R"}) {
+            const float cx = std::string(eye).find('L') != std::string::npos ? 1.0f : -1.0f;
+            assemble::SceneMesh em;
+            em.name = eye;
+            for (int i = 0; i < 3; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f, 0.05f + 0.01f * static_cast<float>(i)}; em.vertices.push_back(v); }   // the white
+            for (int i = 0; i < 2; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f + 0.02f * static_cast<float>(i), 0.06f}; em.vertices.push_back(v); }   // the iris
+            {
+                assemble::SceneBlendShape sh;
+                sh.name = "def_cl";   // squeezes the white with the lid
+                for (int i = 0; i < 3; ++i) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, -1.0f, 0});
+                em.shapes.push_back(sh);
+            }
+            { assemble::SceneSubmesh sub; sub.material = cx > 0 ? 1 : 3; sub.indices = {0, 1, 2}; em.submeshes.push_back(sub); }   // cf_Ohitomi_L: the white
+            { assemble::SceneSubmesh sub; sub.material = cx > 0 ? 2 : 4; sub.indices = {3, 4, 4}; em.submeshes.push_back(sub); }   // cf_Ohitomi_L02: the iris
+            s.meshes.push_back(em);
+        }
+        assemble::SceneMaterial m0; m0.name = "cf_O_kuti";
+        assemble::SceneMaterial wl; wl.name = "cf_Ohitomi_L";
+        assemble::SceneMaterial il; il.name = "cf_Ohitomi_L02";
+        assemble::SceneMaterial wr; wr.name = "cf_Ohitomi_R";
+        assemble::SceneMaterial ir; ir.name = "cf_Ohitomi_R02";
+        s.materials = {m0, wl, il, wr, ir};
+        // the patterns the game's FaceBlendShape mouth and eye components play (both eyes, closed and open states)
+        assemble::SceneExpression mouthEx;
+        mouthEx.name = "Mouth 0 open";
+        mouthEx.panel = 3;
+        mouthEx.targets.push_back({0, 0, 60.0f});
+        mouthEx.shape = "a_l_op";
+        s.expressions.push_back(mouthEx);
+        assemble::SceneExpression eyeEx;
+        eyeEx.name = "Eyes 0 closed";
+        eyeEx.panel = 2;
+        eyeEx.targets.push_back({1, 0, 100.0f});
+        eyeEx.targets.push_back({2, 0, 100.0f});
+        eyeEx.shape = "def_cl";
+        s.expressions.push_back(eyeEx);
+
+        const std::vector<LiveMorph> morphs = BuildLiveMorphs(s);
+        auto find = [&](const char* n) -> const LiveMorph* {
+            for (const auto& m : morphs) if (m.name == n) return &m;
+            return nullptr;
+        };
+        auto offAt = [](const LiveMorph& m, int mesh, uint32_t vertex) -> Vec3 {
+            for (const auto& [v, d] : m.byMesh.at(static_cast<size_t>(mesh))) if (v == vertex) return d;
+            return Vec3{};
+        };
+        // the game's patterns: 60% open is 0.6 x the raw shape; the raw per-mesh shape morph is the full weight
+        const LiveMorph* mouth0 = find("Mouth 0 open");
+        CHECK(mouth0 && mouth0->panel == 3);
+        CHECK(mouth0 && std::fabs(offAt(*mouth0, 0, 0).y + 1.2f) < 1e-4f && std::fabs(offAt(*mouth0, 0, 2).y + 0.6f) < 1e-4f);
+        const LiveMorph* raw = find("cf_O_kuti.a_l_op");
+        CHECK(raw && raw->panel == 3 && offAt(*raw, 0, 0).y == -2.0f && offAt(*raw, 0, 2).y == -1.0f);
+        // the blink: white squeezes (the game's shape), the iris takes the white's mean offset per shape (the PMX's follow)
+        const LiveMorph* blink = find("Eyes 0 closed");
+        CHECK(blink && blink->panel == 2);
+        CHECK(blink && blink->byMesh.at(1).size() == 5 && blink->byMesh.at(2).size() == 5);   // 3 whites + 2 iris, per eye
+        CHECK(blink && offAt(*blink, 1, 3).y == -1.0f && offAt(*blink, 2, 3).y == -1.0f);   // the iris follows (per-mesh vertex indices)
+        // the raw eye shapes are their own morphs too (the exporter's panel keywords do not name "ohitomi", so these are "Other", like in the PMX;
+        // and the iris follow applies to them, like in the export)
+        const LiveMorph* eyeRaw = find("cf_Ohitomi_L.def_cl");
+        CHECK(eyeRaw && eyeRaw->panel == 4 && eyeRaw->byMesh.at(1).size() == 5);   // 3 whites + 2 iris
+        // the MMD standard morphs: the vowels from a_l_op (the game's open mouth) and まばたき from def_cl (the closed eyes)
+        const LiveMorph* a = find("あ");
+        CHECK(a && a->panel == 3 && a->byMesh.at(0).size() == 2);
+        const LiveMorph* b = find("まばたき");
+        CHECK(b && b->panel == 2 && b->byMesh.at(1).size() == 5 && b->byMesh.at(2).size() == 5);
+        // the one-eyed versions: the closed eyes cut on the rig's left eye side (+x here)
+        const LiveMorph* winkL = find("ウィンク２");
+        const LiveMorph* winkR = find("ｳｨﾝｸ２右");
+        CHECK(winkL && winkL->byMesh.at(1).size() == 5 && winkL->byMesh.at(2).size() == 0);
+        CHECK(winkR && winkR->byMesh.at(2).size() == 5 && winkR->byMesh.at(1).size() == 0);
+        // the outfit toggles are material morphs in the PMX: not in the vertex catalog (the Parts tab hides things)
+        for (const auto& m : morphs) CHECK(m.name.find("Hide ") != 0 && m.name.find("Take off ") != 0 && m.name != "Nude body");
+        // 2 expressions + 3 raw shapes + 5 vowels + まばたき + 2 winks
+        CHECK(morphs.size() == 13);
+    });
+
+    test("morphs: the preview folds the live morph offsets into the mesh before it draws a picture", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        assemble::SceneMesh m;
+        m.name = "cf_O_kuti";
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
+            assemble::SceneVertex v;
+            v.pos = p;
+            v.normal = {0, 0, 1};
+            m.vertices.push_back(v);
+        }
+        { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub); }
+        s.meshes.push_back(m);
+        s.materials.push_back(assemble::SceneMaterial{});   // untextured: the plain look draws diffuse
+        assemble::ScenePart part;
+        part.id = "body";
+        part.group = "Body";
+        part.meshes = {0};
+        s.parts.push_back(part);
+        auto draw = [&](const std::vector<std::vector<Vec3>>* md) {
+            ViewOptions opt;
+            opt.shaded = false;
+            opt.step = 1;
+            opt.morphDelta = md;
+            ViewStatePtr st = NewViewState();
+            std::vector<uint32_t> bgra;
+            RenderView(s, ViewCamera{}, 160, 160, opt, *st, bgra);
+            return bgra;
+        };
+        const std::vector<uint32_t> rest = draw(nullptr);
+        // the whole quad slides up by 0.4 (a morph at weight 1, applied bind-space before the pose)
+        std::vector<std::vector<Vec3>> delta(1);
+        for (int i = 0; i < 4; ++i) delta[0].push_back({0, 0.4f, 0});
+        const std::vector<uint32_t> moved = draw(&delta);
+        size_t diff = 0;
+        for (size_t i = 0; i < rest.size(); ++i) if (rest[i] != moved[i]) ++diff;
+        CHECK(diff > 100);
+        // a morph that touches another mesh does not move this one (per-mesh lists)
+        std::vector<std::vector<Vec3>> other(1);   // mesh 0 untouched: an empty per-mesh list
+        const std::vector<uint32_t> same = draw(&other);
+        size_t diffSame = 0;
+        for (size_t i = 0; i < rest.size(); ++i) if (rest[i] != same[i]) ++diffSame;
+        CHECK(diffSame == 0);
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -3512,6 +3658,429 @@ void unitTests() {
         scene.materials.push_back(other);
         CHECK(exporter::ApplyNippleTint(scene, assemble::kDefaultNippleColour) == 1);   // only the body material
         CHECK(std::fabs(scene.materials[1].props[0].second.x - 0.1f) < 1e-6f);
+    });
+
+    // ---- clothing (outfit) export: a character card's coordinate becomes an outfit file ----
+    auto clothPartOf = [](int64_t id) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("id")), Value(id));
+        m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+        return Value(std::move(m));
+    };
+    auto accPartOf = [](int64_t type, int64_t id, const char* parent) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("type")), Value(type));
+        m.emplace_back(Value(std::string("id")), Value(id));
+        m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+        return Value(std::move(m));
+    };
+    auto uarRowBin = [](const char* mod, int64_t slot, int64_t local, const char* prop, int cat) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("ModID")), Value(std::string(mod)));
+        m.emplace_back(Value(std::string("Slot")), Value(slot));
+        m.emplace_back(Value(std::string("LocalSlot")), Value(local));
+        m.emplace_back(Value(std::string("Property")), Value(std::string(prop)));
+        m.emplace_back(Value(std::string("CategoryNo")), Value(int64_t(cat)));
+        if (std::string(mod) == "mod.top") m.emplace_back(Value(std::string("Name")), Value(std::string("ModTop")));   // a sibling key that must survive verbatim
+        return Value(MsgPackPack(Value(std::move(m))));
+    };
+    auto mkClothList = [&](std::initializer_list<int64_t> ids) {
+        Value::Array parts;
+        for (int64_t id : ids) parts.push_back(clothPartOf(id));
+        while (parts.size() < 9) parts.push_back(clothPartOf(0));
+        // part 0 carries a mod pattern (row: outfit1.ChaFileClothes.ClothesTopPattern0, slot 777)
+        {
+            Value p0 = parts[0];
+            for (auto& kv : p0.map())
+                if (kv.first.isStr() && kv.first.asStr() == "colorInfo")
+                    kv.second = Value(Value::Array{Value(Value::Map{{Value(std::string("pattern")), Value(int64_t{777})}})});
+            parts[0] = std::move(p0);
+        }
+        Value::Array sub{Value(int64_t{321}), Value(int64_t{0}), Value(int64_t{0})};
+        Value::Map m;
+        m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+        m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+        return Value(std::move(m));
+    };
+    auto mkAccList = [&](std::initializer_list<std::pair<int64_t, int64_t>> slots) {
+        // exactly 20 parts (extras past 20 are added explicitly by the extras tests)
+        Value::Array arr;
+        for (int i = 0; i < 20; ++i) arr.push_back(accPartOf(120, 0, ""));
+        for (const auto& [index, id] : slots) {
+            if (index >= 0 && index < static_cast<int>(arr.size())) arr[static_cast<size_t>(index)] = accPartOf(127, id, "a_n_headside");
+        }
+        Value::Map m;
+        m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+        return Value(std::move(m));
+    };
+    auto mkCardForExport = [&]() {
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.supported = true;
+        c.productNo = 100;
+        c.formatVersion = "0.0.0";
+        c.path = tempPath("clothing_export_src.png");
+        c.sha256 = "sha256fake";
+        c.faceThumbnail = tinyPng();
+        c.parameter = Value(Value::Map{{Value(std::string("lastname")), Value(std::string("Tohsaka"))}, {Value(std::string("firstname")), Value(std::string("Rin"))}});
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{1})}});   // outfit 1
+        c.outfits.resize(7);
+        c.outfits[1].clothes = mkClothList({56, 0, 203, 0, 0, 0, 0, 6, 6});
+        c.outfits[1].accessory = mkAccList({{0, 10}});
+        c.outfits[1].makeup = Value(Value::Map{{Value(std::string("version")), Value(std::string("1"))}});
+        c.outfits[1].enableMakeup = true;
+        c.rows = {
+            {"mod.top", 56, 100019001, "outfit1.ChaFileClothes.ClothesTop", 105},
+            {"mod.pants", 203, 100019003, "outfit1.ChaFileClothes.ClothesPants", 110},
+            {"mod.pattern", 777, 100019777, "outfit1.ChaFileClothes.ClothesTopPattern0", 430},
+            {"mod.shoes", 6, 100019006, "outfit1.ChaFileClothes.ClothesShoesInner", 112},
+            {"mod.sub", 321, 100019321, "outfit1.ChaFileClothes.ClothesJacket1SubA", 105},
+            {"mod.hat", 10, 100011001, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124},
+            {"mod.other", 42, 100000042, "outfit3.ChaFileClothes.ClothesTop", 105},
+        };
+        return c;
+    };
+
+    test("clothing export: writes an outfit file that applies to a character (byte layout, marker, version)", [&] {
+        card::Card c = mkCardForExport();
+        c.extended = Value(Value::Map{
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{})}, {Value(std::string("extra")), Value(std::string("keepme"))}})})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out;
+        // a KKEx is built only when there is content; here UAR is empty so KKEx should be absent
+        out = card::BuildClothingFileBytes(c, opt, &rep);
+        // PNG signature and a sane thumbnail size
+        CHECK(out.size() > 40);
+        CHECK(out[0] == 0x89 && out[1] == 'P');
+        // productNo 100, then the 【KoiKatuClothes】 marker right after the thumbnail
+        const size_t pngSize = tinyPng().size();
+        const uint8_t* p = out.data() + pngSize;
+        CHECK((static_cast<int32_t>(p[0]) | (static_cast<int32_t>(p[1]) << 8) | (static_cast<int32_t>(p[2]) << 16) | (static_cast<int32_t>(p[3]) << 24)) == 100);
+        const std::string marker = "\xE3\x80\x90KoiKatuClothes\xE3\x80\x91";
+        bool foundMarker = false;
+        for (size_t i = 0; i + marker.size() <= out.size(); ++i)
+            if (std::memcmp(out.data() + i, marker.data(), marker.size()) == 0) { foundMarker = true; break; }
+        CHECK(foundMarker);
+        // no payload garbage: marker parses cleanly as dotnet strings
+        card::ClothingFile cl;
+        const std::string tmp = tempPath("clothing_export_layout.png");
+        {
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (f) { std::fwrite(out.data(), 1, out.size(), f); std::fclose(f); }
+        }
+        cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        CHECK(cl.formatVersion == "0.0.0");
+        CHECK(cl.name == "Tohsaka Rin - School Uniform (Going Home)");
+        CHECK(cl.productNo == 100);
+    });
+
+    test("clothing export: ids re-localise to session locals on write and back to slots on apply (round trip)", [&] {
+        card::Card c = mkCardForExport();
+        // KCOX: one bare overlay and one coordinate-keyed overlay for the target outfit
+        Value::Map garments;
+        garments.emplace_back(Value(std::string("ct_clothesTop")), Value(Value::Array{Value(Bytes{9, 8, 7}), Value(true)}));
+        Value::Map perCoord;
+        perCoord.emplace_back(Value(std::string("ct_other")), Value(Value::Array{Value(Bytes{1, 2, 3}), Value(false)}));
+        Value::Map overlays;
+        overlays.emplace_back(Value(std::string("ct_clothesTop")), Value(Value::Array{Value(Bytes{9, 8, 7}), Value(true)}));
+        overlays.emplace_back(Value(int64_t{3}), Value(std::move(perCoord)));
+        Value::Map kcoxPayload;
+        kcoxPayload.emplace_back(Value(std::string("Overlays")), Value(MsgPackPack(Value(std::move(overlays)))));
+        c.extended = Value(Value::Map{
+            // UAR with an extra sibling key and a row for outfit 3 that must not be copied
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{
+                     uarRowBin("mod.top", 56, 100019001, "outfit1.ChaFileClothes.ClothesTop", 105),
+                     uarRowBin("mod.pants", 203, 100019003, "outfit1.ChaFileClothes.ClothesPants", 110),
+                     uarRowBin("mod.pattern", 777, 100019777, "outfit1.ChaFileClothes.ClothesTopPattern0", 430),
+                     uarRowBin("mod.shoes", 6, 100019006, "outfit1.ChaFileClothes.ClothesShoesInner", 112),
+                     uarRowBin("mod.sub", 321, 100019321, "outfit1.ChaFileClothes.ClothesJacket1SubA", 105),
+                     uarRowBin("mod.hat", 10, 100011001, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124),
+                     uarRowBin("mod.other", 42, 100000042, "outfit3.ChaFileClothes.ClothesTop", 105),
+                 })}, {Value(std::string("extraUAR")), Value(std::string("keepme"))}})})},
+            {Value(std::string("KCOX")), Value(Value::Array{Value(int64_t{1}), Value(std::move(kcoxPayload))})},
+        });
+        card::ClothingExportOptions opt;
+        const std::string tmp = tempPath("clothing_export_roundtrip.png");
+        fileio::RemoveFile(tmp);
+        card::ClothingExportReport rep = card::ExportClothingToFile(c, tmp, opt, true);
+        CHECK(rep.uarRowsKept == 6);
+        CHECK(rep.kcoxGarments == 1);
+        CHECK(rep.clothesIdsLocalized >= 2);   // top + pants
+        CHECK(rep.subPartsLocalized == 1);
+        CHECK(rep.accessoryIdsLocalized == 1); // hat
+        // File contents: ids are the session-local values; rows are unprefixed
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        const auto& cloths = cl.outfit.clothes.at("parts").asArray();
+        CHECK(cloths[0].at("id").asInt() == 100019001);
+        CHECK(cloths[2].at("id").asInt() == 100019003);
+        CHECK(cloths[0].at("colorInfo").at(size_t(0)).at("pattern").asInt() == 100019777);   // re-localised
+        const auto& sub = cl.outfit.clothes.at("subPartsId").asArray();
+        CHECK(sub[0].asInt() == 100019321);
+        const auto& acc = cl.outfit.accessory.at("parts").asArray();
+        CHECK(acc[0].at("id").asInt() == 100011001);
+        CHECK(acc.size() >= 20);
+        CHECK(cl.rows.size() == 6);
+        bool unprefixed = true;
+        for (const auto& r : cl.rows) unprefixed = unprefixed && r.property.rfind("outfit", 0) != 0;
+        CHECK(unprefixed);
+        bool keptExtraKey = false;
+        for (const auto& r : cl.rows) if (r.modId == "mod.top") keptExtraKey = (r.slot == 56);
+        CHECK(keptExtraKey);
+        // apply to another character: local ids become author slots again
+        card::Card b;
+        b.family = card::CardFamily::Koikatsu;
+        b.supported = true;
+        b.outfits.resize(7);
+        b.outfits[4].clothes = mkClothList({0, 0, 0, 0, 0, 0, 0, 0, 0});
+        b.outfits[4].accessory = mkAccList({});
+        b.outfits[4].makeup = Value(Value::Map{});
+        b.outfits[4].enableMakeup = true;
+        card::ApplyClothingOptions aopt;
+        aopt.outfit = 4;
+        card::ApplyClothing(b, cl, aopt);
+        const auto& appliedClothes = b.outfits[4].clothes.at("parts").asArray();
+        CHECK(appliedClothes[0].at("id").asInt() == 56 && appliedClothes[2].at("id").asInt() == 203);
+        CHECK(appliedClothes[0].at("colorInfo").at(size_t(0)).at("pattern").asInt() == 777);   // 100019777 -> 777 again
+        CHECK(b.outfits[4].accessory.at("parts").asArray()[0].at("id").asInt() == 10);
+    });
+
+    test("clothing export: material editor rebase — CoordinateIndex becomes 0, hair rows dropped, texture dictionary subsetted", [&] {
+        card::Card c = mkCardForExport();
+        const Bytes tex1{9, 9, 9}, tex2{8, 8, 8}, tex9{7, 7, 7};
+        Value::Map dict;
+        dict.emplace_back(Value(int64_t{1}), Value(tex1));
+        dict.emplace_back(Value(int64_t{2}), Value(tex2));
+        dict.emplace_back(Value(int64_t{9}), Value(tex9));
+        auto mr = [](int64_t coord, int64_t obj, int64_t slot, const char* name, const char* prop, int64_t tex) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("CoordinateIndex")), Value(coord));
+            m.emplace_back(Value(std::string("ObjectType")), Value(obj));
+            m.emplace_back(Value(std::string("Slot")), Value(slot));
+            m.emplace_back(Value(std::string("MaterialName")), Value(std::string(name)));
+            m.emplace_back(Value(std::string("Property")), Value(std::string(prop)));
+            m.emplace_back(Value(std::string("TexID")), Value(tex));
+            return Value(std::move(m));
+        };
+        auto cr = [](int64_t coord, int64_t obj, int64_t slot, const char* name, float r, float g, float b) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("CoordinateIndex")), Value(coord));
+            m.emplace_back(Value(std::string("ObjectType")), Value(obj));
+            m.emplace_back(Value(std::string("Slot")), Value(slot));
+            m.emplace_back(Value(std::string("MaterialName")), Value(std::string(name)));
+            Value::Array col{Value(static_cast<double>(r)), Value(static_cast<double>(g)), Value(static_cast<double>(b)), Value(1.0)};
+            m.emplace_back(Value(std::string("Color")), Value(std::move(col)));
+            return Value(std::move(m));
+        };
+        Value::Array texRows{mr(1, 1, 0, "ct_top", "MainTex", 1), mr(3, 1, 0, "ct_other", "MainTex", 9),
+                             mr(1, 2, 0, "ca_hat", "MainTex", 2), mr(1, 3, 0, "cf_hair", "MainTex", 2)};
+        Value::Array colorRows{cr(1, 1, 6, "ct_shoes", 1, 0, 0), cr(0, 1, 6, "ct_othercoord", 0, 1, 0)};
+        Value::Map mePayload;
+        mePayload.emplace_back(Value(std::string("TextureDictionary")), Value(MsgPackPack(Value(std::move(dict)))));
+        mePayload.emplace_back(Value(std::string("MaterialTexturePropertyList")), Value(MsgPackPack(Value(std::move(texRows)))));
+        mePayload.emplace_back(Value(std::string("MaterialColorPropertyList")), Value(MsgPackPack(Value(std::move(colorRows)))));
+        c.extended = Value(Value::Map{
+            {Value(std::string("com.deathweasel.bepinex.materialeditor")), Value(Value::Array{Value(int64_t{0}), Value(std::move(mePayload))})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out = card::BuildClothingFileBytes(c, opt, &rep);
+        CHECK(rep.meListRows == 3);          // ct_top, ca_hat, ct_shoes
+        CHECK(rep.meTexturesKept == 2);      // 1 and 2
+        const std::string tmp = tempPath("clothing_export_me.png");
+        fileio::RemoveFile(tmp);
+        fileio::WriteFile(tmp, out.data(), out.size());
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        const Value& me = cl.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        Value texList = MsgPackParse(me.at("MaterialTexturePropertyList").asBin());
+        CHECK(texList.asArray().size() == 2);      // hair row dropped, outfit-3 row dropped
+        for (const auto& row : texList.asArray()) CHECK(row.at("CoordinateIndex").asInt() == 0);
+        // dictionary: only ids 1 and 2 survive
+        Value td = MsgPackParse(me.at("TextureDictionary").asBin());
+        std::set<int64_t> ids;
+        for (const auto& kv : td.map()) if (kv.first.isInt()) ids.insert(kv.first.asInt());
+        CHECK(ids.count(1) == 1 && ids.count(2) == 1 && ids.count(9) == 0);
+        Value colList = MsgPackParse(me.at("MaterialColorPropertyList").asBin());
+        CHECK(colList.asArray().size() == 1 && colList.asArray()[0].at("CoordinateIndex").asInt() == 0);
+    });
+
+    test("clothing export: hidden accessories and hair accessories are not exported; extras past slot 20 travel in the MoreAccessories XML", [&] {
+        card::Card c = mkCardForExport();
+        // Show state: slot 2 hidden, slot 10 hidden; everything else shown.
+        Value::Array show;
+        for (int i = 0; i < 20; ++i) show.emplace_back(int64_t{1});
+        show[2] = Value(int64_t{0});
+        show[10] = Value(int64_t{0});
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{1})}, {Value(std::string("showAccessory")), Value(std::move(show))}});
+        // Parts: 23 accessories; slot 6 a hair accessory; slot 20 a mod necklace extra; slot 21 a hair extra; slot 22 a mod extra.
+        Value::Array arr;
+        for (int i = 0; i < 20; ++i) arr.push_back(accPartOf(120, 0, ""));
+        arr[0] = accPartOf(127, 10, "a_n_headside");
+        arr[2] = accPartOf(127, 42, "a_n_leg_L");          // hidden by showAccessory
+        arr[6] = accPartOf(123, 999, "a_n_headside");      // hair
+        arr[10] = accPartOf(127, 77, "a_n_head_L");        // hidden
+        arr.push_back(accPartOf(124, 1001, "a_n_neck"));   // extra 0 (slot 20): mod necklace
+        arr.push_back(accPartOf(122, 1002, "a_n_headside"));  // extra 1 (slot 21): hair
+        arr.push_back(accPartOf(124, 1003, "a_n_waist"));  // extra 2 (slot 22): mod belt
+        Value::Map acc;
+        acc.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        acc.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+        c.outfits[1].accessory = Value(std::move(acc));
+        c.rows.push_back({"mod.necklace", 321, 100029321, "outfit1.accessory20.ChaFileAccessory.PartsInfo.id", 124});
+        c.rows.push_back({"mod.hairoex", 444, 100029444, "outfit1.accessory21.ChaFileAccessory.PartsInfo.id", 122});
+        c.rows.push_back({"mod.belt", 555, 100029555, "outfit1.accessory22.ChaFileAccessory.PartsInfo.id", 124});
+        // card-style MoreAccessories XML for outfit 1 with three elements (two mods, one empty)
+        std::string xml = "<additionalAccessories version=\"2.0.21.1\">"
+            "<accessorySet type=\"1\">"
+            "<accessory type=\"124\" id=\"321\" parentKey=\"a_n_neck\" addMove0r0x=\"0.1\" addMove0r0y=\"0.2\" addMove0r0z=\"0.3\" "
+                "addMove0r1x=\"0\" addMove0r1y=\"0\" addMove0r1z=\"0\" addMove0r2x=\"0\" addMove0r2y=\"0\" addMove0r2z=\"1\" "
+                "addMove1r0x=\"0\" addMove1r0y=\"0\" addMove1r0z=\"0\" addMove1r1x=\"0\" addMove1r1y=\"0\" addMove1r1z=\"0\" "
+                "addMove1r2x=\"0\" addMove1r2y=\"0\" addMove1r2z=\"1\" "
+                "color0r=\"1\" color0g=\"1\" color0b=\"1\" color0a=\"1\" "
+                "color1r=\"1\" color1g=\"1\" color1b=\"1\" color1a=\"1\" "
+                "color2r=\"1\" color2g=\"1\" color2b=\"1\" color2a=\"1\" "
+                "color3r=\"1\" color3g=\"1\" color3b=\"1\" color3a=\"1\" "
+                "hideCategory=\"0\" noShake=\"false\" />"
+            "<accessory type=\"122\" id=\"1002\" parentKey=\"a_n_headside\" hideCategory=\"0\" noShake=\"true\" />"
+            "<accessory type=\"124\" id=\"555\" parentKey=\"a_n_waist\" hideCategory=\"0\" noShake=\"false\" />"
+            "</accessorySet></additionalAccessories>";
+        Value::Map morePayload;
+        morePayload.emplace_back(Value(std::string("additionalAccessories")), Value(std::move(xml)));
+        c.extended = Value(Value::Map{
+            {Value(std::string("moreAccessories")), Value(Value::Array{Value(int64_t{2}), Value(std::move(morePayload))})},
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{
+                     uarRowBin("mod.necklace", 321, 100029321, "outfit1.accessory20.ChaFileAccessory.PartsInfo.id", 124),
+                     uarRowBin("mod.hairoex", 444, 100029444, "outfit1.accessory21.ChaFileAccessory.PartsInfo.id", 122),
+                     uarRowBin("mod.belt", 555, 100029555, "outfit1.accessory22.ChaFileAccessory.PartsInfo.id", 124),
+                 })}})})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out = card::BuildClothingFileBytes(c, opt, &rep);
+        // hidden slot 2 (42) and slot 10 (77): omitted (counted as hidden); hair slot 6 (999) and extra slot 21 (1002): omitted as hair
+        CHECK(rep.hiddenAccessoriesDropped == 2);
+        CHECK(rep.hairAccessoriesDropped == 2);
+        CHECK(rep.extraAccessoriesKept == 2);   // the necklace and the belt; the hair extra was excluded
+        const std::string tmp = tempPath("clothing_export_hidden.png");
+        fileio::RemoveFile(tmp);
+        fileio::WriteFile(tmp, out.data(), out.size());
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        const auto& a = cl.outfit.accessory.at("parts").asArray();
+        CHECK(a.size() == 22);                            // 20 fixed + 2 extras rebuilt from XML
+        CHECK(a[2].at("id").asInt() == 0);                 // hidden -> empty part
+        CHECK(a[10].at("id").asInt() == 0);                // hidden -> empty part
+        CHECK(a[6].at("id").asInt() == 0);                 // hair -> empty part
+        CHECK(a[0].at("id").asInt() == 100011001);         // visible mod hat, localised
+        CHECK(a[20].at("id").asInt() == 100029321);        // extra necklace, localised via accessory20 row
+        CHECK(a[21].at("id").asInt() == 100029555);        // extra belt, compacted into slot 21
+        // the hair extra is gone; rows for omitted accessory slots are dropped / renumbered
+        bool hasAcc21Row = false, hasAcc22Row = false, hasAcc20Row = false;
+        for (const auto& r : cl.rows) {
+            if (r.property == "accessory21.ChaFileAccessory.PartsInfo.id") hasAcc21Row = true;
+            if (r.property == "accessory22.ChaFileAccessory.PartsInfo.id") hasAcc22Row = true;
+            if (r.property == "accessory20.ChaFileAccessory.PartsInfo.id") hasAcc20Row = true;
+        }
+        CHECK(hasAcc20Row);          // kept: clothes/extra rows are not omitted
+        CHECK(hasAcc21Row);          // the belt's row renumbered from accessory22 -> accessory21
+        CHECK(!hasAcc22Row);
+        // hair-extra row is gone with it
+        bool hairRowGone = true;
+        for (const auto& r : cl.rows) if (r.modId == "mod.hairoex") hairRowGone = false;
+        CHECK(hairRowGone);
+        // with the flags on, nothing is dropped
+        opt.includeHidden = true;
+        opt.withHairAccessories = true;
+        card::ClothingExportReport rep2;
+        Bytes out2 = card::BuildClothingFileBytes(c, opt, &rep2);
+        CHECK(rep2.hiddenAccessoriesDropped == 0 && rep2.hairAccessoriesDropped == 0);
+        // an extras-less card writes no MoreAccessories block (and no KKEx beyond content)
+        card::Card d = mkCardForExport();
+        d.outfits[1].accessory = mkAccList({});
+        const std::string tmpD = tempPath("clothing_export_extras_none.png");
+        fileio::RemoveFile(tmpD);
+        card::ClothingExportReport rep3 = card::ExportClothingToFile(d, tmpD, card::ClothingExportOptions{});
+        card::ClothingFile clf = card::LoadClothingFile(tmpD);
+        CHECK(!clf.extended.has("moreAccessories"));
+        (void)rep3;
+    });
+
+    test("clothing export: guards — unsupported card, bad outfit, overwrite rules, determinism, byte layout", [&] {
+        card::Card c = mkCardForExport();
+        card::Card unknown;
+        unknown.supported = false;
+        unknown.supportNote = "recognised as Koikatsu Sunshine";
+        bool threw = false;
+        try { card::BuildClothingFileBytes(unknown, card::ClothingExportOptions{}); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        c = mkCardForExport();
+        card::ClothingExportOptions bad;
+        bad.outfit = 99;
+        threw = false;
+        try { card::BuildClothingFileBytes(c, bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        // determinism
+        Bytes a = card::BuildClothingFileBytes(c, card::ClothingExportOptions{});
+        Bytes b = card::BuildClothingFileBytes(c, card::ClothingExportOptions{});
+        CHECK(a == b);
+        // overwrite behaviour
+        const std::string tmp = tempPath("clothing_export_overwrite.png");
+        fileio::RemoveFile(tmp);
+        card::ClothingExportReport rep = card::ExportClothingToFile(c, tmp, card::ClothingExportOptions{}, false);
+        CHECK(!rep.outfitName.empty());
+        threw = false;
+        try { card::ExportClothingToFile(c, tmp, card::ClothingExportOptions{}, false); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);   // exists and no overwrite
+        // the output path may not be the source card
+        threw = false;
+        try { card::ExportClothingToFile(c, c.path, card::ClothingExportOptions{}, true); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        // unknown plugin blocks are reported, not silent
+        c = mkCardForExport();
+        Value::Map morePayload;
+        morePayload.emplace_back(Value(std::string("additionalAccessories")), Value(std::string("<additionalAccessories version=\"2.0.21.1\" />")));
+        c.extended = Value(Value::Map{
+            {Value(std::string("KSOX")), Value(Value::Array{Value(int64_t{1}), Value(Value::Map{})})},
+            {Value(std::string("com.deathweasel.bepinex.pushup")), Value(Value::Array{Value(int64_t{0}), Value(Value::Map{})})},
+            {Value(std::string("moreAccessories")), Value(Value::Array{Value(int64_t{2}), Value(std::move(morePayload))})},
+        });
+        card::ClothingExportReport rep4;
+        Bytes out = card::BuildClothingFileBytes(c, card::ClothingExportOptions{}, &rep4);
+        bool sawKsox = false, sawPushup = false;
+        for (const auto& s : rep4.droppedPlugins) { sawKsox = sawKsox || s == "KSOX"; sawPushup = sawPushup || s == "com.deathweasel.bepinex.pushup"; }
+        CHECK(sawKsox && sawPushup);
+        // ABMX is opt-in
+        c = mkCardForExport();
+        c.extended = Value(Value::Map{
+            {Value(std::string("KKABMPlugin.ABMData")), Value(Value::Array{Value(int64_t{3}), Value(Bytes{1, 2, 3})})},
+        });
+        card::ClothingExportReport rep5;
+        Bytes out5 = card::BuildClothingFileBytes(c, card::ClothingExportOptions{}, &rep5);
+        bool hasAbmx = false;
+        for (const auto& s : rep5.droppedPlugins) hasAbmx = hasAbmx || s == "KKABMPlugin.ABMData";
+        CHECK(hasAbmx);
+        const std::string tmp5 = tempPath("clothing_export_abmx.png");
+        fileio::RemoveFile(tmp5);
+        card::ClothingExportOptions wopt;
+        wopt.withAbmx = true;
+        card::ClothingExportReport rep6;
+        Bytes out6 = card::BuildClothingFileBytes(c, wopt, &rep6);
+        bool hasAbmxKeep = false;
+        for (const auto& s : rep6.droppedPlugins) hasAbmxKeep = hasAbmxKeep || s == "KKABMPlugin.ABMData";
+        CHECK(!hasAbmxKeep && !rep6.warnings.empty());
+        // byte layout: IEND-bound thumbnail, then productNo, marker, coordLen, KKEx
+        card::ClothingFile cl = [&]() {
+            const std::string tmp7 = tempPath("clothing_export_bytes.png");
+            fileio::WriteFile(tmp7, out5.data(), out5.size());
+            return card::LoadClothingFile(tmp7);
+        }();
+        CHECK(cl.supported);
     });
 }
 

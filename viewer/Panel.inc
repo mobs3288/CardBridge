@@ -96,6 +96,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         const bool canNext = hasClothing && L && clothingOutfit + 1 < L->outfits;
         Button(s, l.clothingPrev, "<", g.hoverButton == 8, false, canPrev && !g.busy);
         Button(s, l.clothingNext, ">", g.hoverButton == 9, false, canNext && !g.busy);
+        Button(s, l.clothingExport, "Export clothes", g.hoverButton == 21, false, L != nullptr && !g.busy && !g.exporting);
         Button(s, l.clothingReset, "Reset clothing", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
     }
 
@@ -119,11 +120,12 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             else if (g.busy && g.tab != TabParts) right = "shaping";
             else if (g.tweakPending) right = "applying";
             else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
+            else if (g.tab == TabMorphs) { const size_t on = MorphsOn(); right = std::to_string(on) + "/" + std::to_string(g.morphs.size()); }
             else if (g.tab == TabMaterials) right = std::to_string(g.mat.OverrideCount()) + " edited";
             else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
             else if (g.tab == TabSettings) right = "saved";
             else right = AnyTweak() ? "tweaked" : "as card";
-            const bool ed = AnyTweak();
+            const bool ed = AnyTweak() || (g.tab == TabMorphs && MorphsOn() != 0);
             s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : ed && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
         }
     }

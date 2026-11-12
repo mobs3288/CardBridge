@@ -139,7 +139,7 @@ The converter needs base-game data (the shared skeleton and body, the item list 
 | Koikatsu | `【KoiKatuChara】` | Target of the first release; card and asset layers verified on real files |
 | Koikatsu Party (patched) | `【KoiKatuCharaSP】` | Card container verified; asset layout assumed identical, not yet tested |
 | Koikatsu Sunshine | `【KoiKatuCharaSun】` | Recognised and reported as unsupported: the container differs (4 outfits, an extra `About` block) and no Sunshine install was available to verify its asset bundles |
-| Koikatsu outfit files | `【KoiKatuClothes】` (and Party/SP variants) | Supported as a clothing source: the outfit's clothes and accessories are merged into the character's in-memory outfit (see below); still rejected as a character card on its own |
+| Koikatsu outfit files | `【KoiKatuClothes】` (and Party/SP variants) | Supported as a clothing source (merged into the character's in-memory outfit) and as a clothing target: `cardbridge clothes` / **Export clothes** write one back out from a character card |
 | Koikatsu Sunshine outfit files | `【KoiKatuClothesSun】` | Recognised and reported as unsupported, like Sunshine characters |
 | Other games, other families | others | Rejected with a specific error |
 
@@ -152,6 +152,8 @@ An outfit file is a Koikatsu `.png` whose payload after the image is a single co
 **Viewer.** Open a character, then drag an outfit file onto the window. It overwrites the outfit on screen in memory (the card on disk is not saved) and stays pinned to that one slot; the log says what was replaced and that hair was kept. Switching to another outfit slot shows that slot's own clothing again, and switching back shows the imported file again. The status line under the slots names the slot that holds it, and **Reset clothing** (or `D`) drops the file and returns the outfit to the card default. Dropping a different character clears the applied outfit too. Exporting (`E`) exports the merged scene, exactly as shown.
 
 **Command line.** `convert <card.png> --clothes <outfit.png> ...` and `inspect <card.png> --clothes <outfit.png>` do the same one-shot merge for the export. `inspect <outfit.png>` shows an outfit file's name, garment ids and resolver rows. `--outfit N` chooses the target slot (default: the card's current outfit); `--replace-accessories` opts into wholesale accessory replacement.
+
+**Exporting an outfit file from a character card.** The reverse direction exists too: `cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [--thumbnail <file.png>] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]` writes the shown outfit back out as a `【KoiKatuClothes】` `.png` — the same format `--clothes` applies and the game reads. The viewer does the same from **Export clothes** (or `Shift+E`) in the outfit section next to Reset clothing. The file carries the clothes (with jacket sub-parts and pattern ids), the accessories, the makeup, the Sideloader resolver rows, the garment paint (`KCOX`) and the MaterialEditor main-texture edits, rebased to coordinate 0; MoreAccessories extras past slot 20 travel by copying the card's own XML, never by re-serialising it. Hidden accessories (the card's per-slot show/hide state in `Status.showAccessory`, the viewer's unticked slots, or `--hide a,b,c`) and hair-type accessories are **not exported**, by default — the same "hidden leaves the export" rule as the PMX; `--include-hidden` / `--with-hair-accessories` keep them, and the report names every slot omitted. The card on disk is never written; no library and no mods folder are needed, and the output is byte-reproducible: the same card always yields the same file.
 
 **Hair is never deleted.** In Koikatsu the hair can live entirely in the accessory slots (a "no hair" back slot, with the hair front and back worn as accessories, categories 122/123). The merge therefore keeps every hair accessory in its slot: an empty outfit slot never clears the character, and an outfit accessory that wants a slot taken by hair moves to the first empty slot instead (its attach node still decides where it hangs). The character's hair slots (back / front / side / extension) are untouched, because an outfit file has no hair. `--replace-accessories` on the CLI is the only way to overwrite them, for users who really want it.
 
@@ -248,6 +250,12 @@ To check a PMX for what MikuMikuDance chokes on (nested group morphs, IK limits,
 cardbridge library import --game "<game folder>" --library "<library folder>"          # add --minimal for ~5 MB
 cardbridge library check  --library "<library folder>" --hashes
 
+# export one outfit of a character card as an outfit file (the reverse of --clothes; nothing is written to the card)
+cardbridge clothes "<card.png>"                                        # current outfit; default out: <card stem> - <outfit name>.png next to the card
+cardbridge clothes "<card.png>" --outfit 2 --out "<outfit.png>"          # another outfit slot
+cardbridge clothes "<card.png>" --hide 3,7 --with-hair-accessories     # include hidden/hair slots too
+# the viewer writes the same file from the "Export clothes" button (Shift+E) in the outfit section
+
 # look at a card: family, outfits, which items resolve to which mod
 # (an outfit file alone inspects as an outfit; --clothes merges one onto the card's outfit)
 cardbridge inspect "<card.png>" --library "<library folder>" --mods "<mods folder>"
@@ -274,6 +282,13 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # The Body tab's Bust Size row carries a simple "Band:" (65..105) and "Cup:" (AA..G) preset under the slider: one click sets the size, and the chips track the slider (a size not on the grid lights none). The Look tab's Nipples group carries "Size:" (S, M, L, XL: -4 / 0 / +4 / +8 mm) under "Nipple out / in (mm)" the same way.
 # Posing: K shows the skeleton over the model (click a bone to select it), the Bones tab lists the bones as a tree (helper nodes behind a switch)
 # and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
+# The Morphs tab lists every morph the exported PMX would carry for this scene - the game's FaceBlendShape expressions (Brow / Eyes / Mouth, closed and open),
+# one morph per raw blend shape, the MMD standard names (あ い う え お, ん, まばたき, ウィンク, 真面目 ...) as copies of the game's pattern of the same meaning and the
+# one-eyed versions (ウィンク / ｳｨﾝｸ２右) - grouped into brows / eyes / mouth / other like MMD's morph panels, with live 0..100 sliders. The offsets are applied
+# bind-space before skinning, exactly the way the game applies blend shapes and MMD applies PMX vertex morphs, and the iris follows the lid (the white's mean
+# offset per shape) as it does in the PMX; so what you see is what the exported model does. The weights are not exported (no pose is baked - MMD plays them);
+# bones move in the Bones tab, the DynamicBone physics in the Look tab (Y), so every way the PMX can move is checkable in the viewer. The outfit / nude toggles are
+# material morphs in the PMX; the Parts list hides and shows the same meshes.
 # P (or Look tab > Pose) is the automatic A-pose, on by default (MMD motions are keyed for it): clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
 # pose as the model's rest pose and lists it in the manifest's "pose". CLI: on by default, --apose-degrees N, --tpose to keep the T-pose; --gpu-view --gpu-bones draws the skeleton on the picture.
 # With the skeleton on, the bone under the pointer is ringed and a click-drag on a bone turns it (Ctrl+drag moves it): the tip follows the pointer, the bone and

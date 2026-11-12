@@ -1,11 +1,11 @@
-<#
+﻿<#
 .SYNOPSIS
   Smoke test for cardbridge_viewer.exe: starts a private instance on a card, drives it with posted window messages and takes
   PrintWindow screenshots of every tab and the main interactions. Finds crashes, hangs (a message the window does not answer) and
   controls that do nothing.
 
 .DESCRIPTION
-  Steps (all by default, -Only picks some): parts, body, face, look, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
+  Steps (all by default, -Only picks some): parts, body, face, look, morphs, setup, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
   asexported, export, materials, viewmode, gizmo, axeswidget. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
@@ -246,23 +246,23 @@ try {
     }
     if (Want 'setup') {
         Write-Host 'setup tab'
-        $lay = GoTab 6
-        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 6)
+        $lay = GoTab 7
+        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 7)
         $s = Shot 'setup'
         $actions = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
         Check 'setup: the settings actions are listed' ($actions -gt 3) "$actions visible"
     }
     if (Want 'bones') {
         Write-Host 'bones tab'
-        $lay = GoTab 4
-        Check 'bones: the tab opens' ($null -ne $lay -and $lay.tab -eq 4)
+        $lay = GoTab 5
+        Check 'bones: the tab opens' ($null -ne $lay -and $lay.tab -eq 5)
         $s = Shot 'bones'
         Check 'bones: the bone list is there' ($lay.bones.list.Count -gt 3) "$($lay.bones.list.Count) rows"
     }
     if (Want 'materials') {
         Write-Host 'materials tab'
-        $lay = GoTab 5
-        Check 'materials: the tab opens' ($null -ne $lay -and $lay.tab -eq 5)
+        $lay = GoTab 6
+        Check 'materials: the tab opens' ($null -ne $lay -and $lay.tab -eq 6)
         $s = Shot 'materials'
         $mats = $lay.materials.list.Count
         Check 'materials: the material list is there' ($mats -gt 0) "$mats rows, selected $($lay.materials.sel)"
@@ -407,7 +407,7 @@ try {
     # ---- the skeleton overlay and a bone drag (one gesture = one undo step) ----
     $skeleton = (Want 'skeleton') -or (Want 'bonedrag') -or (Want 'undo') -or (Want 'pose')
     if ($skeleton) {
-        $lay = GoTab 4
+        $lay = GoTab 5
         if (-not $lay.state.showBones) { Key 'K' 600 }
         Start-Sleep -Milliseconds 400
         $lay = Layout
@@ -564,6 +564,39 @@ try {
             Click ([int]$balls[0][0]) ([int]$balls[0][1]) 400
             $lay = Layout
             Check 'axeswidget: back to the right view' ([math]::Abs([double]$lay.state.camYaw - 90) -lt 0.01) ("yaw $($lay.state.camYaw)")
+        }
+    }
+
+    # ---- the Morphs tab: the exported PMX's morphs, live ----
+    if (Want 'morphs') {
+        Write-Host 'morphs tab'
+        $lay = GoTab 4
+        Check 'morphs: the tab opens' ($null -ne $lay -and $lay.tab -eq 4)
+        # every morph of the exported PMX is listed: the game's patterns, the raw shapes and the MMD standard ones
+        $sliders = @($lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
+        $heads = @($lay.rows | Where-Object { $_.kind -eq 0 }).Count
+        $resetAll = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
+        Check 'morphs: the morphs are listed, grouped' ($sliders -gt 5 -and $heads -ge 2 -and $resetAll -ge 1) "$sliders sliders, $heads group headers, reset-all present"
+        # find the blink row and drag it to full; the face must move
+        $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 -and $_.label -eq 'Eyes 0 closed' } | Select-Object -First 1
+        if ($null -eq $row) { $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 } | Select-Object -First 1 }
+        if ($null -eq $row) { Check 'morphs: a morph row is visible' $false }
+        else {
+            $a = Shot 'before_morph'
+            $x0 = [int]$lay.track[0] + 1; $x1 = [int]($lay.track[0] + 0.97 * ($lay.track[1] - $lay.track[0]))
+            Drag $x0 ([int]$row.y) $x1 ([int]$row.y) 12 40
+            $answered = Hook 10 8000
+            $lay = Layout
+            $b = Shot 'morph_max'
+            Check 'morphs: the window answers after the drag (no deadlock)' $answered
+            $d = [V]::DiffView($a.Path, $b.Path, $lay.panel)
+            Check 'morphs: the picture changed' ($d -gt 0.0005) ("{0:P2} of the view, morph '{1}'" -f $d, $row.label)
+            # right-click the row resets the weight to 0
+            [void][V]::PostMessage($hwnd, 0x204, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 80
+            [void][V]::PostMessage($hwnd, 0x205, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 700
+            $lay = Layout
+            $c = Shot 'morph_reset'
+            Check 'morphs: the right-click reset puts the picture back' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
         }
     }
 

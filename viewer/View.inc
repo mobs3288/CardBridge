@@ -68,6 +68,7 @@ void Render(int w, int h) {
     g.vopt.hiddenParts = &g.effHidden;
     g.vopt.step = g.interacting ? 3 : 1;
     g.vopt.skin = g.skin.empty() ? nullptr : &g.skin;   // the software view shows the pose (and the physics) too
+    g.vopt.morphDelta = g.morphDelta.empty() ? nullptr : &g.morphDelta;   // ... and the Morphs tab's live blend shapes
     exporter::RenderView(L->scene, g.cam, w, h, g.vopt, *g.state, g.frame);
     DrawAxisWidget(g.frame, w, h);   // the orientation tripod, always on, top-right
 }

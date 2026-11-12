@@ -69,8 +69,8 @@ struct Tweaks {
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabMaterials, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Mats", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
@@ -78,12 +78,16 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 void SettingsAction(int id);
+void MorphSlideEdited();   // Morphs tab: a slider moved, or the tab cleared the weights
+void LoadMorphCatalog();   // after a character is built: collect the exported PMX's vertex morphs (weights all 0)
+void RebuildMorphCatalog();   // after a re-shape: the shapes moved with the bones, so the export's morph offsets move too
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
-              kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002;   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
+              kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
+              kMorphBase = 30000, kMorphResetAll = 23000;   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
 constexpr int kBodyBust = 4;   // the Bust > Size slider in shape::BodySliders() (body slider ids are the shape's index, 0..43)
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row), 6 a preset-chips row (band / cup / nipple size)
@@ -94,7 +98,7 @@ struct TweakRow {
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
-    RECT clothingReset{}, clothingPrev{}, clothingNext{};
+    RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
@@ -127,11 +131,11 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.outfitClothTop = 184;
     l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
     l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
-    l.clothingReset = {206, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // Seven tabs, 42 px each with a 2 px gap, so the right-hand status line
-    // ("34 parts", "0 edited", ...) keeps its own room instead of overlapping
-    // the last tab.
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {8 + i * 44, 216, 50 + i * 44, 240};
+    l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
+    l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
+    // Eight tabs, narrower with the Morphs tab added, so the right-hand status line ("34 parts", "0 edited", ...)
+    // keeps its own room instead of overlapping the last tab.
+    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {8 + i * 39, 216, 45 + i * 39, 240};
     l.partsHeadingTop = 222;
     l.partsTop = 248;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
@@ -216,12 +220,19 @@ struct App {
     float boneDragDx = 0, boneDragDy = 0;     // bone drag: movement since the last picture
     ULONGLONG lastFrameTick = 0;
     bool animating = false;                   // a list is still easing towards its scroll target
-    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs
+    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs, 21 export clothing
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
     std::set<std::string> collapsedGroups;
     Tweaks tw;
+    // The Morphs tab: every vertex morph the exported PMX carries (the game's FaceBlendShape expressions, the raw blend shapes
+    // and the MMD standard ones, exactly as the export writes them), accumulated per weight on top of the rest shape. Weights are
+    // live-only: they are not exported and not saved (the PMX carries the morphs; MMD plays them). morphDelta is the per-mesh
+    // accumulation at the current weights, handed to the renderers.
+    std::vector<exporter::LiveMorph> morphs;
+    std::vector<float> morphWeights;              // parallel to `morphs`; 0..1, the sliders show 0..100
+    std::vector<std::vector<Vec3>> morphDelta;    // parallel to scene.meshes; empty for meshes no active morph touches
     int tab = TabParts;
     int sliderDrag = -1;                      // slider id being dragged, or -1
     // Shift+Left-click on a slider: type its value with the keyboard. The edit is modal for the mouse/keyboard until

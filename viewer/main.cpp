@@ -33,12 +33,14 @@
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
 #include "export/BoneLabels.h"
+#include "export/MorphCatalog.h"
 #include "export/SkeletonOverlay.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"
 #include "card/CardFile.h"
+#include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "export/Preview.h"
@@ -67,6 +69,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -84,6 +87,7 @@ namespace {
 #include "State.inc"
 #include "Progress.inc"
 #include "Tweaks.inc"
+#include "Morphs.inc"
 #include "MaterialsHelpers.inc"
 #include "Pose.inc"
 #include "SliderEdit.inc"

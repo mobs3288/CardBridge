@@ -426,6 +426,25 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
             rows.push_back({2, kLayerBase + static_cast<int>(i), g.layerDefs[i].name, "Shader layers"});
     }
+    else if (tab == TabMorphs) {
+        static const char* const kPanelNames[5] = {"", "Brows", "Eyes", "Mouth", "Other"};
+        size_t inPanel[5] = {};
+        for (const auto& m : g.morphs) inPanel[m.panel >= 1 && m.panel <= 4 ? m.panel : 4]++;
+        const size_t on = MorphsOn();
+        rows.push_back({4, 0, "the " + std::to_string(g.morphs.size()) + " morphs the exported PMX carries; sliders play them live (0..100)", "Morphs"});
+        rows.push_back({5, kMorphResetAll, on ? "reset every morph (" + std::to_string(on) + " on)" : "reset every morph", "Morphs"});
+        if (g.morphs.empty()) {
+            rows.push_back({4, 0, "this head carries no blend shapes (the face does not animate)", "Other"});
+            return rows;
+        }
+        int curPanel = 0;
+        for (size_t i = 0; i < g.morphs.size(); ++i) {
+            const int p = g.morphs[i].panel >= 1 && g.morphs[i].panel <= 4 ? g.morphs[i].panel : 4;
+            if (p != curPanel) { curPanel = p; rows.push_back({0, p, std::string(kPanelNames[p]) + "  (" + std::to_string(inPanel[p]) + ")", kPanelNames[p]}); }
+            rows.push_back({1, kMorphBase + static_cast<int>(i), g.morphs[i].name, kPanelNames[p]});
+        }
+        rows.push_back({4, 0, "bones move in the Bones tab, the physics in the Look tab (Y)", "Other"});
+    }
     else if (tab == TabSettings) {
         auto shown = [](const std::string& v, const char* none) { return v.empty() ? std::string(none) : Shorten(v, 50); };
         rows.push_back({0, -1, "Asset library (the game's data)", "Library"});
@@ -493,6 +512,7 @@ bool AnyTweak() {
         TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
         TweakChanged(kNippleG) || TweakChanged(kNippleB)) return true;
     if (g.mat.IsDirty()) return true;
+    for (float w : g.morphWeights) if (std::fabs(w) > 1e-4f) return true;   // a live blend shape of the exported PMX
     return false;
 }
 

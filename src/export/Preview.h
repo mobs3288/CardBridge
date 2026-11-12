@@ -73,6 +73,9 @@ struct ViewOptions {
     // Per-material interpreted parameters (Material Workbench EffectiveMaterial), indexed by scene.materials index.
     // Used by Roughness / Metallic / Transmission. When nullptr those modes render as their neutral defaults.
     const std::vector<DiagnosticMaterial>* diagnostics = nullptr;
+    // The viewer's live blend shapes: per scene mesh, the accumulated offsets at the current weights (parallel to Scene::meshes,
+    // missing entries or wrong counts are ignored). Applied to the copied mesh before any pose, like the game; nullptr = no morphs.
+    const std::vector<std::vector<Vec3>>* morphDelta = nullptr;
 };
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's
