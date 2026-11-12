@@ -208,20 +208,28 @@ and the "off" path stays bit-exact with today's output. They must never
   normal folded into the same local vector, exactly as `_DetailNormalMapScale`
   does) and **Koikatsu's original body details** (the ink-line channel `G` of the
   default line mask `cf_body_00_line`, and of the card's `detailId` `LineMask`).
+  **Limb dampening:** vertices bound mostly to the arm or leg chains (any bone
+  whose name contains `leg`, `shin`, `thigh`, `knee`, `arm`, `forearm`, `elbow`,
+  `wrist`) take ~25% of the bake's effect so the elbow and knee joints stay
+  faint; torso, head and hands keep full strength (the crease accents worth
+  seeing live in those regions).
 
 **Blending contract (mandatory — no stacking):**
 
 - The new bake must not double-darken texels already shaded by `SkinShade`. It
   reads the same `ss.base` snapshot and the `ss.shade`/`ss.shadeU`/`ss.covered`
   maps, and **attenuates its own contribution where `SkinShade` already darkened**:
-  - cavity term: `occ = clamp((dev - 0.045f) / 0.25f, 0, 1)`, where
+  - cavity term: `occ = clamp((dev - 0.075f) / 0.25f, 0, 1)`, where
     `dev = length(nLocal(center) - nLocal(neighbourhood average))` is how much the
     texel's normal curves away from the covered texels around it (radius 8,
-    covered-neighbour-only); `shade = 1 - 0.55 * occ^1.6`, floored at strength
+    covered-neighbour-only); `shade = 1 - 0.28 * occ^1.6`, floored at strength
     application to 0.30 and attenuated by `att = max(0, 1 - 0.7 * existingDark)`
     with `existingDark = 1 - splitMul` as before. Flat atlas areas see almost no
-    darkening (measured mean 0.995 over the body, ~4% of texels marked over the
-    shoulder/knee/shin/groin lines).
+    darkening (measured mean 0.995 over the body, ~2-3% of texels marked).
+  - line mask term: only `G`, and **scaled × 0.55** so the navel, clavicle and
+    knee strokes read as faint accents; multiplied in with the cleavage/fold
+    band's attenuation factor (same `shade` band structure) so lines never land
+    on the already-dark crease and produce an artificial black stripe.
   - line mask term: multiplied in with the cleavage/fold band's attenuation factor
     (same `shade` band structure), so the ink line never lands on the already-dark
     crease and produces an artificial black stripe — it only draws where the skin
@@ -248,11 +256,11 @@ and the "off" path stays bit-exact with today's output. They must never
    game's `_DetailNormalMapScale` does.
 2. Cavity shading (no fixed light — see "Why not a directional bake" below):
    radius-8 neighbourhood average over **covered texels only**,
-   `dev = |nLocal - avg|`, `occ = clamp((dev - 0.045) / 0.25, 0, 1)`,
-   `shade = 1 - 0.55 * occ^1.6`. Strong creases and joints (knees, shins, groin,
-   feet, elbows) sit at 0.45–0.75; flat atlas regions read 1.0 and are untouched.
-3. Line mask: `line = cf_body_00_line.G` (at the default; the card's detailId row's
-   `_LineMask.G` when present). Multiply in with `bandAttenuation` — the ink lines
+   `dev = |nLocal - avg|`, `occ = clamp((dev - 0.075) / 0.25, 0, 1)`,
+   `shade = 1 - 0.28 * occ^1.6`. Strong creases and joints (knees, shins, groin,
+   feet, elbows) sit at 0.72–0.90; flat atlas regions read 1.0 and are untouched.
+3. Line mask: `line = cf_body_00_line.G x 0.55` (at the default; the card's detailId row's
+   `_LineMask.G` when present, same scale). Multiply in with `bandAttenuation` — the ink lines
    the game draws with `_linewidth`.
 
 Order: `SkinShade` (existing, unchanged) → attenuated cavity AO → attenuated

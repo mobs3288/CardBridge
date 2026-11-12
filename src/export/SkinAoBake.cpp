@@ -88,8 +88,9 @@ void RasterizeAo(const assemble::SceneMesh& mesh, const assemble::SceneSkinAoBak
                         const uint8_t* lp = SampleTexel(ao.lineMask, ao.lineMaskWidth, ao.lineMaskHeight, u, v);
                         const float g = lp[1] * (1.0f / 255.0f);
                         // Only the pure ink-line channel (G) is baked - the R/B passes are faint rim/carve data for the
-                        // game's lighting, not ink, and multiply all wrong into a diffuse texture.
-                        line = clampf(g, 0.0f, 1.0f);
+                        // game's lighting, not ink, and multiply all wrong into a diffuse texture. Scaled down so the navel,
+                        // clavicle and knee strokes read as faint accents without dominating.
+                        line = clampf(g * 0.55f, 0.0f, 1.0f);
                     }
                     covered[at] = 1;
                     localNormals[at] = nLocal;
@@ -162,8 +163,8 @@ void BlurAoMap(std::vector<float>& map, const std::vector<uint8_t>& covered, int
 // fixed-light bake would; it marks creases, ridges and contact folds and leaves flat skin alone.
 inline float CavityFactor(const Vec3& n, const Vec3& avg) {
     const float dev = std::sqrt((n.x - avg.x) * (n.x - avg.x) + (n.y - avg.y) * (n.y - avg.y) + (n.z - avg.z) * (n.z - avg.z));
-    const float occ = clampf((dev - 0.045f) / 0.25f, 0.0f, 1.0f);   // mark the strong creases/joints (~4% of texels)
-    return 1.0f - 0.55f * std::pow(occ, 1.6f);                      // never darker than 0.45 on its own, before attenuation
+    const float occ = clampf((dev - 0.075f) / 0.25f, 0.0f, 1.0f);   // mark only the strongest creases (~2-3% of texels)
+    return 1.0f - 0.28f * std::pow(occ, 1.6f);                      // never darker than ~0.72 on its own, before attenuation
 }
 
 }  // namespace
