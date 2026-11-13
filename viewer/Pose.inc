@@ -622,11 +622,6 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             if (ProgCancelled()) throw Cancelled{};
             out->scene = assemble::Assemble(c, *g.resolver, ao);
             if (ProgCancelled()) throw Cancelled{};
-            // Drape the outfit's own cloth (skirts, aprons, capes, kimonos, waist cloth) to where the game's DynamicBone
-            // hangs it at load, not at the prefab's authored pose — cloth authored to hang over the body starts buried in
-            // it and clips straight through (an apron swallowed by the thighs, a cape through the torso). Every outfit,
-            // the same one build the CLI export does; without it the viewer shows and exports the buried pose.
-            assemble::BakeGarmentSettle(out->scene);
             ProgSet(0.97, "counting triangles");
             out->outfits = static_cast<int>(c.outfits.size());
             out->outfit = shown;
