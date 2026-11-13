@@ -37,17 +37,22 @@ inline bool RayTri(const Vec3& o, const Vec3& d, const Vec3& a, const Vec3& b, c
     return true;
 }
 
-// Rasterizes the triangles of `material`'s submeshes into the layer's coverage map (UV space, like the sample calls read it).
-// Wrap modes are honoured: a chart that crosses 0/1 is rasterized once per shifted copy that overlaps the unit square.
-void BuildCovered(const assemble::Scene& scene, const assemble::SceneMesh& mesh, int material, bool clampTex, assemble::SceneTranslucency::Layer& layer,
+// Rasterizes the triangles of every submesh of `meshes` whose material binds `texture` into the layer's coverage map
+// (UV space, like the sample calls read it). Front and back shells of the same garment share one atlas, so the gate
+// is per-texture across the whole part, not per one mesh. Wrap modes are honoured: a chart that crosses 0/1 is
+// rasterized once per shifted copy that overlaps the unit square.
+void BuildCovered(const assemble::Scene& scene, int texture, const std::vector<int>& meshes, bool clampTex, assemble::SceneTranslucency::Layer& layer,
                   int W, int H) {
     layer.covered.assign(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
-    layer.coveredForMesh = -1;
-    const int m = static_cast<int>(&mesh - scene.meshes.data());
-    for (const auto& sub : mesh.submeshes) {
-        if (sub.material != material) continue;
-        const auto& idx = sub.indices;
-        for (size_t t = 0; t + 2 < idx.size(); t += 3) {
+    layer.coveredBuilt = true;
+    for (int mi : meshes) {
+        if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+        const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+        for (const auto& sub : mesh.submeshes) {
+            if (sub.material < 0 || static_cast<size_t>(sub.material) >= scene.materials.size()) continue;
+            if (scene.materials[static_cast<size_t>(sub.material)].texture != texture) continue;
+            const auto& idx = sub.indices;
+            for (size_t t = 0; t + 2 < idx.size(); t += 3) {
             const auto& a = mesh.vertices[idx[t]], &b = mesh.vertices[idx[t + 1]], &c = mesh.vertices[idx[t + 2]];
             const float us[3] = {a.uv.x, b.uv.x, c.uv.x};
             const float vs[3] = {a.uv.y, b.uv.y, c.uv.y};
@@ -83,7 +88,7 @@ void BuildCovered(const assemble::Scene& scene, const assemble::SceneMesh& mesh,
                 }
         }
     }
-    layer.coveredForMesh = m;
+}
 }
 
 bool Visible(const std::vector<char>* hiddenParts, size_t pi, const assemble::ScenePart& part) {
@@ -211,18 +216,23 @@ int TranslucencyStamp(assemble::Scene& scene, int layerIndex, float u, float v, 
     const auto& tex = scene.textures[static_cast<size_t>(ti)];
     const int W = tex.width, H = tex.height;
     if (W <= 0 || H <= 0 || layer.mask.size() != static_cast<size_t>(W) * static_cast<size_t>(H)) return 0;
-    const int mi = layer.mesh;
-    if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) return 0;
-    const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
-    const int material = layer.material;
-    if (layer.covered.empty() || layer.coveredForMesh != mi) BuildCovered(scene, mesh, material, scene.textures[static_cast<size_t>(ti)].clamp, layer, W, H);
+    if (!layer.coveredBuilt || layer.covered.empty()) {
+        // The gate covers the whole part's islands for this texture (front and back shells of the same garment share one atlas).
+        std::vector<int> coverMeshes;
+        const auto& part = scene.parts[static_cast<size_t>(layer.part)];
+        for (int mi : part.meshes)
+            for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes)
+                if (sub.material >= 0 && static_cast<size_t>(sub.material) < scene.materials.size() && scene.materials[static_cast<size_t>(sub.material)].texture == ti) { coverMeshes.push_back(mi); break; }
+        BuildCovered(scene, ti, coverMeshes, tex.clamp, layer, W, H);
+    }
     // The stamp area in texels (memory rows are flipped for v); wrapped coordinates measure the minimal distance.
     const float rMax = std::min(uvRadius, 0.75f);
-    const float r2 = rMax * rMax;
-    const int x0 = static_cast<int>(std::floor((u - rMax) * static_cast<float>(W)));
-    const int x1 = static_cast<int>(std::ceil((u + rMax) * static_cast<float>(W)));
-    const int y0 = static_cast<int>(std::floor((1.0f - (v + rMax)) * static_cast<float>(H)));
-    const int y1 = static_cast<int>(std::ceil((1.0f - (v - rMax)) * static_cast<float>(H)));
+    const float uC = tex.clamp ? u : u - std::floor(u);
+    const float vC = tex.clamp ? v : v - std::floor(v);
+    const int x0 = static_cast<int>(std::floor((uC - rMax) * static_cast<float>(W)));
+    const int x1 = static_cast<int>(std::ceil((uC + rMax) * static_cast<float>(W)));
+    const int y0 = static_cast<int>(std::floor((1.0f - (vC + rMax)) * static_cast<float>(H)));
+    const int y1 = static_cast<int>(std::ceil((1.0f - (vC - rMax)) * static_cast<float>(H)));
     const float invH = 1.0f / static_cast<float>(H);
     const float a = clampf(amount, 0.0f, 255.0f);
     int changed = 0;
@@ -235,12 +245,21 @@ int TranslucencyStamp(assemble::Scene& scene, int layerIndex, float u, float v, 
             float du = uT - u;
             float dv = vT - v;
             if (!tex.clamp) { du -= std::floor(du + 0.5f); dv -= std::floor(dv + 0.5f); }   // the torus distance, matching the wrap-around sampling
-            if (du * du + dv * dv > r2) continue;
+            const float dr = std::sqrt(du * du + dv * dv);
+            if (dr > rMax) continue;
+            // A smooth radial falloff: full strength to the inner half, a smoothstep down to nothing at the rim -
+            // the painted area fades out instead of ending on a hard circle.
+            float fall;
+            if (dr <= rMax * 0.45f) fall = 1.0f;
+            else {
+                const float t = (dr - rMax * 0.45f) / (rMax * 0.55f);
+                fall = 1.0f - (t * t * (3.0f - 2.0f * t));
+            }
             uint8_t& m = layer.mask[texel];
             if (erase) {
-                if (m) { m = 0; ++changed; }
+                if (m) { m = static_cast<uint8_t>(m * (1.0f - fall)); ++changed; }
             } else {
-                const float add = a * (1.0f - m / 255.0f * 0.5f);   // soft accumulation; strokes build up to full strength
+                const float add = a * fall * (1.0f - m / 255.0f * 0.5f);   // soft build-up to full strength
                 const int nv = std::min(255, static_cast<int>(m) + static_cast<int>(std::lround(add)));
                 if (nv != m) { m = static_cast<uint8_t>(nv); ++changed; }
             }
@@ -264,7 +283,7 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                 layer.base = tex.rgba;
                 layer.mask.assign(static_cast<size_t>(std::max(0, W)) * static_cast<size_t>(std::max(0, H)), 0);
                 layer.covered.clear();
-                layer.coveredForMesh = -1;
+                layer.coveredBuilt = false;
             }
             if (layer.base.size() == tex.rgba.size()) {
                 const uint64_t cur = Fnv1a64(tex.rgba.data(), tex.rgba.size());
@@ -280,7 +299,11 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                     if (!m) continue;
                     painted = true;
                     const float keep = 1.0f - (m / 255.0f) * drop;
-                    out[i * 4 + 3] = static_cast<uint8_t>(std::lround(out[i * 4 + 3] * keep));
+                    const uint8_t base = out[i * 4 + 3];
+                    // The game's cloth shaders often ignore the alpha channel, or use it as a cutout mask rather than a
+                    // real transparency - on those texels the authored shape must stay exactly as it is (a belly-out
+                    // lace edge must not be blended). Only the artwork the game actually draws is faded out.
+                    out[i * 4 + 3] = base >= 128 ? static_cast<uint8_t>(std::lround(255.0f * keep)) : base;
                 }
                 const bool pin = painted && drop > 0.001f;
                 tex.rgba = pin ? std::move(out) : layer.base;
@@ -297,6 +320,12 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                         layer.hadTranslucent = mat.translucent;
                         mat.alpha = true;
                         mat.translucent = true;
+                        // While the bake holds the material, the alpha test (clip at _Cutoff) is off, so the soft blend the
+                        // paint creates is what draws - matching MikuMikuDance, which does not alpha-test a transparent material.
+                        layer.cutoffTouched = false;
+                        for (size_t k = 0; k < mat.props.size(); ++k)
+                            if (mat.props[k].first == "_Cutoff") { layer.cutoffProp = static_cast<int>(k); layer.cutoffPrior = mat.props[k].second; layer.cutoffTouched = true; break; }
+                        if (layer.cutoffTouched) mat.props[static_cast<size_t>(layer.cutoffProp)].second = {1e-3f, 0.0f, 0.0f, 0.0f};
                         layer.passHeld = true;
                     }
                 } else if (!pin && layer.passHeld) {
@@ -307,8 +336,11 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                         auto& mat = scene.materials[static_cast<size_t>(material)];
                         mat.alpha = layer.hadAlpha;
                         mat.translucent = layer.hadTranslucent;
+                        if (layer.cutoffTouched && layer.cutoffProp >= 0 && static_cast<size_t>(layer.cutoffProp) < mat.props.size())
+                            mat.props[static_cast<size_t>(layer.cutoffProp)].second = layer.cutoffPrior;
                     }
                     layer.passHeld = false;
+                    layer.cutoffTouched = false;
                 }
             }
         }

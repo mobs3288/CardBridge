@@ -192,12 +192,15 @@ struct SceneTranslucency {
         int texture = -1;         // Scene::textures index the alpha is written into
         std::vector<uint8_t> base;     // the texture's pixels before the bake (RGBA); re-captured when the texture changes outside the bake
         std::vector<uint8_t> mask;     // per texel 0 = opaque .. 255 = fully translucent; parallel to the texture
-        std::vector<uint8_t> covered;  // per texel 1 where a triangle of `coveredForMesh` covers it (UV space, wrap-matched to the texture); the brush's gate
-        int coveredForMesh = -1; // Scene::meshes index `covered` was rasterized from
+        std::vector<uint8_t> covered;  // per texel 1 where any triangle of the part binding this texture covers it (UV space, wrap-matched to the texture); the brush's gate
+        bool coveredBuilt = false;     // `covered` has been rasterized for the part
         uint64_t afterHash = 0;        // FNV-1a of the texture right after our last write (the external-change detector)
         bool passHeld = false;   // the bake currently holds the material in the transparent pass (alpha + translucent)
         bool hadAlpha = false;   // the material's flags before the bake held it (restored on revert)
         bool hadTranslucent = false;
+        int cutoffProp = -1;           // index into Scene::materials[].props of the _Cutoff property, while the bake holds the material over it
+        Vec4 cutoffPrior{};            // its value before the bake (restored on revert)
+        bool cutoffTouched = false;    // the _Cutoff was rewritten by the bake (and must be put back)
     };
     std::vector<Layer> layers;
 };

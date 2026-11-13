@@ -80,46 +80,87 @@ bool TransView(exporter::ViewFraming& f, float& W, float& H) {
     return true;
 }
 
-// Stamps between the last stamped UV and the one under (vx, vy). Interpolates in *wrapped* UV space so a stroke
-// crossing a texture seam continues on the other side instead of smearing across the whole atlas.
+// Stamps between the last stamped UV and the one under (vx, vy). Every texture the part uses - front and back shells
+// of the same garment share one atlas - gets the stamp, so the see-through does not stop at the front layer.
+// Interpolates in *wrapped* UV space so a stroke crossing a texture seam continues on the other side instead of
+// smearing across the whole atlas.
 void TransStrokeTo(int vx, int vy) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
+    static const bool dbg = std::getenv("CARDBRIDGE_TEST_DEBUG_TRANSLUCENCY") != nullptr;
     exporter::ViewFraming f;
     float W = 0, H = 0;
-    if (!TransView(f, W, H)) return;
+    if (!TransView(f, W, H)) {
+        if (dbg) std::fprintf(stderr, "stroke (%d,%d): no framing\n", vx, vy);
+        return;
+    }
     exporter::BrushHit hit;
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     const auto* md = g.morphDelta.empty() ? nullptr : &g.morphDelta;
     if (!exporter::PickBrushPart(L->scene, &g.effHidden, f, W, H, g.cam, static_cast<float>(vx), static_cast<float>(vy), sk, md, hit)) {
+        if (dbg) std::fprintf(stderr, "stroke (%d,%d): nothing hit (hidden=%zu, framing cx=%.2f cy=%.2f extent=%.2f scale=%.1f zoom=%.2f)\n",
+                              vx, vy, g.effHidden.size(), f.cx, f.cy, f.extent, f.scale, g.cam.zoom);
         g.paintAnchorSet = false;   // out in empty space: the next hit starts a fresh stretch of the stroke
         return;
     }
-    const int material = L->scene.meshes[static_cast<size_t>(hit.mesh)].submeshes[static_cast<size_t>(hit.submesh)].material;
-    const int layer = exporter::TranslucencyLayer(L->scene, hit.part, material, hit.mesh);
-    if (layer < 0) { g.paintAnchorSet = false; return; }
-    const auto& tex = L->scene.textures[static_cast<size_t>(L->scene.translucency.layers[static_cast<size_t>(layer)].texture)];
+    if (dbg) std::fprintf(stderr, "stroke (%d,%d): part=%d mesh=%d submesh=%d uv=(%.3f,%.3f) uvPerM=%.3f\n",
+                          vx, vy, hit.part, hit.mesh, hit.submesh, hit.uv.x, hit.uv.y, hit.uvPerMetre);
+    // The distinct textures every textured submesh of this part binds - shells of the same garment share the atlas.
+    std::vector<int> texs;
+    int hitMaterial = -1;
+    for (int mi : L->scene.parts[static_cast<size_t>(hit.part)].meshes) {
+        if (mi < 0 || static_cast<size_t>(mi) >= L->scene.meshes.size()) continue;
+        const auto& mesh = L->scene.meshes[static_cast<size_t>(mi)];
+        for (size_t smi = 0; smi < mesh.submeshes.size(); ++smi) {
+            const auto& sub = mesh.submeshes[smi];
+            if (sub.material < 0 || static_cast<size_t>(sub.material) >= L->scene.materials.size()) continue;
+            const int t = L->scene.materials[static_cast<size_t>(sub.material)].texture;
+            if (mi == hit.mesh && static_cast<int>(smi) == hit.submesh) hitMaterial = sub.material;
+            if (t < 0 || static_cast<size_t>(t) >= L->scene.textures.size()) continue;
+            if (std::find(texs.begin(), texs.end(), t) == texs.end()) texs.push_back(t);
+        }
+    }
+    if (texs.empty()) { g.paintAnchorSet = false; return; }
     const float rUv = std::clamp((g.tw.transSizeCm / 100.0f) * hit.uvPerMetre, 0.002f, 0.75f);
     const bool erase = g.transEraseStroke;
     const float amount = erase ? 0.0f : 170.0f;
-    int changed = 0;
-    if (g.paintAnchorSet && g.paintLayer == layer) {
+    // The stroke path: the interpolated chord from the last position to the new one (a single point for a fresh stroke).
+    std::vector<std::pair<float, float>> path;
+    if (g.paintAnchorSet && g.paintPart == hit.part) {
         float du = hit.uv.x - g.paintAnchorU, dv = hit.uv.y - g.paintAnchorV;
-        if (!tex.clamp) { du -= std::floor(du + 0.5f); dv -= std::floor(dv + 0.5f); }
+        if (!L->scene.textures[static_cast<size_t>(texs.front())].clamp) { du -= std::floor(du + 0.5f); dv -= std::floor(dv + 0.5f); }
         const float dist = std::sqrt(du * du + dv * dv);
         const float step = std::max(rUv * 0.4f, 1e-4f);
         const int steps = std::min(96, static_cast<int>(dist / step));
-        for (int i = 1; i <= steps; ++i) {
-            const float t = static_cast<float>(i) / static_cast<float>(steps);
-            changed += exporter::TranslucencyStamp(L->scene, layer, g.paintAnchorU + du * t, g.paintAnchorV + dv * t, rUv, erase, amount);
+        if (steps > 0) {
+            for (int i = 1; i <= steps; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(steps);
+                path.push_back({g.paintAnchorU + du * t, g.paintAnchorV + dv * t});
+            }
         }
     } else {
-        changed += exporter::TranslucencyStamp(L->scene, layer, hit.uv.x, hit.uv.y, rUv, erase, amount);
+        path.push_back({hit.uv.x, hit.uv.y});
         g.paintAnchorSet = true;
+    }
+    int changed = 0;
+    for (int ti : texs) {
+        int matOf = -1;   // a material binding this texture (for the layer's material field)
+        for (int mi : L->scene.parts[static_cast<size_t>(hit.part)].meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= L->scene.meshes.size()) continue;
+            for (const auto& sub : L->scene.meshes[static_cast<size_t>(mi)].submeshes)
+                if (sub.material >= 0 && static_cast<size_t>(sub.material) < L->scene.materials.size() && L->scene.materials[static_cast<size_t>(sub.material)].texture == ti) { matOf = sub.material; break; }
+            if (matOf >= 0) break;
+        }
+        if (matOf < 0) matOf = hitMaterial;
+        const int layer = exporter::TranslucencyLayer(L->scene, hit.part, matOf, hit.mesh);
+        if (layer < 0) continue;
+        for (const auto& [u, v] : path)
+            changed += exporter::TranslucencyStamp(L->scene, layer, u, v, rUv, erase, amount);
     }
     g.paintAnchorU = hit.uv.x;
     g.paintAnchorV = hit.uv.y;
-    g.paintLayer = layer;
+    g.paintPart = hit.part;
+    if (dbg) std::fprintf(stderr, "stroke: textures=%zu changed=%d texels\n", texs.size(), changed);
     if (changed > 0) TransApplyNow();
 }
 
@@ -127,7 +168,7 @@ void TransStrokeTo(int vx, int vy) {
 void TransPaintPress(int vx, int vy, bool erase) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
-    g.paintLayer = -1;
+    g.paintPart = -1;
     g.paintAnchorSet = false;
     g.transEraseStroke = erase || g.transErase;
     g.transPaintX = vx;
@@ -142,7 +183,7 @@ void TransPaintPress(int vx, int vy, bool erase) {
 }
 
 void TransEndStroke() {
-    g.paintLayer = -1;
+    g.paintPart = -1;
     g.paintAnchorSet = false;
     g.transPaintPending = false;
     TransApplyNow();   // final pixels; a no-op when nothing changed (the bake counts real pixel changes)

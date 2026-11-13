@@ -414,7 +414,7 @@ struct App {
     bool transPaintPending = false;           // the pointer moved during a stroke; applied once per picture
     int transPaintX = 0, transPaintY = 0;     // the pointer in view pixels (the stroke's current position)
     bool transEraseStroke = false;            // the current stroke erases (right-drag or the erase switch)
-    int paintLayer = -1;                      // the layer the stroke's last stamp came from (-1 = none)
+    int paintPart = -1;                     // the part the current stroke paints (-1 = none); its front and back shells share the atlas and are painted together
     float paintAnchorU = 0.0f, paintAnchorV = 0.0f;   // the last stamped UV: the stroke interpolates from here
     bool paintAnchorSet = false;
     int transHoverX = -1, transHoverY = -1;   // the pointer in view pixels for the brush ring; -1 when not over the view or the mode is off
