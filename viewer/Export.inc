@@ -41,12 +41,16 @@ void StartExport() {
             Log("baking the game shader textures");
             ProgSet(0.06, "baking shader textures");
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
-            exporter::BakeShaderTextures(scene, 1024, false, nullptr,
-                [](const std::string& m) {
-                    Log("  " + m);
-                    const double f = ParseBakeFrac(m);
-                    ProgSet(f >= 0.0 ? 0.06 + f * 0.44 : -1.0, m);
-                }, true, true, [] { return ProgCancelled(); });
+            {   // the skip reasons land in the log: a skipped material stays a white sheet in the PMX, silently no more
+                std::string bakeNote;
+                exporter::BakeShaderTextures(scene, 1024, false, &bakeNote,
+                    [](const std::string& m) {
+                        Log("  " + m);
+                        const double f = ParseBakeFrac(m);
+                        ProgSet(f >= 0.0 ? 0.06 + f * 0.44 : -1.0, m);
+                    }, true, true, [] { return ProgCancelled(); });
+                if (!bakeNote.empty()) Log("  " + bakeNote);
+            }
             if (ProgCancelled()) throw Cancelled{};
             ProgSet(0.52, "writing PMX");
             exporter::ExportOptions eo;
@@ -237,11 +241,13 @@ void ToggleAsExported() {
                 sc = copy;
             }
             ProgSet(0.05, "baking shader textures");
-            exporter::BakeShaderTextures(*sc, 1024, false, nullptr,
+            std::string expNote;
+            exporter::BakeShaderTextures(*sc, 1024, false, &expNote,
                 [](const std::string& m) {
                     const double f = ParseBakeFrac(m);
                     ProgSet(f >= 0.0 ? 0.05 + f * 0.80 : -1.0, m);
                 }, grade, true, [] { return ProgCancelled(); });
+            if (!expNote.empty()) Log("  " + expNote);
             if (ProgCancelled()) throw Cancelled{};
         } catch (const Cancelled&) {
             cancelled = true;

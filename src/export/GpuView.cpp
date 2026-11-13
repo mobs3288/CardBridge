@@ -12,6 +12,7 @@
 #include <dxgi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -146,6 +147,12 @@ struct GpuView::Impl {
     std::vector<char> cutout;                    // per scene material: cut to a shape by its texture (HasCutout), so no outline ring
     std::map<std::string, GpuTex> spheres;       // plain mode: the looks' sphere maps, by MmdSphereImage name
     std::vector<ID3D11ShaderResourceView*> lookSphere;   // per look: its sphere map's view (owned by `spheres`), null for none
+    // Per-material normal map for the simple shader: the material's own tangent-space normal (Unity DXT5nm: X in alpha, Y in green,
+    // Z reconstructed - the layout skinAoBake and the game's shaders read), so a material the game's shader cannot draw still shows
+    // the card's normal-mapped shading (cloth folds, hair strands, face gradients). Filled in Load; never written back.
+    std::vector<const GpuTex*> fbNormals;        // by scene material index; null = the flat default
+    std::vector<char> fbNormalClamp;             // by scene material index: 1 = clamp, 0 = wrap
+    size_t fallbackMats = 0;                     // materials the game shader cannot draw (the simple shader shades them)
     // Plain mode's self-shadow map, made on first use.
     static constexpr int kShadowSize = 2048;
     ID3D11Texture2D* smTex = nullptr;
@@ -260,26 +267,34 @@ cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 Texture2D<float> sm : register(t1); SamplerComparisonState sc : register(s1);
 Texture2D t2 : register(t2);
-struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
-struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; float3 w : TEXCOORD2; float2 vn : TEXCOORD3; };
+Texture2D t3 : register(t3); SamplerState s2 : register(s2);   // the material's normal map (flat default when it has none)
+struct VI { float3 p : POSITION; float3 n : NORMAL; float4 tan : TANGENT0; float2 uv : TEXCOORD0; };
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float4 tan : TEXCOORD2; float2 uv : TEXCOORD0; float3 w : TEXCOORD3; };
 VO vs(VI i) {
     VO o; float4 p = float4(i.p, 1);
     if (mmd.y > 0.5) p.xyz -= light.xyz * ((p.y - mmd.z) / max(light.y, 0.05));
-    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; o.w = p.xyz;
-    o.vn = float2(dot(normalize(r0.xyz), i.n), dot(normalize(r1.xyz), i.n));
+    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.tan = i.tan; o.uv = i.uv; o.w = p.xyz;
     return o;
 }
 float4 ps(VO i) : SV_Target {
     if (mmd.y > 0.5) return diffuse;
     float4 c = t0.Sample(s0, i.uv) * diffuse;
+    // The normal map's tangent-space normal, folded into the vertex frame. Unity DXT5nm: X in alpha, Y in green, Z reconstructed
+    // (a flat default normal map has alpha = green = 0.5, which yields (0, 0, 1)). Shading by the perturbed normal is what the
+    // game's own shaders do, and what keeps the card's cloth folds, hair strands and face gradient in the simple shader.
+    const float2 nm = t3.Sample(s2, i.uv).ga * 2.0 - 1.0;
+    const float3 tn = float3(nm, sqrt(max(0.0, 1.0 - dot(nm, nm))));
+    const float3 T = normalize(i.tan.xyz);
+    const float3 N = normalize(i.n);
+    const float3 wn = normalize(T * tn.x + cross(N, T) * tn.y + N * tn.z);
+    float d = dot(wn, light.xyz);
     if (sph.x > 0.5) {
-        float2 vn = i.vn / max(length(i.vn), 1.0);
-        float3 s = t2.Sample(s0, float2(vn.x * 0.5 + 0.5, 0.5 - vn.y * 0.5)).rgb;
-        c.rgb = sph.x > 1.5 ? c.rgb + s : c.rgb * s;
+        const float2 vn = float2(dot(normalize(r0.xyz), wn), dot(normalize(r1.xyz), wn));
+        const float3 sp = t2.Sample(s0, float2(vn.x * 0.5 + 0.5, 0.5 - vn.y * 0.5)).rgb;
+        c.rgb = sph.x > 1.5 ? c.rgb + sp : c.rgb * sp;
     }
-    float d = dot(normalize(i.n), light.xyz);
     if (shadow.w > 1.5 && mmd.x > 0.5) {   // MMD's self-shadow shading: the lit colour, or it times the ramp's bottom row, by N.L * 3 and the shadow map
-        float4 w = float4(i.w + normalize(i.n) * 0.006 * mmd.w, 1);
+        float4 w = float4(i.w + wn * 0.006 * mmd.w, 1);
         float3 lp = float3(dot(l0, w), dot(l1, w), dot(l2, w));
         float vis = sm.SampleCmpLevelZero(sc, float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5), lp.z - 0.0015);
         c.rgb *= lerp(ramp[31].rgb, float3(1, 1, 1), min(saturate(d * 3.0), vis));
@@ -301,11 +316,12 @@ float4 ps(VO i) : SV_Target {
         if (FAILED(compile(src, sizeof(src) - 1, "fallback", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) { Rel(vb); Rel(err); return false; }
         bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &fbVs)) &&
                   SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &fbPs));
-        const D3D11_INPUT_ELEMENT_DESC el[3] = {
+        const D3D11_INPUT_ELEMENT_DESC el[4] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, nrm), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(GVert, tan), D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
-        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
+        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 4, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = (7 + 32 + 5) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
@@ -610,6 +626,9 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         for (auto& s : spheres) { Rel(s.second.srv); Rel(s.second.tex); }
         spheres.clear();
         lookSphere.clear();
+        fbNormals.clear();
+        fbNormalClamp.clear();
+        fallbackMats = 0;
         skipped = 0;
     }
 
@@ -814,6 +833,7 @@ bool GpuView::ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vect
     return !outPos.empty();
 }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
+size_t GpuView::fallbackMaterials() const { return impl_->fallbackMats; }
 int GpuView::DiagnosticMode() const { return impl_->diagMode; }
 std::string GpuView::DiagnosticError() const { return impl_->diagError; }
 void GpuView::SetPlain(bool on) { impl_->plain = on; }
@@ -1221,11 +1241,13 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
 
     // Shaders: the forward pass of each, straight from the bundle's DXBC.
     I.shaders.resize(scene.shaders.size());
+    const bool noGameShaders = std::getenv("CARDBRIDGE_NO_GAME_SHADERS") != nullptr;   // test aid: force every material onto the simple shader
     for (size_t i = 0; i < scene.shaders.size(); ++i) {
         if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
         report(0.05 + 0.15 * (scene.shaders.empty() ? 1.0 : static_cast<double>(i + 1) / static_cast<double>(scene.shaders.size())),
                "shaders " + std::to_string(i + 1) + " / " + std::to_string(scene.shaders.size()));
         auto& g = I.shaders[i];
+        if (noGameShaders) continue;   // g.ok stays false: the fallback shader draws the material, with its normal map
         Bytes blob(scene.shaders[i].blob.begin(), scene.shaders[i].blob.end());
         g.progs = shader::ParseUnityShaderBlob(blob, nullptr);
         if (!shader::PickForwardPass(g.progs, g.pi, g.vi)) continue;
@@ -1277,6 +1299,34 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
 
     I.cutout.assign(scene.materials.size(), 0);
     for (size_t m = 0; m < scene.materials.size(); ++m) I.cutout[m] = HasCutout(scene, scene.materials[m]) ? 1 : 0;
+
+    // The simple shader's normal map per material: the material's own binding whose name says normal / bump.
+    // A binding that says mask is not a tangent-space normal map (_NormalMask is a mask, not a normal);
+    // the base _NormalMap is preferred, then an ordinary normal map, then the "bump" spelling; an authored
+    // detail normal is the last resort. No binding at all: the flat default (identical to no normal map).
+    I.fbNormals.assign(scene.materials.size(), nullptr);
+    I.fbNormalClamp.assign(scene.materials.size(), 1);
+    I.fallbackMats = 0;
+    for (size_t m = 0; m < scene.materials.size(); ++m) {
+        const assemble::SceneMaterial& mat = scene.materials[m];
+        const bool gameOk = !noGameShaders && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size() && I.shaders[static_cast<size_t>(mat.shaderIndex)].ok;
+        if (!gameOk) ++I.fallbackMats;
+        int best = -1, bestScore = 99;
+        for (const auto& tb : mat.texProps) {
+            std::string n = tb.name;
+            for (auto& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (n.find("mask") != std::string::npos) continue;
+            const bool isNormal = n.find("normal") != std::string::npos || n.find("nmap") != std::string::npos || n.find("bump") != std::string::npos;
+            if (!isNormal) continue;
+            int score = 1;
+            if (n == "_normalmap") score = 0;
+            else if (n.find("detail") != std::string::npos) score = 3;
+            else if (n.find("bump") != std::string::npos) score = 2;
+            if (score >= bestScore) continue;
+            if (tb.texture >= 0 && static_cast<size_t>(tb.texture) < I.textures.size() && I.textures[static_cast<size_t>(tb.texture)].srv) { bestScore = score; best = tb.texture; }
+        }
+        if (best >= 0) { I.fbNormals[m] = &I.textures[static_cast<size_t>(best)]; I.fbNormalClamp[m] = scene.textures[static_cast<size_t>(best)].clamp ? 1 : 0; }
+    }
 
     // Geometry, with the tangents the shaders build their normal-map frame from. When the skinning compute shader is
     // available, each mesh gets a rest buffer (read by the skinning shader and drawn when there is no pose) and a posed
@@ -1639,6 +1689,12 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
                         ID3D11SamplerState* fs = ftClamp ? I.samplerClamp : I.samplerWrap;
                         ctx->PSSetSamplers(0, 1, &fs);
+                        const int nm = gs.material >= 0 && static_cast<size_t>(gs.material) < I.fbNormals.size() ? gs.material : -1;
+                        const GpuTex* nt = nm >= 0 && I.fbNormals[static_cast<size_t>(nm)] ? I.fbNormals[static_cast<size_t>(nm)] : &I.defaults[3];
+                        const bool ntClamp = nm >= 0 && I.fbNormalClamp[static_cast<size_t>(nm)] != 0;
+                        ctx->PSSetShaderResources(3, 1, &nt->srv);
+                        ID3D11SamplerState* const ns = ntClamp ? I.samplerClamp : I.samplerWrap;
+                        ctx->PSSetSamplers(2, 1, &ns);
                         ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                         ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                         ctx->DrawIndexed(gs.count, 0, 0);

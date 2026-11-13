@@ -7,6 +7,7 @@
 #include <stb_image_write.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -771,6 +772,34 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                     mt.decodeSrgb = linear;
                 }
             }
+            // The normal map for the simple path (the game's shader is not in the bundle or did not run): resolved once
+            // per submesh, mips built like the main texture's. Unity DXT5nm (X in alpha, Y in green).
+            int nIdx = -1;
+            if (opt.mode == ViewMode::Lit && !sr) {
+                int best = -1, bestScore = 99;
+                for (const auto& tb : mat.texProps) {
+                    std::string n = tb.name;
+                    for (auto& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    if (n.find("mask") != std::string::npos) continue;   // _NormalMask is a mask, not a tangent-space normal map
+                    const bool isN = n.find("normal") != std::string::npos || n.find("nmap") != std::string::npos || n.find("bump") != std::string::npos;
+                    if (!isN) continue;
+                    int score = 1;
+                    if (n == "_normalmap") score = 0;                     // the base normal map (the strongest shading cue)
+                    else if (n.find("detail") != std::string::npos) score = 3;
+                    else if (n.find("bump") != std::string::npos) score = 2;
+                    if (score >= bestScore) continue;
+                    if (tb.texture >= 0) { bestScore = score; best = tb.texture; }
+                }
+                nIdx = best;
+            }
+            const Mips* nmp = nullptr;
+            if (nIdx >= 0 && static_cast<size_t>(nIdx) < scene.textures.size()) {
+                const size_t ni = static_cast<size_t>(nIdx);
+                if (st.mips.size() != scene.textures.size()) { st.mips.assign(scene.textures.size(), Mips{}); st.built.assign(scene.textures.size(), false); }
+                if (!st.built[ni]) { st.mips[ni] = BuildMips(scene.textures[ni]); st.built[ni] = true; }
+                nmp = &st.mips[ni];
+                if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
+            }
             for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
                 uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
                 const Pt &a = P[i0], &b = P[i1], &c = P[i2];
@@ -948,14 +977,33 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
                         }
                         if (al < detail::DiscardBelow(mat, blend)) continue;
-                        float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        // The lighting normal: the vertex one, perturbed by the material's tangent-space normal map when the
+                        // game's shader did not run (the simple path) - the same DXT5nm decode the game shaders and the bake read.
+                        float nlm = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        if (opt.mode == ViewMode::Lit && nmp) {
+                            const Vec3 na = mesh.vertices[i0].normal, nb = mesh.vertices[i1].normal, nc = mesh.vertices[i2].normal;
+                            const Vec3 N = normalize(Vec3{l0 * na.x + l1 * nb.x + l2 * nc.x, l0 * na.y + l1 * nb.y + l2 * nc.y, l0 * na.z + l1 * nb.z + l2 * nc.z});
+                            const Vec3 ta = vm.tangents[i0], tb = vm.tangents[i1], tc3 = vm.tangents[i2];
+                            Vec3 T = normalize(Vec3{l0 * ta.x + l1 * tb.x + l2 * tc3.x, l0 * ta.y + l1 * tb.y + l2 * tc3.y, l0 * ta.z + l1 * tb.z + l2 * tc3.z});
+                            const Vec3 B = {N.y * T.z - N.z * T.y, N.z * T.x - N.x * T.z, N.x * T.y - N.y * T.x};
+                            const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                            float un = l0 * u0.x + l1 * u1.x + l2 * u2.x, vn = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                            const bool nClamp = nIdx >= 0 && static_cast<size_t>(nIdx) < scene.textures.size() && scene.textures[static_cast<size_t>(nIdx)].clamp;
+                            if (!nClamp) { un -= std::floor(un); vn -= std::floor(vn); }
+                            float tc[4];
+                            SampleBilinear(*nmp, lod, un, vn, tc, nClamp);
+                            const float nx = tc[3] * 2.0f - 1.0f, ny = tc[1] * 2.0f - 1.0f;
+                            const float nz2 = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+                            const Vec3 wn = normalize(Vec3{T.x * nx + B.x * ny + N.x * nz2, T.y * nx + B.y * ny + N.y * nz2, T.z * nx + B.z * ny + N.z * nz2});
+                            nlm = std::max(0.0f, wn.x * L[0] + wn.y * L[1] + wn.z * L[2]);
+                        }
                         // Toon / shadow shading happens only in Lit; diagnostic modes pass their own colour through.
                         if (opt.mode == ViewMode::Lit) {
                             if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
-                                const Vec3& rr = mat.toon[static_cast<size_t>(std::clamp(static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows), 0, assemble::kToonRows - 1))];   // nz can exceed 1: clamp the row, or this reads out of bounds
+                                const Vec3& rr = mat.toon[static_cast<size_t>(std::clamp(static_cast<int>((1.0f - nlm) * 0.5f * assemble::kToonRows), 0, assemble::kToonRows - 1))];   // nlm can exceed 1: clamp the row, or this reads out of bounds
                                 r *= rr.x; g *= rr.y; bl *= rr.z;
                             } else {
-                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nlm - 0.35f) / 0.2f));
                                 r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
                                 g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
                                 bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
@@ -1268,24 +1316,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
     }
     const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
-    int baked = 0;
+    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
-        // A material on the alpha-coverage shader with NO _AlphaMask texture bound: our SM4
-        // evaluation can't see a missing texture's implicit default, so every fragment would
-        // discard (alpha=0) and the bake would come out black. Keep the plain texture as it is.
-        const auto alphaMaskMissing = [&mat]() {
-            if (mat.shader.find("alpha") == std::string::npos) return false;
-            for (const auto& tb : mat.texProps)
-                if (tb.name == "_AlphaMask" && tb.texture >= 0) return false;
-            return true;
-        }();
-        if (mat.translucent) continue;  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
-        if (alphaMaskMissing) continue;  // alpha-coverage shader with no mask: the bake would be black; keep the plain texture
+        if (mat.translucent) { ++skipTranslucent; continue; }  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
-        if (!sr) continue;
+        if (!sr) { ++skipNoShader; continue; }
         // A clamped main texture is edge-clamped in the game, not repeated: its triangles must stay at their UVs (the
         // shader's sampler clamps the border) instead of being shifted into their integer UV tile.
         const bool clampMain = mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
@@ -1447,6 +1485,17 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         std::vector<float> img;
         std::vector<uint8_t> cov;
         if (!render(W, H, L, img, cov)) continue;
+        // A shader that discarded every covered fragment would bake a transparent sheet -
+        // in MikuMikuDance the garment simply vanishes. Never bake that: keep the card's
+        // own texture and record the skip, loudly.
+        {
+            size_t solid = 0;
+            for (size_t ti = 0; ti < cov.size(); ++ti)
+                if (cov[ti] && img[ti * 4 + 3] >= 0.5f) {
+                    if (++solid >= 16) break;
+                }
+            if (solid < 16) { ++skipEmptyBake; continue; }
+        }
 
         if (toon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
@@ -1538,13 +1587,16 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
-    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders";
+    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders" +
+                          ((skipTranslucent || skipEmptyBake || skipNoShader)
+                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader)"
+                               : "");
 }
 
 // The create-job cache: (shader + inputs) -> the placeholder's pixels. The jobs are deterministic (same card, same result),
 // so an outfit switch or a reload in the viewer re-uses the previous run instead of running the game's shaders again.
 // The key carries the shader blob hash, the job's size and linear flag, every property, every bound texture by its content
-// hash, the globals, and the overlay's hash — everything the SM4 can read. Bounded at 512 MB (LRU).
+// hash, the globals, and the overlay's hash ï¿½ everything the SM4 can read. Bounded at 512 MB (LRU).
 namespace {
 using CreateCacheEntry = std::pair<std::string, std::shared_ptr<const std::vector<uint8_t>>>;
 std::mutex createCacheMu;

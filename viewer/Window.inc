@@ -441,7 +441,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
         if (sc && (g.gpuExp.ready() || g.gpuExp.Init(go, &why))) {
             g.gpuExp.SetPlain(true);
-            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); Log("as exported: on (X switches back)", LogKind::Good); }
+            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); const size_t fb = g.gpuExp.fallbackMaterials(); Log(std::string("as exported: on (X switches back)") + (fb ? "; " + std::to_string(fb) + " material(s) shade via their normal map - the game's shader did not upload" : ""), LogKind::Good); }
             else Log("export preview upload failed: " + why, LogKind::Warn);
         } else if (sc) Log("export preview: no Direct3D 11 device (" + why + ")", LogKind::Warn);
         ProgEnd();
@@ -510,7 +510,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
                 g.gpuScene = L;
                 g.gpuOk = true;
-                Log("game shaders uploaded to Direct3D 11", LogKind::Good);
+                const size_t fb = g.gpu.fallbackMaterials();
+                Log(std::string("game shaders uploaded to Direct3D 11") + (fb ? "; " + std::to_string(fb) + " material(s) use the simple shader (their game shader did not upload) - normal-mapped, but the game's own look is unavailable" : ""), fb ? LogKind::Warn : LogKind::Good);
             } else if (gpuWhy == "cancelled by user") {
                 Log("GPU upload cancelled; showing the software renderer", LogKind::Warn);
             } else {

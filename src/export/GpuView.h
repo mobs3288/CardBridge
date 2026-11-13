@@ -126,6 +126,9 @@ public:
     void SetDiagnosticMode(int mode, const std::vector<DiagnosticMaterial>* interpreted);
 
     int skippedMaterials() const;
+    // Materials whose game shader did not upload and are drawn by the simple shader, with their normal map:
+    // the view is never silently flat - check this (and the log) when a character looks washed out.
+    size_t fallbackMaterials() const;
 
     // The diagnostic mode and the reason the diagnostic shader failed, as read by the layout dump.
     int DiagnosticMode() const;
