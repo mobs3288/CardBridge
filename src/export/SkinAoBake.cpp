@@ -201,7 +201,7 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
         for (size_t bi = 0; bi < scene.bones.size(); ++bi) {
             std::string n = scene.bones[bi].name;
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            for (const char* tag : {"leg", "shin", "thigh", "knee", "arm", "forearm", "elbow", "wrist"}) {
+            for (const char* tag : {"leg", "shin", "thigh", "knee", "arm", "forearm", "elbow", "wrist", "hand", "foot", "toe", "ankle", "heel"}) {
                 if (n.find(tag) != std::string::npos) { isLimb[bi] = 1; ++limbBoneCount; break; }
             }
         }
