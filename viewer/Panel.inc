@@ -112,21 +112,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             } else if (hot && L) {
                 s.FillRound(t, 7, ui::kCard);
             }
-            s.TextCentered(act ? g.fontBold : g.fontUi, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
-        }
-        if (L) {
-            std::string right;
-            if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " issues";
-            else if (g.busy && g.tab != TabParts) right = "shaping";
-            else if (g.tweakPending) right = "applying";
-            else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
-            else if (g.tab == TabMorphs) { const size_t on = MorphsOn(); right = std::to_string(on) + "/" + std::to_string(g.morphs.size()); }
-            else if (g.tab == TabMaterials) right = std::to_string(g.mat.OverrideCount()) + " edited";
-            else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
-            else if (g.tab == TabSettings) right = "saved";
-            else right = AnyTweak() ? "tweaked" : "as card";
-            const bool ed = AnyTweak() || (g.tab == TabMorphs && MorphsOn() != 0);
-            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : ed && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
+            s.TextCentered(act ? g.fontBold : g.fontSmall, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
         }
     }
 
@@ -192,6 +178,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             DrawBonesTab(s, clip, l, *L);
         } else if (g.tab == TabMaterials) {
             DrawMaterialsTab(s, clip, l, *L);
+        } else if (g.tab == TabOptimize) {
+            DrawOptimizeTab(s, clip, l, *L);
         } else if (g.tab != TabParts) {
             const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
             const int visible = VisibleRows(l);
@@ -210,10 +198,19 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     if (row.kind == 0) {
                         std::string name = row.label;
                         for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                        // Header and its right-aligned "reset" share the row:
-                        // clip the title so it can never run under "reset".
-                        const RECT headClip{14, y, kPanel - 58, y + kRowH};
-                        s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
+                        const bool morph = g.tab == TabMorphs && row.group.find('/') != std::string::npos;   // a side sub-group under a section
+                        if (g.tab == TabMorphs && row.id >= 0) {   // brows / eyes / mouth / other, or a side sub-group: the fold arrow folds it
+                            const bool collapsed = g.collapsedMorphs.count(row.group) != 0;
+                            const int tx = morph ? 26 : 14;
+                            Expander(s, tx, y + kRowH / 2, !collapsed, ui::kAccent);
+                            const RECT headClip{tx + 14, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAccent, tx + 14, y + 3, ClipText(name, 42), &headClip);
+                        } else {
+                            // Header and its right-aligned "reset" share the row:
+                            // clip the title so it can never run under "reset".
+                            const RECT headClip{14, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
+                        }
                         bool any = false;
                         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
                         if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
@@ -233,6 +230,15 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
                     } else if (row.kind == 6) {
                         DrawPresetChips(s, row.id, row.label, y);
+                    } else if (g.morphEdit >= 0 && row.id == kMorphBase + g.morphEdit) {
+                        // the rename box: the typed text with a caret, Enter commits (Esc restores)
+                        std::string typed = g.morphEditBuf + "_";
+                        const RECT box{12, y + 1, kPanel - 44, y + kRowH - 1};
+                        s.FillRound(box, 5, ui::kLineHi);
+                        s.StrokeRound(box, 5, ui::kAccent);
+                        const RECT boxClip{20, y, kPanel - 52, y + kRowH};
+                        s.Text(g.fontMono, ui::kText, 20, y + 3, ClipText(typed, 30), &boxClip);
+                        s.TextRight(g.fontSmall, ui::kFaint, kPanel - 16, y + 4, "Enter");
                     } else {
                         DrawSliderRow(s, row.id, row.label, y);
                     }

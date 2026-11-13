@@ -111,6 +111,53 @@ A Koikatsu outfit file (`【KoiKatuClothes】`, the `.png` the game saves for on
 
 An item unticked (hidden) in the viewer's list is gone from the export the same way it is gone from the view: its meshes, its DynamicBone physics and the bones only it used are not in the PMX at all, and every exported preview picture (`_preview.png`, `_head.png`, `_feet.png`, `_view.png`, `_shaded.png`) is the viewer's picture at export time (1:1). Visible items stay in the PMX with a `Hide <part>` morph, so MMD can still hide them; the skin under a visible garment stays as the `Under`/`Nude body` morphs, not as a visible part. In the manifest this is recorded as `include_in_export: false` for the removed items.
 
+## Mesh simplification and LODs
+
+Some imported character components contain far more triangles than the silhouette needs. The **Optimize** tab (and the command line) reduce the triangle count with a quadric-error-metrics edge collapse (attribute-aware: the UV layout, material boundaries, hard edges, normal and weight seams stay intact, bone weights are blended top-4 and renormalised, blend-shape offsets travel with their vertices, and every open boundary is preserved, so UV seams and material boundaries cannot tear). It is **not** a uniform percentage of every mesh: each component class gets its own reduction budget relative to the requested amount, so the face keeps its features, the eyes are never touched, the hair keeps its silhouette and strand planes readable, the body keeps proportions and deformation quality, and clothes and accessories reduce the most:
+
+| class | relative weight | hard cap |
+|---|---|---|
+| Eyes | none (kept exactly) | 0% |
+| Face (skin, teeth, brows, tongue) | 0.25 | 15% |
+| Hair | 1.0 | 45% |
+| Body | 0.75 | 60% |
+| Clothing | 1.0 | 80% |
+| Accessories | 1.0 | 90% |
+
+Quality presets in the Optimize tab and on the command line:
+
+| Preset | Target reduction | Intended use |
+|---|---|---|
+| Original | 0% | maximum fidelity |
+| High Quality | 20% | minimal visual differences |
+| Balanced (default) | 40% | general-purpose |
+| Performance | 60% | reduced polygon count |
+| Aggressive | 80% | low-poly / distant viewing |
+| Custom | any 0..100% | the slider |
+
+The slider sets the target; the panel shows the original triangle count, the estimated simplified count, the reduction in effect, per-part-class behaviour is applied automatically and the export always derives the result from the untouched original vertices, never from an already-simplified mesh, so quality cannot degrade cumulatively. The **Apply to export** button commits the current reduction for the next export; **Reset to original** reverts everything to the untouched character. In the viewer the simplified model and any LOD are previewable live; in the export the PMX is simply the reduced mesh (a plain PMX has no runtime LOD switching of its own: pick the file by viewing distance).
+
+LODs are generated the same way and recorded in the manifest. Each level is generated from the original geometry (LOD 0), never from a previous simplified level; the files share the export's textures and are written as `<name>_lod1.pmx` .. `<name>_lod4.pmx` next to the main PMX:
+
+| LOD | default target (remaining) | intended viewing distance |
+|---|---|---|
+| LOD 1 | 60% | near |
+| LOD 2 | 30% | medium |
+| LOD 3 | 15% | far |
+| LOD 4 | 5% | very far |
+
+The targets are configurable per level on the Optimize tab (independent `-` / `+` steppers, 5..95% per level) and on the CLI (`--lods`, or `--lod-targets 70,40,20,10`). The targets are not guarantees: with open borders locked and the class caps above, some meshes cannot reduce further and the exporter logs exactly that (`could not reduce below N triangles`) and, when two levels land on identical counts, writes the alias once instead of a duplicate file (the manifest lists it with `identical_to`). The skeleton, the morphs, the material assignments, the bone indices and every texture are identical between the levels; only the triangulation changes.
+
+CLI:
+
+```powershell
+cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --simplify 40
+cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --lods       # LOD 1..4 at 60/30/15/5
+cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --lod-targets 70,40,20,10
+```
+
+Validation: `cardbridge simplify-bench --subdiv 6` times the reduction on a synthetic closed mesh, and the test suite checks weight renormalisation, UV-seam preservation, blend-shape carry-over, reshape-consistency (bind frames rebuilt), LOD non-cumulation and the export round-trip (simplified PMX + LOD files re-read; the skeleton is unchanged).
+
 ## What it deliberately does not do
 
 - Launch Koikatsu, automate its UI, depend on a game process, or read a game install at run time.
@@ -300,11 +347,19 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # morph row edits its displayed name - the new name is kept in the viewer's settings (%LOCALAPPDATA%\CardBridge\viewer.json, "morphAliases") so it
 # survives restarts, and it is display only: the PMX still carries the original names, because MikuMikuDance motions key morphs by them.
 # Right-clicking a renamed row restores the original name (if it was not renamed, right-click resets the slider).
+# The Optimize tab (before Setup): triangle reduction for the exported PMX and stacked LOD files. A quality preset (Original / High Quality /
+# Balanced / Performance / Aggressive / Custom) or the 0-100% slider picks how hard to simplify - applied on a copy, never on your loaded character;
+# the face keeps its features, the eyes are untouched, the hair keeps its silhouette, the body keeps proportions, clothes and accessories go the furthest
+# (UVs, material boundaries, bone weights and blend shapes are preserved, simplex-like budget per component class, always starting from the untouched original
+# so quality never degrades cumulatively). "Apply to export" commits the reduction and the selected LODs for the next Export PMX; "Reset to original" reverts to the
+# card's look. The LOD section generates LOD 1..4 (each from the original, never from another level), each with its own target in 5% steps, a preview chip per
+# level and the measured triangle count once generated; an LOD whose level adds nothing over the previous one is aliased to it in the manifest, and the files are listed there with triangle counts.
 # P (or Look tab > Pose) is the automatic A-pose, on by default (MMD motions are keyed for it): clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
 # pose as the model's rest pose and lists it in the manifest's "pose". CLI: on by default, --apose-degrees N, --tpose to keep the T-pose; --gpu-view --gpu-bones draws the skeleton on the picture.
 # With the skeleton on, the bone under the pointer is ringed and a click-drag on a bone turns it (Ctrl+drag moves it): the tip follows the pointer, the bone and
 # everything below it (drawn in the same warm colour) swing. The body and face sliders and the nipple controls are real time too (about 6 ms: the skeleton is rebuilt
 # with the game's formulas and every vertex follows through its per-bone frames, no loading), the blend shape offsets and the areola size follow too (a character whose DynamicBone chains were settled with CARDBRIDGE_DYNBONE is assembled again instead).
+# The Look tab's "Translucent clothes" group adds a hand-painted see-through brush for garments (Koikatsu-style see-through clothes, brushed by hand): a toggle, off by default. With it on, left-drag on a garment in the 3D view paints a per-texel mask into that garment's own texture in UV space (right-drag, or the Erase switch, erases; a brush ring shows the radius, adjustable in centimetres; strokes interpolate, and the stamps are gated by the mesh's own UV islands). The bake lowers the painted texels' alpha and moves the material to the transparent pass, so the skin - or a bra, through a painted shirt - shows through, in the viewer, in the "as exported" view and in the PMX (MikuMikuDance draws it in its transparent pass; the skin a painted garment covers is kept visible for exactly this reason). "How see-through the painted area is" sets the strength (0 restores the card's texture and the material exactly); toggling the brush off reverts the bake the same way; "Clear the brush from every garment" wipes the mask. The mask is session-only (like the Morphs tab's live weights): reloading the card drops it, and the export carries whatever is painted at the moment of the export.
 # The Look tab's skin shading and nipple rows are live too: "Cleavage shading" (0..2) bakes an occlusion map into the body's skin texture, limited to the bust front (a ray-cast against the character's own body, a concavity term and a soft band along the midline; the body hidden under clothing is shaded the same way so the nude body keeps its shape, and everything else keeps the card's base colour). "Koikatsu AO" (0..2, default 0.85) bakes the game's own look in as well: a local-curvature cavity factor off the base body normal map (cf_body_00_base_n; orientation-independent, darkens the creases Koikatsu paints - navel, knees, shins, joints) plus the ink-line channel of the game's line mask for the card's body detailId (cf_body_00_line at the default: clavicle, knees, navel; BetterRepack kits add a sternum line) - it complements the cleavage shading without stacking on it. "Underboob fold shading" tunes the fold at the base of the breasts independently of the cleavage (ray-gated to the fold where the breast meets the torso, so the rest of the underside stays bright); "Cleavage length" (0..2) sets how far up the breast line the cleavage shading reaches: 0 = nothing, 1 = the full breast line (top of the bust), 2 = a full bust length higher, toward the base of the neck (default 1.2); "Shading width" (0.1..2, default 0.6) sets how wide the cleavage line runs (a narrow seam to a broad gradient). The nipple colour switch and its three sliders tint the nipple and areola (on by default, a natural warm salmon-red; off gives back the card's own nipColor). CLI: --skin-shade F (cleavage), --skin-underboob F, --skin-top F, --skin-width F, --skin-ao F (the game's own look baked in: a local-curvature cavity factor off the base body normal map plus the ink-line channel of the game's line mask for the card's body detailId - cf_body_00_line at the default; the new bake yields to SkinShade's darkening where both fall on the same texel, never stacks, and defaults to 0.85; 0 restores the previous output exactly), --nipple-colour R,G,B, --card-nipples.
 # Ctrl+Z / Ctrl+Y undo and redo bone edits and the A-pose (one drag or click is one step), Ctrl+S / Ctrl+O (or the buttons under the bone editor) save and load a pose as
 # JSON; `--pose <file>` on the viewer loads one at start, `cardbridge convert --pose <file>` bakes it into the PMX. The software view (no Direct3D 11) shows the pose too.

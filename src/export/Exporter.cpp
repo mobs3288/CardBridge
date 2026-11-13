@@ -1,4 +1,6 @@
 #include "export/Exporter.h"
+#include "core/Timing.h"
+#include "mesh/Simplify.h"
 
 #include "core/FileIo.h"
 #include "core/Version.h"
@@ -18,8 +20,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
+#include <thread>
 
 namespace cardbridge::exporter {
 
@@ -440,14 +447,29 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     return j;
 }
 
-ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt) {
+// Everything the main export writes can be handed to the LOD exports so they ship byte-identical textures:
+// the scene texture -> PMX texture indices (direct and alpha-solidified), the toon / sphere dedupe maps and
+// the file list as written. LODs re-encode nothing and re-reference exactly these files.
+struct ExportTextureReuse {
+    std::vector<int> texMap, solidTexMap;
+    std::map<std::string, int> toonFiles, sphereFiles;
+    std::vector<std::string> textureFiles;
+    std::vector<std::string> pmxTextures;   // model.textures as written by the main run
+};
+
+// `reuse` non-null turns the function into a LOD pass: it writes into the same folder as the main export,
+// shares the textures, skips the overwrite check, the previews, the manifest and the stale-file sweep.
+// `captureOut` (optional) receives everything a LOD pass needs; it is filled right after the main textures are encoded.
+ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt,
+                             const ExportTextureReuse* reuse, ExportTextureReuse* captureOut) {
     ExportResult res;
+    const bool isLod = reuse != nullptr;
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     auto report = [&](double frac, const std::string& stage) { if (opt.progress) opt.progress(frac, stage); };
     auto checkCancel = [&]() { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; };
     std::string stem = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
 
-    if (fileio::Exists(opt.outDir) && !opt.overwrite) {
+    if (!isLod && fileio::Exists(opt.outDir) && !opt.overwrite) {
         std::vector<std::string> existing = fileio::ListFiles(opt.outDir, {".pmx", ".png", ".json"});
         if (!existing.empty())
             throw FormatError("output folder already has files: " + opt.outDir + " (use a new folder or --overwrite)");
@@ -455,15 +477,18 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     fileio::CreateDirectories(fileio::Join(opt.outDir, "textures"));
     log("writing textures and materials");
     report(0.05, "writing textures");
+    cbtime::Scope texTimer("export textures + meshes");
     // A re-export replaces the previous one: stale textures from an earlier run must not linger beside it.
-    if (opt.overwrite)
+    if (!isLod && opt.overwrite)
         for (const std::string& f : fileio::ListFiles(fileio::Join(opt.outDir, "textures"), {".png"})) fileio::RemoveFile(f);
 
     // --- textures: only those a written material uses ---------------------
     std::vector<int> texMap(scene.textures.size(), -1);   // scene texture -> pmx texture
     std::vector<int> solidTexMap(scene.textures.size(), -1);   // the same, written with alpha 255 (for the item shader)
+    if (reuse) { texMap = reuse->texMap; solidTexMap = reuse->solidTexMap; }
     pmx::Model model;
     model.name = scene.name;
+    if (reuse) model.textures = reuse->pmxTextures;   // the LOD shares the main export's texture list and indices
     {   // the model information MikuMikuDance shows (it wants Windows line breaks): the tool, its author, where the model came from
         const std::string author = CARDBRIDGE_AUTHOR;   // fixed: not an option, not read from the environment
         model.nameEn = scene.name;
@@ -491,11 +516,25 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     }
     std::vector<int> meshBase(scene.meshes.size(), -1);   // PMX index of each exported mesh's first vertex
 
+    // Textures are encoded to PNG after the parts loop (below), not inline: the encoder is the CPU-heavy part of this
+    // stage and every encode is independent, so it runs on the pool.
+    struct PendingEncode {
+        const assemble::SceneTexture* tex = nullptr;   // points into the scene (never moved)
+        assemble::SceneTexture solidCopy;              // the alpha-rewritten pixels, for the main_item cutout case
+        std::string file;
+    };
+    std::vector<PendingEncode> pendingEncodes;
+
     std::vector<std::pair<int, int>> range(scene.parts.size(), {0, 0});
     std::vector<float> baseAlpha;   // per PMX material: its alpha before a startHidden part made it transparent
     std::vector<std::string> textureFiles(scene.textures.size());
     std::map<std::string, int> toonFiles;   // ramp bytes -> PMX texture index
     std::map<std::string, int> sphereFiles; // sphere map name -> PMX texture index
+    if (reuse) {
+        textureFiles = reuse->textureFiles;
+        toonFiles = reuse->toonFiles;
+        sphereFiles = reuse->sphereFiles;
+    }
     int meshOrdinal = 0;
     // Parts that move cloth (capes, panels, sleeves, skirts - authored DynamicBone or synthesized auto cloth) get the cloth material pass:
     // no edge, no cast/receive shadows, so they never paint the black slices against whatever they briefly touch.
@@ -553,6 +592,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                     // blends the rest see-through nor shows the cut texels (which were black).
                     const bool solid = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
                     int& pmxTex = solid ? solidTexMap[ti] : texMap[ti];
+                    if (reuse && pmxTex < 0)
+                        throw FormatError("the LOD export expected texture " + std::to_string(ti) + " (\"" + scene.textures[ti].name + "\") to have been written by the main export");
                     if (pmxTex < 0) {
                         // Encoded straight from the scene texture: copying a 2048 texture (16 MB) only to hand it to the
                         // PNG encoder was a needless transient at export time. The solid variant needs its own copy
@@ -564,11 +605,13 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                             for (size_t px = 3; px < solidCopy.rgba.size(); px += 4) solidCopy.rgba[px] = solidCopy.rgba[px] < kItemCutout ? 0 : 255;
                             tp = &solidCopy;
                         }
-                        const assemble::SceneTexture& t = *tp;
-                        std::string file = "textures/" + safeFileName(t.name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
-                        Bytes png = encodePng(t);
-                        fileio::WriteFile(fileio::Join(opt.outDir, file), png.data(), png.size());
-                        log("texture " + t.name + " (" + std::to_string(t.width) + "x" + std::to_string(t.height) + ")");
+                        std::string file = "textures/" + safeFileName(tp->name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
+                        log("texture " + tp->name + " (" + std::to_string(tp->width) + "x" + std::to_string(tp->height) + ")");
+                        PendingEncode pe;
+                        if (solid) pe.solidCopy = std::move(solidCopy);
+                        else pe.tex = tp;
+                        pe.file = file;
+                        pendingEncodes.push_back(std::move(pe));
                         if (textureFiles[ti].empty()) textureFiles[ti] = file;
                         pmxTex = static_cast<int>(model.textures.size());
                         model.textures.push_back(file);
@@ -587,7 +630,44 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         report(0.05 + 0.45 * (static_cast<double>(pi + 1) / static_cast<double>(scene.parts.size())),
                "export part " + std::to_string(pi + 1) + " / " + std::to_string(scene.parts.size()) + ": " + part.id);
     }
+    texTimer.Stop();
+    if (captureOut) {   // hand the main export's texture bookkeeping to the LOD passes
+        captureOut->texMap = texMap;
+        captureOut->solidTexMap = solidTexMap;
+        captureOut->toonFiles = toonFiles;
+        captureOut->sphereFiles = sphereFiles;
+        captureOut->textureFiles = textureFiles;
+        captureOut->pmxTextures = model.textures;
+    }
+    // The PNG encodes: independent files, independent buffers — spread them over the cores. The scene textures are const here.
+    // The LOD passes take the main export's texture files as they are: nothing is encoded, nothing is written twice.
+    if (reuse) pendingEncodes.clear();
+    if (!pendingEncodes.empty()) {
+        cbtime::Scope encodeTimer("encode textures");
+        const size_t n = pendingEncodes.size();
+        std::vector<Bytes> pngs(n);
+        auto encodeOne = [&](size_t i) {
+            const PendingEncode& pe = pendingEncodes[i];
+            pngs[i] = encodePng(pe.tex ? *pe.tex : pe.solidCopy);
+        };
+        const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned>(n)));
+        std::atomic<size_t> next{0};
+        auto worker = [&]() {
+            for (;;) {
+                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= n) break;
+                encodeOne(i);
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(hw > 0 ? hw - 1 : 0);
+        for (unsigned w = 1; w < hw; ++w) pool.emplace_back(worker);
+        worker();
+        for (auto& th : pool) th.join();
+        for (size_t i = 0; i < n; ++i) fileio::WriteFile(fileio::Join(opt.outDir, pendingEncodes[i].file), pngs[i].data(), pngs[i].size());
+    }
     report(0.52, "morphs and physics");
+    cbtime::Scope morphsTimer("morphs + physics");
 
     // Morphs: switch outfit parts off and the nude body on, so one PMX serves every state (the game's own clothes-off needs no second model).
     //   "Hide <part>" / "Show <part>"  one part (transparent / opaque again, by how it starts)
@@ -714,11 +794,16 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     if (opt.mmdNames) AddMmdStandardBones(model);
     log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
+    morphsTimer.Stop();
     if (opt.faceMinusZ) pmx::TurnAboutY(model);
     log("writing PMX (" + std::to_string(model.vertices.size()) + " vertices, " + std::to_string(model.indices.size() / 3) + " triangles)");
     report(0.62, "writing PMX");
     checkCancel();
-    Bytes pmxBytes = pmx::WritePmx(model);
+    Bytes pmxBytes;
+    {
+        cbtime::Scope pmxTimer("pmx write");
+        pmxBytes = pmx::WritePmx(model);
+    }
     std::string pmxFile = stem + ".pmx";
     res.pmxPath = fileio::Join(opt.outDir, pmxFile);
     fileio::WriteFile(res.pmxPath, pmxBytes.data(), pmxBytes.size());
@@ -726,20 +811,35 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     // A picture of what was written (front, side, back): a conversion can be judged without a PMX viewer.
     // Every preview image uses the same final hidden state as the viewer at
     // export time (1:1), so a hidden list item is in none of them - and in
-    // neither the PMX nor its bones.
+    // neither the PMX nor its bones. The LOD passes share the main export's
+    // previews and skip their own.
+    const std::vector<char> effHidden = isLod ? std::vector<char>() : ExportHiddenParts(scene);
+    if (!isLod) {
     log("rendering preview images");
     report(0.68, "rendering preview images");
-    const std::vector<char> effHidden = ExportHiddenParts(scene);
+    cbtime::Scope previewsTimer("previews");
     res.previewPath = fileio::Join(opt.outDir, stem + "_preview.png");
-    {
+    // The five previews are independent: each builds its own mips and writes its own file. Render them concurrently — the shaded one
+    // (game shaders over every lit pixel) is the slowest by far, and the other four ride along on the spare cores. Cancellation is
+    // re-checked after the join (a throw inside a worker is rethrown on this thread, preserving the exception type).
+    std::exception_ptr previewErr;
+    std::mutex previewErrMu;
+    auto runPreview = [&previewErrMu, &previewErr](const std::function<void()>& fn) {
+        try {
+            fn();
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(previewErrMu);
+            if (!previewErr) previewErr = std::current_exception();
+        }
+    };
+    const bool serialPreviews = std::getenv("CARDBRIDGE_SERIAL_PREVIEWS") != nullptr;
+    std::function<void()> frontTask = [&] {
         PreviewOptions po;
         po.hiddenParts = &effHidden;
         Bytes prev = RenderPreviewPng(scene, po);
         fileio::WriteFile(res.previewPath, prev.data(), prev.size());
-    }
-    {   // a head close-up, to compare face and hair against the card's own picture
-        checkCancel();
-        report(0.74, "rendering head preview");
+    };
+    std::function<void()> headTask = [&] {
         PreviewOptions head;
         head.views = 1;
         head.viewWidth = 640;
@@ -749,10 +849,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         head.hiddenParts = &effHidden;
         Bytes hp = RenderPreviewPng(scene, head);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_head.png"), hp.data(), hp.size());
-    }
-    {   // a three-quarter view through the same camera the viewer uses (keeps the viewer's renderer under test)
-        checkCancel();
-        report(0.79, "rendering view preview");
+    };
+    std::function<void()> viewTask = [&] {
         ViewCamera cam;
         cam.yawDeg = 30;
         cam.pitchDeg = 8;
@@ -766,10 +864,9 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         Bytes png;
         stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); }, &png, 640, 800, 4, rgba.data(), 640 * 4);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_view.png"), png.data(), png.size());
-    }
-    {   // the same view through the game's own shaders (materials whose shader is in the bundle), for comparing with the card picture
-        checkCancel();
-        report(0.84, "rendering shaded preview");
+    };
+    std::function<void()> shadedTask = [&] {
+        // the same view through the game's own shaders (materials whose shader is in the bundle), for comparing with the card picture
         ViewCamera cam;
         cam.yawDeg = 0;
         cam.pitchDeg = 4;
@@ -784,10 +881,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         Bytes png;
         stbi_write_png_to_func([](void* c, void* d, int n) { auto* b = static_cast<Bytes*>(c); b->insert(b->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + n); }, &png, 640, 800, 4, rgba.data(), 640 * 4);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_shaded.png"), png.data(), png.size());
-    }
-    {   // the feet from the front, side and back
-        checkCancel();
-        report(0.89, "rendering feet preview");
+    };
+    std::function<void()> feetTask = [&] {   // the feet from the front, side and back
         PreviewOptions feet;
         feet.viewWidth = 560;
         feet.viewHeight = 560;
@@ -796,17 +891,34 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         feet.hiddenParts = &effHidden;
         Bytes fp = RenderPreviewPng(scene, feet);
         fileio::WriteFile(fileio::Join(opt.outDir, stem + "_feet.png"), fp.data(), fp.size());
+    };
+    if (serialPreviews) {
+        for (const auto& task : {frontTask, headTask, viewTask, shadedTask, feetTask}) runPreview(task);
+    } else {
+        std::thread thFront(runPreview, frontTask);
+        std::thread thHead(runPreview, headTask);
+        std::thread thView(runPreview, viewTask);
+        std::thread thShaded(runPreview, shadedTask);
+        std::thread thFeet(runPreview, feetTask);
+        thFront.join();
+        thHead.join();
+        thView.join();
+        thShaded.join();
+        thFeet.join();
     }
+    if (previewErr) std::rethrow_exception(previewErr);
 
     nlohmann::json manifest = BuildManifest(scene, card, opt, pmxFile, textureFiles, range, morphNames);
     manifest["counts"]["rigid_bodies"] = model.rigidBodies.size();
     manifest["counts"]["ik_bones"] = ikBones.size();   // added after the scene's bones, so the PMX has "bones" + "ik_bones"
     manifest["counts"]["joints"] = model.joints.size();
+    previewsTimer.Stop();
     log("writing manifest");
     report(0.95, "writing manifest");
     checkCancel();
     res.manifestPath = fileio::Join(opt.outDir, stem + ".cardbridge.json");
     fileio::WriteTextFile(res.manifestPath, manifest.dump(2) + "\n");
+    }   // !isLod
 
     res.folder = opt.outDir;
     res.vertices = model.vertices.size();
@@ -817,6 +929,115 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     res.parts = scene.parts.size();
     (void)meshOrdinal;
     report(1.0, "done");
+    return res;
+}
+
+// The public entry. Any triangle reduction runs on a copy (the caller's scene is never simplified), and any LOD
+// is generated from the caller's original scene alone - never from the reduced main model, never from another
+// LOD - so quality cannot degrade cumulatively between levels. LOD PMX files are written next to the main one
+// and share its textures; the manifest lists them as "lods" together with the simplification that was applied.
+ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt) {
+    auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
+    const std::string stem0 = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
+    const float requested = std::clamp(opt.simplifyPercent, 0.0f, 95.0f) / 100.0f;
+    std::shared_ptr<assemble::Scene> eff;   // the model this export writes; null when it is the original
+    if (requested > 0.0f) {
+        mesh::SimplifyOptions so;
+        so.maxReduction = requested;
+        so.cancelled = opt.cancelled;
+        mesh::SceneSimplifyStats st;
+        eff = mesh::SimplifyScene(scene, requested, so, st,
+            opt.progress ? std::function<void(float, const std::string&)>([&opt](float f, const std::string& s) { opt.progress(f * 0.45, "simplifying: " + s); })
+                         : std::function<void(float, const std::string&)>{});
+        for (const auto& w : st.warnings) log("warning: " + w);
+        if (!eff) { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; throw FormatError("simplification failed"); }
+        log("simplified for export: " + std::to_string(st.originalTriangles) + " -> " + std::to_string(st.resultTriangles) + " triangles");
+        if (opt.progress) opt.progress(0.45, "writing PMX");
+    }
+    const assemble::Scene& mainScene = eff ? *eff : scene;
+    ExportTextureReuse reuse;
+    ExportResult res = ExportSceneImpl(mainScene, card, opt, nullptr, &reuse);
+    if (!opt.lodTargets.empty()) {
+        nlohmann::json lods = nlohmann::json::array();
+        auto slug = [](const std::string& s) {
+            std::string out;
+            for (const unsigned char c : s) { const char a = static_cast<char>(c | 0x20); if ((a >= 'a' && a <= 'z') || (c >= '0' && c <= '9')) out.push_back(a); }
+            return out;
+        };
+        size_t prevTris = 0, prevVerts = 0;
+        std::string prevFile, prevLabel;   // the level the previous write produced; a level that lands on the same counts is byte-identical (the simplifier is deterministic)
+        for (const auto& target : opt.lodTargets) {
+            const float remainingIn = target.remaining;
+            const float remaining = std::clamp(remainingIn, 0.01f, 0.99f);
+            if (!(remaining > 0.0f && remaining < 1.0f)) continue;   // 1.0 would be LOD 0 itself (the main file); ignore
+            const std::string fileStem = stem0 + "_" + slug(target.label);
+            log("generating " + target.label);
+            mesh::SimplifyOptions so;
+            so.maxReduction = 1.0f - remaining;
+            so.cancelled = opt.cancelled;
+            mesh::SceneSimplifyStats st;
+            auto lod = mesh::SimplifyScene(scene, so.maxReduction, so, st, nullptr);
+            for (const auto& w : st.warnings) log("warning (" + target.label + "): " + w);
+            if (!lod) { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; throw FormatError(target.label + " simplification failed"); }
+            log(target.label + ": " + std::to_string(st.originalTriangles) + " -> " + std::to_string(st.resultTriangles) + " triangles ("
+                + std::to_string(static_cast<int>(remaining * 100.0f + 0.5f)) + "% remaining)");
+            if (!prevFile.empty() && st.resultTriangles == prevTris && st.resultVertices == prevVerts) {
+                // The preservation constraints bind below this point: this level can produce nothing a simpler file does not already hold.
+                // Skip the write and record an alias to the previous level (deterministic simplification, same input -> same bytes).
+                log(target.label + ": identical to " + prevLabel + " (nothing left to collapse under the preservation constraints); the manifest aliases it");
+                lods.push_back({{"file", prevFile}, {"label", target.label}, {"remaining", remaining},
+                                {"triangles", st.resultTriangles}, {"vertices", st.resultVertices}, {"identical_to", prevLabel}});
+                res.lods.push_back({prevFile, target.label, remaining, st.resultTriangles, st.resultVertices});
+                continue;
+            }
+            ExportOptions lodOpt = opt;
+            lodOpt.baseName = fileStem;
+            lodOpt.simplifyPercent = 0.0f;        // already simplified; the LOD pass must not reduce again
+            lodOpt.lodTargets.clear();
+            lodOpt.progress = nullptr;
+            const std::string lodLabel = target.label;
+            if (opt.log) lodOpt.log = [&opt, lodLabel](const std::string& s) { opt.log(lodLabel + ": " + s); };
+            ExportResult r = ExportSceneImpl(*lod, card, lodOpt, &reuse, nullptr);
+            ExportResult::Lod e;
+            e.file = fileio::FileName(r.pmxPath);
+            e.label = target.label;
+            e.remaining = remaining;
+            e.triangles = r.triangles;
+            e.vertices = r.vertices;
+            prevFile = e.file;
+            prevLabel = e.label;
+            prevTris = e.triangles;
+            prevVerts = e.vertices;
+            lods.push_back({{"file", e.file}, {"label", e.label}, {"remaining", remaining},
+                            {"triangles", e.triangles}, {"vertices", e.vertices}});
+            res.lods.push_back(std::move(e));
+        }
+        if (!res.lods.empty()) {
+            // Patch the manifest (already written by the main pass) with the LOD list and the simplification summary.
+            Bytes raw = fileio::ReadFile(res.manifestPath);
+            auto j = nlohmann::json::parse(raw.begin(), raw.end(), nullptr, false);
+            if (!j.is_discarded()) {
+                j["lods"] = std::move(lods);
+                j["simplification"] = {{"applied", requested > 0.0f},
+                                       {"reduction", requested},
+                                       {"lods_from", "the original geometry, never from another level"},
+                                       {"result_triangles", res.triangles}};
+                j["counts"]["lods"] = res.lods.size();
+                fileio::WriteTextFile(res.manifestPath, j.dump(2) + "\n");
+            }
+        }
+    }
+    if (opt.lodTargets.empty() && requested > 0.0f) {   // simplified without LODs: record the applied reduction too
+        Bytes raw = fileio::ReadFile(res.manifestPath);
+        auto j = nlohmann::json::parse(raw.begin(), raw.end(), nullptr, false);
+        if (!j.is_discarded()) {
+            j["simplification"] = {{"applied", true},
+                                   {"reduction", requested},
+                                   {"lods_from", ""},
+                                   {"result_triangles", res.triangles}};
+            fileio::WriteTextFile(res.manifestPath, j.dump(2) + "\n");
+        }
+    }
     return res;
 }
 

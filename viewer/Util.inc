@@ -67,6 +67,8 @@ struct Settings {
     float skinShadeTop = 1.2f;       // cleavage extent: 0 = none, 1 = the full breast line, 2 = toward the base of the neck
     float skinShadeWidth = 0.6f;     // cleavage width: 0.1 = hairline, 1 = the default, 2 = a broad gradient
     float skinAo = 0.85f;              // Koikatsu's own look baked into the skin (base body normal lighting + the detailId line mask); 0 = off
+    // Display names for morphs in the Morphs tab (display only: the PMX still carries the original names, MMD motions key morphs by name).
+    std::map<std::string, std::string> morphAliases;   // original morph name -> the display name the user typed
 };
 Settings LoadSettings() {
     Settings s;
@@ -85,6 +87,9 @@ Settings LoadSettings() {
         s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.2));
         s.skinShadeWidth = static_cast<float>(j.value("skinShadeWidth", 0.6));
         s.skinAo = static_cast<float>(j.value("skinAo", 0.85));
+        if (const auto it = j.find("morphAliases"); it != j.end() && it->is_object())
+            for (const auto& [k, v] : it->items())
+                if (v.is_string() && !v.get_ref<const std::string&>().empty()) s.morphAliases[k] = v.get<std::string>();
     } catch (...) {}
     return s;
 }
@@ -105,6 +110,7 @@ void SaveSettings(const Settings& s) {
         j["skinShadeTop"] = s.skinShadeTop;
         j["skinShadeWidth"] = s.skinShadeWidth;
         j["skinAo"] = s.skinAo;
+        if (!s.morphAliases.empty()) j["morphAliases"] = s.morphAliases;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}
 }

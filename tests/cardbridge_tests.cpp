@@ -36,9 +36,11 @@
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
+#include "export/Translucency.h"
 #include "library/Library.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
+#include "mesh/Simplify.h"
 #include "pmx/PmxWriter.h"
 #include "unity/TextureDecode.h"
 #include "resolve/ListTable.h"
@@ -1092,41 +1094,56 @@ void unitTests() {
         eyeEx.shape = "def_cl";
         s.expressions.push_back(eyeEx);
 
-        const std::vector<LiveMorph> morphs = BuildLiveMorphs(s);
+        const LiveMorphCatalog cat = BuildLiveMorphs(s);
+        const std::vector<LiveMorph>& morphs = cat.morphs;
         auto find = [&](const char* n) -> const LiveMorph* {
             for (const auto& m : morphs) if (m.name == n) return &m;
             return nullptr;
         };
-        auto offAt = [](const LiveMorph& m, int mesh, uint32_t vertex) -> Vec3 {
-            for (const auto& [v, d] : m.byMesh.at(static_cast<size_t>(mesh))) if (v == vertex) return d;
-            return Vec3{};
+        // every offset of a morph, per scene mesh (mesh index -> mesh-local vertex -> offset), at weight 1
+        auto offsetsOf = [&](const LiveMorph* m) {
+            std::vector<std::vector<Vec3>> dst;
+            if (m) AccumulateLiveMorph(s, cat, *m, 1.0f, dst);
+            return dst;
+        };
+        auto offAt = [&](const LiveMorph* m, int mesh, uint32_t vertex) -> Vec3 {
+            const std::vector<std::vector<Vec3>> dst = offsetsOf(m);
+            if (static_cast<size_t>(mesh) >= dst.size()) return Vec3{};
+            return static_cast<size_t>(vertex) < dst[static_cast<size_t>(mesh)].size() ? dst[static_cast<size_t>(mesh)][vertex] : Vec3{};
+        };
+        auto countAt = [&](const LiveMorph* m, int mesh) -> size_t {
+            const std::vector<std::vector<Vec3>> dst = offsetsOf(m);
+            if (static_cast<size_t>(mesh) >= dst.size()) return 0;
+            size_t n = 0;
+            for (const auto& d : dst[static_cast<size_t>(mesh)]) if (std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z) > 1e-7f) ++n;
+            return n;
         };
         // the game's patterns: 60% open is 0.6 x the raw shape; the raw per-mesh shape morph is the full weight
         const LiveMorph* mouth0 = find("Mouth 0 open");
         CHECK(mouth0 && mouth0->panel == 3);
-        CHECK(mouth0 && std::fabs(offAt(*mouth0, 0, 0).y + 1.2f) < 1e-4f && std::fabs(offAt(*mouth0, 0, 2).y + 0.6f) < 1e-4f);
+        CHECK(mouth0 && std::fabs(offAt(mouth0, 0, 0).y + 1.2f) < 1e-4f && std::fabs(offAt(mouth0, 0, 2).y + 0.6f) < 1e-4f);
         const LiveMorph* raw = find("cf_O_kuti.a_l_op");
-        CHECK(raw && raw->panel == 3 && offAt(*raw, 0, 0).y == -2.0f && offAt(*raw, 0, 2).y == -1.0f);
+        CHECK(raw && raw->panel == 3 && std::fabs(offAt(raw, 0, 0).y + 2.0f) < 1e-4f && std::fabs(offAt(raw, 0, 2).y + 1.0f) < 1e-4f);
         // meshes: 0 = mouth, 1 = white L, 2 = iris L, 3 = white R, 4 = iris R
         // the blink: whites squeeze (the game's shape), the iris takes the white's mean offset per shape (the PMX's follow)
         const LiveMorph* blink = find("Eyes 0 closed");
         CHECK(blink && blink->panel == 2);
-        CHECK(blink && blink->byMesh.at(1).size() == 3 && blink->byMesh.at(2).size() == 2 && blink->byMesh.at(3).size() == 3 && blink->byMesh.at(4).size() == 2);   // 3 whites + 2 iris, per eye
-        CHECK(blink && offAt(*blink, 2, 0).y == -1.0f && offAt(*blink, 4, 0).y == -1.0f);   // the iris follows (per-mesh vertex indices)
+        CHECK(blink && countAt(blink, 1) == 3 && countAt(blink, 2) == 2 && countAt(blink, 3) == 3 && countAt(blink, 4) == 2);   // 3 whites + 2 iris, per eye
+        CHECK(blink && std::fabs(offAt(blink, 2, 0).y + 1.0f) < 1e-4f && std::fabs(offAt(blink, 4, 0).y + 1.0f) < 1e-4f);   // the iris follows (per-mesh vertex indices)
         // the raw eye shapes are their own morphs too (the exporter's panel keywords do not name "ohitomi", so these are "Other", like in the PMX;
         // and the iris follow applies to them, like in the export)
         const LiveMorph* eyeRaw = find("cf_Ohitomi_L.def_cl");
-        CHECK(eyeRaw && eyeRaw->panel == 4 && eyeRaw->byMesh.at(1).size() == 3 && eyeRaw->byMesh.at(2).size() == 2);   // 3 whites + 2 iris
+        CHECK(eyeRaw && eyeRaw->panel == 4 && countAt(eyeRaw, 1) == 3 && countAt(eyeRaw, 2) == 2);   // 3 whites + 2 iris
         // the MMD standard morphs: the vowels from a_l_op (the game's open mouth) and まばたき from def_cl (the closed eyes)
         const LiveMorph* a = find("あ");
-        CHECK(a && a->panel == 3 && a->byMesh.at(0).size() == 2);
+        CHECK(a && a->panel == 3 && countAt(a, 0) == 2);
         const LiveMorph* b = find("まばたき");
-        CHECK(b && b->panel == 2 && b->byMesh.at(1).size() == 3 && b->byMesh.at(2).size() == 2 && b->byMesh.at(3).size() == 3 && b->byMesh.at(4).size() == 2);
+        CHECK(b && b->panel == 2 && countAt(b, 1) == 3 && countAt(b, 2) == 2 && countAt(b, 3) == 3 && countAt(b, 4) == 2);
         // the one-eyed versions: the closed eyes cut on the rig's left eye side (+x here)
         const LiveMorph* winkL = find("ウィンク２");
         const LiveMorph* winkR = find("ｳｨﾝｸ２右");
-        CHECK(winkL && winkL->byMesh.at(1).size() == 3 && winkL->byMesh.at(2).size() == 2 && winkL->byMesh.at(3).size() == 0);
-        CHECK(winkR && winkR->byMesh.at(3).size() == 3 && winkR->byMesh.at(4).size() == 2 && winkR->byMesh.at(1).size() == 0);
+        CHECK(winkL && countAt(winkL, 1) == 3 && countAt(winkL, 2) == 2 && countAt(winkL, 3) == 0);
+        CHECK(winkR && countAt(winkR, 3) == 3 && countAt(winkR, 4) == 2 && countAt(winkR, 1) == 0);
         // the outfit toggles are material morphs in the PMX: not in the vertex catalog (the Parts tab hides things)
         for (const auto& m : morphs) CHECK(m.name.find("Hide ") != 0 && m.name.find("Take off ") != 0 && m.name != "Nude body");
         // 2 expressions + 3 raw shapes + 5 vowels + まばたき + 2 winks
@@ -3636,6 +3653,320 @@ void unitTests() {
             CHECK(creaseCombined >= static_cast<int>(creaseShade * 0.6f) - 1);   // but never at full strength: it yields to SkinShade (att scales the AO contribution down further as SkinShade's darkening deepens)
         }
     });
+    test("translucent clothes: the painted alpha bakes into the garment texture, the material goes to the transparent pass, and strength 0 restores exactly", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            for (size_t i = 0; i + 3 < tex.rgba.size(); i += 4) {
+                tex.rgba[i + 0] = 240; tex.rgba[i + 1] = 240; tex.rgba[i + 2] = 245; tex.rgba[i + 3] = 255;
+            }
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart part;
+            part.id = "outfit0.top";
+            part.group = "Outfit";
+            part.meshes = {0};
+            part.visibleInPreview = true;
+            scene.parts.push_back(part);
+            return scene;
+        };
+        auto alphaAt = [](const assemble::Scene& s, int x, int y) { return static_cast<int>(s.textures[0].rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4 + 3]); };
+        {   // paint, bake, check, revert
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(layer >= 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.35f, false, 200.0f) > 0);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+            CHECK(alphaAt(scene, 32, 32) < 128);   // the painted centre is translucent
+            CHECK(alphaAt(scene, 0, 0) == 255);    // the painted-away corner stays opaque
+            CHECK(scene.materials[0].alpha);       // ... and the material is in the transparent pass while painted
+            CHECK(scene.materials[0].translucent);
+            CHECK(exporter::TranslucencyActive(scene, 0));
+            CHECK(exporter::TranslucencyApply(scene, 0.0f) >= 1);   // strength 0 restores exactly
+            CHECK(alphaAt(scene, 32, 32) == 255);
+            CHECK(!scene.materials[0].alpha);
+            CHECK(!scene.materials[0].translucent);
+            CHECK(!exporter::TranslucencyActive(scene, 0));
+        }
+        {   // the clear button wipes the mask and the bake follows
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 255.0f) > 0);
+            CHECK(exporter::TranslucencyClearAll(scene) == 1);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 0);   // a no-op is a no-op
+            CHECK(alphaAt(scene, 32, 32) == 255);
+            CHECK(!scene.materials[0].alpha);
+        }
+        {   // a stamp is gated by the mesh's own UV islands: texels off the chart paint nothing
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {0.5f, 0}, {0.5f, 0.5f}, {0, 0.5f}};   // the chart fills a quarter of the texture
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart part;
+            part.id = "outfit0.top";
+            part.group = "Outfit";
+            part.meshes = {0};
+            part.visibleInPreview = true;
+            scene.parts.push_back(part);
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.75f, 0.75f, 0.1f, false, 255.0f) == 0);   // outside the chart
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.25f, 0.25f, 0.1f, false, 255.0f) > 0);    // the chart's own texels
+            CHECK(exporter::TranslucencyLayerPainted(scene.translucency.layers[static_cast<size_t>(layer)]));
+        }
+    });
+    test("translucent clothes: a covered under piece is drawn while the covering garment is painted, and hidden again once the bake reverts", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart top;
+            top.id = "outfit0.top";
+            top.group = "Outfit";
+            top.meshes = {0};
+            top.visibleInPreview = true;
+            scene.parts.push_back(top);
+            assemble::ScenePart under;   // the bra (or the skin) the shirt hides
+            under.id = "outfit0.top.under";
+            under.group = "Outfit";
+            under.label = "Under outfit0.top";
+            under.meshes = {0};
+            under.visibleInPreview = false;
+            under.underPiece = true;
+            under.underOf = "outfit0.top";
+            under.coveredBy = {"outfit0.top"};
+            scene.parts.push_back(under);
+            return scene;
+        };
+        std::vector<char> hidden(2, 0);
+        auto effective = [&](assemble::Scene& s) { return exporter::EffectiveHiddenParts(s, hidden); };
+        {   // the garment covers it: the under piece stays hidden (the normal case)
+            assemble::Scene scene = makeScene();
+            const auto eff = effective(scene);
+            CHECK(eff[1] == 1);
+        }
+        {   // paint the garment: the under piece is drawn so the see-through area is not a hole in the character
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 200.0f) > 0);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+            const auto eff = effective(scene);
+            CHECK(eff[1] == 2);
+            CHECK(exporter::TranslucencyApply(scene, 0.0f) >= 1);   // the bake reverts: the piece hides again
+            const auto effBack = effective(scene);
+            CHECK(effBack[1] == 1);
+        }
+    });
+    test("translucent brush: a screen point on the garment picks the part and the uv under the pointer", [] {
+        assemble::Scene scene;
+        scene.textures.resize(1);
+        auto& tex = scene.textures[0];
+        tex.name = "cf_t_shirt_01";
+        tex.width = tex.height = 64;
+        tex.rgba.assign(64 * 64 * 4, 255);
+        assemble::SceneMesh mesh;
+        mesh.name = "top_a";
+        const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+        const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        for (int i = 0; i < 4; ++i) {
+            assemble::SceneVertex v;
+            v.pos = pos[i];
+            v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+            v.normal = {0, 0, 1};
+            mesh.vertices.push_back(v);
+        }
+        assemble::SceneSubmesh sub;
+        sub.material = 0;
+        sub.indices = {0, 1, 2, 0, 2, 3};
+        mesh.submeshes.push_back(std::move(sub));
+        scene.meshes.push_back(std::move(mesh));
+        assemble::SceneMaterial mat;
+        mat.name = "cf_m_shirt";
+        mat.texture = 0;
+        scene.materials.push_back(std::move(mat));
+        assemble::ScenePart part;
+        part.id = "outfit0.top";
+        part.group = "Outfit";
+        part.meshes = {0};
+        part.visibleInPreview = true;
+        scene.parts.push_back(part);
+        exporter::ViewCamera cam;
+        cam.yawDeg = 0.0f;
+        cam.pitchDeg = 0.0f;
+        cam.zoom = 1.0f;
+        exporter::ViewFraming f;
+        CHECK(exporter::detail::ComputeViewFraming(scene, nullptr, 100.0f, 100.0f, cam, f));
+        exporter::BrushHit hit;
+        CHECK(exporter::PickBrushPart(scene, nullptr, f, 100.0f, 100.0f, cam, 50.0f, 50.0f, nullptr, nullptr, hit));
+        CHECK(hit.part == 0);
+        CHECK(hit.mesh == 0);
+        CHECK(std::fabs(hit.uv.x - 0.5f) < 0.05f);
+        CHECK(std::fabs(hit.uv.y - 0.5f) < 0.05f);
+        CHECK(!exporter::PickBrushPart(scene, nullptr, f, 100.0f, 100.0f, cam, 2.0f, 2.0f, nullptr, nullptr, hit));   // the empty corner hits nothing
+        const std::vector<char> hidden{1};   // a hidden garment is never picked
+        CHECK(!exporter::PickBrushPart(scene, &hidden, f, 100.0f, 100.0f, cam, 50.0f, 50.0f, nullptr, nullptr, hit));
+    });
+    test("translucent clothes: a painted shirt renders see-through in the software preview", [] {
+        auto makeQuad = [](float z, int texture) {
+            assemble::SceneMesh mesh;
+            mesh.name = texture == 0 ? "skin" : "shirt";
+            const Vec3 pos[4] = {{0, 0, z}, {1, 0, z}, {1, 1, z}, {0, 1, z}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            return mesh;
+        };
+        assemble::Scene scene;
+        scene.textures.resize(2);
+        scene.textures[0].name = "skin";
+        scene.textures[0].width = scene.textures[0].height = 64;
+        scene.textures[0].rgba.assign(64 * 64 * 4, 255);
+        for (size_t i = 0; i + 3 < scene.textures[0].rgba.size(); i += 4) {
+            scene.textures[0].rgba[i + 0] = 200; scene.textures[0].rgba[i + 1] = 150; scene.textures[0].rgba[i + 2] = 130; scene.textures[0].rgba[i + 3] = 255;
+        }
+        scene.textures[1].name = "shirt";
+        scene.textures[1].width = scene.textures[1].height = 64;
+        scene.textures[1].rgba.assign(64 * 64 * 4, 255);
+        for (size_t i = 0; i + 3 < scene.textures[1].rgba.size(); i += 4) {
+            scene.textures[1].rgba[i + 0] = 245; scene.textures[1].rgba[i + 1] = 245; scene.textures[1].rgba[i + 2] = 248; scene.textures[1].rgba[i + 3] = 255;
+        }
+        // submeshes bind material per mesh: skin quad -> material 0, shirt quad -> material 1
+        assemble::SceneMesh skinMesh = makeQuad(0.0f, 0);
+        skinMesh.submeshes[0].material = 0;
+        assemble::SceneMesh shirtMesh = makeQuad(0.05f, 1);
+        shirtMesh.submeshes[0].material = 1;
+        scene.meshes = {std::move(skinMesh), std::move(shirtMesh)};
+        assemble::SceneMaterial m0; m0.name = "cf_m_skin"; m0.texture = 0; scene.materials.push_back(std::move(m0));
+        assemble::SceneMaterial m1; m1.name = "cf_m_shirt"; m1.texture = 1; scene.materials.push_back(std::move(m1));
+        assemble::ScenePart top;
+        top.id = "outfit0.top";
+        top.group = "Outfit";
+        top.meshes = {1};
+        top.visibleInPreview = true;
+        scene.parts.push_back(top);
+        assemble::ScenePart under;
+        under.id = "outfit0.top.under";
+        under.group = "Outfit";
+        under.underPiece = true;
+        under.underOf = "outfit0.top";
+        under.coveredBy = {"outfit0.top"};
+        under.meshes = {0};
+        under.visibleInPreview = false;
+        scene.parts.push_back(under);
+        // paint the middle of the shirt, not the corners, at full strength
+        const int layer = exporter::TranslucencyLayer(scene, 0, 1, 1);
+        CHECK(layer >= 0);
+        CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 255.0f) > 0);
+        CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+        const std::vector<char> hidden(2, 0);
+        const std::vector<char> eff = exporter::EffectiveHiddenParts(scene, hidden);
+        CHECK(eff[1] == 2);   // the skin behind the painted shirt must be drawn
+        exporter::ViewCamera cam;
+        cam.yawDeg = 0.0f;
+        cam.pitchDeg = 0.0f;
+        cam.zoom = 1.0f;
+        exporter::ViewOptions vo;
+        vo.hiddenParts = &eff;
+        vo.textured = true;
+        vo.shaded = false;
+        exporter::ViewStatePtr st = exporter::NewViewState();
+        const int W = 96, H = 96;
+        std::vector<uint32_t> px;
+        exporter::RenderView(scene, cam, W, H, vo, *st, px);
+        auto rgbCh = [](uint32_t v, int k) { return static_cast<int>((v >> (16 - 8 * k)) & 255u); };   // 0=R, 1=G, 2=B
+        const uint32_t centrePx = px[static_cast<size_t>(H / 2) * W + (W / 2)];
+        const uint32_t cornerPx = px[static_cast<size_t>(H - 8) * W + (W - 8)];   // the unpainted shirt corner
+        if (std::getenv("CARDBRIDGE_TEST_DEBUG_TRANSLUCENCY")) {
+            std::fprintf(stderr, "shirt tex centre px %d %d %d %d  corner %d %d %d %d\n",
+                         scene.textures[1].rgba[(32 * 64 + 32) * 4 + 0], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 1], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 2], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 3],
+                         scene.textures[1].rgba[3], scene.textures[1].rgba[1], scene.textures[1].rgba[2], scene.textures[1].rgba[3]);
+            std::fprintf(stderr, "skin  tex centre px %d %d %d %d\n",
+                         scene.textures[0].rgba[(32 * 64 + 32) * 4 + 0], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 1], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 2], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 3]);
+            std::fprintf(stderr, "centre %08x (R%d G%d B%d)  corner %08x (R%d G%d B%d)\n", centrePx,
+                        static_cast<int>((centrePx >> 16) & 255u), static_cast<int>((centrePx >> 8) & 255u), static_cast<int>(centrePx & 255u),
+                        cornerPx,
+                        static_cast<int>((cornerPx >> 16) & 255u), static_cast<int>((cornerPx >> 8) & 255u), static_cast<int>(cornerPx & 255u));
+        }
+        // centre: skin showing through (the shirt is ~10% opaque there). corner: the opaque shirt.
+        const int c0 = rgbCh(centrePx, 0), c1 = rgbCh(centrePx, 1), c2 = rgbCh(centrePx, 2);
+        CHECK(std::fabs(static_cast<double>(c0) - 200.0) < 60.0 && std::fabs(static_cast<double>(c1) - 150.0) < 60.0 && std::fabs(static_cast<double>(c2) - 130.0) < 60.0);
+        CHECK(c1 < rgbCh(cornerPx, 1) - 30);   // the painted half is clearly darker than the opaque half
+    });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
         assemble::Scene scene;
         assemble::SceneMaterial mat;
@@ -4089,6 +4420,395 @@ void unitTests() {
     });
 }
 
+
+// ---- mesh simplification & LOD --------------------------------------------------
+namespace {
+
+// A small skinned two-mesh scene: "o_body" (body, two bones, a blend shape, split UV seam) and "hair" (hair slot).
+// Identity rest worlds so reshapable bind frames equal positions exactly.
+assemble::Scene makeSkinnedScene() {
+    using namespace assemble;
+    Scene s;
+    s.name = "lodtest";
+    auto addBone = [&](const char* name, int parent, Vec3 pos) {
+        SceneBone b;
+        b.name = name; b.parent = parent; b.pos = pos; b.source = "rig";
+        b.world = Mat4{};
+        s.bones.push_back(b);
+    };
+    addBone("root", -1, {0, 0, 0});
+    addBone("cf_j_hips", 0, {0, 0.9f, 0});
+
+    auto makeSphere = [&](const char* name, float y, float radius, int rings, int sectors, int bone0, int bone1) {
+        SceneMesh m;
+        m.name = name;
+        m.reshapable = true;
+        const int stride = sectors + 1;
+        for (int r = 0; r <= rings; ++r) {
+            const float v = static_cast<float>(r) / static_cast<float>(rings);
+            const float phi = 3.14159265f * v;
+            for (int si = 0; si < stride; ++si) {
+                const float u = static_cast<float>(si) / static_cast<float>(sectors);
+                const float th = 2.0f * 3.14159265f * u;
+                SceneVertex vert;
+                vert.pos = {radius * std::sin(phi) * std::cos(th), y + radius * std::cos(phi), radius * std::sin(phi) * std::sin(th)};
+                const Vec3 c{0, y, 0};
+                vert.normal = normalize(Vec3{vert.pos.x - c.x, vert.pos.y - c.y, vert.pos.z - c.z});
+                vert.uv = {u, 1.0f - v};
+                vert.uv1 = vert.uv; vert.uv2 = vert.uv; vert.uv3 = vert.uv;
+                const float w = (r * 2 <= rings) ? 0.25f : 0.75f;
+                vert.bone[0] = bone0; vert.weight[0] = w;
+                vert.bone[1] = bone1; vert.weight[1] = 1.0f - w;
+                vert.bone[2] = 0; vert.weight[2] = 0.0f;
+                vert.bone[3] = 0; vert.weight[3] = 0.0f;
+                for (int k = 0; k < 4; ++k) { vert.local[k] = vert.pos; vert.nlocal[k] = vert.normal; }
+                m.vertices.push_back(vert);
+            }
+        }
+        SceneSubmesh sm;
+        sm.material = 0;
+        for (int r = 0; r < rings; ++r)
+            for (int si = 0; si < sectors; ++si) {
+                const int a = r * stride + si, b = a + 1, c = a + stride, d = c + 1;
+                sm.indices.insert(sm.indices.end(), {(uint32_t)a, (uint32_t)c, (uint32_t)b, (uint32_t)b, (uint32_t)c, (uint32_t)d});
+            }
+        m.submeshes.push_back(std::move(sm));
+        return m;
+    };
+
+    SceneMaterial matBody;
+    matBody.name = "mf_m_body";
+    matBody.shader = "Shader Forge/main_opaque";
+    matBody.diffuse = {0.9f, 0.8f, 0.7f, 1.0f};
+    s.materials.push_back(matBody);
+    SceneMaterial matHair;
+    matHair.name = "cf_m_hair";
+    matHair.shader = "Shader Forge/main_hair";
+    matHair.diffuse = {0.2f, 0.2f, 0.5f, 1.0f};
+    s.materials.push_back(matHair);
+
+    SceneMesh body = makeSphere("o_body", 0.8f, 0.5f, 14, 28, 0, 1);
+    SceneMesh hair = makeSphere("hair", 1.5f, 0.3f, 10, 20, 0, 0);
+    hair.submeshes[0].material = 1;
+    s.meshes.push_back(std::move(body));
+    s.meshes.push_back(std::move(hair));
+
+    ScenePart bodyPart; bodyPart.id = "body"; bodyPart.group = "Body"; bodyPart.meshes = {0};
+    ScenePart hairPart; hairPart.id = "hair.back"; hairPart.group = "Hair"; hairPart.meshes = {1};
+    s.parts.push_back(bodyPart);
+    s.parts.push_back(hairPart);
+
+    SceneBlendShape sh;
+    sh.name = "browlift";
+    for (size_t i = 0; i < s.meshes[0].vertices.size(); ++i)
+        if (s.meshes[0].vertices[i].pos.y > 1.1f) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, 0.03f, 0});
+    s.meshes[0].shapes.push_back(sh);
+    return s;
+}
+
+size_t sceneTris(const assemble::Scene& s) {
+    size_t t = 0;
+    for (const auto& m : s.meshes) for (const auto& sm : m.submeshes) t += sm.indices.size() / 3;
+    return t;
+}
+
+} // namespace
+
+void meshTests() {
+    test("simplify: per-class weights and caps follow the brief (eyes 0, face a sliver, accessories the most)", [] {
+        using namespace mesh;
+        CHECK(ClassReduction(MeshClass::Eye, 0.8f) == 0.0f);
+        CHECK(ClassReduction(MeshClass::Eye, 0.2f) == 0.0f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Face, 0.8f) - 0.15f) < 1e-6f);      // 0.8 * 0.25 = 0.2, capped at 0.15
+        CHECK(std::fabs(ClassReduction(MeshClass::Face, 0.4f) - 0.1f) < 1e-6f);       // 0.4 * 0.25
+        CHECK(std::fabs(ClassReduction(MeshClass::Body, 0.8f) - 0.6f) < 1e-6f);       // 0.8 * 0.75
+        CHECK(std::fabs(ClassReduction(MeshClass::Hair, 0.8f) - 0.45f) < 1e-6f);   // capped at 0.45
+        CHECK(std::fabs(ClassReduction(MeshClass::Clothing, 0.8f) - 0.8f) < 1e-6f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Accessory, 0.8f) - 0.8f) < 1e-6f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Clothing, 0.95f) - 0.8f) < 1e-6f);   // capped
+    });
+
+    test("simplify: meshes are classified by part group and material names", [] {
+        using namespace assemble;
+        using namespace mesh;
+        auto s = makeSkinnedScene();
+        CHECK(ClassifyMesh(s, 0) == MeshClass::Body);
+        CHECK(ClassifyMesh(s, 1) == MeshClass::Hair);
+        // the head model: face skin, teeth, brows, eyes
+        ScenePart head; head.id = "head"; head.group = "Head"; head.meshes = {2}; s.parts.push_back(head);
+        SceneMesh face; face.name = "cf_O_face"; face.part = 2;
+        face.submeshes.push_back({0, {}}); s.meshes.push_back(face);
+        SceneMaterial faceMat; faceMat.name = "cf_O_face"; s.materials.push_back(faceMat);
+        SceneMesh hitomi; hitomi.name = "cf_Ohitomi_L02"; hitomi.part = 2;
+        hitomi.submeshes.push_back({2, {}}); s.meshes.push_back(hitomi);
+        SceneMaterial eyeMat; eyeMat.name = "cf_Ohitomi_L02"; s.materials.push_back(eyeMat);
+        CHECK(ClassifyMesh(s, 2) == MeshClass::Face);
+        CHECK(ClassifyMesh(s, 3) == MeshClass::Eye);
+        // an outfit slot
+        ScenePart top; top.id = "outfit0.top"; top.group = "Outfit"; top.meshes = {4}; s.parts.push_back(top);
+        SceneMesh cloth; cloth.name = "o_top"; cloth.part = 3; cloth.submeshes.push_back({1, {}}); s.meshes.push_back(cloth);
+        CHECK(ClassifyMesh(s, 4) == MeshClass::Clothing);
+    });
+
+    test("simplify: a 0% reduction returns an untouched mesh", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.0f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles == st.originalTriangles);
+        CHECK(st.resultVertices == st.originalVertices);
+        CHECK(st.collapses == 0);
+        CHECK(m.vertices.size() == s.meshes[0].vertices.size());
+    });
+
+    test("simplify: closed skinned mesh reduces, stays skinned and keeps its geometry on a sphere", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        // the target is approximate by design: locked split seams and twinned pole chains may keep more than requested
+        CHECK(st.resultTriangles < st.originalTriangles);
+        CHECK(st.resultTriangles <= static_cast<size_t>(std::floor(st.originalTriangles * 0.5)) + 64);
+        CHECK(st.resultVertices < st.originalVertices);
+        for (const auto& v : m.vertices) {
+            float w = 0;
+            for (int k = 0; k < 4; ++k) { w += v.weight[k]; CHECK(v.bone[k] >= 0); }
+            CHECK(std::fabs(w - 1.0f) < 1e-3f);
+            CHECK(std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z));
+            const float n = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
+            CHECK(std::fabs(n - 1.0f) < 1e-3f);
+            // the sphere must stay in the right ballpark: QEM collapses chords, pulling slightly inside, never outside wildly
+            const float r = std::sqrt(v.pos.x * v.pos.x + (v.pos.y - 0.8f) * (v.pos.y - 0.8f) + v.pos.z * v.pos.z);
+            CHECK(r > 0.30f && r < 0.66f);
+        }
+        size_t idx = 0;
+        for (const auto& sm : m.submeshes) for (uint32_t ix : sm.indices) { CHECK(ix < m.vertices.size()); ++idx; }
+        CHECK(idx == st.resultTriangles * 3);
+        // the bind frames follow a re-shape exactly: pos == sum(w * world * local) with identity worlds
+        double maxErr = 0;
+        for (const auto& v : m.vertices) {
+            Vec3 acc{};
+            for (int k = 0; k < 4; ++k) acc = {acc.x + v.local[k].x * v.weight[k], acc.y + v.local[k].y * v.weight[k], acc.z + v.local[k].z * v.weight[k]};
+            maxErr = std::max(maxErr, static_cast<double>(std::sqrt((acc.x - v.pos.x) * (acc.x - v.pos.x) + (acc.y - v.pos.y) * (acc.y - v.pos.y) + (acc.z - v.pos.z) * (acc.z - v.pos.z))));
+        }
+        CHECK(maxErr < 1e-3);
+    });
+
+    test("simplify: split UV seam vertices keep exactly their positions; the chain cannot tear", [] {
+        auto s = makeSkinnedScene();
+        // collect the original twinned border positions: vertices shared by exactly one face, coincident in position
+        std::map<std::pair<uint32_t, uint32_t>, int> edgeUse;
+        for (const auto& m : s.meshes) for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+                for (int e = 0; e < 3; ++e) {
+                    uint32_t a = sm.indices[i + e], b = sm.indices[i + (e + 1) % 3];
+                    if (a > b) std::swap(a, b);
+                    edgeUse[{a, b}]++;
+                }
+        std::set<uint32_t> border;
+        for (const auto& [k, c] : edgeUse) if (c == 1) { border.insert(k.first); border.insert(k.second); }
+        const auto key = [](Vec3 p) { return std::make_tuple(std::llround(p.x / 1e-4), std::llround(p.y / 1e-4), std::llround(p.z / 1e-4)); };
+        std::map<decltype(key(Vec3{})), std::vector<uint32_t>> groups;
+        for (uint32_t vi : border) groups[key(s.meshes[0].vertices[vi].pos)].push_back(vi);
+        size_t twinned = 0;
+        for (const auto& [k, members] : groups) if (members.size() >= 2) twinned += members.size();
+        CHECK(twinned > 0);
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        mesh::SimplifyMesh(m, opt, &s.bones);
+        std::set<decltype(key(Vec3{}))> kept;
+        for (const auto& v : m.vertices) kept.insert(key(v.pos));
+        size_t missing = 0;
+        for (const auto& [k, members] : groups)
+            if (members.size() >= 2 && !kept.count(k)) ++missing;
+        CHECK(missing == 0);   // every split-chain position survives exactly once per side: no crack
+    });
+
+    test("simplify: blend shape offsets travel onto the surviving vertices", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        const size_t before = m.shapes[0].offsets.size();
+        CHECK(before > 0);
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        mesh::SimplifyMesh(m, opt, &s.bones);
+        assemble::SceneBlendShape& sh = m.shapes[0];
+        CHECK(!sh.offsets.empty());
+        CHECK(sh.local.size() == sh.offsets.size());
+        for (const auto& [vi, d] : sh.offsets) {
+            CHECK(vi < m.vertices.size());
+            const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+            CHECK(len > 1e-6f);
+        }
+    });
+
+    test("simplify: extreme reduction under a cap reports what it kept, never fakes the target", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.95f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles >= 1);
+        CHECK(st.resultTriangles <= st.originalTriangles);
+    });
+
+    test("simplify: disconnected components in one mesh simplify independently, none tears", [] {
+        // a big component (the body of the thing) and a tiny one (a bow), disconnected, one mesh
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneMesh m;
+        m.name = "two";
+        m.reshapable = true;
+        auto addSphere = [&](float radius, Vec3 center, int rings, int sectors) {
+            const size_t base = m.vertices.size();
+            const int stride = sectors + 1;
+            for (int r = 0; r <= rings; ++r) {
+                const float v = static_cast<float>(r) / rings;
+                const float phi = 3.14159265f * v;
+                for (int si = 0; si < stride; ++si) {
+                    const float u = static_cast<float>(si) / sectors;
+                    const float th = 2.0f * 3.14159265f * u;
+                    SceneVertex vert;
+                    vert.pos = {center.x + radius * std::sin(phi) * std::cos(th), center.y + radius * std::cos(phi), center.z + radius * std::sin(phi) * std::sin(th)};
+                    vert.normal = normalize(Vec3{vert.pos.x - center.x, vert.pos.y - center.y, vert.pos.z - center.z});
+                    vert.uv = {u, 1.0f - v};
+                    vert.uv1 = vert.uv; vert.uv2 = vert.uv; vert.uv3 = vert.uv;
+                    vert.bone[0] = 0; vert.weight[0] = 1.0f;
+                    m.vertices.push_back(vert);
+                }
+            }
+            SceneSubmesh sub;
+            sub.material = 0;
+            for (int r = 0; r < rings; ++r)
+                for (int si = 0; si < sectors; ++si) {
+                    const int a = static_cast<int>(base) + r * stride + si, b = a + 1, c = a + stride, d = c + 1;
+                    sub.indices.insert(sub.indices.end(), {(uint32_t)a, (uint32_t)c, (uint32_t)b, (uint32_t)b, (uint32_t)c, (uint32_t)d});
+                }
+            m.submeshes.push_back(std::move(sub));
+        };
+        addSphere(0.5f, {0, 0, 0}, 10, 20);
+        addSphere(0.1f, {2.0f, 1.0f, 0}, 6, 12);
+        const size_t origTotal = 10 * 20 * 2 + 6 * 12 * 2;
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.6f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles < origTotal);
+        // every triangle is valid and each component kept a plausible share
+        size_t idx = 0;
+        for (const auto& sm : m.submeshes) for (uint32_t ix : sm.indices) { CHECK(ix < m.vertices.size()); ++idx; }
+        CHECK(idx == st.resultTriangles * 3);
+        // the tiny component survived (it is small; it may only reduce so far before hitting its locked borders)
+        size_t tiny = 0;
+        for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const Vec3& p0 = m.vertices[sm.indices[i]].pos;
+                if (p0.x > 1.0f) ++tiny;   // the bow component lives around x=2
+            }
+        CHECK(tiny > 0);
+        // both components are still welded internally (no crosses between them in any face)
+        for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+                for (int e = 0; e < 3; ++e)
+                    for (int f = 0; f < 3; ++f)
+                        if (e != f) {
+                            const Vec3& a = m.vertices[sm.indices[i + e]].pos;
+                            const Vec3& b = m.vertices[sm.indices[i + f]].pos;
+                            CHECK(!((a.x > 1.0f) != (b.x > 1.0f)));   // no triangle spans the two disjoint components
+                        }
+    });
+
+    test("lod: levels are generated from the original, never from each other", [] {
+        auto s = makeSkinnedScene();
+        std::vector<mesh::LodLevelSpec> levels = {{"lod1", "LOD 1", 0.6f}, {"lod2", "LOD 2", 0.3f}};
+        auto lods = mesh::GenerateLods(s, levels, mesh::SimplifyOptions{});
+        CHECK(lods.size() == 2);
+        CHECK(lods[0].scene && lods[1].scene);
+        CHECK(lods[0].triangles > lods[1].triangles);
+        CHECK(!lods[0].cancelled && !lods[1].cancelled);
+        // LOD 2 from the original == a direct reduction of the original; never the LOD 1 result re-reduced
+        mesh::SimplifyOptions so;
+        so.maxReduction = 0.7f;
+        mesh::SceneSimplifyStats st;
+        auto direct = mesh::SimplifyScene(s, 0.7f, so, st);
+        CHECK(direct != nullptr);
+        CHECK(direct->meshes[0].vertices.size() == lods[1].scene->meshes[0].vertices.size());
+    });
+
+    test("lod: export produces a simplified PMX and LOD files from the same original; skeleton and textures shared", [] {
+        auto s0 = makeSkinnedScene();
+        const size_t originalTris = sceneTris(s0);
+        const size_t bodyVertsBefore = s0.meshes[0].vertices.size();
+        const size_t hairVertsBefore = s0.meshes[1].vertices.size();
+        card::Card c;
+        c.path = "lodtest.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("lod_export") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        eo.simplifyPercent = 40.0f;
+        eo.lodTargets = {{"LOD 1", 0.6f}, {"LOD 2", 0.3f}};
+        const auto r = exporter::ExportScene(s0, c, eo);
+        // the caller's scene is never modified by the export
+        CHECK(s0.meshes[0].vertices.size() == bodyVertsBefore);
+        CHECK(s0.meshes[1].vertices.size() == hairVertsBefore);
+        CHECK(sceneTris(s0) == originalTris);
+        // the main PMX is simpler than the original, by roughly the requested rate
+        CHECK(r.triangles < originalTris);
+        mesh::SceneSimplifyStats directStats;
+        auto directScene = mesh::SimplifyScene(s0, 0.4f, mesh::SimplifyOptions{}, directStats);
+        CHECK(directScene != nullptr);
+        CHECK(r.triangles == sceneTris(*directScene));
+        // LOD files exist and carry the same skeleton, material count and texture tables
+        CHECK(fileio::Exists(r.folder + "/lodtest_lod1.pmx"));
+        CHECK(fileio::Exists(r.folder + "/lodtest_lod2.pmx"));
+        CHECK(r.lods.size() == 2);
+        CHECK(r.lods[0].triangles > r.lods[1].triangles);
+        const Bytes mainPmx = fileio::ReadFile(r.pmxPath);
+        const Bytes lod1 = fileio::ReadFile(r.folder + "/lodtest_lod1.pmx");
+        const Bytes lod2 = fileio::ReadFile(r.folder + "/lodtest_lod2.pmx");
+        const pmxread::Model main = readPmx(mainPmx), l1 = readPmx(lod1), l2 = readPmx(lod2);
+        CHECK(l1.bones.size() == main.bones.size());
+        CHECK(l2.bones.size() == main.bones.size());
+        CHECK(l1.materials.size() == main.materials.size());
+        CHECK(l2.materials.size() == main.materials.size());
+        CHECK(l1.textures.size() == main.textures.size());
+        CHECK(l2.textures.size() == main.textures.size());
+        CHECK(l1.bones.size() > 0 && l2.bones.size() > 0);
+        // the texture bytes are shared, not re-encoded: every file the main export wrote is still there exactly once
+        CHECK(fileio::Exists(r.folder + "/textures"));
+        // the raw blend shape made it into the PMX as a vertex morph
+        bool sawBrowlift = false;
+        for (const auto& m : main.morphs) sawBrowlift = sawBrowlift || m.name.find("browlift") != std::string::npos;
+        CHECK(sawBrowlift);
+        // the manifest lists the LODs and the simplification that was applied
+        const Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifest(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifest.find("\"lods\"") != std::string::npos);
+        CHECK(manifest.find("lodtest_lod1.pmx") != std::string::npos);
+        CHECK(manifest.find("lodtest_lod2.pmx") != std::string::npos);
+        CHECK(manifest.find("\"simplification\"") != std::string::npos);
+        CHECK(manifest.find("\"applied\": true") != std::string::npos);
+    });
+
+    test("lod: no simplification means the pipeline is byte-identical to before", [] {
+        auto s0 = makeSkinnedScene();
+        card::Card c;
+        c.path = "plain.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("plain_export") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s0, c, eo);
+        CHECK(r.lods.empty());
+        CHECK(r.triangles == sceneTris(s0));
+        const Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifest(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifest.find("\"lods\"") == std::string::npos);
+        CHECK(manifest.find("\"simplification\"") == std::string::npos);
+    });
+}
 
 void integrationTests() {
     std::string lib = env("CARDBRIDGE_TEST_LIBRARY"), mods = env("CARDBRIDGE_TEST_MODS"), cardPath = env("CARDBRIDGE_TEST_CARD");
@@ -4583,6 +5303,7 @@ void integrationTests() {
 
 int main() {
     unitTests();
+    meshTests();
     integrationTests();
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;

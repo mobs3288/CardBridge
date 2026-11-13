@@ -11,6 +11,7 @@
 #include "material/MaterialWorkbench.h"
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
+#include "core/Timing.h"
 #include "export/Preview.h"
 #include "export/SkinAoBake.h"
 #include "export/SkinShade.h"
@@ -633,7 +634,16 @@ struct Builder {
         auto it = textureCache.find(key);
         if (it != textureCache.end()) return it->second;
         std::string why;
-        auto t = uf.readTexture(p, &why);
+        std::shared_ptr<unity::TextureData> t;
+        if (resolverPtr && !uf.source().empty())
+            if (auto bound = resolverPtr->cachedDecodedTexture(uf.source(), uf.statPath(), p.pathId))
+                t = std::make_shared<unity::TextureData>(*bound);
+        if (!t) {
+            if (auto fresh = uf.readTexture(p, &why)) {
+                t = std::make_shared<unity::TextureData>(std::move(*fresh));
+                if (resolverPtr && !uf.source().empty()) resolverPtr->cacheDecodedTexture(uf.source(), uf.statPath(), p.pathId, t);
+            }
+        }
         int result = -1;
         if (!t) {
             scene.warn(partId, "texture not loaded: " + why);
@@ -801,10 +811,23 @@ struct Builder {
             return it->second->tex;
         }
         std::string why;
-        auto t = uf.readTexture(p, &why);
         std::shared_ptr<unity::TextureData> out;
-        if (t) out = std::make_shared<unity::TextureData>(std::move(*t));
-        else scene.warn(partId, "texture not loaded: " + why);
+        // The process-wide decoded-texture cache outlives this assembly (an outfit switch or a
+        // reload in the viewer decodes the same bundles again): copy out of it, because the
+        // caller may consume the shared TextureData.
+        if (resolverPtr && !uf.source().empty()) {
+            if (auto bound = resolverPtr->cachedDecodedTexture(uf.source(), uf.statPath(), p.pathId))
+                out = std::make_shared<unity::TextureData>(*bound);   // private copy: the caller may consume it, the cache object must stay intact
+        }
+        if (!out) {
+            auto t = uf.readTexture(p, &why);
+            if (t) {
+                out = std::make_shared<unity::TextureData>(std::move(*t));
+                if (resolverPtr && !uf.source().empty()) resolverPtr->cacheDecodedTexture(uf.source(), uf.statPath(), p.pathId, out);
+            } else {
+                scene.warn(partId, "texture not loaded: " + why);
+            }
+        }
         if (out) {
             DecodedEntry e;
             e.key = key;
@@ -1990,6 +2013,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (!materialEdits.empty()) b.edits = &materialEdits;
 
     // --- shared skeleton and body ---------------------------------------
+    cbtime::Scope skeletonTimer("skeleton + head + body");
     log("loading the shared skeleton and body");
     report(0.05, "skeleton and body");
     std::string why;
@@ -2375,6 +2399,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     }
 
     // --- card items ------------------------------------------------------
+    skeletonTimer.Stop();
+    cbtime::Scope itemsTimer("items");
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
     log("assembling " + std::to_string(work.size()) + " card item(s)");
     auto itemWhere = [](const resolve::ItemRef& ref, const resolve::ResolvedItem& item) {
@@ -2412,6 +2438,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
     std::vector<MaskSource> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
+        cbtime::Scope itemTimer("item " + work[wi].partId);
         checkCancel();
         const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
@@ -3419,6 +3446,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         report(0.15 + 0.6 * (static_cast<double>(wi + 1) / static_cast<double>(work.size())),
                "item " + std::to_string(wi + 1) + " / " + std::to_string(work.size()) + ": " + logId);
     }
+    itemsTimer.Stop();
     LogMemory("assemble after items");
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
@@ -3435,6 +3463,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // (one part per set of garments covering them) so the nude body can be shown again, in the viewer and through PMX morphs.
     log("applying clothing masks");
     report(0.78, "clothing masks");
+    cbtime::Scope masksTimer("clothing masks");
     // A garment whose materials are all authored translucency does not mask what is behind it: the
     // skin underneath shows through the fabric (that is the point of it), so its triangles stay.
     std::map<std::string, bool> allTranslucentByPart;   // part id -> true when every material on it blends
@@ -3619,6 +3648,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto cl = [&](int c) { return std::sqrt(m.m[c] * m.m[c] + m.m[4 + c] * m.m[4 + c] + m.m[8 + c] * m.m[8 + c]); };
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
+    masksTimer.Stop();
     // Koikatsu's own body skin look: the base body normal map (always bound by the game as _NormalMap) and the
     // card's detailId detail normal / line mask pair (bound as _NormalMapDetail / _LineMask, category 420).
     // Decoded here, once, so the bake below - and the viewer's later re-applications - can use them without
@@ -3668,18 +3698,24 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     report(0.88, "create materials");
     checkCancel();
     LogMemory("assemble before create jobs");
-    exporter::RunCreateJobs(scene);
-    log("create materials done");
-    exporter::ApplyNippleTint(scene, opt.nippleColour);
-    if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
-        exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
-        log("automatic skin shading baked from the body mesh");
+    {
+        cbtime::Scope _("create materials");
+        exporter::RunCreateJobs(scene);
     }
-    // The Koikatsu skin look goes on top of the create result x the cleavage shading (it yields to SkinShade's own
-    // darkening, never stacks); both are multiplied into the texture the PMX references.
-    if (!scene.skinShade.meshes.empty() && (opt.skinAo > 0.0f || scene.aoBake.applied >= 0.0f)) {
-        exporter::ApplySkinAoBake(scene, opt.skinAo, true);
-        log("Koikatsu skin look baked (base body normal map + detailId line mask)");
+    log("create materials done");
+    {
+        cbtime::Scope _("nipple tint + skin shade + ao");
+        exporter::ApplyNippleTint(scene, opt.nippleColour);
+        if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
+            exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
+            log("automatic skin shading baked from the body mesh");
+        }
+        // The Koikatsu skin look goes on top of the create result x the cleavage shading (it yields to SkinShade's own
+        // darkening, never stacks); both are multiplied into the texture the PMX references.
+        if (!scene.skinShade.meshes.empty() && (opt.skinAo > 0.0f || scene.aoBake.applied >= 0.0f)) {
+            exporter::ApplySkinAoBake(scene, opt.skinAo, true);
+            log("Koikatsu skin look baked (base body normal map + detailId line mask)");
+        }
     }
     report(0.96, "finishing");
     LogMemory("assemble after create jobs");

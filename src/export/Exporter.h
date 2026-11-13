@@ -26,6 +26,18 @@ struct ExportOptions {
     std::string modsFolder;        // recorded as provenance only
     std::string materialFile;      // --materials provenance ("" = none)
     nlohmann::json materialWorkbench;   // the cardbridge-materials object for the manifest (null = none)
+    // Triangle reduction for the written PMX (0 = the original geometry, the default; 80 = aggressive). The reduction is applied
+    // per part class (face / eyes / hair / body / clothes / accessories), always from this scene's own vertices - the exported
+    // PMX never comes from an already simplified intermediate. 0 disables the pass entirely (the default).
+    float simplifyPercent = 0.0f;
+    // One level per file to write beside the main PMX. `remaining` is the fraction of the original triangles to keep (0.6 = 60%).
+    // Each LOD is generated from this scene's own (untouched) vertices too, never from another level. Empty = none.
+    // The files share the main export's textures (identical bytes) and are listed in the manifest as "lods".
+    struct LodTarget {
+        std::string label;         // "LOD 1" .. "LOD 4": names the file (<stem>_lod1.pmx) and shows in the manifest
+        float remaining = 1.0f;
+    };
+    std::vector<LodTarget> lodTargets;
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative
@@ -39,6 +51,13 @@ struct ExportOptions {
 struct ExportResult {
     std::string folder, pmxPath, manifestPath, previewPath;
     size_t vertices = 0, triangles = 0, materials = 0, bones = 0, textures = 0, parts = 0;
+    // One entry per --lods level, in the order given: the file name (inside `folder`), the label and how much of the original it keeps.
+    struct Lod {
+        std::string file, label;
+        float remaining = 1.0f;
+        size_t triangles = 0, vertices = 0;
+    };
+    std::vector<Lod> lods;
 };
 
 // Writes <outDir>/<name>.pmx, <outDir>/textures/*.png and

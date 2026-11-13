@@ -96,6 +96,18 @@ public:
     // Decompressed bytes currently held by the bundle cache (diagnostics).
     size_t cacheBytes() const;
 
+    // Decoded-texture cache: one entry per (source bundle, pathId), keyed by identity + the source file's
+    // size and last-write ticks, so re-reading a card re-uses the previous decode instead of running the
+    // LZ4/Block decoder again. Outfit switches in the viewer cost the mesh work, not the texture decodes.
+    // Bounded by CARDBRIDGE_TEXTURE_CACHE_MB (default 384 MB, 0 disables); evicted least-recently-used first.
+    // The identity strings are set on the UnityFile by the open*Bundle functions. Misses and hits on a file
+    // that changed are indistinguishable from a brand-new texture — the stat is part of the key.
+    std::shared_ptr<unity::TextureData> cachedDecodedTexture(const std::string& source, const std::string& statPath, int64_t pathId);
+    void cacheDecodedTexture(const std::string& source, const std::string& statPath, int64_t pathId, const std::shared_ptr<unity::TextureData>& tex);
+    size_t decodedCacheBytes() const;
+    // Test/debug aid: drop the decoded-texture cache (the bundle cache is dropped by clearCaches).
+    void clearDecodedCache();
+
 private:
     struct CacheEntry {
         std::string key;
@@ -111,6 +123,10 @@ private:
     ListTable& lists_;
     std::string abdata_;
     std::map<std::string, bool> modListsLoaded_;
+    // Bounded LRU of decoded textures, most-recent first. Shares the bundle cache's lock. Key: "<source>|<size>|<mtime>#<pathId>".
+    std::list<std::pair<std::string, std::shared_ptr<unity::TextureData>>> textureCache_;
+    std::map<std::string, std::list<std::pair<std::string, std::shared_ptr<unity::TextureData>>>::iterator> textureCacheByKey_;
+    size_t textureCacheBytes_ = 0;
     // Bounded LRU of opened bundles, most-recent first. Previously this was an
     // unbounded map: every bundle a character touched (the library's largest
     // is 132 MB on disk) was decompressed once and kept for the life of the

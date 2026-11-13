@@ -31,6 +31,8 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kSkinShadeTop) { r.v = &g.tw.skinShadeTop; r.def = 1.2f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinShadeWidth) { r.v = &g.tw.skinShadeWidth; r.def = 0.6f; r.lo = 0.1f; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinAo) { r.v = &g.tw.skinAo; r.def = 0.85f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
+    if (id == kTransStrength) { r.v = &g.tw.transStrength; r.def = 0.65f; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }   // shown as 0..100
+    if (id == kTransSize) { r.v = &g.tw.transSizeCm; r.def = 4.0f; r.lo = 0.5f; r.hi = 15.0f; r.step = 0.25f; r.percent = false; r.fmt = "%.2f cm"; return true; }
     if (id == kNippleR) { r.v = &g.tw.nippleColour.x; r.def = assemble::kDefaultNippleColour.x; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
     if (id == kNippleG) { r.v = &g.tw.nippleColour.y; r.def = assemble::kDefaultNippleColour.y; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
     if (id == kNippleB) { r.v = &g.tw.nippleColour.z; r.def = assemble::kDefaultNippleColour.z; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }
@@ -81,6 +83,9 @@ bool SliderFor(int id, SliderRef& r) {
 // Pose controls change the picture at once, no re-assembly. Morphs too: a weight is a live edit, like a pose bone.
 bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount) || (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())); }
 void TweakEdited(int id, bool released);   // defined in Pose.inc
+void TransSwitchChanged(int id);   // defined in Paint.inc (the translucency switch: apply or revert the bake at once)
+void TransApplyNow();              // defined in Paint.inc (re-applies the baked alpha from the stored masks)
+void TransClearPaint();            // defined in Paint.inc (the "clear the brush" button)
 
 // ---- preset chips: the band + cup pair for the bust size, S..XL for the nipple size ---------------------------------
 // A plain slider is hard to shop for, so the Bust Size row carries a band (65..105) and a cup (AA..G), and the Look tab's

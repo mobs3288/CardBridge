@@ -641,7 +641,7 @@ bool WbClick(int x, int y, bool right) {
             SliderRef r;
             if (!SliderFor(id, r)) return true;
             if (right) { ResetTweak(id); TweakEdited(id, true); return true; }
-            if (GetKeyState(VK_SHIFT) & 0x8000) { BeginSliderEdit(id); return true; }   // type the value with the keyboard
+            if (g.shiftDown) { BeginSliderEdit(id); return true; }   // type the value with the keyboard
             if (x < l.trackL - 8) return true;
             if (g.sliderDrag != id) material::PushUndo(g.mat);
             g.sliderDrag = id;
@@ -963,8 +963,8 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateMat();
             return 0;
         }
-        if (GetKeyState(VK_CONTROL) & 0x8000) {   // the material shortcuts, wherever focus is
-            if (wp == 'Z') MaterialUndo((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        if (g.ctrlDown) {   // the material shortcuts, wherever focus is
+            if (wp == 'Z') MaterialUndo(g.shiftDown);
             else if (wp == 'Y') MaterialUndo(true);
             else if (wp == 'S') SaveMatFile();
             else if (wp == 'O') { LoadMatFile(); RevealSelectedMaterial(); }

@@ -21,6 +21,7 @@
 #include "card/ClothingExport.h"
 #include "core/FileIo.h"
 #include "core/MemoryProbe.h"
+#include "core/Timing.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include "material/MaterialWorkbench.h"
@@ -33,6 +34,7 @@
 #include "export/Preview.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
+#include "mesh/Simplify.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -41,6 +43,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -132,6 +135,15 @@ void usage() {
         "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
         "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
+        "             [--simplify N]               reduce the written PMX's triangles by N percent (0-80; off by default). The face and\n"
+        "                                             eyes are kept nearly as-is, the hair and body a little, the clothes and accessories\n"
+        "                                             the most; UVs, material boundaries, bone weights and blend shapes are preserved\n"
+        "             [--lods] [--lod-targets A,B,C,D]\n"
+        "                                             also write <name>_lod1.pmx .. _lod4.pmx beside the main PMX (default targets:\n"
+        "                                             60/30/15/5 percent of the triangles left, --lod-targets overrides, comma-separated,\n"
+        "                                             e.g. --lod-targets 70,40,20,10). Each LOD is generated from the original geometry,\n"
+        "                                             never from another level; they share the export's textures and are listed in the\n"
+        "                                             manifest. PMX itself has no runtime LOD switching: pick a file per distance\n"
         "             [--skin-shade F]              automatic cleavage shading strength baked into the skin (0 = off,\n"
         "                                             1 = default, up to 2; breast region only)\n"
         "             [--skin-underboob F]          strength of the fold under the breasts (0 = off, 1 = default, up to 2)\n"
@@ -149,6 +161,7 @@ void usage() {
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
+        "  cardbridge simplify-bench [--subdiv N]   time the triangle reduction on a synthetic closed mesh (subdiv 6 = 81920 faces; the same path LODs use)\n"
         "  cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>]\n"
         "                                     [--thumbnail <file.png>] [--render-thumbnail] [--json] [--overwrite]\n"
         "                                     [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]\n"
@@ -643,14 +656,20 @@ int cmdConvert(const Args& a) {
     card::Card c;
     int code = 0;
     LogMemory("startup");
-    if (!loadCard(normalizeSlashes(a.positional[1]), c, code)) return code;
+    {
+        cbtime::Scope _("card load");
+        if (!loadCard(normalizeSlashes(a.positional[1]), c, code)) return code;
+    }
     LogMemory("after card load");
     if (!c.supported) {
         std::fprintf(stderr, "%s: %s\n", c.path.c_str(), c.supportNote.c_str());
         return 2;
     }
     Context ctx;
-    if (!buildContext(a, ctx)) return 3;
+    {
+        cbtime::Scope _("context (lists + resolver)");
+        if (!buildContext(a, ctx)) return 3;
+    }
     LogMemory("after context (lists)");
 
     assemble::AssembleOptions ao;
@@ -705,7 +724,11 @@ int cmdConvert(const Args& a) {
     ao.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     ao.progress = [](double f, const std::string& stage) { printProgress(f, "assembling: " + stage); };
     auto t0 = std::chrono::steady_clock::now();
-    assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
+    assemble::Scene scene;
+    {
+        cbtime::Scope _("assemble");
+        scene = assemble::Assemble(c, *ctx.resolver, ao);
+    }
     auto t1 = std::chrono::steady_clock::now();
     // Material workbench originals, captured straight after assembly so every
     // later edit (including --materials below) has an untouched baseline.
@@ -753,6 +776,7 @@ int cmdConvert(const Args& a) {
     // The arms come down from the T-pose (clavicle and upper arm), 40 degrees by default (--apose-degrees N), and the PMX is written in that pose:
     // MikuMikuDance's motions are keyed for it. --tpose keeps the T-pose. --pose <file.json> bakes a pose saved by the viewer (bone edits and the
     // A-pose switch, which then decides); --apose brings the arms down as well.
+    cbtime::Scope poseTimer("pose + settle");
     assemble::PoseFile poseFile;
     if (a.opt.count("pose")) {
         std::string err;
@@ -813,6 +837,7 @@ int cmdConvert(const Args& a) {
         // stiff paper cloth, not fabric.
         assemble::BakeGarmentSettle(scene);
     }
+    poseTimer.Stop();
 
     // --materials <file.json>: apply workbench overrides after the pose bake
     // (so the shader bake below sees the edited colours), before the part
@@ -866,7 +891,9 @@ int cmdConvert(const Args& a) {
     if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour
         std::string bakeNote;
         auto tb0 = std::chrono::steady_clock::now();
-        exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
+        {
+            cbtime::Scope _("shader bake");
+            exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
                                      [](const std::string& m) {
                                          std::fprintf(stderr, "  %s\n", m.c_str());
                                          const std::string key = "baked texture ";
@@ -880,6 +907,7 @@ int cmdConvert(const Args& a) {
                                              }
                                          }
                                      }, true, !a.has("no-toon-ramp"));
+        }
         std::fprintf(stderr, "\n  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
         LogMemory("after bake");
     }
@@ -950,19 +978,118 @@ int cmdConvert(const Args& a) {
     eo.modsFolder = a.get("mods");
     eo.materialFile = a.get("materials");
     if (!materialWorkbenchJson.is_null()) eo.materialWorkbench = materialWorkbenchJson;
+    if (a.opt.count("simplify")) {
+        const double pct = std::atof(a.get("simplify").c_str());
+        if (!std::isfinite(pct)) { std::fprintf(stderr, "--simplify needs a number (percent, 0..80)\n"); return 1; }
+        eo.simplifyPercent = static_cast<float>(std::clamp(pct, 0.0, 80.0));
+    }
+    if (a.opt.count("lod-targets")) {   // e.g. --lod-targets 70,40,20,10
+        std::string csv = a.get("lod-targets");
+        std::vector<float> levels;
+        size_t pos = 0;
+        while (pos <= csv.size()) {
+            const size_t comma = csv.find(',', pos);
+            const std::string tok = csv.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            if (!tok.empty()) { const double v = std::atof(tok.c_str()); if (std::isfinite(v)) levels.push_back(static_cast<float>(std::clamp(v, 1.0, 99.0)) / 100.0f); }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (levels.empty()) { std::fprintf(stderr, "--lod-targets needs comma-separated percentages (e.g. 60,30,15,5)\n"); return 1; }
+        size_t n = 0;
+        for (const float remaining : levels) eo.lodTargets.push_back({"LOD " + std::to_string(++n), remaining});
+    } else if (a.has("lods")) {
+        eo.lodTargets = {{"LOD 1", 0.6f}, {"LOD 2", 0.3f}, {"LOD 3", 0.15f}, {"LOD 4", 0.05f}};
+    }
     eo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
     eo.progress = [](double f, const std::string& stage) { printProgress(f, "exporting: " + stage); };
     try {
-        auto r = exporter::ExportScene(scene, c, eo);
+        exporter::ExportResult r;
+        {
+            cbtime::Scope _("export");
+            r = exporter::ExportScene(scene, c, eo);
+        }
         LogMemory("after export");
         if (!gpuRgba.empty()) stbi_write_png((out + "/gpu_view.png").c_str(), 640, 800, 4, gpuRgba.data(), 640 * 4);
         if (!plainRgba.empty()) stbi_write_png((out + "/gpu_plain.png").c_str(), 640, 800, 4, plainRgba.data(), 640 * 4);
         double secs = std::chrono::duration<double>(t1 - t0).count();
         std::printf("wrote %s\n  %zu vertices, %zu triangles, %zu materials, %zu bones, %zu textures; %zu of %zu card items loaded (assembled in %.1fs)\n  manifest: %s\n",
                     r.pmxPath.c_str(), r.vertices, r.triangles, r.materials, r.bones, r.textures, parts - failed - 0, parts, secs, r.manifestPath.c_str(), r.previewPath.c_str());
+        for (const auto& lod : r.lods)
+            std::printf("  %s: %s (%zu triangles, %zu vertices)\n", lod.label.c_str(), lod.file.c_str(), lod.triangles, lod.vertices);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "export failed: %s\n", e.what());
         return 3;
+    }
+    return 0;
+}
+
+// Benchmark the triangle-reduction path on a synthetic closed mesh (a subdivided icosahedron projected
+// onto a sphere): the same code path the LODs take, deterministic, no card or library needed.
+int cmdSimplifyBench(const Args& a) {
+    const int subdiv = a.opt.count("subdiv") ? std::atoi(a.get("subdiv").c_str()) : 6;
+    if (subdiv < 0 || subdiv > 8) { std::fprintf(stderr, "--subdiv 0..8\n"); return 1; }
+    const double t = (1.0 + std::sqrt(5.0)) / 2.0;
+    std::vector<std::array<double, 3>> verts = {
+        {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1},
+    };
+    for (auto& v : verts) {
+        const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        v = {v[0] / n, v[1] / n, v[2] / n};
+    }
+    std::vector<std::array<int, 3>> faces = {
+        {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+        {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8}, {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1},
+    };
+    for (int s = 0; s < subdiv; ++s) {
+        std::map<uint64_t, int> midpoint;
+        auto mid = [&](int a, int b) {
+            const uint64_t key = (static_cast<uint64_t>(std::min(a, b)) << 32) | static_cast<uint64_t>(std::max(a, b));
+            auto it = midpoint.find(key);
+            if (it != midpoint.end()) return it->second;
+            const auto& va = verts[static_cast<size_t>(a)], & vb = verts[static_cast<size_t>(b)];
+            std::array<double, 3> m{(va[0] + vb[0]) * 0.5, (va[1] + vb[1]) * 0.5, (va[2] + vb[2]) * 0.5};
+            const double n = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+            verts.push_back({m[0] / n, m[1] / n, m[2] / n});
+            midpoint.emplace(key, static_cast<int>(verts.size()) - 1);
+            return static_cast<int>(verts.size()) - 1;
+        };
+        std::vector<std::array<int, 3>> next;
+        next.reserve(faces.size() * 4);
+        for (const auto& f : faces) {
+            const int a = mid(f[0], f[1]), b = mid(f[1], f[2]), c = mid(f[2], f[0]);
+            next.push_back({f[0], a, c});
+            next.push_back({a, f[1], b});
+            next.push_back({c, b, f[2]});
+            next.push_back({a, b, c});
+        }
+        faces = std::move(next);
+    }
+    assemble::SceneMesh m;
+    m.name = "bench";
+    m.reshapable = false;
+    for (const auto& v : verts) {
+        assemble::SceneVertex sv;
+        sv.pos = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])};
+        sv.normal = sv.pos;
+        sv.uv = {static_cast<float>(v[0] * 0.5 + 0.5), static_cast<float>(v[2] * 0.5 + 0.5)};
+        sv.uv1 = sv.uv; sv.uv2 = sv.uv; sv.uv3 = sv.uv;
+        sv.bone[0] = 0; sv.weight[0] = 1.0f;
+        m.vertices.push_back(sv);
+    }
+    assemble::SceneSubmesh sm;
+    sm.material = 0;
+    for (const auto& f : faces) { sm.indices.push_back(static_cast<uint32_t>(f[0])); sm.indices.push_back(static_cast<uint32_t>(f[1])); sm.indices.push_back(static_cast<uint32_t>(f[2])); }
+    m.submeshes.push_back(std::move(sm));
+    std::printf("simplify-bench: %zu triangles (subdiv %d)\n", faces.size(), subdiv);
+    for (const double pct : {20.0, 40.0, 60.0, 80.0}) {
+        assemble::SceneMesh copy = m;
+        mesh::SimplifyOptions so;
+        so.maxReduction = static_cast<float>(pct / 100.0);
+        const auto t0 = std::chrono::steady_clock::now();
+        const mesh::SimplifyMeshStats st = mesh::SimplifyMesh(copy, so, nullptr);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("  -%.0f%%: %zu -> %zu triangles in %.3fs (%.1f Mtri/s), %zu collapsed\n", pct, st.originalTriangles, st.resultTriangles, secs,
+                    st.originalTriangles / 1e6 / std::max(secs, 1e-9), st.collapses);
     }
     return 0;
 }
@@ -977,28 +1104,31 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
+    const auto tMain0 = std::chrono::steady_clock::now();
+    int rc = 1;
     try {
-        if (cmd == "convert") return cmdConvert(a);
-        if (cmd == "inspect") return cmdInspect(a);
-        if (cmd == "clothes") return cmdClothes(a);
-        if (cmd == "library") return cmdLibrary(a);
-        if (cmd == "shader") return cmdShader(a);
-        if (cmd == "shader-run") return cmdShaderRun(a);
-        if (cmd == "skin-bench") {
+        if (cmd == "convert") rc = cmdConvert(a);
+        else if (cmd == "inspect") rc = cmdInspect(a);
+        else if (cmd == "clothes") rc = cmdClothes(a);
+        else if (cmd == "library") rc = cmdLibrary(a);
+        else if (cmd == "shader") rc = cmdShader(a);
+        else if (cmd == "shader-run") rc = cmdShaderRun(a);
+        else if (cmd == "simplify-bench") { rc = cmdSimplifyBench(a); return rc; }
+        else if (cmd == "skin-bench") {
             const int repeats = a.opt.count("repeats") ? std::atoi(a.get("repeats").c_str()) : 30;
             std::string summary;
             exporter::RunSkinBenchmark(repeats, &summary, a.get("gpu", "auto"));
             if (!summary.empty()) std::printf("(workloads are synthetic; see SkinBench for counts/distributions)\n");
             return 0;
-        }
+        } else { usage(); return 1; }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
-        return 3;
+        rc = 3;
     }
-    usage();
-    return 1;
+    cbtime::Report(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tMain0).count());
+    return rc;
 }

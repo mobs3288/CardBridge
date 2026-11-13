@@ -165,6 +165,13 @@ public:
     // Texts stored as TextAsset objects (the base game's list tables).
     std::vector<std::pair<std::string, Bytes>> readTextAssets() const;
 
+    // Where the bundle came from (absolute path for a library bundle, "<mod zip>|<abdata-relative entry>" for a mod's bundle).
+    // Set by the resolver when it opens the bundle; the decoded-texture cache keys off it (see Resolver::cachedDecodedTexture).
+    // Empty when the bundle was not opened through the resolver (tests), which disables the cache for its textures.
+    void setSource(std::string source, std::string statPath) { source_ = std::move(source); statPath_ = std::move(statPath); }
+    const std::string& source() const { return source_; }       // identity string (not necessarily an existing path)
+    const std::string& statPath() const { return statPath_; }   // the file to stat for size/mtime; empty = uncacheable
+
 private:
     std::string externalName(const PPtr& p) const;
 
@@ -175,6 +182,7 @@ private:
     std::map<int64_t, std::string> goNames_;
     std::map<int64_t, bool> goActive_;   // goId -> m_IsActive
     std::map<int64_t, std::vector<std::pair<int, int64_t>>> goComponents_;   // goId -> (classId, componentId)
+    std::string source_, statPath_;
 };
 
 } // namespace cardbridge::unity

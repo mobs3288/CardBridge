@@ -2,6 +2,7 @@
 
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
 void TweakClick(int x, int y, const PanelLayout& l, bool right) {
+    if (g.tab == TabOptimize) return;   // the Optimize tab routes its own clicks (OptTabClick)
     std::vector<TweakRow> rows = BuildTweakRows(g.tab);
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;
@@ -25,11 +26,18 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
         return;
     }
-    if (row.kind == 0 && g.tab == TabMorphs) {   // a morph group header: reset its group only (no re-shape; morphs are live, not a reshape)
-        size_t n = 0;
-        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
-            if (rows[k].kind == 1 && TweakChanged(rows[k].id)) { ResetTweak(rows[k].id); ++n; }
-        if (n) { MorphSlideEdited(); Log("reset " + row.label + " (" + std::to_string(n) + " morph(s))"); }
+    if (row.kind == 0 && g.tab == TabMorphs) {   // a morph group header: click folds / unfolds it; the right chip (or a right-click) resets the group's sliders
+        if (x >= kPanel - 64 || right) {          // the "reset" affordance on the right, or a right-click
+            size_t n = 0;
+            for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
+                if (rows[k].kind == 1 && TweakChanged(rows[k].id)) { ResetTweak(rows[k].id); ++n; }
+            if (n) { MorphSlideEdited(); Log("reset " + row.label + " (" + std::to_string(n) + " morph(s))"); }
+            return;
+        }
+        if (g.collapsedMorphs.count(row.group)) g.collapsedMorphs.erase(row.group);
+        else g.collapsedMorphs.insert(row.group);
+        g.hoverRow = -1;
+        InvalidatePanel();
         return;
     }
     if (row.kind == 0) {
@@ -75,6 +83,13 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         TweakEdited(row.id, true);
         return;
     }
+    if (row.kind == 2 && (row.id == kTransBrush || row.id == kTransErase)) {
+        bool& v = row.id == kTransBrush ? g.transBrush : g.transErase;
+        if (right) ResetTweak(row.id); else v = !v;
+        Log(row.label + ": " + (v ? "on" : "off"));
+        TransSwitchChanged(row.id);
+        return;
+    }
     if (row.kind == 2) {
         if (right) ResetTweak(row.id); else g.tw.nippleInside = !g.tw.nippleInside;
         Log(row.label + ": " + (g.tw.nippleInside ? "on" : "off"));
@@ -84,10 +99,24 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     SliderRef r;
     if (!SliderFor(row.id, r)) return;
     if (right) {
+        if (g.tab == TabMorphs && row.id >= kMorphBase && row.id < kMorphBase + static_cast<int>(g.morphCatalog.morphs.size())) {
+            const std::string& name = g.morphCatalog.morphs[static_cast<size_t>(row.id - kMorphBase)].name;
+            if (g.settings.morphAliases.erase(name)) { SaveSettings(g.settings); Log("rename cleared for \"" + name + "\""); }
+            else if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
+            return;
+        }
         if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
         return;
     }
-    if (GetKeyState(VK_SHIFT) & 0x8000) { BeginSliderEdit(row.id); return; }   // type the value with the keyboard
+    if (g.shiftDown) {   // Shift+click: type the value with the keyboard (a morph row: its display name instead)
+        if (g.tab == TabMorphs && row.id >= kMorphBase && row.id < kMorphBase + static_cast<int>(g.morphCatalog.morphs.size())) {
+            if (g.morphEdit >= 0) EndMorphEdit(true);   // another row had the box: commit it first
+            BeginMorphEdit(row.id - kMorphBase);
+            return;
+        }
+        BeginSliderEdit(row.id);
+        return;
+    }
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
     *r.v = SliderValueAt(r, x);
@@ -140,7 +169,7 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         SliderRef r;
         if (!SliderFor(id, r)) return;
         if (right) { *r.v = r.def; ApplyPoseLive(); InvalidatePanel(); return; }
-        if (GetKeyState(VK_SHIFT) & 0x8000) { BeginSliderEdit(id); return; }   // type the value with the keyboard
+        if (g.shiftDown) { BeginSliderEdit(id); return; }   // type the value with the keyboard
         if (x < kTrackL - 8) return;
         g.sliderDrag = id;
         *r.v = SliderValueAt(r, x);
@@ -494,6 +523,7 @@ void SettingsAction(int id) {
         Log("settings forgotten: the library and the mods folder are looked for again at the next start (the library on disk stays)", LogKind::Warn);
         break;
     case kMorphResetAll: ResetAllMorphs(); break;
+    case kTransClear: TransClearPaint(); break;
     default: break;
     }
     InvalidatePanel();

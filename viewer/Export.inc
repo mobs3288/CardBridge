@@ -53,6 +53,14 @@ void StartExport() {
             eo.outDir = outDir;
             eo.baseName = stem;
             eo.outfit = L->outfit;
+            if (g.opt.applied.set) {   // the Optimize tab's Apply commits to the export (the PMX and the LODs carry it)
+                eo.simplifyPercent = std::clamp(g.opt.applied.reduction, 0.0f, 0.9f) * 100.0f;
+                eo.lodTargets = g.opt.applied.lods;
+                const size_t nLods = eo.lodTargets.size();
+                char buf[128];
+                std::snprintf(buf, sizeof buf, "Mesh Optimization applied: %.0f%% reduction, %zu LOD%s", eo.simplifyPercent, nLods, nLods == 1 ? "" : "s");
+                Log(buf, LogKind::Info);
+            }
             eo.jiggleBust = jiggleBust;
             eo.jiggleButt = jiggleButt;
             eo.jiggleIntensity = jiggleIntensity;
@@ -207,14 +215,27 @@ void ToggleAsExported() {
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
+    const bool applyOpt = g.opt.applied.set && g.opt.applied.reduction > 0.0f;
+    const float optReduction = g.opt.applied.reduction;
     ProgBegin("Rendering as-exported preview (MMD look)");
     Log(std::string("baking the export preview (colour only, toon ramps, ") + (grade ? "graded" : "not graded") + ")");
     auto copy = std::make_shared<assemble::Scene>(L->scene);
-    std::thread([L, grade, copy]() {
+    std::thread([L, grade, copy, applyOpt, optReduction]() {
         std::shared_ptr<assemble::Scene> sc;
         bool cancelled = false;
         try {
-            sc = copy;
+            if (applyOpt) {   // the Optimize tab's Apply commits: the as-exported preview shows the simplified model too
+                mesh::SimplifyOptions so;
+                so.maxReduction = optReduction;
+                so.cancelled = [] { return ProgCancelled(); };
+                mesh::SceneSimplifyStats st;
+                sc = mesh::SimplifyScene(*copy, optReduction, so, st,
+                    [](float f, const std::string& stage) { ProgSet(f * 0.05, "simplifying: " + stage); });
+                for (const auto& w : st.warnings) Log("warning: " + w, LogKind::Warn);
+                if (!sc) { if (ProgCancelled()) throw Cancelled{}; throw std::runtime_error("simplification failed"); }
+            } else {
+                sc = copy;
+            }
             ProgSet(0.05, "baking shader textures");
             exporter::BakeShaderTextures(*sc, 1024, false, nullptr,
                 [](const std::string& m) {

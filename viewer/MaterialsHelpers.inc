@@ -400,6 +400,13 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kSkinShadeTop, "Cleavage length", "Skin shading"});
         rows.push_back({1, kSkinShadeWidth, "Shading width", "Skin shading"});
         rows.push_back({1, kSkinAo, "Koikatsu AO (base body normal + detail lines)", "Skin shading"});
+        rows.push_back({0, -1, "Translucent clothes: paint the see-through area on the garment", "Translucent clothes"});
+        rows.push_back({2, kTransBrush, "Translucency brush: left-drag on a garment paints (right-drag erases)", "Translucent clothes"});
+        rows.push_back({2, kTransErase, "Erase the paint instead of laying it down", "Translucent clothes"});
+        rows.push_back({1, kTransSize, "Brush size (cm)", "Translucent clothes"});
+        rows.push_back({1, kTransStrength, "How see-through the painted area is", "Translucent clothes"});
+        rows.push_back({4, 0, "the garment moves to the transparent pass: the skin (or a bra) shows through", "Translucent clothes"});
+        rows.push_back({5, kTransClear, "Clear the brush from every garment", "Translucent clothes"});
         rows.push_back({0, kNippleIn, "Nipples", "Nipples"});
         rows.push_back({2, kNippleIn, "Push the nipples into the body", "Nipples"});
         rows.push_back({1, kNippleMm, "Nipple out / in (mm)", "Nipples"});
@@ -427,21 +434,43 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
             rows.push_back({2, kLayerBase + static_cast<int>(i), g.layerDefs[i].name, "Shader layers"});
     }
     else if (tab == TabMorphs) {
-        static const char* const kPanelNames[5] = {"", "Brows", "Eyes", "Mouth", "Other"};
-        size_t inPanel[5] = {};
-        for (const auto& m : g.morphs) inPanel[m.panel >= 1 && m.panel <= 4 ? m.panel : 4]++;
+        static const char* const kSectionName[5] = {"", "Brows", "Eyes", "Mouth", "Other"};
+        static const char* const kSubName[3] = {"Other", "Left", "Right"};   // SideOf: 0 / 1 / 2 -> display order Left, Right, Other
+        size_t secCount[5] = {}, subCount[5][3] = {};
+        for (const auto& m : g.morphCatalog.morphs) {
+            const int p = m.panel >= 1 && m.panel <= 4 ? m.panel : 4;
+            const int s = SideOf(m.name);
+            secCount[p]++; subCount[p][s]++;
+        }
         const size_t on = MorphsOn();
-        rows.push_back({4, 0, "the " + std::to_string(g.morphs.size()) + " morphs the exported PMX carries; sliders play them live (0..100)", "Morphs"});
+        rows.push_back({4, 0, "the " + std::to_string(g.morphCatalog.morphs.size()) + " morphs the exported PMX carries; sliders play them live (0..100)", "Morphs"});
+        rows.push_back({4, 0, "Shift+click a row to rename it (display only, saved for you); click a header to fold it", "Morphs"});
         rows.push_back({5, kMorphResetAll, on ? "reset every morph (" + std::to_string(on) + " on)" : "reset every morph", "Morphs"});
-        if (g.morphs.empty()) {
+        if (g.morphCatalog.morphs.empty()) {
             rows.push_back({4, 0, "this head carries no blend shapes (the face does not animate)", "Other"});
             return rows;
         }
-        int curPanel = 0;
-        for (size_t i = 0; i < g.morphs.size(); ++i) {
-            const int p = g.morphs[i].panel >= 1 && g.morphs[i].panel <= 4 ? g.morphs[i].panel : 4;
-            if (p != curPanel) { curPanel = p; rows.push_back({0, p, std::string(kPanelNames[p]) + "  (" + std::to_string(inPanel[p]) + ")", kPanelNames[p]}); }
-            rows.push_back({1, kMorphBase + static_cast<int>(i), g.morphs[i].name, kPanelNames[p]});
+        // The fold of a sub-group follows its section's: a folded section shows nothing under it.
+        for (int p = 1; p <= 4; ++p) {
+            if (secCount[p] == 0) continue;
+            const std::string secKey = kSectionName[p];
+            const bool secFolded = g.collapsedMorphs.count(secKey) != 0;
+            rows.push_back({0, p, std::string(kSectionName[p]) + "  (" + std::to_string(secCount[p]) + ")", secKey});
+            if (secFolded) continue;
+            for (int si = 0; si < 3; ++si) {   // Left, Right, Other
+                const int s = si == 0 ? 1 : si == 1 ? 2 : 0;
+                if (subCount[p][s] == 0) continue;
+                const std::string subKey = secKey + "/" + kSubName[s];
+                const bool subFolded = g.collapsedMorphs.count(subKey) != 0;
+                rows.push_back({0, 10 + p * 4 + s, std::string(kSubName[s]) + "  (" + std::to_string(subCount[p][s]) + ")", subKey});
+                if (subFolded) continue;
+                for (size_t i = 0; i < g.morphCatalog.morphs.size(); ++i) {
+                    const auto& m = g.morphCatalog.morphs[i];
+                    if ((m.panel >= 1 && m.panel <= 4 ? m.panel : 4) != p) continue;
+                    if (SideOf(m.name) != s) continue;
+                    rows.push_back({1, kMorphBase + static_cast<int>(i), MorphDisplayName(m.name), subKey});
+                }
+            }
         }
         rows.push_back({4, 0, "bones move in the Bones tab, the physics in the Look tab (Y)", "Other"});
     }
@@ -499,6 +528,8 @@ bool TweakChanged(int id) {
     if (id == kJiggleBust) return g.jiggleBust;
     if (id == kJiggleButt) return g.jiggleButt;
     if (id == kAutoCloth) return g.autoCloth;
+    if (id == kTransBrush) return g.transBrush;
+    if (id == kTransErase) return g.transErase;
     if (id == kNipplePink) return !g.tw.pinkNipples;
     return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
 }
@@ -510,7 +541,8 @@ bool AnyTweak() {
     if (TweakChanged(kSkinShade) || TweakChanged(kSkinShadeUnder) || TweakChanged(kSkinShadeTop) ||
         TweakChanged(kSkinShadeWidth) || TweakChanged(kSkinAo) ||
         TweakChanged(kNipplePink) || TweakChanged(kNippleR) ||
-        TweakChanged(kNippleG) || TweakChanged(kNippleB)) return true;
+        TweakChanged(kNippleG) || TweakChanged(kNippleB) ||
+        TweakChanged(kTransSize) || TweakChanged(kTransStrength) || g.transBrush) return true;
     if (g.mat.IsDirty()) return true;
     for (float w : g.morphWeights) if (std::fabs(w) > 1e-4f) return true;   // a live blend shape of the exported PMX
     return false;
@@ -545,6 +577,10 @@ void ResetTweak(int id) {
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = true;
     else if (id == kAutoCloth) g.autoCloth = false;
+    else if (id == kTransBrush || id == kTransErase) {
+        if (id == kTransBrush) g.transBrush = false; else g.transErase = false;
+        TransSwitchChanged(id);   // the toggle reverts the bake at once (the paint is kept)
+    }
     else if (id == kNipplePink) g.tw.pinkNipples = true;
     else if (SliderFor(id, r)) *r.v = r.def;
 }

@@ -44,9 +44,12 @@
 #include "card/MaterialEdits.h"
 #include "export/OutfitIcon.h"
 #include "core/FileIo.h"
+#include "core/Timing.h"
 #include "export/Preview.h"
+#include "export/Translucency.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
+#include "mesh/Simplify.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
@@ -96,10 +99,12 @@ namespace {
 #include "Export.inc"
 #include "Parts.inc"
 #include "Gizmo.inc"
+#include "Paint.inc"
 #include "ModeStrip.inc"
 #include "AxisWidget.inc"
 #include "View.inc"
 #include "Widgets.inc"
+#include "Optimize.inc"
 #include "MaterialsDraw.inc"
 #include "Workbench.inc"
 #include "BonesDraw.inc"
@@ -216,6 +221,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
     g.wb.Reset();
+    cbtime::Report();
     for (HFONT* f : {&g.fontTitle, &g.fontUi, &g.fontBold, &g.fontMono, &g.fontLog, &g.fontSmall})
         if (*f) DeleteObject(*f);
     ui::Shutdown();

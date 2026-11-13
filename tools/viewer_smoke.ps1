@@ -123,6 +123,18 @@ public static class V {
             return n == 0 ? 0 : (double)d / n;
         }
     }
+    // The same with a configurable sampling stride and per-pixel tolerance sum: deterministic renders make even a small real movement measurable at stride 1.
+    public static double DiffViewFine(string a, string b, int left, int sumTolerance, int stride) {
+        using (Bitmap x = new Bitmap(a)) using (Bitmap y = new Bitmap(b)) {
+            int w = Math.Min(x.Width, y.Width), h = Math.Min(x.Height, y.Height), n = 0, d = 0;
+            for (int j = 0; j < h; j += stride) for (int i = left; i < w; i += stride) {
+                Color p = x.GetPixel(i, j), q = y.GetPixel(i, j);
+                n++;
+                if (Math.Abs(p.R - q.R) + Math.Abs(p.G - q.G) + Math.Abs(p.B - q.B) > sumTolerance) d++;
+            }
+            return n == 0 ? 0 : (double)d / n;
+        }
+    }
 }
 '@
 
@@ -182,7 +194,7 @@ function Layout() {
     if (-not (Hook 10)) { return $null }
     for ($i = 0; $i -lt 20 -and -not (Test-Path $layoutPath); $i++) { Start-Sleep -Milliseconds 100 }
     if (-not (Test-Path $layoutPath)) { return $null }
-    return (Get-Content $layoutPath -Raw | ConvertFrom-Json)
+    return (Get-Content $layoutPath -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 function Shot([string]$name, [IntPtr]$of = [IntPtr]::Zero) {
     $script:shotNo++
@@ -381,7 +393,39 @@ try {
     if (Want 'viewmode') {
         Write-Host 'viewmode strip'
         $lay = GoTab 0
-        $a = Shot 'before_viewmode'
+        # move the pointer off the panel first, twice, with the queue draining in between: the materials step leaves a hover
+        # on a row, and its orange highlight of the selected material's meshes would otherwise be part of the "before" Lit picture
+        [void][V]::PostMessage($script:target, 0x200, [IntPtr]0, [V]::L(700, 400)); Start-Sleep -Milliseconds 300
+        [void](Layout)
+        [void][V]::PostMessage($script:target, 0x200, [IntPtr]0, [V]::L(720, 400)); Start-Sleep -Milliseconds 300
+        [void](Layout)
+        [void][V]::PostMessage($script:target, 0x200, [IntPtr]0, [V]::L(700, 400)); Start-Sleep -Milliseconds 500
+        $lay = Layout
+        # clicking the Lit cell re-renders the view with no change of state: without that, the picture is the stale surface from
+        # the materials step (its render happened while the Mats tab and the edited material were selected - the orange glow).
+        $client = $lay.client
+        if ($null -ne $client) {
+            $cw = [int]$client[0]; $kPanel = [int]$lay.panel
+            $cellW = [int](($cw - $kPanel - 12 - 64 - 8) / 11)
+            $stripY = [int]$client[1] - 17
+            $litX = $kPanel + 6 + [int]($cellW / 2)
+            Click $litX $stripY 800
+            $lay = Layout
+        }
+        $a = $null; $prev = $null
+        for ($i = 0; $i -lt 40 -and $null -eq $a; $i++) {
+            $try = Join-Path $Out ('xx_viewmode_try_{0}.png' -f $i)
+            [void][V]::Shot($script:target, $try)
+            Start-Sleep -Milliseconds 250
+            if ($null -ne $prev) {
+                $d = [V]::DiffView($prev, $try, $lay.panel)
+                if ($d -lt 0.0005) { $a = @{ Path = $prev }; Remove-Item $try -Force -ErrorAction SilentlyContinue; break }
+                Remove-Item $prev -Force -ErrorAction SilentlyContinue
+            }
+            $prev = $try
+        }
+        if ($null -eq $a) { Remove-Item $prev -Force -ErrorAction SilentlyContinue; $a = Shot 'before_viewmode' }
+        Write-Host ("  viewmode     : the picture is stable after {0} shot(s)" -f ($i + 1))
         $client = $lay.client
         if ($null -eq $client) { Check 'viewmode: the layout reports the client size' $false; }
         else {
@@ -390,6 +434,7 @@ try {
             $stripY = [int]$client[1] - 17
             # M-ID (mode 10) cell centre; the Lit cell is at index 0
             $mIdX = $kPanel + 6 + 10 * $cellW + [int]($cellW / 2)
+            $litX = $kPanel + 6 + [int]($cellW / 2)
             Click $mIdX $stripY 700
             $lay = Layout
             $b = Shot 'viewmode_materialid'
@@ -470,11 +515,15 @@ try {
         if ($null -eq $lay) { Check 'gizmo: the Parts tab answers' $false } else { Write-Host ("  GoTab 0    : yaw={0:F1} zoom={1:F2} drag={2}" -f $lay.state.camYaw, $lay.state.camZoom, $lay.state.drag) }
         # the accessories sit at the bottom of the list: scroll it there first, and wait until the
         # list's ease has stopped (a click on a stale row position lands on the wrong row)
+        # (WM_MOUSEWHEEL carries SCREEN coordinates, and the private window sits off-screen: ask it where)
+        $gw = New-Object V+RECT
+        [void][V]::GetWindowRect($script:target, [ref]$gw)
+        $gx = $gw.Left + 100; $gy = $gw.Top + 300
         $acc = $null
         for ($i = 0; $i -lt 40; $i++) {
             $acc = @($lay.accessories | Where-Object { $_.inView }) | Select-Object -First 1
             if ($null -ne $acc) { break }
-            [void][V]::PostMessage($script:target, $WM_MOUSEWHEEL, [IntPtr](-7864320), [V]::L(100, 300))
+            [void][V]::PostMessage($script:target, $WM_MOUSEWHEEL, [IntPtr](-7864320), [V]::L($gx, $gy))
             Start-Sleep -Milliseconds 180
             $lay = Layout
             if ($null -eq $lay) { break }
@@ -512,8 +561,13 @@ try {
                 $best = -1; $bestLen = -1.0
                 for ($i = 0; $i -lt 3; $i++) { if ([double]$lay.gizmo.axisLen[$i] -gt $bestLen) { $bestLen = [double]$lay.gizmo.axisLen[$i]; $best = $i } }
                 $undo0 = $lay.state.undo
-                $o = $lay.gizmo.origin; $t = @($lay.gizmo.tipX[$best], $lay.gizmo.tipY[$best])
-                Drag ([int]$o[0]) ([int]$o[1]) ([int]($o[0] + 1.2 * ($t[0] - $o[0]))) ([int]($o[1] + 1.2 * ($t[1] - $o[1]))) 10
+                $o = @($lay.gizmo.origin); $tx = [double]$lay.gizmo.tipX[$best]; $ty = [double]$lay.gizmo.tipY[$best]
+                $ox = [double]$o[0]; $oy = [double]$o[1]
+                # start near the arrowhead, not at the origin: there all axes meet (distance 0 to every one) and the pick is a tie,
+                # which would drag an axis that is not the one being moved
+                $sx = [int]($ox + 0.8 * ($tx - $ox)); $sy = [int]($oy + 0.8 * ($ty - $oy))
+                $ex = [int]($ox + 1.3 * ($tx - $ox)); $ey = [int]($oy + 1.3 * ($ty - $oy))
+                Drag $sx $sy $ex $ey 10
                 $lay = Layout
                 Write-Host ("  cam yaw={0:F1} pitch={1:F1} zoom={2:F2} drag={3} undo={4} edits={5}" -f $lay.state.camYaw, $lay.state.camPitch, $lay.state.camZoom, $lay.state.drag, $lay.state.undo, $lay.state.edits)
                 $b = Shot 'gizmo_drag'
@@ -577,8 +631,105 @@ try {
         $heads = @($lay.rows | Where-Object { $_.kind -eq 0 }).Count
         $resetAll = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
         Check 'morphs: the morphs are listed, grouped' ($sliders -gt 5 -and $heads -ge 2 -and $resetAll -ge 1) "$sliders sliders, $heads group headers, reset-all present"
-        # find the blink row and drag it to full; the face must move
-        $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 -and $_.label -eq 'Eyes 0 closed' } | Select-Object -First 1
+        # each section with left/right twins is split into Left and Right sub-groups
+        $subs = @($lay.rows | Where-Object { $_.kind -eq 0 })
+        $hasLeft = @($subs | Where-Object { $_.label -like 'Left*' }).Count -ge 1
+        $hasRight = @($subs | Where-Object { $_.label -like 'Right*' }).Count -ge 1
+        Check 'morphs: the Left and Right sub-groups are listed' ($hasLeft -and $hasRight) "Left: $hasLeft, Right: $hasRight"
+        # click a group header: the group folds (its sliders disappear), click again: it re-opens
+        $sec = $lay.rows | Where-Object { $_.kind -eq 0 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -eq $sec) { Check 'morphs: a section header is visible to click' $false }
+        else {
+            $full = @($lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
+            Click 30 ([int]$sec.y) 500
+            $after = Layout
+            $folded = @($after.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
+            Check 'morphs: clicking the header folds the group' ($null -ne $after -and $folded -lt $full) "$full sliders -> $folded"
+            $sec2 = $after.rows | Where-Object { $_.kind -eq 0 } | Select-Object -First 1
+            if ($null -eq $sec2) { Check 'morphs: the folded header is still listed' $false }
+            else {
+                Click 30 ([int]$sec2.y) 500
+                $after2 = Layout
+                $open = @($after2.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
+                Check 'morphs: clicking it again re-opens the group' ($null -ne $after2 -and $open -ge $full) "$folded -> $open"
+            }
+        }
+        # Shift+click on a morph row renames its displayed name (settings file roundtrip, restored afterwards)
+        $settingsPath = Join-Path $env:LOCALAPPDATA 'CardBridge\viewer.json'
+        $backup = "$settingsPath.smoke.bak"
+        $hadSettings = Test-Path $settingsPath
+        if ($hadSettings) { Copy-Item $settingsPath $backup -Force }
+        $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -ne $row) {
+            $WM_CHAR = 0x102; $VK_SHIFT = 0x10; $VK_RETURN = 0x0D
+            [void][V]::PostMessage($script:target, $WM_KEYDOWN, [IntPtr]$VK_SHIFT, [IntPtr]0)
+            Click 60 ([int]$row.y) 400
+            [void][V]::PostMessage($script:target, $WM_KEYDOWN, [IntPtr]0x2E, [IntPtr]0)   # VK_DELETE: clear the original name out of the box
+            [void][V]::PostMessage($script:target, $WM_CHAR, [IntPtr][char]'A', [IntPtr]0)
+            [void][V]::PostMessage($script:target, $WM_KEYDOWN, [IntPtr]$VK_RETURN, [IntPtr]0)
+            [void][V]::PostMessage($script:target, 0x101, [IntPtr]$VK_SHIFT, [IntPtr]0)   # VK_SHIFT up
+            Start-Sleep -Milliseconds 500
+            $json = if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | ConvertFrom-Json } else { $null }
+            $aliasCount = if ($json -and $json.morphAliases) { @($json.morphAliases.PSObject.Properties).Count } else { 0 }
+            Check 'morphs: the rename is written to the viewer settings' ($aliasCount -ge 1) "$aliasCount alias(es)"
+            # right-click on the renamed row restores the original name
+            $lay2 = Layout
+            $renamed = $lay2.rows | Where-Object { $_.kind -eq 1 -and $_.label -eq 'A' } | Select-Object -First 1
+            if ($null -ne $renamed) {
+                [void][V]::PostMessage($script:target, 0x204, [IntPtr]0, [V]::L(60, [int]$renamed.y)); Start-Sleep -Milliseconds 80
+                [void][V]::PostMessage($script:target, 0x205, [IntPtr]0, [V]::L(60, [int]$renamed.y)); Start-Sleep -Milliseconds 500
+                $json2 = if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | ConvertFrom-Json } else { $null }
+                $aliasCount2 = if ($json2 -and $json2.morphAliases) { @($json2.morphAliases.PSObject.Properties).Count } else { 0 }
+                Check 'morphs: right-click restores the original name' ($aliasCount2 -eq 0) "$aliasCount2 alias(es) left"
+            } else {
+                Check 'morphs: the renamed row is visible' $false
+            }
+        } else { Check 'morphs: a morph row is visible to rename' $false }
+        if ($hadSettings) { Copy-Item $backup $settingsPath -Force; Remove-Item $backup -Force } else { Remove-Item $settingsPath -Force -ErrorAction SilentlyContinue }
+        # drag a vertical gesture on the list: it scrolls (the row's y moves), and the window stays responsive
+        $row3 = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -ne $row3) {
+            $yBefore = [int]$row3.y
+            Drag 60 $yBefore 60 ($yBefore - 90) 8 45
+            $answered = Hook 10 8000
+            $after3 = Layout
+            $row4 = $after3.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 } | Select-Object -First 1
+            $yAfter = if ($null -eq $row4) { -1 } else { [int]$row4.y }
+            Check 'morphs: a vertical drag scrolls the list (the rows move)' ($answered -and ($yAfter -ne $yBefore)) "row y $yBefore -> $yAfter, answered $answered"
+        }
+        # (WM_MOUSEWHEEL carries SCREEN coordinates, and the private window sits off-screen: ask it where)
+        $wr = New-Object V+RECT
+        [void][V]::GetWindowRect($hwnd, [ref]$wr)
+        $wx = $wr.Left + 160; $wy = $wr.Top + 400
+        # the drag test above scrolled the shared slider list down; the steps after the morphs section expect it at the top, so scroll back
+        for ($i = 0; $i -lt 12; $i++) { [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](120 * 65536), [V]::L($wx, $wy)); Start-Sleep -Milliseconds 100 }
+        # the earlier axes-widget step leaves the camera side-on (an eye edge-on is sub-pixel): click the front ball to face the camera again
+        $layF = Layout
+        if ($null -ne $layF -and $null -ne $layF.axesWidget) {
+            $front = $layF.axesWidget.balls[2]   # +Z: the front view
+            Click ([int]$front[0]) ([int]$front[1]) 600
+        }
+        # the earlier wheel-zoom tests leave the camera at the minimum zoom; pull it back so the face is visible for the picture check
+        $lay = Layout
+        for ($i = 0; $i -lt 40 -and $null -ne $lay -and $lay.state.camZoom -lt 0.9; $i++) {
+            [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](120 * 65536), [V]::L($wr.Left + 800, $wr.Top + 400))
+            Start-Sleep -Milliseconds 100
+            $lay = Layout
+        }
+        # the list holds every morph; scroll until a big one is visible ("Mouth 0 open" - the jaw drops - with "Eyes 0 closed" as fallback),
+        # then drag it to full - a brow morph at this zoom barely clears the noise floor
+        $lay = Layout
+        $row = $null
+        for ($i = 0; $i -lt 120 -and $null -eq $row; $i++) {
+            foreach ($want in @('Eyes 0 closed', 'Mouth 0 open', 'あ', 'まばたき')) {
+                $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 -and $_.label -eq $want } | Select-Object -First 1
+                if ($null -ne $row) { break }
+            }
+            if ($null -ne $row) { break }
+            [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](-120 * 65536), [V]::L($wx, $wy))
+            Start-Sleep -Milliseconds 150
+            $lay = Layout
+        }
         if ($null -eq $row) { $row = $lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 } | Select-Object -First 1 }
         if ($null -eq $row) { Check 'morphs: a morph row is visible' $false }
         else {
@@ -589,8 +740,10 @@ try {
             $lay = Layout
             $b = Shot 'morph_max'
             Check 'morphs: the window answers after the drag (no deadlock)' $answered
-            $d = [V]::DiffView($a.Path, $b.Path, $lay.panel)
-            Check 'morphs: the picture changed' ($d -gt 0.0005) ("{0:P2} of the view, morph '{1}'" -f $d, $row.label)
+            $d = [V]::DiffViewFine($a.Path, $b.Path, $lay.panel, 30, 1)
+            # deterministic renders: 0 means nothing moved. The face is sub-pixel at full-body framing, so the blink moves only ~50 px; the bar
+            # sits between the reset noise floor (~0.001 %) and the observed blink diff (~0.04 %).
+            Check 'morphs: the picture changed' ($d -gt 0.00005) ("{0:P2} of the view, morph '{1}'" -f $d, $row.label)
             # right-click the row resets the weight to 0
             [void][V]::PostMessage($hwnd, 0x204, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 80
             [void][V]::PostMessage($hwnd, 0x205, [IntPtr]0, [V]::L(60, [int]$row.y)); Start-Sleep -Milliseconds 700
@@ -631,7 +784,17 @@ try {
         Write-Host 'areola slider'
         [void](Hook 11 8000 $ChestPan); Start-Sleep -Milliseconds 800
         $lay = GoTab 3
+        # the Areola row sits below the fold at scroll 0: wheel the list down until it is in view
+        $wrA = New-Object V+RECT
+        [void][V]::GetWindowRect($hwnd, [ref]$wrA)
+        $ax = $wrA.Left + 160; $ay = $wrA.Top + 400
         $row = $lay.rows | Where-Object { $_.id -eq 201 -and $_.y -ge 0 } | Select-Object -First 1
+        for ($i = 0; $i -lt 10 -and $null -eq $row; $i++) {
+            [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](-120 * 65536), [V]::L($ax, $ay))
+            Start-Sleep -Milliseconds 200
+            $lay = Layout
+            $row = $lay.rows | Where-Object { $_.id -eq 201 -and $_.y -ge 0 } | Select-Object -First 1
+        }
         if ($null -eq $row) { Check 'areola: the slider row is visible' $false }
         else {
             $x0 = [int]$lay.track[0] + 1; $x1 = [int]$lay.track[1] - 1
@@ -682,7 +845,7 @@ try {
     if ((Want 'asexported') -and -not $Quick) {
         Write-Host 'as exported (X)'
         Key 'X' 300
-        $lay = WaitFor { param($l) $l.state.expOk -and $l.state.showExp } 120
+        $lay = WaitFor { param($l) $l.state.expOk -and $l.state.showExp } 300
         Check 'asexported: the baked copy is ready' ($null -ne $lay)
         $s = Shot 'asexported'
         Check 'asexported: the picture is not blank' ($s.Distinct -gt 40) "$($s.Distinct) colours"

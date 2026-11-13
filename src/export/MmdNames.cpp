@@ -361,40 +361,11 @@ MmdBones ApplyMmdBoneNames(const assemble::Scene& scene, pmx::Model& model, floa
     return result;
 }
 
-std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std::string>& shapes) {
-    std::vector<int> added;
-    auto find = [&](const std::string& n) { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == n) return static_cast<int>(i); return -1; };
-    // The game expression morph that plays a pattern, by the pattern's own blend shape name (each FaceBlendShape pattern is a whole face:
-    // lips, teeth, canines, tongue and nose line move together, so a copy keeps them together). Only the same panel (brows, eyes and mouth reuse names such as def_cl); several keys: the first one the head has.
-    auto byShape = [&](const char* keys, int panel) {
-        std::string list = keys;
-        for (size_t at = 0; at <= list.size();) {
-            const size_t end = std::min(list.find(',', at), list.size());
-            const std::string key = list.substr(at, end - at);
-            at = end + 1;
-            for (size_t i = 0; i < model.morphs.size(); ++i) {
-                auto it = shapes.find(model.morphs[i].name);
-                if (it != shapes.end() && it->second == key && model.morphs[i].panel == panel && !model.morphs[i].vertices.empty()) return static_cast<int>(i);
-            }
-        }
-        return -1;
-    };
-    auto add = [&](const std::string& name, const char* en, int panel, std::vector<std::pair<int, Vec3>> verts) {
-        if (verts.empty() || find(name) >= 0) return;
-        pmx::Morph m;
-        m.name = name;
-        m.nameEn = en;
-        m.panel = panel;
-        m.vertices = std::move(verts);
-        added.push_back(static_cast<int>(model.morphs.size()));
-        model.morphs.push_back(std::move(m));
-    };
-
-    // The standard morphs a motion keys, each the game's own pattern of the same meaning (which is which was read off renders of every pattern
-    // next to the reference model's morph of that name). Names and panels as MikuMikuDance's standard models have them.
-    struct Standard { const char* mmd; const char* en; int panel; const char* keys; const char* fallback; float gain; };
-    static const Standard kStandard[] = {
-        // vowels: the game's lip-sync shapes, the large ones (a_l = あ wide open with both rows of teeth, ...); n_l is the closed ん
+// The standard morphs a motion keys, each the game's own pattern of the same meaning (which is which was read off renders of every pattern
+// next to the reference model's morph of that name). Names and panels as MikuMikuDance's standard models have them.
+const std::vector<MmdStandardMorph>& MmdStandardMorphs() {
+    // vowels: the game's lip-sync shapes, the large ones (a_l = あ wide open with both rows of teeth, ...); n_l is the closed ん
+    static const std::vector<MmdStandardMorph> kStandard = {
         {"あ", "A", 3, "a_l_op", "Mouth 0 open", 2.0f},
         {"い", "I", 3, "i_l_op", "Mouth 0 open", 0.6f},
         {"う", "U", 3, "u_l_op", "Mouth 0 open", 0.6f},
@@ -440,7 +411,47 @@ std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std
         {"上", "Up", 1, "odoro_cl,odoro_op", nullptr, 1.0f},
         {"やっかい", "Uneasy", 1, "huan_op,huan_cl", nullptr, 1.0f},
     };
-    for (const Standard& s : kStandard) {
+    return kStandard;
+}
+
+const std::vector<MmdWinkMorph>& MmdWinkMorphs() {
+    static const std::vector<MmdWinkMorph> kWinks = {{"笑い", "ウィンク", "Wink", "ウィンク右", "Wink R"}, {"まばたき", "ウィンク２", "Wink 2", "ｳｨﾝｸ２右", "Wink 2 R"}};
+    return kWinks;
+}
+
+std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std::string>& shapes) {
+    std::vector<int> added;
+    auto find = [&](const std::string& n) { for (size_t i = 0; i < model.morphs.size(); ++i) if (model.morphs[i].name == n) return static_cast<int>(i); return -1; };
+    // The game expression morph that plays a pattern, by the pattern's own blend shape name (each FaceBlendShape pattern is a whole face:
+    // lips, teeth, canines, tongue and nose line move together, so a copy keeps them together). Only the same panel (brows, eyes and mouth reuse names such as def_cl); several keys: the first one the head has.
+    auto byShape = [&](const char* keys, int panel) {
+        std::string list = keys;
+        for (size_t at = 0; at <= list.size();) {
+            const size_t end = std::min(list.find(',', at), list.size());
+            const std::string key = list.substr(at, end - at);
+            at = end + 1;
+            for (size_t i = 0; i < model.morphs.size(); ++i) {
+                auto it = shapes.find(model.morphs[i].name);
+                if (it != shapes.end() && it->second == key && model.morphs[i].panel == panel && !model.morphs[i].vertices.empty()) return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    auto add = [&](const std::string& name, const char* en, int panel, std::vector<std::pair<int, Vec3>> verts) {
+        if (verts.empty() || find(name) >= 0) return;
+        pmx::Morph m;
+        m.name = name;
+        m.nameEn = en;
+        m.panel = panel;
+        m.vertices = std::move(verts);
+        added.push_back(static_cast<int>(model.morphs.size()));
+        model.morphs.push_back(std::move(m));
+    };
+
+    // The standard morphs a motion keys, each the game's own pattern of the same meaning (which is which was read off renders of every pattern
+    // next to the reference model's morph of that name). Names and panels as MikuMikuDance's standard models have them.
+    const std::vector<MmdStandardMorph>& kStandard = MmdStandardMorphs();
+    for (const MmdStandardMorph& s : kStandard) {
         if (find(s.mmd) >= 0) continue;   // made already
         int src = byShape(s.keys, s.panel);
         float gain = 1.0f;
@@ -455,9 +466,8 @@ std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std
     // eye bone is on (the model is still as built here, before the half turn that puts its front at -Z, so the sign of x alone says nothing).
     float leftSign = 1.0f;
     for (const auto& b : model.bones) if (b.name == "cf_J_hitomi_tx_L" || b.name == "左目") { leftSign = b.position.x < 0.0f ? -1.0f : 1.0f; break; }
-    struct Wink { const char* from; const char* left; const char* leftEn; const char* right; const char* rightEn; };
-    static const Wink kWinks[] = {{"笑い", "ウィンク", "Wink", "ウィンク右", "Wink R"}, {"まばたき", "ウィンク２", "Wink 2", "ｳｨﾝｸ２右", "Wink 2 R"}};
-    for (const Wink& w : kWinks) {
+    const std::vector<MmdWinkMorph>& kWinksRef = MmdWinkMorphs();
+    for (const MmdWinkMorph& w : kWinksRef) {
         const int src = find(w.from);
         if (src < 0) continue;
         const auto verts = model.morphs[static_cast<size_t>(src)].vertices;

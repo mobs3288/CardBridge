@@ -179,6 +179,29 @@ struct SceneSkinAoBake {
     bool built = false;                // aoShade / aoLine are current for the body geometry
 };
 
+// A hand-painted translucency mask on a garment part, brushed on by the user in the viewer (ray-cast onto the part's mesh,
+// stamped into the garment's own texture in UV space). The bake writes the painted alpha into that texture, so the body - or
+// a bra - shows through the garment in the viewer and in every PMX viewer after export. One layer per (part, material texture):
+// the material of the submesh under the brush is the one that goes to the transparent pass while the bake holds it.
+// The mask is session-only (never saved or serialized, like the Morphs tab's live weights): reloading the card drops it.
+struct SceneTranslucency {
+    struct Layer {
+        int part = -1;            // Scene::parts index the layer belongs to
+        int mesh = -1;            // Scene::meshes index whose UVs the mask is painted on
+        int material = -1;        // Scene::materials index whose texture carries the paint
+        int texture = -1;         // Scene::textures index the alpha is written into
+        std::vector<uint8_t> base;     // the texture's pixels before the bake (RGBA); re-captured when the texture changes outside the bake
+        std::vector<uint8_t> mask;     // per texel 0 = opaque .. 255 = fully translucent; parallel to the texture
+        std::vector<uint8_t> covered;  // per texel 1 where a triangle of `coveredForMesh` covers it (UV space, wrap-matched to the texture); the brush's gate
+        int coveredForMesh = -1; // Scene::meshes index `covered` was rasterized from
+        uint64_t afterHash = 0;        // FNV-1a of the texture right after our last write (the external-change detector)
+        bool passHeld = false;   // the bake currently holds the material in the transparent pass (alpha + translucent)
+        bool hadAlpha = false;   // the material's flags before the bake held it (restored on revert)
+        bool hadTranslucent = false;
+    };
+    std::vector<Layer> layers;
+};
+
 // An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the
 // blend shape weights it sets on the face meshes. Exported as a vertex morph (offsets relative to the resting expression).
 struct SceneExpression {
@@ -280,6 +303,7 @@ struct Scene {
     std::vector<SceneMesh> meshes;
     SceneSkinShade skinShade;
     SceneSkinAoBake aoBake;
+    SceneTranslucency translucency;
     std::vector<ScenePart> parts;
     std::vector<SceneExpression> expressions;
     std::vector<SceneChain> chains;

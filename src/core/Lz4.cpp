@@ -17,7 +17,7 @@ void Lz4DecompressBlockTo(const uint8_t* src, size_t srcSize, uint8_t* dst, size
             } while (b == 255);
         }
         if (lit > srcSize - ip || lit > uncompressedSize - op) throw FormatError("LZ4: literal run out of range");
-        for (size_t i = 0; i < lit; ++i) out[op + i] = src[ip + i];
+        if (lit) std::memcpy(out + op, src + ip, lit);
         ip += lit;
         op += lit;
         if (ip >= srcSize) break; // the last sequence is literals only
@@ -36,8 +36,12 @@ void Lz4DecompressBlockTo(const uint8_t* src, size_t srcSize, uint8_t* dst, size
         }
         len += 4;
         if (len > uncompressedSize - op) throw FormatError("LZ4: match runs past the output");
-        // Byte by byte: matches may overlap their own output (offset < len).
-        for (size_t i = 0; i < len; ++i) out[op + i] = out[op - offset + i];
+        if (offset >= len) {
+            std::memcpy(out + op, out + op - offset, len);   // non-overlapping copy
+        } else {
+            // Byte by byte: matches may overlap their own output (offset < len).
+            for (size_t i = 0; i < len; ++i) out[op + i] = out[op - offset + i];
+        }
         op += len;
     }
     if (op != uncompressedSize) throw FormatError("LZ4: output size mismatch");

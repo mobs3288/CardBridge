@@ -39,6 +39,44 @@ struct Loaded {
     std::string clothing;             // the outfit file applied in memory, if any (never saved)
 };
 
+// ---- the Optimize tab: triangle reduction & LOD generation ------------------
+// What Apply commits the export to (an empty OptApplied = the export writes the original, the default).
+struct OptApplied {
+    bool set = false;              // set by the tab's Apply button; cleared by Reset
+    float reduction = 0.0f;        // 0..1 fraction of triangles to remove from the written PMX
+    std::vector<exporter::ExportOptions::LodTarget> lods;   // selected LOD targets in LOD 1..4 order (label + remaining fraction)
+};
+
+// One LOD level as generated this session. The PMX files are only written on export; this cache is for the tab's previews and stats.
+struct OptLod {
+    std::shared_ptr<assemble::Scene> scene;   // null when not generated; kept for the individual LOD previews
+    size_t triangles = 0, vertices = 0;
+    double seconds = 0.0;
+    bool pending = false;          // generation queued or running
+    bool failed = false;
+};
+
+struct OptState {
+    int preset = 2;                // 0..4 = mesh::kSimplifyPresets, 5 = Custom
+    float reduction = 0.4f;        // the slider; 0..1 (shown as 0..100%)
+    bool lodSelected[4] = {true, true, true, true};        // LOD 1..4 checkboxes
+    float lodTarget[4] = {0.6f, 0.3f, 0.15f, 0.05f};       // the remaining-fraction target per level (independent, 5..95%)
+    OptLod lods[4];
+    OptApplied applied;            // what the next export writes
+    bool busy = false;             // a generation is running (slider preview or LODs)
+    bool stale = true;             // the settings changed since the preview was generated
+    std::shared_ptr<assemble::Scene> simplified;   // the generated preview scene at `simplifiedFor` (textures included: the GPU view reads them)
+    float simplifiedFor = -1.0f;   // the reduction the cached preview/stats were built for
+    size_t simplifiedTris = 0, simplifiedVerts = 0;
+    double simplifiedSeconds = 0.0;
+    int previewLod = 0;            // 0 = original, 1 = simplified preview, 2..5 = LOD 1..4
+    int hover = -1;                // hovered control for paint feedback (kOpt* ids)
+    int dragX = 0;                 // the slider drag's pointer x
+    int dragging = 0;              // 1 while the slider is dragged
+    // WM_OPT_READY hands the generated results from the worker to the UI thread:
+    int pendingPreviewFor = -1;    // the slider reduction snapshot the worker worked on (-1 = LODs only)
+};
+
 constexpr int kPanel = 380;
 constexpr int kRowH = 20;
 
@@ -65,26 +103,50 @@ struct Tweaks {
     float skinShadeTop = 1.2f;                             // the top extent of the cleavage: 0 = none, 1 = the full breast line, 2 = toward the base of the neck; saved in the viewer's settings
     float skinShadeWidth = 0.6f;                          // how wide the cleavage line runs (0.1 = hairline, 1 = default, 2 = broad); saved in the viewer's settings
     float skinAo = 0.85f;                                // Koikatsu's own look baked in (base body normal lighting + the card's detail line mask); 0 = off; saved in the viewer's settings
+    float transSizeCm = 4.0f;                             // translucency brush radius, centimetres
+    float transStrength = 0.65f;                          // how see-through a fully painted texel becomes (0..1, like the morph weights)
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabOptimize, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Optimize", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
+constexpr int kTransClear = 20019;   // the Look tab's "clear the brush from every garment" button
+// The Optimize tab's controls (its own range; nothing else uses it). 31000..31005 presets, 31010..31013 LOD checkboxes,
+// 31020 Generate LODs, 31021 Apply, 31022 Reset, 31030..31035 preview chips (original, simplified, LOD 1..4).
+constexpr int kOptPresetOriginal = 31000, kOptPresetHigh = 31001, kOptPresetBalanced = 31002, kOptPresetPerformance = 31003, kOptPresetAggressive = 31004, kOptPresetCustom = 31005;
+constexpr int kOptLodBase = 31010, kOptGenerate = 31020, kOptApply = 31021, kOptReset = 31022, kOptPreviewBase = 31030;
+constexpr int kOptLodDown = 31040, kOptLodUp = 31050;   // per-level target steppers: 31040..31043, 31050..31053 (LOD 1..4)
+
+// What the Optimize worker hands to the UI thread on WM_OPT_READY (like expPending for the export bake).
+struct OptPending {
+    int kind = 0;                    // 0 = slider preview, 1 = LOD generation
+    std::shared_ptr<assemble::Scene> simplified;   // kind 0: the generated preview (null on cancel/failure)
+    float simplifiedFor = 0.0f;
+    mesh::SceneSimplifyStats simplifiedStats;      // kind 0
+    std::vector<mesh::LodResult> lods;             // kind 1
+    bool done = false;
+    bool cancelled = false;
+};
 void SettingsAction(int id);
 void MorphSlideEdited();   // Morphs tab: a slider moved, or the tab cleared the weights
 void LoadMorphCatalog();   // after a character is built: collect the exported PMX's vertex morphs (weights all 0)
-void RebuildMorphCatalog();   // after a re-shape: the shapes moved with the bones, so the export's morph offsets move too
+void BeginMorphEdit(int morphIndex);   // Morphs tab: type a display name for the morph (Shift+click its row)
+void EndMorphEdit(bool commit);        // Enter commits (the alias is kept in settings); Esc restores the original
+bool MorphEditKey(UINT wp);            // while the rename box is open the keyboard goes to it
+bool MorphEditChar(wchar_t ch);        // typed characters; called from WM_CHAR
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
+               kTransStrength = 214, kTransSize = 215,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
+              kTransBrush = 307, kTransErase = 308,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
               kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
               kMorphBase = 30000, kMorphResetAll = 23000;   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
@@ -133,9 +195,19 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
     l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
     l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // Eight tabs, narrower with the Morphs tab added, so the right-hand status line ("34 parts", "0 edited", ...)
-    // keeps its own room instead of overlapping the last tab.
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {8 + i * 39, 216, 45 + i * 39, 240};
+    // The tab strip fits its labels (Segoe UI 11px, measured literal widths): uniform padding, small gaps, centered as a strip.
+    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 46, 30};
+    constexpr int kTabPad = 8;
+    int tabsTotal = 0;
+    for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
+    const int tabGap = std::max(1, (kPanel - 24 - tabsTotal) / (TabCount - 1));
+    const int used = tabsTotal + tabGap * (TabCount - 1);
+    int tx = (kPanel - used) / 2;
+    for (int i = 0; i < TabCount; ++i) {
+        const int w = kTabTextW[i] + kTabPad;
+        l.tabs[i] = {tx, 216, tx + w, 240};
+        tx += w + tabGap;
+    }
     l.partsHeadingTop = 222;
     l.partsTop = 248;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
@@ -200,6 +272,8 @@ struct App {
     std::shared_ptr<assemble::Scene> expScene, expPending;   // pending: filled by the bake thread, taken over on WM_EXP_READY
     std::shared_ptr<Loaded> expFor, expPendingFor;           // the loaded character the baked copy belongs to
     bool showExp = false, expOk = false, expGrade = false, expPendingGrade = false;
+    OptState opt;                      // the Optimize tab (triangle reduction, presets, LODs)
+    OptPending optPending;             // what the Optimize worker produced; adopted on WM_OPT_READY
     std::atomic<bool> expBusy{false};
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
@@ -209,6 +283,7 @@ struct App {
     int viewHoverCell = -1;          // the mode strip cell the cursor is over (-1 = none); repaint only that band
     ULONGLONG lastInput = 0;   // tick of the last camera change: the game shaders run only once the view has been still for a moment
     bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
+    bool shiftDown = false, ctrlDown = false;   // tracked here (a posted key works like a real one); read these, not GetKeyState
     POINT last{};
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0, logScroll = 0;        // list scroll targets, in rows
@@ -224,16 +299,22 @@ struct App {
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
+    bool listScroll = false;       // the gesture became a list scroll (the row's click is swallowed)
+    int listPressY = -1;           // the y of the press in the list, or -1 when the list is not pressed
+    int listPressX = 0;            // the x of the press
+    float listPressPos = 0.0f;     // partPos at the press: the list offset the drag maps from
     std::set<std::string> collapsedGroups;
+    std::set<std::string> collapsedMorphs;   // morph groups folded in the Morphs tab (Brows / Eyes / Mouth / Other)
     Tweaks tw;
     // The Morphs tab: every vertex morph the exported PMX carries (the game's FaceBlendShape expressions, the raw blend shapes
-    // and the MMD standard ones, exactly as the export writes them), accumulated per weight on top of the rest shape. Weights are
+    // and the MMD standard ones, exactly as the export picks them), accumulated per weight on top of the rest shape. Weights are
     // live-only: they are not exported and not saved (the PMX carries the morphs; MMD plays them). morphDelta is the per-mesh
     // accumulation at the current weights, handed to the renderers.
-    std::vector<exporter::LiveMorph> morphs;
-    std::vector<float> morphWeights;              // parallel to `morphs`; 0..1, the sliders show 0..100
+    exporter::LiveMorphCatalog morphCatalog;
+    std::vector<float> morphWeights;              // parallel to `morphCatalog.morphs`; 0..1, the sliders show 0..100
     std::vector<std::vector<Vec3>> morphDelta;    // parallel to scene.meshes; empty for meshes no active morph touches
     int tab = TabParts;
+    int optScroll = 0;                      // the Optimize tab's vertical scroll, in pixels (wheel when the window is short)
     int sliderDrag = -1;                      // slider id being dragged, or -1
     // Shift+Left-click on a slider: type its value with the keyboard. The edit is modal for the mouse/keyboard until
     // Enter commits (the typed number, clamped and snapped to the slider's step), Esc restores the value it had, or any
@@ -243,6 +324,11 @@ struct App {
     float sliderEditOrig = 0;                 // the stored value when the edit began (Esc restores it)
     bool sliderEditMatPushed = false;         // one material-undo step per typing session
     PoseState sliderEditPoseBefore;           // the pose when the edit began (a pose slider pushes one undo step on commit)
+    // Shift+Left-click on a morph row: type a display name for it. Enter commits (the alias is kept in the viewer's settings,
+    // so it survives restarts), Esc puts the original back. The PMX is untouched - MMD motions key morphs by name.
+    int morphEdit = -1;                       // morph index being renamed, or -1
+    std::string morphEditBuf;                 // the text typed so far
+    std::string morphEditOrig;                // the alias when the edit began (Esc restores it)
     std::vector<exporter::ShaderLayer> layerDefs;   // extra HLSL shading layers found in the layers folder (the GPU view runs them)
     std::map<std::string, char> keepHidden;   // part checkboxes to restore after a tweak reload
     bool applyKeep = false;
@@ -321,6 +407,17 @@ struct App {
     float gizmoAcc[3] = {0, 0, 0};            // world delta applied during the current drag (for the log line)
     float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
     int hoverAccChip = -1;                    // the accessory chip under the pointer in the panel, -1 = none
+    // Translucent clothes (Look tab): the brush paints the see-through area of the garment under the cursor. The mask is
+    // baked into the garment's own texture (see export/Translucency.cpp): session-only, kept in the scene, undone by the toggle.
+    bool transBrush = false;                  // the toggle: off by default, like every brush that changes pixels
+    bool transErase = false;                  // erase the paint instead of laying it down (right-drag always erases)
+    bool transPaintPending = false;           // the pointer moved during a stroke; applied once per picture
+    int transPaintX = 0, transPaintY = 0;     // the pointer in view pixels (the stroke's current position)
+    bool transEraseStroke = false;            // the current stroke erases (right-drag or the erase switch)
+    int paintLayer = -1;                      // the layer the stroke's last stamp came from (-1 = none)
+    float paintAnchorU = 0.0f, paintAnchorV = 0.0f;   // the last stamped UV: the stroke interpolates from here
+    bool paintAnchorSet = false;
+    int transHoverX = -1, transHoverY = -1;   // the pointer in view pixels for the brush ring; -1 when not over the view or the mode is off
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
@@ -431,6 +528,7 @@ constexpr UINT WM_EXP_READY = WM_APP + 4;
 constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok, 2 = cancelled)
 constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
 constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: repaint the bar
+constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finished (wParam: 1 cancelled, 2 failed)
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;

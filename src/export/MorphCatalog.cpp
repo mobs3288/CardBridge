@@ -1,123 +1,219 @@
 #include "export/MorphCatalog.h"
 
 #include "export/MmdNames.h"
-#include "export/PmxPhysics.h"
-#include "pmx/PmxWriter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
+#include <string>
 #include <vector>
 
 namespace cardbridge::exporter {
 
 namespace {
 
-// The scratch model exists to reuse the export's own morph builders verbatim (AddExpressionMorphs, AddMmdMorphs and
-// the eye pass), so the catalog cannot drift from what the file carries. Only positions, indices, material names and
-// bone names are filled - the winks split by vertex x, the eye pass fits the white and rebinds it, the morph compensation
-// adds the white's mean offset to the iris - none of which reads normals, uvs or weights.
-struct MeshBase {
-    std::vector<int> base;   // PMX vertex index of each scene mesh's first vertex (-1 never happens: the scratch exports everything)
-    uint32_t total = 0;
-};
+// Panel by the names the game gives its face meshes and shapes (the same keywords AddExpressionMorphs uses): mayuge = brows,
+// eye / namida = eyes, kuti / tooth / tang = mouth; teeth are a mouth thing, the nose line belongs to the eyes.
+int panelFor(const std::string& full) {
+    auto has = [&](const char* s) { return full.find(s) != std::string::npos; };
+    return has("mayu") ? 1 : (has("eye") || has("namida") || has("gag")) ? 2 : (has("kuti") || has("tooth") || has("tang") || has("mouth")) ? 3 : 4;
+}
 
-MeshBase meshBaseOf(const assemble::Scene& scene) {
-    MeshBase mb;
-    mb.base.resize(scene.meshes.size(), -1);
-    uint32_t base = 0;
+// The white and the iris of an eye: the game builds an eye as two meshes, the white (cf_Ohitomi_L / _R) and the iris one (cf_Ohitomi_L02 / _R02).
+// A mesh whose name carries the eye's own name followed by digits is the iris.
+LiveMorphEyes findEye(const assemble::Scene& scene, const char* key) {
+    LiveMorphEyes out;
+    const size_t keyLen = std::char_traits<char>::length(key);
     for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
-        mb.base[mi] = static_cast<int>(base);
-        base += static_cast<uint32_t>(scene.meshes[mi].vertices.size());
+        const std::string& n = scene.meshes[mi].name;
+        const size_t at = n.find(key);
+        if (at == std::string::npos) continue;
+        const size_t next = at + keyLen;
+        const bool iris = next < n.size() && std::isdigit(static_cast<unsigned char>(n[next]));   // cf_Ohitomi_L02: the iris
+        auto& mesh = iris ? out.irisMesh : out.whiteMesh;
+        if (mesh >= 0) continue;   // first match wins
+        mesh = static_cast<int>(mi);
+        auto& verts = iris ? out.irisVerts : out.whiteVerts;
+        for (const auto& sub : scene.meshes[mi].submeshes)
+            verts.insert(verts.end(), sub.indices.begin(), sub.indices.end());
+        std::sort(verts.begin(), verts.end());
+        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
     }
-    mb.total = base;
-    return mb;
+    return out;
 }
 
 } // namespace
 
-std::vector<LiveMorph> BuildLiveMorphs(const assemble::Scene& scene) {
-    std::vector<LiveMorph> out;
-    if (scene.meshes.empty()) return out;
+LiveMorphCatalog BuildLiveMorphs(const assemble::Scene& scene) {
+    LiveMorphCatalog cat;
+    if (scene.meshes.empty()) return cat;
 
-    const MeshBase mb = meshBaseOf(scene);
-    pmx::Model model;
+    cat.eyes[0] = findEye(scene, "cf_Ohitomi_L");   // the left eye (+x in the as-built scene)
+    cat.eyes[1] = findEye(scene, "cf_Ohitomi_R");
 
-    // positions
-    model.vertices.resize(mb.total);
-    {
-        uint32_t base = 0;
-        for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
-            const auto& m = scene.meshes[mi];
-            for (size_t v = 0; v < m.vertices.size(); ++v) {
-                pmx::Vertex& pv = model.vertices[base + v];
-                pv.position = m.vertices[v].pos;   // scene units, copied at rest (the PMX scales, the viewer does not)
-                pv.bone[0] = 0;
-            }
-            base += static_cast<uint32_t>(m.vertices.size());
-        }
-    }
-    // indices and one material per submesh, named the way the exporter names them (part/mesh#sub): the eye pass looks for
-    // the mesh's own name inside the material name to tell the white ("cf_Ohitomi_L") from the iris ("cf_Ohitomi_L02").
-    // The scene's submesh indices are mesh-local; the PMX (and this scratch model) is one vertex array, so they are offset
-    // by the mesh's base.
-    {
-        std::vector<std::string> partOf(scene.meshes.size());
-        for (const auto& part : scene.parts)
-            for (int mi : part.meshes)
-                if (mi >= 0 && static_cast<size_t>(mi) < partOf.size() && partOf[static_cast<size_t>(mi)].empty()) partOf[static_cast<size_t>(mi)] = part.id;
-        for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
-            const auto& m = scene.meshes[mi];
-            const uint32_t base = static_cast<uint32_t>(mb.base[mi]);
-            const std::string partId = partOf[mi].empty() ? std::string("mesh") : partOf[mi];
-            for (size_t si = 0; si < m.submeshes.size(); ++si) {
-                const auto& sm = m.submeshes[si];
-                pmx::Material pm;
-                pm.name = partId + "/" + m.name + "#" + std::to_string(si);
-                pm.indexCount = static_cast<uint32_t>(sm.indices.size());
-                for (uint32_t idx : sm.indices) model.indices.push_back(base + idx);
-                model.materials.push_back(std::move(pm));
-            }
-        }
-    }
-    // bones, parallel to scene.bones: rig names (ApplyMmdBoneNames renames in place, as it does for the PMX) and the
-    // rig's rest positions (the winks split the eye's vertices on the left eye's side by x).
-    model.bones.resize(scene.bones.size());
-    for (size_t i = 0; i < scene.bones.size(); ++i) {
-        pmx::Bone& pb = model.bones[i];
-        pb.name = scene.bones[i].name;
-        pb.position = scene.bones[i].pos;
-        pb.parent = scene.bones[i].parent;
-        pb.flags = 0x0006;   // helper; the scratch model is discarded, never written
-    }
-
-    // The morphs, exactly in the export's order: the expressions (and, with them, one morph per raw blend shape),
-    // then the MMD standard ones (copies of the game's pattern with the standard name), then the bone-name pass,
-    // which is also what compensates the lid morphs so the iris slides with the white (the game moves the white and
-    // lids through the face blend shapes; the iris would stay in front of the lid without it).
-    std::map<std::string, std::string> expressionShapes;   // expression morph name -> the pattern's blend shape name ("a_l_op")
-    AddExpressionMorphs(scene, model, mb.base, 1.0f, &expressionShapes);
-    AddMmdMorphs(model, expressionShapes);
-    ApplyMmdBoneNames(scene, model, 1.0f);
-
-    // global vertex indices -> per-mesh lists
-    out.reserve(model.morphs.size());
-    for (const auto& m : model.morphs) {
-        if (m.vertices.empty()) continue;   // the outfit and nude toggles are material morphs; group morphs have no vertex work
+    auto add = [&](std::string name, std::string nameEn, int panel, std::vector<LiveMorph::Recipe> recipe) {
+        if (recipe.empty()) return;
         LiveMorph lm;
-        lm.name = m.name;
-        lm.nameEn = m.nameEn;
-        lm.panel = m.panel >= 1 && m.panel <= 4 ? m.panel : 4;
-        lm.byMesh.resize(scene.meshes.size());
-        for (const auto& [vi, d] : m.vertices) {
-            if (vi < 0 || static_cast<size_t>(vi) >= mb.total) continue;
-            // meshBase is cumulative and sorted; duplicates (an empty mesh) resolve to the mesh that owns the vertex.
-            const auto it = std::upper_bound(mb.base.begin(), mb.base.end(), vi);
-            const size_t mi = it == mb.base.begin() ? 0 : static_cast<size_t>(it - mb.base.begin() - 1);
-            lm.byMesh[mi].emplace_back(static_cast<uint32_t>(vi - mb.base[mi]), d);
+        lm.name = std::move(name);
+        lm.nameEn = std::move(nameEn);
+        lm.panel = panel;
+        lm.recipe = std::move(recipe);
+        cat.morphs.push_back(std::move(lm));
+    };
+    std::map<std::string, std::string> expressionShapes;   // expression morph name -> the pattern's blend shape name ("a_l_op")
+    // The game's FaceBlendShape patterns, in the order the export writes them: brow / eye / mouth, closed and open, relative to the resting
+    // expression built into the vertices.
+    for (const auto& ex : scene.expressions) {
+        std::vector<LiveMorph::Recipe> recipe;
+        for (const auto& t : ex.targets) {
+            if (t.mesh < 0 || static_cast<size_t>(t.mesh) >= scene.meshes.size()) continue;
+            const auto& shapes = scene.meshes[static_cast<size_t>(t.mesh)].shapes;
+            if (t.shape < 0 || static_cast<size_t>(t.shape) >= shapes.size()) continue;
+            if (shapes[static_cast<size_t>(t.shape)].offsets.empty()) continue;   // a pattern the head does not carry: nothing to move, like the PMX
+            const float w = (t.weight - shapes[static_cast<size_t>(t.shape)].rest) * 0.01f;   // scene units
+            if (std::fabs(w) > 1e-7f) recipe.push_back({t.mesh, t.shape, w});
         }
-        out.push_back(std::move(lm));
+        if (recipe.empty()) continue;
+        add(ex.name, "", ex.panel, std::move(recipe));
+        if (!ex.shape.empty()) expressionShapes[ex.name] = ex.shape;
     }
-    return out;
+    // One morph per raw blend shape, at full weight.
+    for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
+        const auto& mesh = scene.meshes[mi];
+        for (size_t si = 0; si < mesh.shapes.size(); ++si) {
+            const auto& sh = mesh.shapes[si];
+            if (sh.offsets.empty()) continue;
+            const float w = (100.0f - sh.rest) * 0.01f;   // the full shape, relative to the resting weight built into the vertices
+            if (std::fabs(w) < 1e-7f) continue;
+            const std::string full = mesh.name + "." + sh.name;
+            add(full, "", panelFor(full), {{static_cast<int>(mi), static_cast<int>(si), w}});
+        }
+    }
+    // The MMD standard ones: each a copy of the game morph of the same meaning, found by the pattern's own blend shape name, or (for a head
+    // without the pattern) of the plain morph the fallback names, scaled.
+    auto findMorph = [&](const std::string& name) {
+        for (size_t i = 0; i < cat.morphs.size(); ++i) if (cat.morphs[i].name == name) return static_cast<int>(i);
+        return -1;
+    };
+    auto byShape = [&](const char* keys, int panel) {
+        std::string list = keys;
+        for (size_t at = 0; at <= list.size();) {
+            const size_t end = std::min(list.find(',', at), list.size());
+            const std::string key = list.substr(at, end - at);
+            at = end + 1;
+            for (size_t i = 0; i < cat.morphs.size(); ++i) {
+                auto it = expressionShapes.find(cat.morphs[i].name);
+                if (it != expressionShapes.end() && it->second == key && cat.morphs[i].panel == panel && !cat.morphs[i].recipe.empty()) return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    auto scaledCopy = [&](int src, float gain) {
+        std::vector<LiveMorph::Recipe> recipe;
+        if (src < 0) return recipe;
+        for (const auto& e : cat.morphs[static_cast<size_t>(src)].recipe) recipe.push_back({e.mesh, e.shape, e.weight * gain});
+        return recipe;
+    };
+    for (const auto& s : MmdStandardMorphs()) {
+        if (findMorph(s.mmd) >= 0) continue;   // made already
+        int src = byShape(s.keys, s.panel);
+        float gain = 1.0f;
+        if (src < 0 && s.fallback) { src = findMorph(s.fallback); gain = s.gain; }
+        if (src < 0) continue;
+        add(s.mmd, s.en, s.panel, scaledCopy(src, gain));
+    }
+    // The one-eyed versions: the closed-eye shapes cut at the face's middle. ウィンク closes the character's left eye: the side the rig's left
+    // eye bone is on (the model is still as built here, so the sign of x alone decides).
+    float leftSign = 1.0f;
+    for (const auto& b : scene.bones)
+        if (b.name == "cf_J_hitomi_tx_L" || b.name == "左目") { leftSign = b.pos.x < 0.0f ? -1.0f : 1.0f; break; }
+    for (const auto& w : MmdWinkMorphs()) {
+        const int src = findMorph(w.from);
+        if (src < 0) continue;
+        // The mean of the source morph's vertex positions is the face's middle: the cut goes there (the left eye first).
+        double sum = 0;
+        size_t n = 0;
+        for (const auto& e : cat.morphs[static_cast<size_t>(src)].recipe) {
+            const auto& mesh = scene.meshes[static_cast<size_t>(e.mesh)];
+            const auto& shapes = mesh.shapes;
+            if (e.shape < 0 || static_cast<size_t>(e.shape) >= shapes.size()) continue;
+            for (const auto& [vi, d] : shapes[static_cast<size_t>(e.shape)].offsets) {
+                if (vi >= mesh.vertices.size()) continue;
+                sum += mesh.vertices[vi].pos.x;
+                ++n;
+            }
+        }
+        if (n == 0) continue;
+        const float mid = static_cast<float>(sum / static_cast<double>(n));
+        for (int side = 0; side < 2; ++side) {
+            // side 0 = the left eye (ウィンク): keep the vertices on the rig's left side of the middle
+            LiveMorph lm;
+            lm.name = side == 0 ? w.left : w.right;
+            lm.nameEn = side == 0 ? w.leftEn : w.rightEn;
+            lm.panel = 2;
+            for (const auto& e : cat.morphs[static_cast<size_t>(src)].recipe)
+                lm.recipe.push_back({e.mesh, e.shape, e.weight});
+            lm.winkSide = side;
+            lm.winkMid = mid;
+            lm.winkSign = leftSign;
+            cat.morphs.push_back(std::move(lm));
+        }
+    }
+    return cat;
+}
+
+void AccumulateLiveMorph(const assemble::Scene& scene, const LiveMorphCatalog& catalog, const LiveMorph& morph, float weight,
+                         std::vector<std::vector<Vec3>>& dst) {
+    if (weight == 0.0f) return;
+    const size_t meshCount = scene.meshes.size();
+    if (dst.size() < meshCount) dst.resize(meshCount);
+    const auto meshVec = [&dst, &scene](int mi) -> std::vector<Vec3>& {
+        std::vector<Vec3>& vec = dst[static_cast<size_t>(mi)];
+        if (vec.empty()) vec.assign(scene.meshes[static_cast<size_t>(mi)].vertices.size(), Vec3{0, 0, 0});
+        return vec;
+    };
+    for (const auto& e : morph.recipe) {
+        if (e.mesh < 0 || static_cast<size_t>(e.mesh) >= meshCount) continue;
+        const auto& shapes = scene.meshes[static_cast<size_t>(e.mesh)].shapes;
+        if (e.shape < 0 || static_cast<size_t>(e.shape) >= shapes.size()) continue;
+        const auto& offsets = shapes[static_cast<size_t>(e.shape)].offsets;
+        if (offsets.empty()) continue;
+        const float k = weight * e.weight;
+        std::vector<Vec3>& vec = meshVec(e.mesh);
+        for (const auto& [vi, d] : offsets) {
+            if (vi >= vec.size()) continue;
+            if (morph.winkSide >= 0) {   // the one-eyed versions: only the vertices on the rig's left / right of the middle
+                const float side = (scene.meshes[static_cast<size_t>(e.mesh)].vertices[vi].pos.x - morph.winkMid) * morph.winkSign;
+                if ((side > 0.0f) != (morph.winkSide == 0)) continue;
+            }
+            Vec3& a = vec[vi];
+            a.x += d.x * k; a.y += d.y * k; a.z += d.z * k;
+        }
+    }
+    // Iris follow: when the lid squeezes the white, the iris takes the mean offset of the white's (the PMX adds it to every morph).
+    for (const auto& E : catalog.eyes) {
+        if (E.whiteMesh < 0 || E.irisMesh < 0) continue;
+        if (static_cast<size_t>(E.whiteMesh) >= dst.size() || static_cast<size_t>(E.irisMesh) >= dst.size()) continue;
+        const std::vector<Vec3>& white = dst[static_cast<size_t>(E.whiteMesh)];
+        if (white.empty()) continue;   // this morph did not move the white: the iris follow is the zero offset, nothing to do
+        Vec3 sum{0, 0, 0};
+        size_t n = 0;
+        for (uint32_t v : E.whiteVerts) {
+            if (v >= white.size()) continue;
+            const Vec3& d = white[v];
+            if (d.x == 0.0f && d.y == 0.0f && d.z == 0.0f) continue;
+            sum = {sum.x + d.x, sum.y + d.y, sum.z + d.z};
+            ++n;
+        }
+        if (n == 0) continue;
+        const Vec3 mean{sum.x / static_cast<float>(n), sum.y / static_cast<float>(n), sum.z / static_cast<float>(n)};
+        std::vector<Vec3>& iris = meshVec(E.irisMesh);
+        for (uint32_t v : E.irisVerts) {
+            if (v >= iris.size()) continue;
+            Vec3& a = iris[v];
+            a.x += mean.x; a.y += mean.y; a.z += mean.z;
+        }
+    }
 }
 
 } // namespace cardbridge::exporter

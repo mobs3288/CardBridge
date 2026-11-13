@@ -94,6 +94,7 @@ add_library(cardbridge_core STATIC
     src/export/OutfitTemplate.cpp
     src/export/Preview.cpp
     src/export/SkinShade.cpp
+    src/export/Translucency.cpp
     src/export/SkinAoBake.cpp
     src/export/GpuView.cpp
     src/export/ViewMode.cpp
@@ -101,6 +102,8 @@ add_library(cardbridge_core STATIC
     src/export/ColourGrade.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp
+    src/mesh/Simplify.cpp
+    src/mesh/Lod.cpp
     src/material/MaterialWorkbench.cpp
     src/material/UvDiagnostics.cpp
     src/shader/Dxbc.cpp
@@ -158,6 +161,14 @@ add_executable(cardbridge_tests tests/cardbridge_tests.cpp)
 target_link_libraries(cardbridge_tests PRIVATE cardbridge_core stb_image)
 if(WIN32 AND NOT MSVC)
     target_link_options(cardbridge_tests PRIVATE -static)
+endif()
+
+# Regression tests for the performance work (the timing recorder, the LZ4 block
+# handling, the decoded-texture cache). Pure core; no game files needed.
+add_executable(cardbridge_perf_tests tests/perf_regression.cpp)
+target_link_libraries(cardbridge_perf_tests PRIVATE cardbridge_core)
+if(WIN32 AND NOT MSVC)
+    target_link_options(cardbridge_perf_tests PRIVATE -static)
 endif()
 
 # Independent PMX read-back with the engine's own loader (shares no code with
