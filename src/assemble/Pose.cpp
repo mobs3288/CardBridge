@@ -426,8 +426,6 @@ void BakeGarmentSettle(Scene& scene) {
         if (any) std::fprintf(stderr, "]\n");
     }
     for (int step = 0; step < 600 && sim.Step(scene, poseWorld, 1, skin); ++step) {}
-    sim.PushOutsideBody(scene);   // settle the cloth outside the skin silhouette
-    sim.Step(scene, poseWorld, 0, skin);   // refresh the skin matrices from the pushed particles
     BakeSkin(scene, skin);
 }
 

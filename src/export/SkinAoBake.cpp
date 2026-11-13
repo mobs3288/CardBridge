@@ -325,12 +325,8 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
             const float existingDark = 1.0f - splitMul;
             const float att = clampf(1.0f - 0.7f * existingDark, 0.0f, 1.0f);
             const float damp = i < ao.aoDamp.size() ? ao.aoDamp[i] : 1.0f;   // limb joints: elbows/knees stay faint
-            // The darkening floors scale with the strength: at 1.0 and below the soft cap is kept; deeper bakes may go dark.
-            const float depth = clampf((s - 1.0f) / 1.0f, 0.0f, 1.0f);
-            const float aoFloor = 0.30f - 0.30f * depth;    // 0.30 -> 0.00
-            const float lineFloor = 0.45f - 0.45f * depth;  // 0.45 -> 0.00
-            const float aoMul = std::max(aoFloor, 1.0f - s * (1.0f - ao.aoShade[i]) * att * damp);
-            const float lineMul = std::max(lineFloor, 1.0f - s * ao.aoLine[i] * att * damp);
+            const float aoMul = std::max(0.30f, 1.0f - s * (1.0f - ao.aoShade[i]) * att * damp);
+            const float lineMul = std::max(0.45f, 1.0f - s * ao.aoLine[i] * att * damp);
             mul = splitMul * aoMul * lineMul;
         }
         for (int c = 0; c < 3; ++c) {
