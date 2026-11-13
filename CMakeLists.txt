@@ -91,6 +91,7 @@ add_library(cardbridge_core STATIC
     src/export/SkeletonOverlay.cpp
     src/export/MoveGizmo.cpp
     src/export/OutfitIcon.cpp
+    src/export/OutfitTemplate.cpp
     src/export/Preview.cpp
     src/export/SkinShade.cpp
     src/export/SkinAoBake.cpp

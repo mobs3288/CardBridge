@@ -135,6 +135,83 @@ bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base) {
     return any;
 }
 
+namespace {
+Quat axisAngleQuat(Vec3 axis, float radians) {
+    const float h = radians * 0.5f;
+    return {axis.x * std::sin(h), axis.y * std::sin(h), axis.z * std::sin(h), std::cos(h)};
+}
+Quat conjQ(Quat q) { return {-q.x, -q.y, -q.z, q.w}; }
+// The rotation that turns `from` onto `to` the short way, as a quaternion (both directions need not be unit length).
+Quat rotationBetweenQuat(Vec3 from, Vec3 to) {
+    const Vec3 a = normalize(from), b = normalize(to);
+    const Vec3 v = cross(a, b);
+    const float c = dot(a, b);
+    if (c < -0.99999f) {   // opposite: half a turn about any perpendicular axis
+        Vec3 axis = std::fabs(a.x) < 0.9f ? cross(a, Vec3{1, 0, 0}) : cross(a, Vec3{0, 1, 0});
+        axis = normalize(axis);
+        return {axis.x, axis.y, axis.z, 0.0f};   // half a turn: sin(90 deg) * axis, cos(90 deg) = 0
+    }
+    Quat q{v.x, v.y, v.z, 1.0f + c};
+    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return {q.x / n, q.y / n, q.z / n, q.w / n};
+}
+} // namespace
+
+bool MakeHandsOnHips(const Scene& scene, std::vector<Quat>& base) {
+    base.clear();
+    const float lower = 44.0f * 3.14159265f / 180.0f;
+    struct Arm { int shoulder = -1, arm = -1, forearm = -1, thigh = -1; };
+    Arm arms[2];
+    for (int s = 0; s < 2; ++s) {
+        const char* side = s == 0 ? "_L" : "_R";
+        arms[s].shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);
+        arms[s].arm = scene.boneIndex(std::string("cf_j_arm00") + side);
+        arms[s].forearm = scene.boneIndex(std::string("cf_j_forearm01") + side);
+        arms[s].thigh = scene.boneIndex(std::string("cf_j_thigh00") + side);
+        if (arms[s].arm < 0 || arms[s].forearm < 0 || arms[s].thigh < 0) return false;
+    }
+    base.assign(scene.bones.size(), Quat{});
+    Vec3 axis[2], dirRest[2];
+    for (int s = 0; s < 2; ++s) {
+        // At rest the arm is straight, so the forearm's direction is the arm's direction.
+        dirRest[s] = normalize(sub(scene.bones[static_cast<size_t>(arms[s].forearm)].pos,
+                                   scene.bones[static_cast<size_t>(arms[s].arm)].pos));
+        const Vec3 ax = cross(dirRest[s], Vec3{0, -1, 0});   // turning about this axis by a positive angle lowers the arm
+        const float al = len(ax);
+        if (al < 1e-3f) { base.clear(); return false; }   // the arm already hangs: nothing sensible to lower
+        axis[s] = ax * (1.0f / al);
+        base[static_cast<size_t>(arms[s].arm)] = axisAngleQuat(axis[s], lower * 0.8f);
+        if (arms[s].shoulder >= 0) base[static_cast<size_t>(arms[s].shoulder)] = axisAngleQuat(axis[s], lower * 0.2f);
+    }
+    // Where does the elbow end up, and where should the hand be? (The arms hang down from the lowered pose.)
+    Pose lowerPose;
+    lowerPose.base = base;
+    const std::vector<Mat4> worlds = BoneWorlds(scene, lowerPose);
+    const float kAbove = 0.055f;   // hand height above the thigh root, metres
+    const float kForward = 0.030f; // hand forward of the frontal plane, metres
+    const float kInset = 1.50f;    // hand x as a multiple of the thigh root x (the waist sides, under the elbows)
+    for (int s = 0; s < 2; ++s) {
+        const Vec3 elbow = worlds[static_cast<size_t>(arms[s].forearm)].translation();
+        const Vec3 thigh = scene.bones[static_cast<size_t>(arms[s].thigh)].pos;
+        const Vec3 hip = {thigh.x * kInset, thigh.y + kAbove, thigh.z + kForward};
+        const Vec3 want = normalize(sub(hip, elbow));
+        // The forearm chain inherits the whole lowering (the shoulder and the arm turn about the same axis), so the
+        // forearm's local rotation takes its rest direction straight onto the wanted one, in the lowered frame.
+        const Quat q = rotationBetweenQuat(dirRest[s], want);
+        base[static_cast<size_t>(arms[s].forearm)] = mul(conjQ(axisAngleQuat(axis[s], lower)), q);
+    }
+    return true;
+}
+
+Pose MakeHandsOnHipsPose(const Scene& scene) {
+    Pose p;
+    if (MakeHandsOnHips(scene, p.base)) return p;
+    PoseFile pf;
+    pf.aPose = true;
+    pf.aPoseDegrees = 40.0f;
+    return MakePose(scene, pf, nullptr);
+}
+
 // Rodrigues' formula; half a turn about a perpendicular axis when the directions are opposite.
 Mat4 RotationBetween(Vec3 from, Vec3 to) {
     const Vec3 a = normalize(from), b = normalize(to);

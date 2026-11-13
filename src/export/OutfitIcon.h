@@ -9,26 +9,26 @@
 
 namespace cardbridge::exporter {
 
-// A flat icon of the outfit the card has on screen, the way Koikatsu itself
-// does it in an outfit file: a faceless, bald, grey mannequin wearing exactly
-// the parts the exported file carries (the outfit's clothes and its kept
-// accessories; hair and the omitted accessories are not drawn). Skin textures
-// are dropped and the body/head are a single flat grey, eyes and other painted
-// face layers are not drawn. Sorted front view on the preview background, PNG
-// bytes.
+// The outfit the card has on screen, as a Koikatsu-style outfit-file thumbnail: a faceless, bald,
+// grey mannequin wearing exactly the parts the exported file carries (the outfit's clothes and its
+// kept accessories; hair and the omitted accessories are not drawn). Skin textures are dropped and
+// the body/head are flat grey with the toon shading baked in; the mannequin stands on a stage-style
+// backdrop (the embedded template: pink tiled wallpaper, filigree frame, floor) with a soft floor
+// shadow baked behind it - the same convention Koikatsu uses for coordinate files (a mannequin in
+// the outfit, not the character). The outfit renders with its own textures and shading, unchanged.
 //
 // hiddenParts, when given, is parallel to scene.parts with Koikatsu's meaning:
 //   0 = unchanged
 //   1 = do not draw
 //   2 = draw even when the part starts hidden (force on: skin under garments)
 // When null the scene's own final state is used.
-// The caller renders hair by passing hiddenParts from OutfitIconHiddenParts(..., withHair): the
-// mannequin icon stays bald by default (Koikatsu's own convention for coordinate files); withHair
-// adds the hair meshes and the hair-type accessories to the render.
+// `note`, when set, receives a non-empty message on a degraded path (the embedded template failing
+// to decode): the icon still renders, on the plain preview background, and the message says so.
 struct OutfitIconOptions {
     int viewWidth = 256;
     int viewHeight = 384;
     const std::vector<char>* hiddenParts = nullptr;
+    std::string* note = nullptr;
 };
 Bytes RenderOutfitIcon(const assemble::Scene& scene, const OutfitIconOptions& opt = {});
 

@@ -311,11 +311,27 @@ Policy (current, shipped):
 1. **The icon is a faceless, bald mannequin wearing exactly what the file
    carries** — a render through the same software path the preview uses
    (`exporter::RenderOutfitIcon`). Bald, because an outfit file never carries
-   the character's hair; grey-flat, because skin is not the outfit. This is the
-   same convention Koikatsu itself uses for its own coordinate .png files
-   (verified on real game-produced files: a bald grey mannequin in the outfit,
-   no face, on the preview-coloured background). Deterministic: same card +
-   same outfit → same bytes.
+   the character's hair; grey-flat with the toon ramp baked in (body/head run
+   through the renderer with a flat grey diffuse and a wide shadow range, so the
+   figure reads as a figure, not a paper cutout). This is the same convention
+   Koikatsu itself uses for its own coordinate .png files (verified on real
+   game-produced files: a bald grey mannequin in the outfit, no face). The
+   mannequin stands **hands on hips** (`assemble::MakeHandsOnHipsPose`: upper
+   arms down ~44°, forearms turned back in so the palms land on the waist;
+   rig-agnostic — the arm bones are found by name, the hand target is the
+   thigh root — and falls back to the A-pose on a rig with no arms). It stands
+   on the embedded **stage template** (`src/export/outfit_template.inc`,
+   504×704: pink tiled wallpaper, filigree frame with hearts and gems, a floor
+   grid — shipped inside CardBridge, works with no game files, identical on
+   every machine; AI-generated for this project, source
+   `image/outfit_template.jpg`, regenerable via `tools/gen_outfit_template.py`).
+   A soft floor shadow is baked behind the mannequin (its silhouette, pushed
+   down and blurred — a tight contact line over a wide fall-off), and the whole
+   render is composited over the template; the outfit's own textures render
+   unchanged. Deterministic: same card + same outfit → same bytes. If the
+   embedded template ever fails to decode (a build problem), the icon falls
+   back to the plain preview background and says so (`OutfitIconOptions::note`,
+   CLI prints it, the viewer logs it as a warning); the export still succeeds.
 2. `--thumbnail <file.png>` CLI / an option in the viewer's save dialog: use
    the provided image (validated: PNG signature + `pngEnd` succeeds, so a JPEG
    with a renamed extension is rejected with a clear error rather than

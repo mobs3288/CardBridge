@@ -162,18 +162,21 @@ void StartExportClothing() {
         // screen (what unticked is not there; hair only with the checkbox).
         // The icon is rendered pose-baked like the export (and like the CLI); bake into a copy.
         assemble::Scene iconScene = L->scene;
-        const assemble::Pose pose = BuildPose(*L, false);
-        if (!pose.empty() && !iconScene.bones.empty()) assemble::BakePose(iconScene, pose);
+        const assemble::Pose pose = assemble::MakeHandsOnHipsPose(iconScene);
+        if (!iconScene.bones.empty()) assemble::BakePose(iconScene, pose);
         std::vector<char> base(iconScene.parts.size(), 0);
         for (size_t i = 0; i < base.size() && i < g.hidden.size(); ++i) base[i] = g.hidden[i] ? 1 : 0;
         std::vector<char> iconFlags = exporter::OutfitIconHiddenParts(iconScene, L->card, outfit, base, withHairFile);
         exporter::OutfitIconOptions ipo;
         ipo.hiddenParts = &iconFlags;
+        std::string iconNote;
+        ipo.note = &iconNote;
         card::ClothingExportOptions opt;
         opt.outfit = outfit;
         opt.hiddenSlots = std::move(hiddenSlots);
         opt.withHairAccessories = withHairFile;
         opt.thumbnailBytes = exporter::RenderOutfitIcon(iconScene, ipo);
+        if (!iconNote.empty()) Log("icon: " + iconNote, LogKind::Warn);
         const card::ClothingExportReport rep = card::ExportClothingToFile(L->card, out, opt, true);   // the save dialog already prompted to overwrite
         char msg[640];
         std::snprintf(msg, sizeof msg, "clothing written: %s (outfit %d \"%s\", %llu bytes)", out.c_str(), rep.outfit + 1, rep.outfitName.c_str(),

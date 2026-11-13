@@ -458,11 +458,8 @@ int cmdClothes(const Args& a) {
         }
         if (ao.outfit < 0) ao.outfit = mc.status.isMap() ? static_cast<int>(mc.status.at("coordinateType").asInt()) : 0;
         assemble::Scene scene = assemble::Assemble(mc, *ctx.resolver, ao);
-        {   // rest pose like convert writes it: arms down, so the icon shows the outfit as worn
-            assemble::PoseFile pose;
-            pose.aPose = true;
-            pose.aPoseDegrees = 40.0f;
-            assemble::BakePose(scene, assemble::MakePose(scene, pose, nullptr));
+        {   // the stock outfit-icon pose: hand on hip, so the icon shows the outfit as worn
+            assemble::BakePose(scene, assemble::MakeHandsOnHipsPose(scene));
         }
         const int iconOutfit = ao.outfit >= 0 && ao.outfit < static_cast<int>(c.outfits.size()) ? ao.outfit : 0;
         const std::string prefix = "outfit" + std::to_string(iconOutfit) + ".acc";
@@ -479,7 +476,10 @@ int cmdClothes(const Args& a) {
         std::vector<char> flags = exporter::OutfitIconHiddenParts(scene, mc, iconOutfit, base, a.has("with-hair-accessories"));
         exporter::OutfitIconOptions ipo;
         ipo.hiddenParts = &flags;
+        std::string iconNote;
+        ipo.note = &iconNote;
         opt.thumbnailBytes = exporter::RenderOutfitIcon(scene, ipo);
+        if (!iconNote.empty()) std::fprintf(stderr, "icon: %s\n", iconNote.c_str());
     }
     if (a.has("include-hidden")) opt.includeHidden = true;
     if (a.has("with-hair-accessories")) opt.withHairAccessories = true;

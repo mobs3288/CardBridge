@@ -37,6 +37,14 @@ std::vector<Mat4> SkinMatrices(const Scene& scene, const Pose& pose);
 // cf_j_forearm01_L / _R, or any rig with the same roles); returns false, leaving `base` empty, when the rig has no arms to turn.
 bool MakeAPose(const Scene& scene, float degrees, std::vector<Quat>& base);
 
+// An automatic hands-on-hips pose, like the stock outfit-file thumbnails: the upper arms come down to the waist and the
+// forearms turn back in so the palms rest on the hips. Rig-agnostic (the arm bones are found by the same name convention
+// MakeAPose uses); the hand target is the side's thigh root, lifted a touch above the leg line and forward of the body's
+// frontal plane. Returns false, leaving `base` empty, when the rig has no arms to move.
+bool MakeHandsOnHips(const Scene& scene, std::vector<Quat>& base);
+// The Pose that pose describes: hands on hips when the rig allows it, the A-pose (40 degrees) otherwise.
+Pose MakeHandsOnHipsPose(const Scene& scene);
+
 // Writes skin matrices into the scene as its new rest pose (the body of BakePose, so the jiggle settle can use it).
 void BakeSkin(Scene& scene, const std::vector<Mat4>& skin);
 
