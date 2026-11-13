@@ -193,17 +193,25 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
         ao.aoLine.assign(WH, 0.0f);
         ao.aoDamp.assign(WH, 1.0f);
         ao.covered.assign(WH, 0);
-        // Limb-bound vertices (arm and leg chains) get their AO damped: the elbow and knee crease
-        // markings on the body atlas are the strongest local-deviation spots and read as black
-        // smudges at full strength; keep them faint instead.
-        std::vector<char> isLimb(scene.bones.size(), 0);
+        // Limb-bound vertices get their AO damped. Two tiers: the limb chains
+        // (arms, legs, elbows, knees, wrists, ...) drop to 0.25, the end effectors
+        // (hands, fingers, feet, toes, the heel/ankle region) drop to 0.10 so their
+        // crease marks read as nearly flat. Every other bone keeps full AO.
+        std::vector<float> isLimb(scene.bones.size(), -1.0f);   // negative = not limb; >=0 = the damp value it gets
         int limbBoneCount = 0;
         for (size_t bi = 0; bi < scene.bones.size(); ++bi) {
             std::string n = scene.bones[bi].name;
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            for (const char* tag : {"leg", "shin", "thigh", "knee", "arm", "forearm", "elbow", "wrist", "hand", "foot", "toe", "ankle", "heel"}) {
-                if (n.find(tag) != std::string::npos) { isLimb[bi] = 1; ++limbBoneCount; break; }
+            static const struct { const char* tag; float damp; } kTiers[] = {
+                {"hand", 0.10f}, {"finger", 0.10f}, {"foot", 0.10f}, {"toe", 0.10f}, {"heel", 0.10f}, {"ankle", 0.10f},
+                {"elbow", 0.75f}, {"forearm", 0.75f}, {"wrist", 0.75f}, {"arm", 0.75f},
+                {"leg", 0.75f}, {"shin", 0.75f}, {"thigh", 0.75f}, {"knee", 0.75f},
+            };
+            float damp = -1.0f;
+            for (const auto& t : kTiers) {
+                if (n.find(t.tag) != std::string::npos) { damp = t.damp; break; }
             }
+            if (damp >= 0.0f) { isLimb[bi] = damp; ++limbBoneCount; }
         }
         if (std::getenv("CARDBRIDGE_DEBUG_AO"))
             std::fprintf(stderr, "ao debug: %d of %zu bones classified as limb\n", limbBoneCount, scene.bones.size());
@@ -232,12 +240,13 @@ bool ApplySkinAoBake(assemble::Scene& scene, float strength, bool rebuild) {
             std::vector<float> vertexDamp(mesh.vertices.size(), 1.0f);
             for (size_t vi = 0; vi < mesh.vertices.size(); ++vi) {
                 const auto& v = mesh.vertices[vi];
-                float w = 0.0f;
+                float effDamp = 0.0f, w = 0.0f;
                 for (int k = 0; k < 4; ++k) {
                     const int b = v.bone[k];
-                    if (b >= 0 && static_cast<size_t>(b) < isLimb.size() && isLimb[b]) w += v.weight[k];
+                    if (b >= 0 && static_cast<size_t>(b) < isLimb.size() && isLimb[b] >= 0.0f) { effDamp += v.weight[k] * isLimb[b]; w += v.weight[k]; }
                 }
-                vertexDamp[vi] = 1.0f - 0.75f * clampf(w, 0.0f, 1.0f);
+                if (w > 1.0f) effDamp = effDamp / w;   // over-weighted skinning: keep proportions
+                vertexDamp[vi] = 1.0f - clampf(effDamp, 0.0f, 0.95f);
             }
             RasterizeAo(mesh, ao, W, H, localNormals, ao.aoLine, ao.aoDamp, ao.covered, vertexDamp);
         }

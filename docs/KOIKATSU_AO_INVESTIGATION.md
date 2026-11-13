@@ -212,11 +212,12 @@ and the "off" path stays bit-exact with today's output. They must never
   clavicle band (the top-third row with the widest G\>60 run, no fixed atlas
   coordinates) and damps the ink-line multiplier inside it to \~0.35 so the
   collarbone strokes stay subtle without muting any other ink.
-  **Limb dampening:** vertices bound mostly to the arm or leg chains (any bone
-  whose name contains `leg`, `shin`, `thigh`, `knee`, `arm`, `forearm`, `elbow`,
-  `wrist`) take ~25% of the bake's effect so the elbow and knee joints stay
-  faint; torso, head and hands keep full strength (the crease accents worth
-  seeing live in those regions).
+  **Limb dampening (two tiers):** vertices bound mostly to a limb chain take a
+  fraction of the bake's effect, in two tiers — the limb chains (arms, elbows,
+  forearms, wrists, legs, shins, thighs, knees) get ~25% the bake's effect; the
+  end effectors (hands, fingers, feet, toes, heels, ankles) get ~10%. Every other
+  bone-bound set and every non-limb region keeps full strength — the cleavage
+  creases live there.
 
 **Blending contract (mandatory — no stacking):**
 
