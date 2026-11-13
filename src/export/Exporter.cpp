@@ -142,22 +142,32 @@ bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat)
     return TextureHasCutTexels(scene, mat);
 }
 
-// A material whose texture's alpha actually discards texels is not only main_item: clothing items with a
-// cutout lace (the stocking's two-tone boundary, the white's scalloped edge) carry the same binary cutout,
-// e.g. Shader Forge/main_skin of a nakay sock item. MikuMikuDance draws an opaque material without testing
-// its texture's alpha, so those texels drew black. Such a material must join the transparent pass like the rest.
-// (Deliberately whole-texture: a centroid test misses a mesh whose UV island lies entirely inside the opaque part.)
+// A material is an alpha-cutout only when its triangles actually sample texels that discard: the lace of a stocking
+// (the mesh spans the holes, so the fragments both exist and must show through). A mesh whose island sits entirely
+// inside the opaque part renders fully either way, so it is opaque: as it is the mesh that determines what MMD draws,
+// the scan walks it, not the atlas. An opaque answer also keeps the skin shader from the transparent pass,
+// which restores self-shadowing and depth writes for it (its mask is the game's coverage mask: the hidden body
+// triangles are not in the PMX at all, so the atlas being empty outside the islands is expected, not breakage).
 bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
     const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
     if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
-    bool haveCut = false, haveOpaque = false;
-    for (size_t i = 3; i < t.rgba.size() && !(haveCut && haveOpaque); i += 4) {
-        const uint8_t a = t.rgba[i];
-        if (a < kItemCutout) haveCut = true;
-        else if (a >= 128) haveOpaque = true;
+    if (scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
+    const int mi = static_cast<int>(&mat - &scene.materials.front());
+    const int W = t.width, H = t.height;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& sm : mesh.submeshes) {
+            if (sm.material != mi) continue;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const auto& a = mesh.vertices[sm.indices[i]].uv, & b = mesh.vertices[sm.indices[i + 1]].uv, & c = mesh.vertices[sm.indices[i + 2]].uv;
+                float u = (a.x + b.x + c.x) / 3.0f, v = (a.y + b.y + c.y) / 3.0f;
+                u -= std::floor(u); v -= std::floor(v);
+                const int x = std::min(W - 1, static_cast<int>(u * W)), y = std::min(H - 1, static_cast<int>((1.0f - v) * H));
+                if (t.rgba[(static_cast<size_t>(y) * W + x) * 4 + 3] < kItemCutout) return true;
+            }
+        }
     }
-    return haveCut && haveOpaque;
+    return false;
 }
 
 // The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid, the game's
