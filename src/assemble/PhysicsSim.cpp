@@ -11,6 +11,9 @@ namespace cardbridge::assemble {
 namespace {
 
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+Vec3 add(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+Vec3 cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+Vec3 scale(Vec3 v, float s) { return {v.x * s, v.y * s, v.z * s}; }
 float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 float length(Vec3 v) { return std::sqrt(dot(v, v)); }
 
@@ -29,6 +32,27 @@ struct WorldCollider {
     Vec3 a, b;     // capsule segment ends (equal for a sphere)
     float radius = 0;
 };
+
+// Closest point on triangle to point P (Ericson, Real-Time Collision Detection).
+static Vec3 closestPointTriangle(Vec3 p, Vec3 a, Vec3 b, Vec3 c) {
+    const Vec3 ab = {b.x - a.x, b.y - a.y, b.z - a.z}, ac = {c.x - a.x, c.y - a.y, c.z - a.z}, ap = {p.x - a.x, p.y - a.y, p.z - a.z};
+    const Vec3 bp = {p.x - b.x, p.y - b.y, p.z - b.z}, cp = {p.x - c.x, p.y - c.y, p.z - c.z};
+    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) { const float v = d1 / (d1 - d3); return {a.x + ab.x * v, a.y + ab.y * v, a.z + ab.z * v}; }
+    const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) { const float w = d2 / (d2 - d6); return {a.x + ac.x * w, a.y + ac.y * w, a.z + ac.z * w}; }
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); return {b.x + (c.x - b.x) * w, b.y + (c.y - b.y) * w, b.z + (c.z - b.z) * w}; }
+    const float denom = 1.0f / (va + vb + vc);
+    const float v = vb * denom, w = vc * denom;
+    return {a.x + ab.x * v + ac.x * w, a.y + ab.y * v + ac.y * w, a.z + ab.z * v + ac.z * w};
+}
 
 // Pushes a particle of radius r out of a collider; a sphere is a capsule with a zero-length segment.
 void collide(Vec3& p, float r, const WorldCollider& c) {
@@ -95,6 +119,10 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
     }
 }
 
+void PhysicsSim::SetColliderOverride(const std::vector<SceneCollider>& colliders) {
+    colliderOverride_ = colliders;
+}
+
 void PhysicsSim::Nudge(Vec3 impulse) {
     for (const Chain& chain : chains_) {
         // The bust / butt chains are heavy skin, not hair strands: a shake needs a bigger hit to show, so it gets 2.5x.
@@ -109,15 +137,27 @@ void PhysicsSim::Nudge(Vec3 impulse) {
 
 bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, int steps, std::vector<Mat4>& skin) {
     if (poseWorld.size() != scene.bones.size() || skin.size() != scene.bones.size()) return false;
-    // The colliders as the pose carries them: each rides its bone.
+    // The colliders to use this step: the override when set (a settle that fits the cloth outside the skin), otherwise
+    // the scene's own, resolved against the pose.
     std::vector<WorldCollider> colliders;
-    for (const auto& c : scene.colliders) {
-        if (c.bone < 0 || static_cast<size_t>(c.bone) >= poseWorld.size() || c.inside || c.radius <= 0.0f) continue;
-        const Mat4 m = poseWorld[static_cast<size_t>(c.bone)] * Mat4::TRS(scene.bones[static_cast<size_t>(c.bone)].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
-        const Vec3 centre = m.point(c.center);
-        const float half = std::max(0.0f, c.height * 0.5f - c.radius);
-        const Vec3 axis = normalize(m.dir(c.axis));
-        colliders.push_back({sub(centre, axis * half), centre + axis * half, c.radius});
+    if (!colliderOverride_.empty()) {
+        for (const auto& c : colliderOverride_) {
+            if (c.bone < 0 || c.bone >= static_cast<int>(poseWorld.size()) || c.inside || c.radius <= 0.0f) continue;
+            const Mat4 m = poseWorld[static_cast<size_t>(c.bone)] * Mat4::TRS(scene.bones[static_cast<size_t>(c.bone)].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
+            const Vec3 centre = m.point(c.center);
+            const float half = std::max(0.0f, c.height * 0.5f - c.radius);
+            const Vec3 axis = normalize(m.dir(c.axis));
+            colliders.push_back({sub(centre, axis * half), centre + axis * half, c.radius});
+        }
+    } else {
+        for (const auto& c : scene.colliders) {
+            if (c.bone < 0 || static_cast<size_t>(c.bone) >= poseWorld.size() || c.inside || c.radius <= 0.0f) continue;
+            const Mat4 m = poseWorld[static_cast<size_t>(c.bone)] * Mat4::TRS(scene.bones[static_cast<size_t>(c.bone)].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
+            const Vec3 centre = m.point(c.center);
+            const float half = std::max(0.0f, c.height * 0.5f - c.radius);
+            const Vec3 axis = normalize(m.dir(c.axis));
+            colliders.push_back({sub(centre, axis * half), centre + axis * half, c.radius});
+        }
     }
     // The arms are not in the game's collider list, but the breast clipping into them is the classic break:
     // add an upper-arm + forearm capsule per arm so the jiggle particles slide off the arm instead of through it.
@@ -215,6 +255,73 @@ bool PhysicsSim::Step(const Scene& scene, const std::vector<Mat4>& poseWorld, in
         }
     if (steps > 0) speed_ = moved;
     return speed_ > 1e-5f;
+}
+
+// Snaps the outfit cloth's chain bones to a tiny fixed distance off the skin, both directions: pull a too-distant particle in to the
+// clearance, push a too-close one out to it. The cloth ends up hugging the skin silhouette (the authored straight-then-hanging pose)
+// instead of ballooning off the body (the raw collider radius fill) while never slicing into it either.
+void PhysicsSim::PushOutsideBody(const Scene& scene) {
+    // collect the body's triangles once; the loop per chain per particle is cheap against a few k tris
+    std::vector<Vec3> tri, nrm;
+    for (const auto& p : scene.parts) {
+        if (p.group != "Body" && p.group != "Head") continue;
+        for (int mi : p.meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+            const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+            for (const auto& sm : mesh.submeshes) {
+                if (sm.material < 0 || static_cast<size_t>(sm.material) >= scene.materials.size()) continue;
+                for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                    const Vec3 a = mesh.vertices[sm.indices[i]].pos, b = mesh.vertices[sm.indices[i + 1]].pos, c = mesh.vertices[sm.indices[i + 2]].pos;
+                    Vec3 n = cross(sub(b, a), sub(c, a));
+                    const float nl = length(n);
+                    if (nl < 1e-8f) continue;
+                    n = scale(n, 1.0f / nl);
+                    tri.push_back(a); tri.push_back(b); tri.push_back(c); nrm.push_back(n);
+                }
+            }
+        }
+    }
+    if (tri.empty()) return;
+    const float kClearance = 0.012f;   // ~1.5 mm of air: enough to avoid z-fighting the skin, tight enough for a skin-hugging kiss
+    for (const Chain& chain : chains_) {
+        const SceneChain& sc = scene.chains[chain.scene];
+        if (sc.part.rfind("outfit", 0) != 0) continue;   // outfit cloth only
+        bool pushed = false;
+        for (size_t k = 1; k < chain.particles.size(); ++k) {
+            Particle& p = particles_[static_cast<size_t>(chain.particles[k])];
+            int best = -1; float bestDist2 = 1e30f;
+            for (size_t ti = 0; ti < tri.size() / 3; ++ti) {
+                const Vec3& a = tri[ti * 3], & b = tri[ti * 3 + 1], & c = tri[ti * 3 + 2];
+                const Vec3 cp = closestPointTriangle(p.pos, a, b, c);
+                const Vec3 dd = sub(p.pos, cp);
+                const float d2 = dot(dd, dd);
+                if (d2 < bestDist2) { bestDist2 = d2; best = static_cast<int>(ti); }
+            }
+            if (best < 0) continue;
+            const Vec3& a = tri[best * 3], & b = tri[best * 3 + 1], & c = tri[best * 3 + 2];
+            const Vec3 cp = closestPointTriangle(p.pos, a, b, c);
+            const float signedDist = dot(sub(p.pos, cp), nrm[best]);
+            const float offset = signedDist - kClearance;
+            if (std::fabs(offset) < 1e-5f) continue;   // already kissing
+            const Vec3 shift = scale(nrm[best], -offset);   // positive offset -> shift inwards; negative -> push out
+            p.pos = add(p.pos, shift);
+            p.prev = add(p.prev, shift);
+            pushed = true;
+        }
+        if (pushed) {   // re-derive the chain bones from the moved particles, top down
+            for (size_t k = 1; k < chain.particles.size(); ++k) {
+                Particle& p = particles_[static_cast<size_t>(chain.particles[k])];
+                const Particle& par = particles_[static_cast<size_t>(p.parent)];
+                Mat4 rot = rotationPart(par.world);
+                if (p.child >= 0) {
+                    const Vec3 want = sub(particles_[static_cast<size_t>(p.child)].pos, p.pos);
+                    const Vec3 have = rot.dir(particles_[static_cast<size_t>(p.child)].restLocal);
+                    if (length(want) > 1e-9f && length(have) > 1e-9f) rot = RotationBetween(have, want) * rot;
+                }
+                p.world = translated(rot, p.pos);
+            }
+        }
+    }
 }
 
 } // namespace cardbridge::assemble

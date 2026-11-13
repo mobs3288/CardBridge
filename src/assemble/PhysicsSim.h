@@ -21,6 +21,15 @@ public:
     void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = true, float jiggleIntensity = 0.5f,
                bool jiggleOnly = false, bool outfitOnly = false);
 
+    // Snaps the outfit cloth's chain bones to a tiny fixed distance off the skin, both directions: pull a too-distant particle in to the
+    // clearance, push a too-close one out to it. The cloth ends up hugging the skin silhouette (the authored straight-then-hanging pose)
+    // instead of ballooning off the body (the raw collider-radius fill) while never slicing into it either. The skin matrices are re-derived after the pass.
+    void PushOutsideBody(const Scene& scene);
+
+    // Overrides the collider list Step() uses (e.g. colliders inflated to the skin silhouette, so cloth settled for export hangs
+    // outside the skin). Unset to use the scene's own colliders again.
+    void SetColliderOverride(const std::vector<SceneCollider>& colliders);
+
     // Runs `steps` updates (1/60 s each; 0 only refreshes the output after the anchors moved) and writes the skin matrices of the chain bones
     // (every bone of a chain but its first, which follows the pose) into `skin`, sized like the scene's bones. Returns true while any
     // particle is still moving.
@@ -52,6 +61,7 @@ private:
     };
     std::vector<Particle> particles_;
     std::vector<Chain> chains_;
+    std::vector<SceneCollider> colliderOverride_;   // used instead of the scene's colliders when non-empty
     float speed_ = 0.0f;          // largest particle displacement in the last update
 };
 
