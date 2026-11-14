@@ -607,6 +607,8 @@ void OpenCard() {
             g.clothingPath.clear();
             g.clothingName.clear();
             g.clothingOutfit = -1;
+            g.clothingMode = 0;
+            g.clothingSrcOutfit = -1;
         }
         StartLoad(c, -1);
     }
@@ -631,10 +633,143 @@ void ApplyClothingFile(const std::string& path) {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.clothingPath = path;
         g.clothingName = cl.displayName();
+        g.clothingSrcOutfit = -1;
+        g.clothingMode = 0;
         g.clothingOutfit = L->outfit;   // the outfit on screen
     }
     g.cam = {};
     StartLoad(g.cardPath, L->outfit, true);
+}
+
+// A Coordinate PNG dropped on a loaded character: the whole coordinate can be
+// imported, or just its outfit contents. The source is parsed here first so the
+// dialog can name it; a source that fails to parse never reaches the dialog
+// (the caller falls back to the plain open-a-character flow, as before).
+// mode: 0 = import as clothing (clothes+accessories only, existing clothing merge),
+//       1 = import as coordinate (the whole coordinate replaces the slot, including accessories)
+void ImportCoordinateFile(const std::string& path, int mode) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || g.cardPath.empty()) { Log("open a character first, then drop the coordinate file", LogKind::Warn); return; }
+    if (g.busy) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    card::Card src;
+    try {
+        src = card::LoadCard(path);
+        if (!src.supported) { Log(src.supportNote, LogKind::Error); return; }
+    } catch (const std::exception& e) {
+        Log(std::string("not a valid coordinate source: ") + e.what(), LogKind::Error);
+        return;
+    }
+    int srcOutfit = src.status.isMap() ? static_cast<int>(src.status.at("coordinateType").asInt(0)) : 0;
+    if (srcOutfit < 0 || static_cast<size_t>(srcOutfit) >= src.outfits.size()) srcOutfit = 0;
+    const std::string who = src.displayName().empty() ? fileio::FileName(path) : src.displayName();
+    const std::string what = src.outfitName(srcOutfit);
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        g.clothingPath = path;
+        g.clothingName = who + " - " + what + (mode == 1 ? std::string(" (coordinate)") : std::string());
+        g.clothingSrcOutfit = srcOutfit;
+        g.clothingMode = mode;
+        g.clothingOutfit = L->outfit;   // the outfit on screen
+    }
+    g.cam = {};
+    if (mode == 1)
+        Log("coordinate import: whole coordinate \"" + what + "\" from " + who + " (replaces the outfit on screen, including accessories; in memory only)", LogKind::Info);
+    else
+        Log("coordinate import (as clothing): outfit contents of \"" + what + "\" from " + who + " (your character's identity and other outfits stay untouched; in memory only)", LogKind::Info);
+    StartLoad(g.cardPath, L->outfit, true);
+}
+
+// The drop-time question for a Coordinate PNG: outfit import, coordinate import, or open the
+// card as a character (what a drop did before Coordinate import existed).
+// CARDBRIDGE_COORDINATE_MODE=clothing|coordinate|open|cancel skips the dialog in scripted runs.
+void ShowCoordinateImportDialog(const std::string& path) {
+    const char* envMode = std::getenv("CARDBRIDGE_COORDINATE_MODE");
+    if (envMode && *envMode) {
+        const std::string m = envMode;
+        if (m == "clothing") { ImportCoordinateFile(path, 0); return; }
+        if (m == "coordinate") { ImportCoordinateFile(path, 1); return; }
+        if (m == "cancel") { Log("coordinate import cancelled", LogKind::Info); return; }
+        // "open" (or anything else): the previous drop behavior.
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.clothingPath.clear();
+            g.clothingName.clear();
+            g.clothingOutfit = -1;
+            g.clothingMode = 0;
+            g.clothingSrcOutfit = -1;
+        }
+        g.cam = {};
+        StartLoad(path, -1);
+        return;
+    }
+    // Name the source in the dialog when it parses; fall back to the file name when it does not.
+    std::string who;
+    std::string what;
+    try {
+        card::Card src = card::LoadCard(path);
+        int srcOutfit = src.status.isMap() ? static_cast<int>(src.status.at("coordinateType").asInt(0)) : 0;
+        if (srcOutfit < 0 || static_cast<size_t>(srcOutfit) >= src.outfits.size()) srcOutfit = 0;
+        who = src.displayName().empty() ? fileio::FileName(path) : src.displayName();
+        what = src.outfitName(srcOutfit);
+    } catch (const std::exception&) {
+        who = fileio::FileName(path);
+        what = "(unresolved coordinate)";
+    }
+    const std::wstring wWho = Utf8ToWide(who), wWhat = Utf8ToWide(what), wFile = Utf8ToWide(fileio::FileName(path));
+    const std::wstring instruction = L"How should \"" + wFile + L"\" be imported?";
+    const std::wstring content =
+        L"This looks like a Koikatsu Coordinate saved from " + wWho + L" (\"" + wWhat + L"\").\n"
+        L"The import goes to the outfit on screen. Neither choice writes the card to disk.\n"
+        L"\n"
+        L"Import as Clothing:\n"
+        L"   Extracts only this coordinate's outfit - clothes, accessories and makeup - and merges them\n"
+        L"   onto the outfit on screen with the clothing import. Your character keeps their identity, face, body,\n"
+        L"   personality and every other outfit. Hair worn as accessories is kept.\n"
+        L"\n"
+        L"Import as Coordinate:\n"
+        L"   Replaces the outfit on screen with the whole coordinate, exactly as saved - clothes, accessories,\n"
+        L"   makeup and their settings. Accessories are replaced too (including hair worn as accessories).\n"
+        L"   Your character's identity is not imported either way.\n"
+        L"\n"
+        L"\"Open as character\" shows this card instead (what a drop did before Coordinate import existed).";
+    enum { kImportClothing = 101, kImportCoordinate = 102, kOpenCard = 103 };
+    TASKDIALOG_BUTTON btns[3] = {
+        {kImportClothing, L"Import as Clothing"},
+        {kImportCoordinate, L"Import as Coordinate"},
+        {kOpenCard, L"Open as character"},
+    };
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize = sizeof(cfg);
+    cfg.hwndParent = g.hwnd;
+    cfg.pszWindowTitle = L"CardBridge";
+    cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    cfg.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    cfg.pszMainInstruction = instruction.c_str();
+    cfg.pszContent = content.c_str();
+    cfg.nDefaultButton = kImportClothing;
+    cfg.cButtons = static_cast<UINT>(sizeof(btns) / sizeof(btns[0]));
+    cfg.pButtons = btns;
+    int pressed = 0;
+    if (TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr) != S_OK) pressed = 0;
+    switch (pressed) {
+    case kImportClothing: ImportCoordinateFile(path, 0); return;
+    case kImportCoordinate: ImportCoordinateFile(path, 1); return;
+    case kOpenCard:
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.clothingPath.clear();
+            g.clothingName.clear();
+            g.clothingOutfit = -1;
+            g.clothingMode = 0;
+            g.clothingSrcOutfit = -1;
+        }
+        g.cam = {};
+        StartLoad(path, -1);
+        return;
+    default:
+        Log("coordinate import cancelled; the current character is unchanged", LogKind::Info);
+        return;
+    }
 }
 
 // Picking a slot is the same reload Left/Right does, just aimed. The reload
@@ -662,6 +797,8 @@ void ResetClothing() {
         g.clothingPath.clear();
         g.clothingName.clear();
         g.clothingOutfit = -1;
+        g.clothingMode = 0;
+        g.clothingSrcOutfit = -1;
     }
     Log("clothing reset to the card's own outfit" + (name.empty() ? std::string() : " (dropped " + name + ")"), LogKind::Good);
     g.cam = {};

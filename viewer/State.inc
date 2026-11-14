@@ -239,10 +239,16 @@ struct App {
     HWND hwnd = nullptr;
     Settings settings;
     std::string cardPath;
-    // An outfit file applied in memory only (never saved as a card): the path
-    // of the clothing file and the outfit slot it overwrote. Empty = none.
+    // An outfit file (or a Coordinate PNG) applied in memory only (never saved as a card): the path
+    // and the outfit slot it overwrote. Empty = none.
+    // clothingMode: 0 = outfit import (a regular clothing file, or a Coordinate PNG imported as clothing -
+    // the extracted clothes+accessories are merged via the clothing import); 1 = Coordinate import (the
+    // whole coordinate replaces the slot, including accessories).
+    // clothingSrcOutfit: for a Coordinate source, which coordinate of the source card is imported (-1 = the source's own current outfit).
     std::string clothingPath, clothingName;
     int clothingOutfit = -1;
+    int clothingMode = 0;
+    int clothingSrcOutfit = -1;
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up

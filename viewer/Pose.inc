@@ -509,10 +509,14 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     g.cardPath = path;
     std::string clothingPath;
     int clothingOutfit = -1;
+    int clothingMode = 0;
+    int clothingSrcOutfit = -1;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         clothingPath = g.clothingPath;
         clothingOutfit = g.clothingOutfit;
+        clothingMode = g.clothingMode;
+        clothingSrcOutfit = g.clothingSrcOutfit;
     }
     g.applyKeep = keepTweaks;
     g.keepHidden.clear();
@@ -526,7 +530,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, prevCardPath]() {
+    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, clothingMode, clothingSrcOutfit, prevCardPath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -557,27 +561,51 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
                                        clothingOutfit < static_cast<int>(c.outfits.size());
             if (applyClothing) {
-                ProgSet(0.20, "applying outfit file (cloth)");
+                ProgSet(0.20, clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
                 try {
-                    card::ClothingFile cl = card::LoadClothingFile(clothingPath);
-                    if (!cl.supported) throw std::runtime_error(cl.supportNote);
-                    card::ApplyClothingOptions opt;
-                    opt.outfit = shown;
-                    auto rep = card::ApplyClothing(c, cl, opt);
-                    {
-                        std::lock_guard<std::recursive_mutex> lk(g.mu);
-                        g.clothingOutfit = rep.outfit;
-                        g.clothingName = cl.displayName();   // --clothes arrives without one; the drop path already set it
+                    if (clothingMode == 1) {
+                        // Coordinate import: the whole coordinate replaces the outfit on screen, including accessories.
+                        card::Card src = card::LoadCard(clothingPath);
+                        if (!src.supported) throw std::runtime_error(src.supportNote);
+                        card::ApplyCoordinateOptions copt;
+                        copt.srcOutfit = clothingSrcOutfit;
+                        copt.dstOutfit = shown;
+                        const card::ApplyCoordinateReport rep = card::ApplyCoordinate(c, src, copt);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.dstOutfit;
+                            g.clothingName = rep.sourceName + " - " + src.outfitName(rep.srcOutfit) + " (coordinate)";
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                            out->clothing = g.clothingName;
+                        }
+                        for (const std::string& note : rep.notes) Log("  coordinate: " + note, LogKind::Warn);
+                        Log("coordinate: " + rep.sourceName + " (" + src.outfitName(rep.srcOutfit) + ") -> outfit " + std::to_string(rep.dstOutfit) +
+                            " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " + std::to_string(rep.accessoriesReplaced) +
+                            " accessory slot(s) replaced; the whole coordinate was imported; in memory only, card not saved)");
+                    } else {
+                        // Outfit import (regular clothing file, or a Coordinate PNG imported as clothing): the
+                        // extracted clothes + accessories go through the existing clothing import merge.
+                        card::ApplyClothingOptions opt;
+                        opt.outfit = shown;
+                        opt.srcOutfit = clothingSrcOutfit;
+                        const card::OutfitSourceReport rep = card::ApplyOutfitSource(c, clothingPath, opt);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.apply.outfit;
+                            g.clothingName = rep.sourceName;
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                        }
+                        out->clothing = rep.sourceName;
+                        Log(std::string(rep.fromCoordinate ? "coordinate (as clothing): " : "clothing: ") + rep.sourceName +
+                            " -> outfit " + std::to_string(rep.apply.outfit) +
+                            " (" + std::to_string(rep.apply.clothesReplaced) + " clothes slot(s) replaced, " +
+                            std::to_string(rep.apply.accessoriesAdded) + " accessory(ies) added" +
+                            (rep.apply.accessoriesRelocated ? ", " + std::to_string(rep.apply.accessoriesRelocated) + " moved to keep hair" : "") +
+                            ", " + std::to_string(rep.apply.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
                     }
-                    out->clothing = cl.displayName();
-                    Log("clothing: " + cl.displayName() + " -> outfit " + std::to_string(rep.outfit) +
-                        " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " +
-                        std::to_string(rep.accessoriesAdded) + " accessory(ies) added" +
-                        (rep.accessoriesRelocated ? ", " + std::to_string(rep.accessoriesRelocated) + " moved to keep hair" : "") +
-                        ", " + std::to_string(rep.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
                 } catch (const std::exception& e) {
                     out->notes.push_back(e.what());
-                    Log(std::string("clothing failed: ") + e.what(), LogKind::Error);
+                    Log(std::string(clothingMode == 1 ? "coordinate import failed: " : "clothing failed: ") + e.what(), LogKind::Error);
                 }
             }
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");

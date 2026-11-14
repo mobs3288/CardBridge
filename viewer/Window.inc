@@ -582,25 +582,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t buf[1024];
         if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) {
             const std::string dropped = Slashes(WideToUtf8(buf));
-            bool isClothing = false;
-            try {
-                card::ClothingFile probe = card::LoadClothingFile(dropped);
-                (void)probe;
-                isClothing = true;
-            } catch (const card::CardError& e) {
-                isClothing = e.kind == card::CardErrorKind::ClothesFile;
-            } catch (const std::exception&) {
-                isClothing = false;
-            }
-            if (isClothing) {
+            const card::ImageSourceKind sourceKind = card::DetectImageSource(dropped);
+            if (sourceKind == card::ImageSourceKind::RegularClothing) {
+                // A regular clothing file: applied as today, on the outfit on screen, no dialog.
                 ApplyClothingFile(dropped);
+            } else if (sourceKind == card::ImageSourceKind::Coordinate && !g.cardPath.empty() && !g.busy.load()) {
+                // A Koikatsu Coordinate PNG (a character card used as an outfit source), dropped on
+                // a loaded character: ask how to import it. The outfit on screen is the target.
+                ShowCoordinateImportDialog(dropped);
             } else {
+                // Nothing on screen (open the card, as always), or a source we do not import:
+                // fall back to the plain drop behavior (open as character), never to clothing import.
                 g.cam = {};
                 {
                     std::lock_guard<std::recursive_mutex> lk(g.mu);
                     g.clothingPath.clear();
                     g.clothingName.clear();
                     g.clothingOutfit = -1;
+                    g.clothingMode = 0;
+                    g.clothingSrcOutfit = -1;
                 }
                 StartLoad(dropped, -1);
             }

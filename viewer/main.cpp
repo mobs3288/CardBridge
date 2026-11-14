@@ -7,6 +7,10 @@
 // Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the outfit on screen in memory only
 // (hair worn as accessories is kept; the card on disk is never saved). It stays pinned to that one outfit slot: switching
 // to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// A Koikatsu Coordinate PNG (a character card used as an outfit source, 【KoiKatuChara】 and Party/SP variants) dropped
+// while a character is open asks how to import it: Import as Clothing (outfit contents only, merged as the clothing
+// import does - hair is kept) or Import as Coordinate (the whole coordinate replaces the slot, accessories included),
+// or Open as character (what a drop did before). With no character on screen it opens as a character, as before.
 // In the Parts list the import is its own "Added outfit" group, apart from the base model's Body/Head/Hair/Outfit/
 // Accessories: its header checkbox toggles every added part at once, each item keeps its own checkbox, the slot
 // marked * is the base outfit it replaced (shown as OUTFIT (REPLACED)), and < > move it to another slot.

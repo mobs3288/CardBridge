@@ -115,9 +115,13 @@ void usage() {
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
         "             [--outfit N]                    which outfit of the card to convert (default: the card's current one)\n"
-        "             [--clothes <file.png>]          an outfit file (KKCLOTHING) applied to that outfit in memory for this\n"
-        "                                             export only; the card on disk is never saved. Hair worn as accessories\n"
-        "                                             is kept (see --replace-accessories)\n"
+        "             [--clothes <file.png>]          an outfit source applied to that outfit in memory for this\n"
+        "                                             export only; the card on disk is never saved. A regular outfit file\n"
+        "                                             (KKCLOTHING) merges as usual; a Koikatsu Coordinate PNG (a character\n"
+        "                                             card used as an outfit source) is detected and its outfit contents\n"
+        "                                             (clothes, accessories, makeup) are extracted first - the source's\n"
+        "                                             identity, face, body and personality are never applied. Hair worn\n"
+        "                                             as accessories is kept (see --replace-accessories)\n"
         "             [--replace-accessories]         replace the outfit's accessories wholesale (may delete hair carried\n"
         "                                             as accessories; off by default, hair is always kept)\n"
         "             [--apose-degrees N] [--tpose]   the rest pose has the arms N degrees down from the T-pose (40 by default,\n"
@@ -310,37 +314,38 @@ bool loadCard(const std::string& path, card::Card& c, int& code) {
     return false;
 }
 
-bool loadClothing(const std::string& path, card::ClothingFile& c, int& code) {
-    try {
-        c = card::LoadClothingFile(path);
-        return true;
-    } catch (const card::CardError& e) {
-        std::fprintf(stderr, "%s: %s [%s]\n", path.c_str(), e.what(), card::ErrorKindName(e.kind));
-        code = 2;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "%s: %s\n", path.c_str(), e.what());
-        code = 3;
-    }
-    return false;
-}
-
-// Applies an outfit file to a character in memory (never writes a card file).
+// Applies an outfit source to a character in memory (never writes a card file). The source is detected
+// from its bytes: a regular outfit file merges through the clothing import merge; a Koikatsu
+// Coordinate PNG (a character card used as an outfit source) is first stripped down to its outfit
+// contents and then merged the same way (identity, face, body, personality never travel).
 // Returns the merged outfit index, or -1 with `code` set.
 int applyClothes(const Args& a, card::Card& c) {
     if (a.get("clothes").empty()) return -1;
-    card::ClothingFile cl;
-    int code = 0;
-    if (!loadClothing(normalizeSlashes(a.get("clothes")), cl, code)) throw std::runtime_error("clothing file failed");
-    if (!cl.supported) throw std::runtime_error(cl.supportNote);
     card::ApplyClothingOptions opt;
     if (a.opt.count("outfit")) opt.outfit = std::atoi(a.get("outfit").c_str());
     opt.keepHairAccessories = !a.has("replace-accessories");
-    auto rep = card::ApplyClothing(c, cl, opt);
-    std::fprintf(stderr, "  clothing: %s -> outfit %d (%d clothes slot(s) replaced, %d accessory(ies) added%s, %d hair accessories kept)\n",
-                 cl.displayName().c_str(), rep.outfit, rep.clothesReplaced, rep.accessoriesAdded,
-                 rep.accessoriesRelocated ? (", " + std::to_string(rep.accessoriesRelocated) + " moved to keep hair").c_str() : "",
-                 rep.hairPreserved);
-    return rep.outfit;
+    card::OutfitSourceReport rep;
+    try {
+        rep = card::ApplyOutfitSource(c, normalizeSlashes(a.get("clothes")), opt);
+    } catch (const card::CardError& e) {
+        std::fprintf(stderr, "%s: %s [%s]\n", normalizeSlashes(a.get("clothes")).c_str(), e.what(), card::ErrorKindName(e.kind));
+        throw std::runtime_error("outfit source failed");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "%s\n", e.what());
+        throw;
+    }
+    const auto& ar = rep.apply;
+    if (rep.fromCoordinate)
+        std::fprintf(stderr, "  coordinate (as clothing): %s (coordinate %d) -> outfit %d (%d clothes slot(s) replaced, %d accessory(ies) added%s, %d hair accessories kept)\n",
+                     rep.sourceName.c_str(), rep.srcOutfit, ar.outfit, ar.clothesReplaced, ar.accessoriesAdded,
+                     ar.accessoriesRelocated ? (", " + std::to_string(ar.accessoriesRelocated) + " moved to keep hair").c_str() : "",
+                     ar.hairPreserved);
+    else
+        std::fprintf(stderr, "  clothing: %s -> outfit %d (%d clothes slot(s) replaced, %d accessory(ies) added%s, %d hair accessories kept)\n",
+                     rep.sourceName.c_str(), ar.outfit, ar.clothesReplaced, ar.accessoriesAdded,
+                     ar.accessoriesRelocated ? (", " + std::to_string(ar.accessoriesRelocated) + " moved to keep hair").c_str() : "",
+                     ar.hairPreserved);
+    return ar.outfit;
 }
 
 int cmdInspect(const Args& a) {
