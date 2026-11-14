@@ -886,54 +886,19 @@ Value appendMeRows(const Value& charBin, const Bytes& clothingRows) {
 // import: the source coordinate's effective entry replaces only the target
 // coordinate's slot in the shared bone's list (other coordinates of the
 // target keep theirs, and a target without a KKEx block gets one created).
-// The clothing-file path keeps the original rule verbatim (the source wins
-// the whole shared bone) so regular clothing imports are unchanged.
-void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::string>& notes,
-                       int srcCoordinate, int dstOutfit, int dstOutfits, bool coordinateMode) {
-    if (!srcExtended.isMap()) return;
-    AbmxTable charAbmx = LoadAbmx(card.extended);
-    AbmxTable srcAbmx = LoadAbmx(srcExtended);
-    if (srcAbmx.empty()) return;
-    // A KKEx block is created when the target has none (vanilla cards carry
-    // no KKEx until a plugin writes one): without it the merged source's
-    // bone mods cannot be stored and would be silently lost.
-    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
-    if (!coordinateMode) {
-        for (const auto& kv : srcAbmx.bones) charAbmx.bones[kv.first] = kv.second;
-    } else {
-        const int m = dstOutfits > 0 && dstOutfit >= 0 && dstOutfit < dstOutfits ? dstOutfit : 0;
-        for (const auto& kv : srcAbmx.bones) {
-            const AbmxMod* srcMod = srcAbmx.find(kv.first, srcCoordinate);
-            if (!srcMod) continue;   // this source has no effective mod for that bone on this coordinate
-            if (srcMod->empty()) continue;
-            auto it = charAbmx.bones.find(kv.first);
-            if (it == charAbmx.bones.end()) {
-                // The target had nothing for the bone: a full-length list with identity entries everywhere except the
-                // replaced coordinate, so the source's mod applies only to that outfit (as it did on the source).
-                if (dstOutfits <= 0 || m >= dstOutfits) { charAbmx.bones[kv.first] = {*srcMod}; continue; }
-                std::vector<AbmxMod> list(static_cast<size_t>(dstOutfits), AbmxMod{});
-                list[static_cast<size_t>(m)] = *srcMod;
-                charAbmx.bones[kv.first] = std::move(list);
-                continue;
-            }
-            auto& list = it->second;
-            if (list.size() == 1) {
-                // A blanket mod shared by every coordinate: expand it, replace only the target coordinate's entry.
-                if (dstOutfits > 1 && m < dstOutfits) {
-                    const AbmxMod blanket = list[0];
-                    std::vector<AbmxMod> full(static_cast<size_t>(dstOutfits), blanket);
-                    full[static_cast<size_t>(m)] = *srcMod;
-                    list = std::move(full);
-                } else {
-                    list[0] = *srcMod;
-                }
-                continue;
-            }
-            if (list.size() <= static_cast<size_t>(m)) list.resize(static_cast<size_t>(m) + 1, AbmxMod{});
-            list[static_cast<size_t>(m)] = *srcMod;   // other coordinates of the target keep their entries
-        }
-    }
-    Bytes bin = PackAbmxBin(charAbmx);
+// The clothing-file path clears the destination coordinate-specific slot and
+// then lets the source win the whole shared bone, as before (except it no
+// longer keeps the target's stale destination-coordinate-specific mods).
+//
+// Rollback: CARDBRIDGE_ABMX_LEGACY_MERGE=1 restores the pre-fix behaviour exactly
+// (no destination-slot clear anywhere, and the v2-dictionary ABMX format is ignored),
+// reproducing byte-identical output. Both paths are kept separately so the legacy
+// behaviour can never drift from what was shipped.
+static bool abmxLegacyMerge() { return std::getenv("CARDBRIDGE_ABMX_LEGACY_MERGE") != nullptr; }
+
+// Writes the table back into the target's KKEx block (creating it when missing) and appends `note`.
+static void writeAbmxBack(Card& card, const AbmxTable& table, std::vector<std::string>& notes, const char* note) {
+    Bytes bin = PackAbmxBin(table);
     const auto setExtended = [&](const char* key, const Value& entry) {
         bool found = false;
         if (card.extended.isMap())
@@ -951,7 +916,94 @@ void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::st
     const int64_t version = existing.isArray() ? existing.at(size_t(0)).asInt(3) : 3;
     Value::Array entry{Value(version), Value(std::move(payload))};
     setExtended("KKABMPlugin.ABMData", Value(std::move(entry)));
-    notes.emplace_back("ABMX: source's bone mods merged (skirt fit)");
+    notes.emplace_back(note);
+}
+
+// The coordinate-import rebase: the source coordinate's effective modifier replaces only the target
+// coordinate's slot in the shared bone's list. Shared by the legacy and the current path.
+static void rebaseCoordinateSlot(AbmxTable& charAbmx, const AbmxTable& srcAbmx, int srcCoordinate, int dstOutfit, int dstOutfits) {
+    const int m = dstOutfits > 0 && dstOutfit >= 0 && dstOutfit < dstOutfits ? dstOutfit : 0;
+    for (const auto& kv : srcAbmx.bones) {
+        const AbmxMod* srcMod = srcAbmx.find(kv.first, srcCoordinate);
+        if (!srcMod) continue;   // this source has no effective mod for that bone on this coordinate
+        if (srcMod->empty()) continue;
+        auto it = charAbmx.bones.find(kv.first);
+        if (it == charAbmx.bones.end()) {
+            // The target had nothing for the bone: a full-length list with identity entries everywhere except the
+            // replaced coordinate, so the source's mod applies only to that outfit (as it did on the source).
+            if (dstOutfits <= 0 || m >= dstOutfits) { charAbmx.bones[kv.first] = {*srcMod}; continue; }
+            std::vector<AbmxMod> list(static_cast<size_t>(dstOutfits), AbmxMod{});
+            list[static_cast<size_t>(m)] = *srcMod;
+            charAbmx.bones[kv.first] = std::move(list);
+            continue;
+        }
+        auto& list = it->second;
+        if (list.size() == 1) {
+            // A blanket mod shared by every coordinate: expand it, replace only the target coordinate's entry.
+            if (dstOutfits > 1 && m < dstOutfits) {
+                const AbmxMod blanket = list[0];
+                std::vector<AbmxMod> full(static_cast<size_t>(dstOutfits), blanket);
+                full[static_cast<size_t>(m)] = *srcMod;
+                list = std::move(full);
+            } else {
+                list[0] = *srcMod;
+            }
+            continue;
+        }
+        if (list.size() <= static_cast<size_t>(m)) list.resize(static_cast<size_t>(m) + 1, AbmxMod{});
+        list[static_cast<size_t>(m)] = *srcMod;   // other coordinates of the target keep their entries
+    }
+}
+
+// Pre-fix behaviour, frozen verbatim behind CARDBRIDGE_ABMX_LEGACY_MERGE=1. Do not edit.
+static void mergeAbmxPayloadsLegacy(Card& card, const Value& srcExtended, std::vector<std::string>& notes,
+                                    int srcCoordinate, int dstOutfit, int dstOutfits, bool coordinateMode) {
+    if (!srcExtended.isMap()) return;
+    AbmxTable charAbmx = LoadAbmx(card.extended);
+    AbmxTable srcAbmx = LoadAbmx(srcExtended);
+    if (srcAbmx.empty()) return;
+    // A KKEx block is created when the target has none (vanilla cards carry no KKEx until a plugin writes one).
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    if (!coordinateMode) {
+        for (const auto& kv : srcAbmx.bones) charAbmx.bones[kv.first] = kv.second;   // the source wins the whole shared bone
+    } else {
+        rebaseCoordinateSlot(charAbmx, srcAbmx, srcCoordinate, dstOutfit, dstOutfits);
+    }
+    writeAbmxBack(card, charAbmx, notes, "ABMX: source's bone mods merged (skirt fit)");
+}
+
+// The ABMX import merge, matching the game's coordinate load (BoneController.OnCoordinateBeingLoaded):
+// every coordinate-specific modifier already on the character gets the destination coordinate's slot
+// cleared — whether or not the source carries ABMX data — and the source's modifiers replace that same
+// slot. Other coordinates keep their entries. A regular clothing file keeps the original rule that the
+// source wins the whole shared bone, applied to the destination outfit as usual.
+void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::string>& notes,
+                       int srcCoordinate, int dstOutfit, int dstOutfits, bool coordinateMode) {
+    if (abmxLegacyMerge()) { mergeAbmxPayloadsLegacy(card, srcExtended, notes, srcCoordinate, dstOutfit, dstOutfits, coordinateMode); return; }
+    AbmxTable charAbmx = LoadAbmx(card.extended);
+    const AbmxTable srcAbmx = srcExtended.isMap() ? LoadAbmx(srcExtended) : AbmxTable{};
+    const int m = dstOutfits > 0 && dstOutfit >= 0 && dstOutfit < dstOutfits ? dstOutfit : 0;
+    bool cleared = false;
+    for (auto& kv : charAbmx.bones) {
+        auto& list = kv.second;
+        if (list.size() <= 1 || m >= static_cast<int>(list.size())) continue;
+        AbmxMod& slot = list[static_cast<size_t>(m)];
+        if (slot.empty()) continue;   // already the empty modifier: nothing to reset
+        slot = AbmxMod{};             // BoneModifierData.Clear(): scale 1, rotation 0, position 0, length 1
+        cleared = true;
+    }
+    if (!cleared && srcAbmx.empty()) return;   // nothing to clear and nothing to merge: the target is left untouched
+    // A KKEx block is created when the target has none (vanilla cards carry no KKEx until a plugin writes one):
+    // the destination-slot clear and the merged source mods must be stored or they are silently lost.
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    if (!coordinateMode) {
+        for (const auto& kv : srcAbmx.bones) charAbmx.bones[kv.first] = kv.second;   // the source wins the whole shared bone
+    } else {
+        rebaseCoordinateSlot(charAbmx, srcAbmx, srcCoordinate, dstOutfit, dstOutfits);
+    }
+    writeAbmxBack(card, charAbmx, notes,
+                  srcAbmx.empty() ? "ABMX: outfit's coordinate-specific bone mods cleared"
+                                  : "ABMX: source's bone mods merged (skirt fit)");
 }
 
 // `clothToMerged[i]` is the merged slot holding source accessory slot i
