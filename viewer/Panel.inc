@@ -641,7 +641,7 @@ void ApplyClothingFile(const std::string& path) {
     StartLoad(g.cardPath, L->outfit, true);
 }
 
-// A Coordinate PNG dropped on a loaded character: the whole coordinate can be
+// A Coordinate PNG dropped on the viewer: the whole coordinate can be
 // imported, or just its outfit contents. The source is parsed here first so the
 // dialog can name it; a source that fails to parse never reaches the dialog
 // (the caller falls back to the plain open-a-character flow, as before).
@@ -682,6 +682,14 @@ void ImportCoordinateFile(const std::string& path, int mode) {
 // The drop-time question for a Coordinate PNG: outfit import, coordinate import, or open the
 // card as a character (what a drop did before Coordinate import existed).
 // CARDBRIDGE_COORDINATE_MODE=clothing|coordinate|open|cancel skips the dialog in scripted runs.
+// Whether a dropped Coordinate PNG may merge onto the outfit on screen right now.
+// Without a loaded, idle character there is no recipient, so the import buttons are not offered.
+static bool CanImportCoordinateNow() {
+    if (g.cardPath.empty()) return false;   // no target character on screen
+    if (g.busy.load()) return false;        // its load is still running
+    return Current() != nullptr;
+}
+
 void ShowCoordinateImportDialog(const std::string& path) {
     const char* envMode = std::getenv("CARDBRIDGE_COORDINATE_MODE");
     if (envMode && *envMode) {
@@ -716,28 +724,57 @@ void ShowCoordinateImportDialog(const std::string& path) {
         what = "(unresolved coordinate)";
     }
     const std::wstring wWho = Utf8ToWide(who), wWhat = Utf8ToWide(what), wFile = Utf8ToWide(fileio::FileName(path));
-    const std::wstring instruction = L"How should \"" + wFile + L"\" be imported?";
-    const std::wstring content =
-        L"This looks like a Koikatsu Coordinate saved from " + wWho + L" (\"" + wWhat + L"\").\n"
-        L"The import goes to the outfit on screen. Neither choice writes the card to disk.\n"
-        L"\n"
-        L"Import as Clothing:\n"
-        L"   Extracts only this coordinate's outfit - clothes, accessories and makeup - and merges them\n"
-        L"   onto the outfit on screen with the clothing import. Your character keeps their identity, face, body,\n"
-        L"   personality and every other outfit. Hair worn as accessories is kept.\n"
-        L"\n"
-        L"Import as Coordinate:\n"
-        L"   Replaces the outfit on screen with the whole coordinate, exactly as saved - clothes, accessories,\n"
-        L"   makeup and their settings. Accessories are replaced too (including hair worn as accessories).\n"
-        L"   Your character's identity is not imported either way.\n"
-        L"\n"
-        L"\"Open as character\" shows this card instead (what a drop did before Coordinate import existed).";
-    enum { kImportClothing = 101, kImportCoordinate = 102, kOpenCard = 103 };
-    TASKDIALOG_BUTTON btns[3] = {
+    const bool canImport = CanImportCoordinateNow();
+    const bool busy = g.busy.load();
+    std::wstring instruction, content;
+    if (canImport) {
+        instruction = L"How should \"" + wFile + L"\" be imported?";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from " + wWho + L" (\"" + wWhat + L"\").\n"
+            L"The import goes to the outfit on screen. Neither choice writes the card to disk.\n"
+            L"\n"
+            L"Import as Clothing:\n"
+            L"   Extracts only this coordinate's outfit - clothes, accessories and makeup - and merges them\n"
+            L"   onto the outfit on screen with the clothing import. Your character keeps their identity, face, body,\n"
+            L"   personality and every other outfit. Hair worn as accessories is kept.\n"
+            L"\n"
+            L"Import as Coordinate:\n"
+            L"   Replaces the outfit on screen with the whole coordinate, exactly as saved - clothes, accessories,\n"
+            L"   makeup and their settings. Accessories are replaced too (including hair worn as accessories).\n"
+            L"   Your character's identity is not imported either way.\n"
+            L"\n"
+            L"\"Open as character\" shows this card instead (what a drop did before Coordinate import existed).";
+    } else if (busy) {
+        instruction = L"\"" + wFile + L"\" cannot be imported yet";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from " + wWho + L" (\"" + wWhat + L"\").\n"
+            L"The character on screen is still loading; wait for it to finish and drop the file again to import.\n"
+            L"\n"
+            L"Neither choice writes the card to disk.";
+    } else {
+        instruction = L"\"" + wFile + L"\" cannot be imported yet";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from " + wWho + L" (\"" + wWhat + L"\").\n"
+            L"No character is on screen to import onto. Open one first (the Open button or Ctrl+O),\n"
+            L"then drop this card again - the import choices will be offered then.\n"
+            L"\n"
+            L"\"Open as character\" shows this card now (what a drop did before Coordinate import existed).\n"
+            L"Neither choice writes the card to disk.";
+    }
+    enum { kImportClothing = 101, kImportCoordinate = 102, kOpenCard = 103, kDismiss = 104 };
+    TASKDIALOG_BUTTON importBtns[3] = {
         {kImportClothing, L"Import as Clothing"},
         {kImportCoordinate, L"Import as Coordinate"},
         {kOpenCard, L"Open as character"},
     };
+    TASKDIALOG_BUTTON openBtns[1] = {
+        {kOpenCard, L"Open as character"},
+    };
+    TASKDIALOG_BUTTON busyBtns[1] = {
+        {kDismiss, L"Close (import when the load finishes)"},
+    };
+    const TASKDIALOG_BUTTON* btns = canImport ? importBtns : (busy ? busyBtns : openBtns);
+    const UINT btnCount = canImport ? 3u : 1u;
     TASKDIALOGCONFIG cfg{};
     cfg.cbSize = sizeof(cfg);
     cfg.hwndParent = g.hwnd;
@@ -746,8 +783,8 @@ void ShowCoordinateImportDialog(const std::string& path) {
     cfg.dwCommonButtons = TDCBF_CANCEL_BUTTON;
     cfg.pszMainInstruction = instruction.c_str();
     cfg.pszContent = content.c_str();
-    cfg.nDefaultButton = kImportClothing;
-    cfg.cButtons = static_cast<UINT>(sizeof(btns) / sizeof(btns[0]));
+    cfg.nDefaultButton = canImport ? kImportClothing : (busy ? kDismiss : kOpenCard);
+    cfg.cButtons = btnCount;
     cfg.pButtons = btns;
     int pressed = 0;
     if (TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr) != S_OK) pressed = 0;
@@ -765,6 +802,9 @@ void ShowCoordinateImportDialog(const std::string& path) {
         }
         g.cam = {};
         StartLoad(path, -1);
+        return;
+    case kDismiss:
+        Log("coordinate import dismissed; the current character is unchanged", LogKind::Info);
         return;
     default:
         Log("coordinate import cancelled; the current character is unchanged", LogKind::Info);

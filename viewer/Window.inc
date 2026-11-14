@@ -586,9 +586,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (sourceKind == card::ImageSourceKind::RegularClothing) {
                 // A regular clothing file: applied as today, on the outfit on screen, no dialog.
                 ApplyClothingFile(dropped);
-            } else if (sourceKind == card::ImageSourceKind::Coordinate && !g.cardPath.empty() && !g.busy.load()) {
-                // A Koikatsu Coordinate PNG (a character card used as an outfit source), dropped on
-                // a loaded character: ask how to import it. The outfit on screen is the target.
+            } else if (sourceKind == card::ImageSourceKind::Coordinate) {
+                // A Koikatsu Coordinate PNG (a character card used as an outfit source):
+                // always ask how to import it. With no character on screen the modal explains
+                // that there is nothing to import onto yet (it offers "Open as character").
                 ShowCoordinateImportDialog(dropped);
             } else {
                 // Nothing on screen (open the card, as always), or a source we do not import:
