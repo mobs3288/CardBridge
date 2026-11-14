@@ -577,6 +577,87 @@ std::string withOutfitPrefix(const std::string& property, int outfit) {
     return "outfit" + std::to_string(outfit) + "." + property;
 }
 
+// --- syncing the card's extended universalautoresolver payload with the merged rows ---
+// LoadCard seeds card.rows from KKEx but never writes it back: after a merge, a
+// re-export produced an outfit file with no rows even though rows existed.
+// Here the extended UAR bin is brought in line with card.rows: rows for dstOutfit
+// are dropped (clothes rows always, accessory rows the merge replaced) or, when the
+// coordinate is replaced wholesale, dropped entirely; untouched rows keep their raw
+// bins verbatim (their extra keys survive) and the rebased rows the merge added are
+// appended.
+void syncExtendedResolvedRows(Card& card, int dstOutfit, const std::vector<ResolveRow>& appended,
+                              const std::set<int>* replacedAcc /*nullptr: drop ALL rows of the outfit*/) {
+    const std::string prefix = "outfit" + std::to_string(dstOutfit) + ".";
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    bool hasUar = false;
+    int64_t uarVersion = 0;
+    Value::Map uarPayload;
+    for (const auto& kv : card.extended.map()) {
+        if (!kv.first.isStr() || kv.first.asStr() != "com.bepis.sideloader.universalautoresolver") continue;
+        hasUar = kv.second.isArray() && kv.second.size() >= 2;
+        if (hasUar) {
+            uarVersion = kv.second.at(size_t(0)).asInt(0);
+            if (kv.second.at(size_t(1)).isMap()) uarPayload = kv.second.at(size_t(1)).asMap();
+        }
+        break;
+    }
+    Value::Array outInfo;
+    if (hasUar) {
+        const Value* info = nullptr;
+        for (const auto& kv : uarPayload)
+            if (kv.first.isStr() && kv.first.asStr() == "info") { info = &kv.second; break; }
+        if (info != nullptr && info->isArray()) {
+            for (const auto& raw : info->asArray()) {
+                if (!raw.isBin()) continue;
+                Value row;
+                try { row = MsgPackParse(raw.asBin()); } catch (const FormatError&) { outInfo.emplace_back(raw); continue; }   // unparseable: keep verbatim
+                const std::string prop = row.at("Property").asStr();
+                bool drop = false;
+                if (prop.rfind(prefix, 0) == 0) {
+                    if (prop.find("ChaFileClothes.") != std::string::npos) drop = true;
+                    else if (prop.find("ChaFileAccessory.") != std::string::npos &&
+                             (!replacedAcc || replacedAcc->count(accessoryIndexOfProperty(prop)) != 0)) drop = true;
+                }
+                if (!drop) outInfo.emplace_back(raw);   // verbatim: extra keys, other coordinates
+            }
+        }
+    } else {
+        // The target has no UAR payload: seed one from the merged rows so a re-export carries them.
+        // CardBridge's row model round-trips exactly these five keys (LoadCard drops the rest), so nothing
+        // is lost that this path can see.
+        if (card.rows.empty()) return;
+    }
+    for (const auto& rr : appended) {
+        Value::Map row;
+        row.emplace_back(Value(std::string("ModID")), Value(rr.modId));
+        row.emplace_back(Value(std::string("Slot")), Value(rr.slot));
+        row.emplace_back(Value(std::string("LocalSlot")), Value(rr.localSlot));
+        row.emplace_back(Value(std::string("Property")), Value(rr.property));
+        row.emplace_back(Value(std::string("CategoryNo")), Value(static_cast<int64_t>(rr.category)));
+        outInfo.emplace_back(Value(MsgPackPack(Value(std::move(row)))));
+    }
+    // Nothing to write back when the UAR was absent, no rows were appended and there was nothing to merge either.
+    if (!hasUar && card.rows.empty()) return;
+    bool found = false;
+    for (auto& kv : card.extended.map()) {
+        if (!kv.first.isStr() || kv.first.asStr() != "com.bepis.sideloader.universalautoresolver") continue;
+        Value::Map payload2 = std::move(uarPayload);
+        bool keptInfo = false;
+        for (auto& pkv : payload2)
+            if (pkv.first.isStr() && pkv.first.asStr() == "info") { pkv.second = Value(std::move(outInfo)); keptInfo = true; }
+        if (!keptInfo) payload2.emplace_back(Value(std::string("info")), Value(std::move(outInfo)));
+        kv.second = Value(Value::Array{Value(uarVersion), Value(std::move(payload2))});
+        found = true;
+        break;
+    }
+    if (!found) {
+        Value::Map payload2;
+        payload2.emplace_back(Value(std::string("info")), Value(std::move(outInfo)));
+        card.extended.map().emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")),
+                                         Value(Value::Array{Value(uarVersion), Value(std::move(payload2))}));
+    }
+}
+
 // --- merging the outfit file's plugin payloads (ABMX, MaterialEditor) ---
 // The game's coordinate load applies the file's bone mods and material edits
 // for the outfit; without them the outfit shows its prefab look and fits
@@ -680,12 +761,61 @@ Value appendMeRows(const Value& charBin, const Bytes& clothingRows) {
 // the source's bone mods and material edits for the coordinate; without them
 // an imported outfit shows its prefab look and fits without its skirt scaling.
 
-void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::string>& notes) {
+// `srcCoordinate` is the coordinate of the source table the merge reads (0 for
+// a real outfit file, the card's coordinate number for a synthesised source).
+// `dstOutfit` is the outfit of the target that is being replaced, and
+// `dstOutfits` its total outfit count (an ABMX mod list longer than 1 is
+// coordinate-indexed). `coordinateMode` selects the rebase for a Coordinate
+// import: the source coordinate's effective entry replaces only the target
+// coordinate's slot in the shared bone's list (other coordinates of the
+// target keep theirs, and a target without a KKEx block gets one created).
+// The clothing-file path keeps the original rule verbatim (the source wins
+// the whole shared bone) so regular clothing imports are unchanged.
+void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::string>& notes,
+                       int srcCoordinate, int dstOutfit, int dstOutfits, bool coordinateMode) {
     if (!srcExtended.isMap()) return;
     AbmxTable charAbmx = LoadAbmx(card.extended);
     AbmxTable srcAbmx = LoadAbmx(srcExtended);
     if (srcAbmx.empty()) return;
-    for (const auto& kv : srcAbmx.bones) charAbmx.bones[kv.first] = kv.second;
+    // A KKEx block is created when the target has none (vanilla cards carry
+    // no KKEx until a plugin writes one): without it the merged source's
+    // bone mods cannot be stored and would be silently lost.
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    if (!coordinateMode) {
+        for (const auto& kv : srcAbmx.bones) charAbmx.bones[kv.first] = kv.second;
+    } else {
+        const int m = dstOutfits > 0 && dstOutfit >= 0 && dstOutfit < dstOutfits ? dstOutfit : 0;
+        for (const auto& kv : srcAbmx.bones) {
+            const AbmxMod* srcMod = srcAbmx.find(kv.first, srcCoordinate);
+            if (!srcMod) continue;   // this source has no effective mod for that bone on this coordinate
+            if (srcMod->empty()) continue;
+            auto it = charAbmx.bones.find(kv.first);
+            if (it == charAbmx.bones.end()) {
+                // The target had nothing for the bone: a full-length list with identity entries everywhere except the
+                // replaced coordinate, so the source's mod applies only to that outfit (as it did on the source).
+                if (dstOutfits <= 0 || m >= dstOutfits) { charAbmx.bones[kv.first] = {*srcMod}; continue; }
+                std::vector<AbmxMod> list(static_cast<size_t>(dstOutfits), AbmxMod{});
+                list[static_cast<size_t>(m)] = *srcMod;
+                charAbmx.bones[kv.first] = std::move(list);
+                continue;
+            }
+            auto& list = it->second;
+            if (list.size() == 1) {
+                // A blanket mod shared by every coordinate: expand it, replace only the target coordinate's entry.
+                if (dstOutfits > 1 && m < dstOutfits) {
+                    const AbmxMod blanket = list[0];
+                    std::vector<AbmxMod> full(static_cast<size_t>(dstOutfits), blanket);
+                    full[static_cast<size_t>(m)] = *srcMod;
+                    list = std::move(full);
+                } else {
+                    list[0] = *srcMod;
+                }
+                continue;
+            }
+            if (list.size() <= static_cast<size_t>(m)) list.resize(static_cast<size_t>(m) + 1, AbmxMod{});
+            list[static_cast<size_t>(m)] = *srcMod;   // other coordinates of the target keep their entries
+        }
+    }
     Bytes bin = PackAbmxBin(charAbmx);
     const auto setExtended = [&](const char* key, const Value& entry) {
         bool found = false;
@@ -896,6 +1026,570 @@ void mergeKcoxPayloads(Card& card, const Value& srcExtended, int srcCoordinate, 
         notes.emplace_back("KoiClothesOverlayX: previous outfit's garment paint cleared (the source has no overlays)");
 }
 
+// --- source KKEx coordinate-scoped payloads ------------------------------
+// Every helper below reads the source's KKEx payload for one coordinate and
+// rebases it to the target outfit. The Coordinate-import path replaces the
+// target coordinate wholesale; the clothing-file path merges around kept
+// hair, remapping accessory slots through `clothToMerged`. Both share the
+// same code so the two modes stay consistent.
+
+// Writes `value` as `innerKey` of the [version, payload] plugin entry `key`,
+// creating the entry (and an empty KKEx map) when absent. Version defaults to
+// the existing entry's version, or `defaultVersion` for a new entry.
+void writePluginPayload(Card& card, const char* key, const char* innerKey, const Value& value, int64_t defaultVersion) {
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    bool found = false;
+    for (auto& kv : card.extended.map()) {
+        if (!kv.first.isStr() || kv.first.asStr() != key) continue;
+        const int64_t version = kv.second.isArray() && kv.second.size() >= 2 ? kv.second.at(size_t(0)).asInt(defaultVersion) : defaultVersion;
+        Value::Map payload;
+        if (kv.second.isArray() && kv.second.size() >= 2 && kv.second.at(size_t(1)).isMap())
+            payload = kv.second.at(size_t(1)).asMap();
+        bool kfound = false;
+        for (auto& pkv : payload)
+            if (pkv.first.isStr() && pkv.first.asStr() == innerKey) { pkv.second = value; kfound = true; }
+        if (!kfound) payload.emplace_back(Value(std::string(innerKey)), value);
+        kv.second = Value(Value::Array{Value(version), Value(std::move(payload))});
+        found = true;
+        break;
+    }
+    if (!found) {
+        Value::Map payload;
+        payload.emplace_back(Value(std::string(innerKey)), value);
+        card.extended.map().emplace_back(Value(std::string(key)),
+                                         Value(Value::Array{Value(defaultVersion), Value(std::move(payload))}));
+    }
+}
+
+// Accessory_States (KKEx "Accessory_States"): the full per-slot visibility /
+// state-machine data for accessories, per coordinate. CoordinateData is a map
+// of coordIndex -> {_slotinfo, _names, _clothnotdata, _forceclothnotupdate}.
+// _slotinfo is slotIndex -> Slotdata {_binding (0-8 = ClothesKind, -1 unbound), _state (visible ranges
+// of the bound state), _shoetype, _parented}; _names is slotIndex -> NameData.
+// The clothing merge maps source slots through clothToMerged (the hair that
+// stays on the target keeps its accessory-state entries; slots that did not
+// travel are dropped); the Coordinate import replaces the whole coordinate's
+// entry.
+void mergeAccessoryStatesPayloads(Card& card, const Value& srcExtended, int srcCoordinate, int dstOutfit,
+                                  const std::vector<int>& clothToMerged, bool coordinateImport,
+                                  std::vector<std::string>& notes) {
+    if (!srcExtended.isMap()) return;
+    const Value& payload = srcExtended.at("Accessory_States").at(size_t(1));
+    if (!payload.isMap()) return;
+    const Value& bin = payload.at("CoordinateData");
+    if (!bin.isBin() || bin.asBin().empty()) return;
+    std::map<int64_t, Value> srcCoords;
+    try {
+        Value parsed = MsgPackParse(bin.asBin());
+        if (parsed.isMap())
+            for (const auto& kv : parsed.asMap())
+                if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
+    } catch (const FormatError&) {}
+    const auto sit = srcCoords.find(static_cast<int64_t>(srcCoordinate));
+    if (sit == srcCoords.end() || !sit->second.isMap()) return;   // nothing stored for this coordinate
+    const Value& srcEntry = sit->second;
+
+    std::map<int64_t, Value> dstCoords;
+    {
+        const Value& dpayload = card.extended.at("Accessory_States").at(size_t(1));
+        if (dpayload.isMap()) {
+            const Value& dbin = dpayload.at("CoordinateData");
+            if (dbin.isBin() && !dbin.asBin().empty()) {
+                try {
+                    Value dparsed = MsgPackParse(dbin.asBin());
+                    if (dparsed.isMap())
+                        for (const auto& kv : dparsed.asMap())
+                            if (kv.first.isInt()) dstCoords.emplace(kv.first.asInt(), kv.second);
+                } catch (const FormatError&) {}
+            }
+        }
+    }
+    const Value& srcSlotinfo = srcEntry.at("_slotinfo");
+    const Value& srcNames = srcEntry.at("_names");
+    const Value& srcClothNot = srcEntry.at("_clothnotdata");
+    const Value& srcForce = srcEntry.at("_forceclothnotupdate");
+    Value::Map entry;
+    if (coordinateImport) {
+        if (srcSlotinfo.isMap()) entry.emplace_back(Value(std::string("_slotinfo")), srcSlotinfo);
+        if (srcNames.isMap()) entry.emplace_back(Value(std::string("_names")), srcNames);
+        if (srcClothNot.isArray()) entry.emplace_back(Value(std::string("_clothnotdata")), srcClothNot);
+        if (srcForce.isBool()) entry.emplace_back(Value(std::string("_forceclothnotupdate")), srcForce);
+    } else {
+        // Keep the target's surviving entries (slots not re-mapped to a travelled source slot), then rewrite the travelled ones.
+        Value::Map mergedSlotinfo, mergedNames;
+        const Value& dstSlotinfo = dstCoords.count(dstOutfit) && dstCoords[dstOutfit].isMap() ? dstCoords[dstOutfit].at("_slotinfo") : Value::nil();
+        const Value& dstNames = dstCoords.count(dstOutfit) && dstCoords[dstOutfit].isMap() ? dstCoords[dstOutfit].at("_names") : Value::nil();
+        std::set<int> used;
+        if (srcSlotinfo.isMap()) {
+            for (const auto& kv : srcSlotinfo.asMap()) {
+                if (!kv.first.isInt()) continue;
+                const int s = static_cast<int>(kv.first.asInt());
+                const int m = s >= 0 && static_cast<size_t>(s) < clothToMerged.size() ? clothToMerged[static_cast<size_t>(s)] : -1;
+                if (m < 0) continue;
+                used.insert(m);
+            }
+        }
+        if (dstSlotinfo.isMap()) for (const auto& kv : dstSlotinfo.asMap()) if (kv.first.isInt() && !used.count(static_cast<int>(kv.first.asInt()))) mergedSlotinfo.emplace_back(kv.first, kv.second);
+        if (dstNames.isMap()) for (const auto& kv : dstNames.asMap()) if (kv.first.isInt() && !used.count(static_cast<int>(kv.first.asInt()))) mergedNames.emplace_back(kv.first, kv.second);
+        auto remapMap = [&](const Value& src, Value::Map& into) {
+            if (!src.isMap()) return;
+            for (const auto& kv : src.asMap()) {
+                if (!kv.first.isInt()) continue;
+                const int s = static_cast<int>(kv.first.asInt());
+                const int m = s >= 0 && static_cast<size_t>(s) < clothToMerged.size() ? clothToMerged[static_cast<size_t>(s)] : -1;
+                if (m < 0) continue;
+                bool found = false;
+                for (auto& ekv : into)
+                    if (ekv.first.isInt() && static_cast<int>(ekv.first.asInt()) == m) { ekv.second = kv.second; found = true; break; }
+                if (!found) into.emplace_back(Value(static_cast<int64_t>(m)), kv.second);
+            }
+        };
+        remapMap(srcSlotinfo, mergedSlotinfo);
+        remapMap(srcNames, mergedNames);
+        entry.emplace_back(Value(std::string("_slotinfo")), Value(std::move(mergedSlotinfo)));
+        entry.emplace_back(Value(std::string("_names")), Value(std::move(mergedNames)));
+        if (srcClothNot.isArray()) entry.emplace_back(Value(std::string("_clothnotdata")), srcClothNot);
+        if (srcForce.isBool()) entry.emplace_back(Value(std::string("_forceclothnotupdate")), srcForce);
+    }
+    dstCoords[dstOutfit] = Value(std::move(entry));
+    Value::Map outMap;
+    for (const auto& kv : dstCoords) outMap.emplace_back(Value(kv.first), kv.second);
+    writePluginPayload(card, "Accessory_States", "CoordinateData",
+                       Value(MsgPackPack(Value(std::move(outMap)))), 2);
+    notes.emplace_back(coordinateImport ? "Accessory_States: the source coordinate's accessory states imported"
+                                        : "Accessory_States: source's accessory states merged (slots remapped)");
+}
+
+// DynamicBoneEditor (KKEx "com.deathweasel.bepinex.dynamicboneeditor"): rows of
+// per-accessory bone modifiers, keyed by CoordinateIndex and Slot. Coordinate
+// import replaces the coordinate's rows wholesale (they belong to the
+// replaced accessories); the clothing merge keeps rows for surviving
+// accessories and maps rows through clothToMerged.
+void mergeDynamicBonePayloads(Card& card, const Value& srcExtended, int srcCoordinate, int dstOutfit,
+                              const std::vector<int>& clothToMerged, bool coordinateImport,
+                              const std::set<int>& replacedAcc,
+                              std::vector<std::string>& notes) {
+    if (!srcExtended.isMap()) return;
+    const Value& payload = srcExtended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1));
+    if (!payload.isMap()) return;
+    const Value& srcBin = payload.at("AccessoryDynamicBoneData");
+    if (!srcBin.isBin() || srcBin.asBin().empty()) return;
+    std::vector<Value> rows;
+    {
+        const Value& dpayload = card.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1));
+        const Value& dbin = dpayload.at("AccessoryDynamicBoneData");
+        if (dpayload.isMap() && dbin.isBin() && !dbin.asBin().empty()) {
+            try {
+                Value list = MsgPackParse(dbin.asBin());
+                if (list.isArray()) {
+                    for (const auto& row : list.asArray()) {
+                        if (!row.isMap()) { rows.emplace_back(row); continue; }
+                        const int64_t coord = row.at("CoordinateIndex").asInt(-1);
+                        const int64_t slot = row.at("Slot").asInt(0);
+                        if (coord == static_cast<int64_t>(dstOutfit) &&
+                            (coordinateImport || replacedAcc.count(static_cast<int>(slot)))) continue;
+                        rows.emplace_back(row);
+                    }
+                }
+            } catch (const FormatError&) {}
+        }
+    }
+    int added = 0;
+    try {
+        Value list = MsgPackParse(srcBin.asBin());
+        if (list.isArray()) {
+            for (const auto& row : list.asArray()) {
+                if (!row.isMap()) continue;
+                const int64_t coord = row.at("CoordinateIndex").asInt(-1);
+                if (coord != static_cast<int64_t>(srcCoordinate)) continue;
+                Value nr = row;
+                const int64_t slot = row.at("Slot").asInt(-1);
+                int mapped = static_cast<int>(slot);
+                if (slot >= 0) {
+                    if (static_cast<size_t>(slot) < clothToMerged.size()) mapped = clothToMerged[static_cast<size_t>(slot)];
+                    else if (!coordinateImport) continue;   // out of range: only the coordinate path passes a 1:1 map for every slot
+                    if (mapped < 0) continue;
+                    const auto setKeyInt = [&](const char* k, int64_t v) {
+                        for (auto& kv : nr.map()) if (kv.first.isStr() && kv.first.asStr() == k) { kv.second = Value(v); return; }
+                        nr.map().emplace_back(Value(std::string(k)), Value(v));
+                    };
+                    setKeyInt("Slot", mapped);
+                }
+                const auto setKeyIntCI = [&](const char* k, int64_t v) {
+                    for (auto& kv : nr.map()) if (kv.first.isStr() && kv.first.asStr() == k) { kv.second = Value(v); return; }
+                    nr.map().emplace_back(Value(std::string(k)), Value(v));
+                };
+                setKeyIntCI("CoordinateIndex", dstOutfit);
+                rows.emplace_back(std::move(nr));
+                ++added;
+            }
+        }
+    } catch (const FormatError&) {}
+    writePluginPayload(card, "com.deathweasel.bepinex.dynamicboneeditor", "AccessoryDynamicBoneData",
+                       Value(MsgPackPack(Value(std::move(rows)))), 0);
+    if (added > 0 || coordinateImport)
+        notes.emplace_back(coordinateImport ? "DynamicBoneEditor: the source coordinate's accessory bone mods imported (" + std::to_string(added) + " row(s))"
+                                            : "DynamicBoneEditor: source's accessory bone mods merged (" + std::to_string(added) + " row(s))");
+}
+
+// HairAccessoryCustomizer (KKEx "com.deathweasel.bepinex.hairaccessorycustomizer"):
+// per-coordinate, per-slot hair-accessory look, a map of coordIndex -> slotIndex -> settings.
+void mergeHairAccessoryPayloads(Card& card, const Value& srcExtended, int srcCoordinate, int dstOutfit,
+                                const std::vector<int>& clothToMerged, bool coordinateImport,
+                                const std::set<int>& /*unused*/,
+                                std::vector<std::string>& notes) {
+    if (!srcExtended.isMap()) return;
+    const Value& payload = srcExtended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1));
+    if (!payload.isMap()) return;
+    const Value& srcBin = payload.at("HairAccessories");
+    if (!srcBin.isBin() || srcBin.asBin().empty()) return;
+    std::map<int64_t, Value> srcCoords, dstCoords;
+    try {
+        Value parsed = MsgPackParse(srcBin.asBin());
+        if (parsed.isMap())
+            for (const auto& kv : parsed.asMap())
+                if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
+    } catch (const FormatError&) {}
+    {
+        const Value& dpayload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1));
+        const Value& dbin = dpayload.at("HairAccessories");
+        if (dpayload.isMap() && dbin.isBin() && !dbin.asBin().empty()) {
+            try {
+                Value dparsed = MsgPackParse(dbin.asBin());
+                if (dparsed.isMap())
+                    for (const auto& kv : dparsed.asMap())
+                        if (kv.first.isInt()) dstCoords.emplace(kv.first.asInt(), kv.second);
+            } catch (const FormatError&) {}
+        }
+    }
+    const auto sit = srcCoords.find(static_cast<int64_t>(srcCoordinate));
+    if (sit == srcCoords.end() || !sit->second.isMap()) return;
+    const Value& srcEntry = sit->second;
+    Value::Map merged;
+    if (coordinateImport) {
+        for (const auto& kv : srcEntry.asMap()) merged.emplace_back(kv.first, kv.second);
+    } else {
+        // keep target slots not touched by the merge, then rewrite the travelled ones
+        std::set<int> used;
+        for (const auto& kv : srcEntry.asMap()) {
+            if (!kv.first.isInt()) continue;
+            const int s = static_cast<int>(kv.first.asInt());
+            const int m = s >= 0 && static_cast<size_t>(s) < clothToMerged.size() ? clothToMerged[static_cast<size_t>(s)] : -1;
+            if (m < 0) continue;
+            used.insert(m);
+        }
+        const Value& dstEntry = dstCoords.count(dstOutfit) ? dstCoords[dstOutfit] : Value::nil();
+        if (dstEntry.isMap()) for (const auto& kv : dstEntry.asMap()) if (kv.first.isInt() && !used.count(static_cast<int>(kv.first.asInt()))) merged.emplace_back(kv.first, kv.second);
+        for (const auto& kv : srcEntry.asMap()) {
+            if (!kv.first.isInt()) { merged.emplace_back(kv.first, kv.second); continue; }
+            const int s = static_cast<int>(kv.first.asInt());
+            const int m = s >= 0 && static_cast<size_t>(s) < clothToMerged.size() ? clothToMerged[static_cast<size_t>(s)] : -1;
+            if (m < 0) continue;
+            bool found = false;
+            for (auto& ekv : merged)
+                if (ekv.first.isInt() && static_cast<int>(ekv.first.asInt()) == m) { ekv.second = kv.second; found = true; break; }
+            if (!found) merged.emplace_back(Value(static_cast<int64_t>(m)), kv.second);
+        }
+    }
+    dstCoords[dstOutfit] = Value(std::move(merged));
+    Value::Map outMap;
+    for (const auto& kv : dstCoords) outMap.emplace_back(Value(kv.first), kv.second);
+    writePluginPayload(card, "com.deathweasel.bepinex.hairaccessorycustomizer", "HairAccessories",
+                       Value(MsgPackPack(Value(std::move(outMap)))), 0);
+    notes.emplace_back(coordinateImport ? "HairAccessoryCustomizer: the source coordinate's hair accessory settings imported"
+                                        : "HairAccessoryCustomizer: source's hair accessory settings merged");
+}
+
+// pushup (KKEx "com.deathweasel.bepinex.pushup"): per-coordinate garment physics,
+// a map of coordIndex -> parameters. The body pushup (Pushup_BodyData) is tied
+// to the wearer's own body and is not ported; the top/bra (Pushup_TopData /
+// Pushup_BraData) are tuned to the garments, so they travel with the outfit.
+void mergePushupPayloads(Card& card, const Value& srcExtended, int srcCoordinate, int dstOutfit,
+                         std::vector<std::string>& notes) {
+    if (!srcExtended.isMap()) return;
+    const char* kKeys[] = {"Pushup_TopData", "Pushup_BraData"};
+    for (const char* key : kKeys) {
+        const Value& payload = srcExtended.at("com.deathweasel.bepinex.pushup").at(size_t(1));
+        if (!payload.isMap()) return;
+        const Value& srcBin = payload.at(key);
+        if (!srcBin.isBin() || srcBin.asBin().empty()) continue;
+        std::map<int64_t, Value> coords;
+        try {
+            Value parsed = MsgPackParse(srcBin.asBin());
+            if (parsed.isMap())
+                for (const auto& kv : parsed.asMap())
+                    if (kv.first.isInt()) coords.emplace(kv.first.asInt(), kv.second);
+        } catch (const FormatError&) {}
+        const auto it = coords.find(static_cast<int64_t>(srcCoordinate));
+        if (it == coords.end()) continue;
+        const Value& dpayload = card.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1));
+        std::map<int64_t, Value> dstCoords;
+        if (dpayload.isMap()) {
+            const Value& dbin = dpayload.at(key);
+            if (dbin.isBin() && !dbin.asBin().empty()) {
+                try {
+                    Value dparsed = MsgPackParse(dbin.asBin());
+                    if (dparsed.isMap())
+                        for (const auto& kv : dparsed.asMap())
+                            if (kv.first.isInt()) dstCoords.emplace(kv.first.asInt(), kv.second);
+                } catch (const FormatError&) {}
+            }
+        }
+        dstCoords[dstOutfit] = it->second;
+        Value::Map outMap;
+        for (const auto& kv : dstCoords) outMap.emplace_back(Value(kv.first), kv.second);
+        // Preserve the entry's version (0) and any sibling keys we do not manage (Pushup_BodyData, BraHigherPriority).
+        if (card.extended.isMap()) {
+            bool found = false;
+            for (auto& kv : card.extended.map()) {
+                if (!kv.first.isStr() || kv.first.asStr() != "com.deathweasel.bepinex.pushup") continue;
+                const int64_t version = kv.second.isArray() && kv.second.size() >= 2 ? kv.second.at(size_t(0)).asInt(0) : 0;
+                Value::Map payload2;
+                if (kv.second.isArray() && kv.second.size() >= 2 && kv.second.at(size_t(1)).isMap()) payload2 = kv.second.at(size_t(1)).asMap();
+                bool kfound = false;
+                for (auto& pkv : payload2)
+                    if (pkv.first.isStr() && pkv.first.asStr() == key) { pkv.second = Value(MsgPackPack(Value(std::move(outMap)))); kfound = true; }
+                if (!kfound) payload2.emplace_back(Value(std::string(key)), Value(MsgPackPack(Value(std::move(outMap)))));
+                kv.second = Value(Value::Array{Value(version), Value(std::move(payload2))});
+                found = true;
+                break;
+            }
+            if (!found) {
+                Value::Map payload2;
+                payload2.emplace_back(Value(std::string(key)), Value(MsgPackPack(Value(std::move(outMap)))));
+                card.extended.map().emplace_back(Value(std::string("com.deathweasel.bepinex.pushup")),
+                                                 Value(Value::Array{Value(int64_t{0}), Value(std::move(payload2))}));
+            }
+        } else {
+            card.extended = Value(Value::Map{});
+            Value::Map payload2;
+            payload2.emplace_back(Value(std::string(key)), Value(MsgPackPack(Value(std::move(outMap)))));
+            card.extended.map().emplace_back(Value(std::string("com.deathweasel.bepinex.pushup")),
+                                             Value(Value::Array{Value(int64_t{0}), Value(std::move(payload2))}));
+        }
+    }
+    notes.emplace_back("pushup: the source garments' pushup settings imported (body pushup left with the character)");
+}
+
+// Additional_Card_Info schema reconnaissance (both generations found in the wild, see docs/COORDINATE_IMPORT.md):
+//   v0 ({CoordinateInfo: bin({coordIdx: {...}}), CardInfo: bin({...})}) and
+//   v1 (flat map, per-coordinate keys are 7-element arrays over the outfits).
+// CardInfo/Personal_Clothing_Save/MakeUpKeep/Cosplay_Academy_Ready are
+// character-scoped and never travel; only the coordinate's own entry does:
+// the full entry in a Coordinate import, the accessory keep flags
+// (_acckeep/_hairkeep / AccKeep/HairAcc) in a clothing import (a clothing file
+// carries exactly those).
+bool aciEntry(const Value& ext, int64_t& versionOut, Value::Map& payloadOut) {
+    if (!ext.isMap()) return false;
+    const Value& entry = ext.at("Additional_Card_Info");
+    if (!entry.isArray() || entry.size() < 2 || !entry.at(size_t(1)).isMap()) return false;
+    versionOut = entry.at(size_t(0)).asInt(0);
+    payloadOut = entry.at(size_t(1)).asMap();
+    return true;
+}
+
+// Find in a raw map (string keys only); nullptr when absent.
+const Value* mapFind(const Value::Map& map, const char* key) {
+    for (const auto& kv : map)
+        if (kv.first.isStr() && kv.first.asStr() == key) return &kv.second;
+    return nullptr;
+}
+
+// The source coordinate's own gender-restriction flag from Additional_Card_Info
+// (v0 CoordinateInfo entries / v1 flat GenderType array), or -1 when absent.
+// The maker shows such a coordinate only to matching characters; the flag is a
+// restriction the author set, not something we can enforce here.
+int aciGenderRestriction(const Value& ext, int srcCoordinate, int srcOutfits) {
+    int64_t version = 0;
+    Value::Map payload;
+    if (!aciEntry(ext, version, payload)) return -1;
+    const int64_t n = static_cast<int64_t>(srcCoordinate);
+    const Value* ci = mapFind(payload, "CoordinateInfo");
+    if (ci && ci->isBin() && !ci->asBin().empty()) {
+        try {
+            Value parsed = MsgPackParse(ci->asBin());
+            if (!parsed.isMap()) return -1;
+            for (const auto& kv : parsed.asMap()) {
+                if (!kv.first.isInt() || kv.first.asInt() != n) continue;
+                if (!kv.second.isMap()) return -1;
+                const Value& ri = kv.second.at("_restrictioninfo");
+                if (!ri.isMap()) return -1;
+                const Value& g = ri.at("_gender");
+                return g.isNumber() ? static_cast<int>(g.asInt()) : -1;
+            }
+            return -1;
+        } catch (const FormatError&) { return -1; }
+    }
+    // v1: GenderType is an array over the outfits.
+    const Value* gtp = mapFind(payload, "GenderType");
+    Value arr;
+    if (gtp && gtp->isBin() && !gtp->asBin().empty()) {
+        try { arr = MsgPackParse(gtp->asBin()); } catch (const FormatError&) { return -1; }
+    } else if (gtp && gtp->isArray()) {
+        arr = *gtp;
+    } else {
+        return -1;
+    }
+    if (!arr.isArray() || srcOutfits <= 0 || static_cast<size_t>(n) >= arr.size()) return -1;
+    const Value& g = arr.at(static_cast<size_t>(n));
+    return g.isNumber() ? static_cast<int>(g.asInt()) : -1;
+}
+void writeAci(Card& card, int64_t version, const Value::Map& payload) {
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    Value entry(Value::Array{Value(version), Value(payload)});
+    for (auto& kv : card.extended.map()) {
+        if (!kv.first.isStr() || kv.first.asStr() != "Additional_Card_Info") continue;
+        kv.second = std::move(entry);
+        return;
+    }
+    card.extended.map().emplace_back(Value(std::string("Additional_Card_Info")), std::move(entry));
+}
+
+// Warns when a coordinate from a different-sex source is being applied; names what resolves fine (mod rows by GUID,
+// base rows by id) and what the maker would flag (the source coordinate's own gender restriction). Never discards anything.
+void sexMismatchNotes(const Card& src, const Card& dst, int srcCoordinate, std::vector<std::string>& notes) {
+    const Value& sSex = src.parameter.at("sex");
+    const Value& dSex = dst.parameter.at("sex");
+    const int64_t ss = sSex.isNumber() ? sSex.asInt() : -1;
+    const int64_t ds = dSex.isNumber() ? dSex.asInt() : -1;
+    if (ss < 0 || ds < 0 || ss == ds) return;
+    const char* sName = ss == 1 ? "female" : ss == 0 ? "male" : "unknown";
+    const char* dName = ds == 1 ? "female" : ds == 0 ? "male" : "unknown";
+    int modRows = 0;
+    for (const auto& rr : src.rows)
+        if (!rr.modId.empty() && rr.modId != "コイカツ" && rr.modId != "abdata") ++modRows;
+    const int genderFlag = src.extended.isMap() ? aciGenderRestriction(src.extended, srcCoordinate, static_cast<int>(src.outfits.size())) : -1;
+    notes.emplace_back(
+        std::string("sex mismatch: the source is a ") + sName + " card, the target " + dName +
+        " - mod items resolve by GUID regardless of sex (" + std::to_string(modRows) +
+        " mod row(s)) and base items by id, so the items themselves are unaffected; "
+        "garments authored for one sex may clash with the target's body shape (fit/textures). "
+        "Nothing is discarded; items with no matching row are reported missing by the resolver.");
+    if (genderFlag > 0)
+        notes.emplace_back("the source coordinate carries its own gender restriction flag (raw value " +
+                           std::to_string(genderFlag) +
+                           "), which the maker honours when browsing coordinates - it is imported with the coordinate, not enforced here");
+}
+
+// Copies the whole coordinate's ACI entry (coordinate import) or its accessory keep flags (clothing import)
+// from the source to the target's outfit slot `dstOutfit`. Character-scoped keys never travel.
+void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordinate, int srcOutfits, int dstOutfit,
+                             int dstOutfits, bool coordinateImport, std::vector<std::string>& notes) {
+    if (!srcExtended.isMap()) return;
+    int64_t srcVersion = 0;
+    Value::Map srcPayload;
+    if (!aciEntry(srcExtended, srcVersion, srcPayload)) return;
+    const int64_t n = static_cast<int64_t>(srcCoordinate);
+    int64_t dstVersion = 0;
+    Value::Map dstPayload;
+    const bool dstHad = card.extended.isMap() && aciEntry(card.extended, dstVersion, dstPayload);
+    const Value* srcCoordInfo = mapFind(srcPayload, "CoordinateInfo");
+    const bool srcIsV0 = srcCoordInfo != nullptr && srcCoordInfo->isBin();
+    bool ported = false;
+    if (srcIsV0) {
+        Value srcInfo;
+        try { srcInfo = MsgPackParse(srcCoordInfo->asBin()); } catch (const FormatError&) {}
+        std::map<int64_t, Value> srcEntries;
+        if (srcInfo.isMap())
+            for (const auto& kv : srcInfo.asMap())
+                if (kv.first.isInt()) srcEntries.emplace(kv.first.asInt(), kv.second);
+        std::map<int64_t, Value> dstEntries;
+        if (dstHad) {
+            const Value* dbin = mapFind(dstPayload, "CoordinateInfo");
+            if (dbin != nullptr && dbin->isBin() && !dbin->asBin().empty()) {
+                try {
+                    Value dparsed = MsgPackParse(dbin->asBin());
+                    if (dparsed.isMap())
+                        for (const auto& kv : dparsed.asMap())
+                            if (kv.first.isInt()) dstEntries.emplace(kv.first.asInt(), kv.second);
+                } catch (const FormatError&) {}
+            }
+        }
+        const auto it = srcEntries.find(n);
+        if (it != srcEntries.end() && it->second.isMap()) {
+            const Value& srcEntry = it->second;
+            if (coordinateImport) {
+                dstEntries[dstOutfit] = srcEntry;   // the coordinate, as saved, including restrictions and keep flags
+                ported = true;
+            } else {
+                // Clothing import: only the accessory keep flags travel (what a clothing file carries).
+                Value dstEntry = dstEntries.count(dstOutfit) ? dstEntries[dstOutfit] : Value(Value::Map{});
+                if (!dstEntry.isMap()) dstEntry = Value(Value::Map{});
+                Value::Map em;
+                if (dstEntry.isMap()) em = dstEntry.asMap();
+                auto poke = [&](const char* key) {
+                    const Value& fv = srcEntry.at(key);
+                    bool found = false;
+                    for (auto& kv : em)
+                        if (kv.first.isStr() && kv.first.asStr() == key) { kv.second = fv; found = true; }
+                    if (!found) em.emplace_back(Value(std::string(key)), fv);
+                };
+                if (srcEntry.at("_acckeep").isArray()) poke("_acckeep");
+                if (srcEntry.at("_hairkeep").isArray()) poke("_hairkeep");
+                dstEntries[dstOutfit] = Value(std::move(em));
+                ported = true;
+            }
+        }
+        Value::Map outInfo;
+        for (const auto& kv : dstEntries) outInfo.emplace_back(Value(kv.first), kv.second);
+        // CardInfo (character-scoped) stays whatever the target has; when the target has no ACI at all, create only what travels.
+        Value::Map outPayload = dstHad ? dstPayload : Value::Map{};
+        bool ciFound = false;
+        for (auto& kv : outPayload)
+            if (kv.first.isStr() && kv.first.asStr() == "CoordinateInfo") { kv.second = Value(MsgPackPack(Value(std::move(outInfo)))); ciFound = true; }
+        if (!ciFound) outPayload.emplace_back(Value(std::string("CoordinateInfo")), Value(MsgPackPack(Value(std::move(outInfo)))));
+        int64_t version = dstHad ? dstVersion : srcVersion;
+        writeAci(card, version, outPayload);
+        if (ported) notes.emplace_back(coordinateImport ? "Additional_Card_Info: the source coordinate's metadata imported (keep flags, restrictions)"
+                                                        : "Additional_Card_Info: accessory keep flags imported");
+        return;
+    }
+    // v1: per-coordinate keys are arrays (usually msgpack bins) spanning the source's outfits; copy index n -> m.
+    // Character-scoped keys never travel: bools, non-array bins, and arrays whose size differs from the
+    // source's outfit count (the character-scoped keeps are length 9, Cosplay_Academy_Ready a bare bool).
+    // srcOutfits == 1 means the source is a real outfit file; those carry no ACI in practice (verified
+    // against the installation), so nothing is ported rather than guessing at the array's shape.
+    if (srcOutfits < 2 || dstOutfits <= 0) return;
+    if (dstOutfits < static_cast<int>(dstOutfit) + 1) return;   // nothing sane to write into
+    const auto v1Decode = [](const Value& v) -> Value {
+        if (v.isBin() && !v.asBin().empty()) {
+            try { return MsgPackParse(v.asBin()); } catch (const FormatError&) { return Value::nil(); }
+        }
+        return v;
+    };
+    Value::Map outPayload = dstHad ? dstPayload : Value::Map{};
+    int portedCount = 0;
+    for (const auto& kv : srcPayload) {
+        const std::string key = kv.first.isStr() ? kv.first.asStr() : std::string();
+        if (key.empty()) continue;
+        if (key == "CoordinateInfo" || key == "CardInfo") continue;   // v0 leftovers in a v1 payload, if any
+        const Value decoded = v1Decode(kv.second);
+        if (!decoded.isArray() || static_cast<int>(decoded.size()) != srcOutfits) continue;   // character-scoped, or outfit-shape we cannot map
+        const Value& srcAtN = decoded.at(static_cast<size_t>(n));
+        if (!coordinateImport) {
+            if (key != "AccKeep" && key != "HairAcc") continue;   // clothing import: accessory keep flags only
+        }
+        const Value* curBin = mapFind(outPayload, key.c_str());
+        const Value cur = curBin ? v1Decode(*curBin) : Value(Value::Array{});
+        Value::Array arr;
+        if (cur.isArray()) arr = cur.asArray();
+        while (static_cast<int>(arr.size()) < dstOutfits) arr.emplace_back(Value(Value::Array{}));
+        arr[static_cast<size_t>(dstOutfit)] = srcAtN;
+        const Value encoded = Value(MsgPackPack(Value(std::move(arr))));
+        bool found = false;
+        for (auto& ekv : outPayload)
+            if (ekv.first.isStr() && ekv.first.asStr() == key) { ekv.second = encoded; found = true; }
+        if (!found) outPayload.emplace_back(Value(std::string(key)), encoded);
+        ++portedCount;
+    }
+    if (portedCount) {
+        int64_t version = dstHad ? dstVersion : srcVersion;
+        writeAci(card, version, outPayload);
+        notes.emplace_back(coordinateImport ? ("Additional_Card_Info: the source coordinate's metadata imported (" + std::to_string(portedCount) + " key(s))")
+                                            : ("Additional_Card_Info: accessory keep flags imported (" + std::to_string(portedCount) + " key(s))"));
+    }
+}
+
 } // namespace
 
 ClothingFile LoadClothingFile(const std::string& path) {
@@ -1021,6 +1715,7 @@ ClothingFile ExtractClothingFromCard(const Card& src, int coordinate) {
     cl.productNo = src.productNo;
     cl.supported = true;
     cl.srcCoordinate = n;
+    cl.srcOutfitCount = static_cast<int>(src.outfits.size());
     cl.outfit = src.outfits[static_cast<size_t>(n)];
     // The full map, with every reader aimed at coordinate n: nothing of the
     // source's identity (Custom/Parameter/Status, hair, other coordinates,
@@ -1061,6 +1756,7 @@ OutfitSourceReport ApplyOutfitSource(Card& card, const std::string& path, const 
         out.srcOutfit = cl.srcCoordinate;
         out.sourceName = cl.name;
         out.apply = ApplyClothing(card, cl, opt);
+        sexMismatchNotes(src, card, cl.srcCoordinate, out.apply.notes);
         return out;
     }
     ClothingFile cl = LoadClothingFile(path);
@@ -1150,14 +1846,39 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
             }
         }
     }
-
-    // --- sex sanity for cross-character transfers -----------------------------
+    // --- clothes toggle state: the source's current screen state travels with the coordinate
+    // (a character card carries exactly one Status; the coordinate shown at save time is
+    // what was on screen. byte[9] indexed by ClothesKind: 0=on, 1=half-off, 2=half-off#2, 3=off) ---
     {
-        const Value& sSex = src.parameter.at("sex");
-        const Value& dSex = card.parameter.at("sex");
-        if (sSex.isNumber() && dSex.isNumber() && sSex.asInt() != dSex.asInt())
-            rep.notes.emplace_back("the source and target characters have different sexes - clothes ids are typically sex-specific");
+        const Value& srcCs = src.status.at("clothesState");
+        const Value& dstCs = card.status.at("clothesState");
+        auto writeClothesState = [&](const Value& bytes) {
+            bool found = false;
+            for (auto& kv : card.status.map())
+                if (kv.first.isStr() && kv.first.asStr() == "clothesState") { kv.second = bytes; found = true; }
+            if (!found && card.status.isMap())
+                card.status.map().emplace_back(Value(std::string("clothesState")), bytes);
+        };
+        if (srcCs.isBin() && !srcCs.asBin().empty()) {
+            bool ok = true;
+            for (uint8_t b : srcCs.asBin()) ok = ok && b <= 3;
+            if (!ok) {
+                rep.notes.emplace_back("Status: source clothes toggle state not copied (unexpected byte values; kept the target's)");
+            } else if (srcCs.asBin().size() == 9) {
+                writeClothesState(srcCs);
+                rep.notes.emplace_back("Status: clothes toggle state (0=on, 1=half-off, 2=half-off#2, 3=off) copied from the source");
+            } else if (dstCs.isBin() && srcCs.asBin().size() == dstCs.asBin().size()) {
+                writeClothesState(srcCs);
+                rep.notes.emplace_back("Status: clothes toggle state copied from the source (length " + std::to_string(srcCs.asBin().size()) + ")");
+            } else {
+                rep.notes.emplace_back("Status: source clothes toggle state not copied (unexpected length " +
+                                       std::to_string(srcCs.asBin().size()) + "; kept the target's)");
+            }
+        }
     }
+
+    // --- sex mismatch (source and target of different sex) -------------------
+    sexMismatchNotes(src, card, n, rep.notes);
 
     // --- resolver rows: the target coordinate's rows are dropped, the source's rebased, 1:1
     const std::string dstPrefix = "outfit" + std::to_string(m) + ".";
@@ -1169,7 +1890,7 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
         card.rows = std::move(kept);
     }
     const std::string srcPrefix = "outfit" + std::to_string(n) + ".";
-    int rowsAdded = 0;
+    std::vector<ResolveRow> appended;
     for (const auto& rr : src.rows) {
         if (rr.property.rfind(srcPrefix, 0) != 0) continue;   // only this coordinate's rows travel
         ResolveRow nr = rr;
@@ -1177,13 +1898,15 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
         bool exists = false;
         for (const auto& e : card.rows) if (e.property == nr.property && e.slot == nr.slot) { exists = true; break; }
         if (exists) continue;
+        appended.push_back(nr);
         card.rows.push_back(std::move(nr));
-        ++rowsAdded;
     }
-    rep.notes.emplace_back("resolver rows: " + std::to_string(rowsAdded) + " rebased to outfit " + std::to_string(m));
+    rep.notes.emplace_back("resolver rows: " + std::to_string(appended.size()) + " rebased to outfit " + std::to_string(m));
+    // Keep the extended universalautoresolver payload consistent with the replaced coordinate's rows.
+    syncExtendedResolvedRows(card, m, appended, /*replacedAcc=*/nullptr);
 
     // --- coordinate-scoped plugin payloads, rebased n -> m -------------------
-    mergeAbmxPayloads(card, src.extended, rep.notes);
+    mergeAbmxPayloads(card, src.extended, rep.notes, n, m, static_cast<int>(card.outfits.size()), /*coordinateMode=*/true);
     {
         std::vector<int> identity;
         if (so.accessory.isMap() && so.accessory.at("parts").isArray()) {
@@ -1194,6 +1917,12 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
         }
         std::set<int> unused;
         mergeMaterialEditorPayloads(card, src.extended, m, identity, n, unused, /*dropAllAccRows=*/true, rep.notes);
+        mergeDynamicBonePayloads(card, src.extended, n, m, identity, /*coordinateImport=*/true, unused, rep.notes);
+        mergeHairAccessoryPayloads(card, src.extended, n, m, identity, /*coordinateImport=*/true, unused, rep.notes);
+        mergeAccessoryStatesPayloads(card, src.extended, n, m, identity, /*coordinateImport=*/true, rep.notes);
+        mergePushupPayloads(card, src.extended, n, m, rep.notes);
+        mergeAdditionalCardInfo(card, src.extended, n, static_cast<int>(src.outfits.size()), m,
+                                static_cast<int>(card.outfits.size()), /*coordinateImport=*/true, rep.notes);
     }
     mergeKcoxPayloads(card, src.extended, n, m, rep.notes);
 
@@ -1410,7 +2139,7 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     const std::string prefix = "outfit" + std::to_string(outfit) + ".";
     std::set<int> replacedAcc;
     for (size_t i = 0; i < charParts.size() && i < merged.size(); ++i) {
-        const bool same = isEmptyAcc(charParts[i]) && isEmptyAcc(merged[i]) ||
+        const bool same = (isEmptyAcc(charParts[i]) && isEmptyAcc(merged[i])) ||
                           (!isEmptyAcc(charParts[i]) && !isEmptyAcc(merged[i]) &&
                            charParts[i].at("type").asInt() == merged[i].at("type").asInt() &&
                            charParts[i].at("id").asInt() == merged[i].at("id").asInt());
@@ -1427,6 +2156,7 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
         if (!drop) kept.push_back(rr);
     }
     card.rows = std::move(kept);
+    std::vector<ResolveRow> appended;
     for (const auto& rr : clothes.rows) {
         const bool isClothesRow = rr.property.find("ChaFileClothes.") != std::string::npos;
         const bool isAccRow = rr.property.find("ChaFileAccessory.") != std::string::npos;
@@ -1441,14 +2171,29 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
         }
         bool exists = false;
         for (const auto& e : card.rows) if (e.property == nr.property && e.slot == nr.slot) { exists = true; break; }
-        if (!exists) card.rows.push_back(std::move(nr));
+        if (!exists) {
+            appended.push_back(nr);
+            card.rows.push_back(std::move(nr));
+        }
     }
+    // Keep the extended universalautoresolver payload consistent with the merged rows (writes the rows a re-export carries).
+    syncExtendedResolvedRows(card, outfit, appended, &replacedAcc);
     // --- plugin payloads: the source's bone mods and material edits for the outfit ---
-    if (clothes.extended.isMap()) {
-        mergeAbmxPayloads(card, clothes.extended, rep.notes);
+    {
+        mergeAbmxPayloads(card, clothes.extended, rep.notes, clothes.srcCoordinate, outfit,
+                          static_cast<int>(card.outfits.size()), /*coordinateMode=*/false);
         mergeMaterialEditorPayloads(card, clothes.extended, outfit, clothToMerged, clothes.srcCoordinate, replacedAcc,
                                     /*dropAllAccRows=*/false, rep.notes);
         mergeKcoxPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
+        mergeDynamicBonePayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+                                 /*coordinateImport=*/false, replacedAcc, rep.notes);
+        mergeHairAccessoryPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+                                   /*coordinateImport=*/false, replacedAcc, rep.notes);
+        mergeAccessoryStatesPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+                                     /*coordinateImport=*/false, rep.notes);
+        mergePushupPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
+        mergeAdditionalCardInfo(card, clothes.extended, clothes.srcCoordinate, clothes.srcOutfitCount, outfit,
+                                static_cast<int>(card.outfits.size()), /*coordinateImport=*/false, rep.notes);
     }
     // Added-clothing provenance: which assembled parts came from the file.
     // Their ScenePart.group stays Outfit/Accessories (the exporter's Take-off

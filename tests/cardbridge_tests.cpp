@@ -332,7 +332,7 @@ card::Card testToruCard() {
 }
 Value testMoeParameter() {
     Value::Map m;
-    m.emplace_back(Value(std::string("sex")), Value(int64_t{0}));
+    m.emplace_back(Value(std::string("sex")), Value(int64_t{1}));   // female (Parameter.sex: female = 1, male = 0)
     m.emplace_back(Value(std::string("lastname")), Value(std::string("Moe")));
     m.emplace_back(Value(std::string("firstname")), Value(std::string("Hashimoto")));
     return Value(std::move(m));
@@ -400,6 +400,165 @@ Value testToruResolverRows() {
     Value::Map inner;
     inner.emplace_back(Value(std::string("info")), Value(std::move(info)));
     return Value(Value::Array{Value(int64_t{1}), Value(std::move(inner))});
+}
+
+// ---- coordinate-import fixtures (plugins, ACI, ABMX) ----
+
+Value testAciV0Entry(int gender, const char* creator = "TestAuthor") {
+    Value::Map entry;
+    entry.emplace_back(Value(std::string("_makeup")), Value(true));
+    entry.emplace_back(Value(std::string("_clothnot")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    {
+        Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+        entry.emplace_back(Value(std::string("_coordsavebool")), Value(std::move(a)));
+    }
+    entry.emplace_back(Value(std::string("_acckeep")), Value(Value::Array{Value(int64_t{3})}));
+    entry.emplace_back(Value(std::string("_hairkeep")), Value(Value::Array{Value(int64_t{4})}));
+    entry.emplace_back(Value(std::string("_creatornames")), Value(Value::Array{Value(std::string(creator))}));
+    entry.emplace_back(Value(std::string("_set")), Value(std::string("TestSet")));
+    entry.emplace_back(Value(std::string("_subset")), Value(std::string("TestSubset")));
+    Value::Map ri;
+    ri.emplace_back(Value(std::string("_personality")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_trait")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_interest")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_height")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    ri.emplace_back(Value(std::string("_breast")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    ri.emplace_back(Value(std::string("_htype")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_club")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_gender")), Value(static_cast<int64_t>(gender)));
+    ri.emplace_back(Value(std::string("_coordtype")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_coordsubtype")), Value(int64_t{0}));
+    entry.emplace_back(Value(std::string("_restrictioninfo")), Value(std::move(ri)));
+    return Value(std::move(entry));
+}
+
+// Additional_Card_Info, v0 generation: [1, {CoordinateInfo: bin({coordIdx: entry}), CardInfo: bin({...})}]
+Value testAciV0(std::initializer_list<std::pair<int, int>> coords /* coordIdx -> gender */, const char* creator = "TestAuthor") {
+    Value::Map info;
+    for (const auto& [idx, gender] : coords)
+        info.emplace_back(Value(static_cast<int64_t>(idx)), testAciV0Entry(gender, creator));
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(info))))));
+    {
+        Value::Map cardInfo;
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            cardInfo.emplace_back(Value(std::string("_personalsavebool")), Value(std::move(a)));
+        }
+        cardInfo.emplace_back(Value(std::string("_cosplayready")), Value(false));
+        payload.emplace_back(Value(std::string("CardInfo")), Value(std::move(MsgPackPack(Value(std::move(cardInfo))))));
+    }
+    return Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))});
+}
+
+// Additional_Card_Info, v1 generation: [0, { <key>: bin(msgpack) ... }] with per-coordinate arrays of `outfits` entries
+Value testAciV1(int outfits) {
+    auto keepArr = [&](int n) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{5})})); return Value(std::move(a)); };
+    auto nArr = [&](int n, int64_t v) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); };
+    auto sArr = [&](int n, const char* s) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(std::string(s))); return Value(std::move(a)); };
+    auto bools = [&](int n, bool v) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); };
+    auto bool9n = [&](int n, bool v) { Value::Array a; for (int i = 0; i < n; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(v)); a.emplace_back(Value(std::move(inner))); } return Value(std::move(a)); };
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("HairAcc")), Value(std::move(MsgPackPack(Value(std::move(keepArr(outfits)))))));
+    payload.emplace_back(Value(std::string("AccKeep")), Value(std::move(MsgPackPack(Value(std::move(keepArr(outfits)))))));
+    payload.emplace_back(Value(std::string("CoordinateSaveBools")), Value(std::move(MsgPackPack(Value(std::move(bool9n(outfits, false)))))));
+    payload.emplace_back(Value(std::string("Creator")), Value(std::move(MsgPackPack(Value(std::move(sArr(outfits, "V1Author")))))));
+    payload.emplace_back(Value(std::string("GenderType")), Value(std::move(MsgPackPack(Value(std::move(nArr(outfits, 0)))))));
+    payload.emplace_back(Value(std::string("Personal_Clothing_Save")), Value(std::move(MsgPackPack(Value(std::move(bools(9, false)))))));   // character-scoped
+    payload.emplace_back(Value(std::string("MakeUpKeep")), Value(std::move(MsgPackPack(Value(std::move(bools(9, false)))))));               // character-scoped
+    payload.emplace_back(Value(std::string("Cosplay_Academy_Ready")), Value(std::move(MsgPackPack(Value(false)))));                          // character-scoped
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+}
+
+struct TestAccStateOutfit { int coord, slot, binding, state, shoetype; bool parented; };
+
+// Accessory_States payload builder: [2, {CoordinateData: bin({coordIdx: {...}})}]
+Value testAccessoryStates(std::initializer_list<TestAccStateOutfit> outfits) {
+    std::map<int64_t, Value::Map> slotinfoByCoord, namesByCoord;
+    for (const auto& o : outfits) {
+        {
+            Value::Map sd;
+            sd.emplace_back(Value(std::string("_binding")), Value(static_cast<int64_t>(o.binding)));
+            Value::Array states;
+            states.emplace_back(Value(Value::Array{Value(static_cast<int64_t>(o.state)), Value(static_cast<int64_t>(o.state))}));
+            sd.emplace_back(Value(std::string("_state")), Value(std::move(states)));
+            sd.emplace_back(Value(std::string("_shoetype")), Value(static_cast<int64_t>(o.shoetype)));
+            sd.emplace_back(Value(std::string("_parented")), Value(o.parented));
+            slotinfoByCoord[o.coord].emplace_back(Value(static_cast<int64_t>(o.slot)), Value(std::move(sd)));
+        }
+        {
+            Value::Map nd;
+            nd.emplace_back(Value(std::string("_name")), Value(std::string("state")));
+            Value::Map statenames;
+            statenames.emplace_back(Value(int64_t{0}), Value(std::string("Normal")));
+            nd.emplace_back(Value(std::string("_statenames")), Value(std::move(statenames)));
+            namesByCoord[o.coord].emplace_back(Value(static_cast<int64_t>(o.slot)), Value(std::move(nd)));
+        }
+    }
+    Value::Map all;
+    for (const auto& [coord, slotinfo] : slotinfoByCoord) {
+        Value::Map entry;
+        entry.emplace_back(Value(std::string("_slotinfo")), Value(Value(slotinfo)));
+        auto it = namesByCoord.find(coord);
+        entry.emplace_back(Value(std::string("_names")), it != namesByCoord.end() ? Value(Value(it->second)) : Value(Value::Map{}));
+        entry.emplace_back(Value(std::string("_clothnotdata")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+        entry.emplace_back(Value(std::string("_forceclothnotupdate")), Value(true));
+        all.emplace_back(Value(static_cast<int64_t>(coord)), Value(std::move(entry)));
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("CoordinateData")), Value(std::move(MsgPackPack(Value(std::move(all))))));
+    return Value(Value::Array{Value(int64_t{2}), Value(std::move(payload))});
+}
+
+// DynamicBoneEditor rows bin
+Value testDynamicBoneRows(std::initializer_list<std::pair<int, std::pair<int, int>>> rows) {
+    // {coordIdx, {slot, marker}}
+    Value::Array arr;
+    for (const auto& [ci, rest] : rows) {
+        const auto& [slot, marker] = rest;
+        Value::Map row;
+        row.emplace_back(Value(std::string("CoordinateIndex")), Value(static_cast<int64_t>(ci)));
+        row.emplace_back(Value(std::string("Slot")), Value(static_cast<int64_t>(slot)));
+        row.emplace_back(Value(std::string("BoneName")), Value(std::string("acce_" + std::to_string(marker))));
+        row.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+        arr.emplace_back(Value(std::move(row)));
+    }
+    return Value(std::move(MsgPackPack(Value(std::move(arr)))));
+}
+
+// HairAccessoryCustomizer: [0, {HairAccessories: bin({coordIdx: {slotIdx: settings}})}]
+Value testHairAccessories(std::initializer_list<std::pair<int, std::map<int, int>>> coords) {
+    Value::Map all;
+    for (const auto& [coord, slots] : coords) {
+        Value::Map& entry = all.emplace_back(Value(static_cast<int64_t>(coord)), Value(Value::Map{})).second.map();
+        for (const auto& [slot, marker] : slots) {
+            Value::Map settings;
+            settings.emplace_back(Value(std::string("HairGloss")), Value(true));
+            settings.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+            entry.emplace_back(Value(static_cast<int64_t>(slot)), Value(std::move(settings)));
+        }
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("HairAccessories")), Value(std::move(MsgPackPack(Value(std::move(all))))));
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+}
+
+// pushup, multi-coordinate: [0, {Pushup_TopData: bin({coordIdx: {...}}), Pushup_BraData: bin(...), Pushup_BodyData: bin(...)}]
+Value testPushupMulti(std::initializer_list<std::array<double, 4>> coords) {
+    Value::Map top, bra, body;
+    for (const auto& [ci, t, b, bd] : coords) {
+        Value::Map mT; mT.emplace_back(Value(std::string("Firmness")), Value(t)); mT.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        top.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mT)));
+        Value::Map mB; mB.emplace_back(Value(std::string("Firmness")), Value(b)); mB.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        bra.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mB)));
+        Value::Map mD; mD.emplace_back(Value(std::string("Firmness")), Value(bd)); mD.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        body.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mD)));
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("Pushup_TopData")), Value(std::move(MsgPackPack(Value(std::move(top))))));
+    payload.emplace_back(Value(std::string("Pushup_BraData")), Value(std::move(MsgPackPack(Value(std::move(bra))))));
+    payload.emplace_back(Value(std::string("Pushup_BodyData")), Value(std::move(MsgPackPack(Value(std::move(body))))));
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
 }
 
 // ---- PMX read-back (tests/PmxReader.h reads the written bytes, independent of the writer) ----
@@ -2859,6 +3018,467 @@ void unitTests() {
         threw = false;
         try { (void)card::LoadClothingFile(toruPath); } catch (const card::CardError&) { threw = true; }
         CHECK(threw);
+    });
+
+    auto setStatusKey = [](card::Card& c, const char* key, Value value) {
+        Value::Map s;
+        bool replaced = false;
+        for (const auto& kv : c.status.asMap()) {
+            if (kv.first.isStr() && kv.first.asStr() == key) { s.emplace_back(kv.first, value); replaced = true; }
+            else s.emplace_back(kv.first, kv.second);
+        }
+        if (!replaced) s.emplace_back(Value(std::string(key)), std::move(value));
+        c.status = Value(std::move(s));
+    };
+
+    test("coordinate import: clothesState (ClothesKind byte[9]) travels with the coordinate, clothing mode untouched", [setStatusKey] {
+        // src outfit 1 was saved with: top half-off#2, bra on, shorts off, pantyhose half-off
+        const Bytes cs{2, 0, 0, 3, 0, 1, 0, 0, 0};
+        card::Card src = testToruCard();
+        setStatusKey(src, "clothesState", Value(cs));
+        // coordinate mode: the toggle state of the outfit as saved is copied (it is what the source maker shows)
+        card::Card dst = testMoeCard();
+        card::ApplyCoordinateReport rep = card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        CHECK(dst.status.at("clothesState").asBin() == cs);
+        bool csNote = false;
+        for (const std::string& n : rep.notes) if (n.find("clothes toggle state") != std::string::npos) csNote = true;
+        CHECK(csNote);
+        // a target with no clothesState at all gains it
+        card::Card dstNone = testMoeCard();
+        {
+            Value::Map s;
+            for (const auto& kv : dstNone.status.asMap()) if (!(kv.first.isStr() && kv.first.asStr() == "clothesState")) s.emplace_back(kv.first, kv.second);
+            dstNone.status = Value(std::move(s));
+        }
+        card::ApplyCoordinate(dstNone, src, card::ApplyCoordinateOptions{});
+        CHECK(dstNone.status.at("clothesState").asBin() == cs);
+        // a target whose own clothesState is out-of-range is overwritten by the source's (the source's state is the one being imported)
+        card::Card dstBad = testMoeCard();
+        setStatusKey(dstBad, "clothesState", Value(Bytes{0, 0, 9, 0, 0, 0, 0, 0, 0}));
+        card::ApplyCoordinate(dstBad, src, card::ApplyCoordinateOptions{});
+        CHECK(dstBad.status.at("clothesState").asBin() == cs);
+        // a source with an out-of-range byte leaves the target's own state alone, with a note
+        card::Card srcBad = testToruCard();
+        setStatusKey(srcBad, "clothesState", Value(Bytes{0, 0, 9, 0, 0, 0, 0, 0, 0}));
+        card::Card dstGood = testMoeCard();
+        setStatusKey(dstGood, "clothesState", Value(Bytes{1, 1, 1, 1, 1, 1, 1, 1, 1}));
+        card::ApplyCoordinateReport rep3 = card::ApplyCoordinate(dstGood, srcBad, card::ApplyCoordinateOptions{});
+        CHECK(dstGood.status.at("clothesState").asBin() == Bytes({1, 1, 1, 1, 1, 1, 1, 1, 1}));
+        bool badNote = false;
+        for (const std::string& n : rep3.notes) if (n.find("unexpected byte values") != std::string::npos) badNote = true;
+        CHECK(badNote);
+        // clothing import never touches the target's Status
+        card::Card moe = testMoeCard();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(moe, cl, copt);
+        bool hasCs = false;
+        for (const auto& kv : moe.status.asMap()) if (kv.first.isStr() && kv.first.asStr() == "clothesState") hasCs = true;
+        CHECK(!hasCs);
+    });
+
+    test("coordinate import: Additional_Card_Info v0 - coordinate entries travel in coordinate mode, keep flags in clothing mode", [] {
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), testAciV0({{1, 2}, {3, 0}})}});
+        // a dst that carries its own v0 ACI (outfit 0 gender 0, outfit 3 gender 3, cosplayready true)
+        Value::Map cardInfo;
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            cardInfo.emplace_back(Value(std::string("_personalsavebool")), Value(std::move(a)));
+        }
+        cardInfo.emplace_back(Value(std::string("_cosplayready")), Value(true));
+        Value::Map dstPayload;
+        {
+            Value::Map mod;
+            mod.emplace_back(Value(static_cast<int64_t>(0)), testAciV0Entry(0, "MoeAuthor"));
+            mod.emplace_back(Value(static_cast<int64_t>(3)), testAciV0Entry(3, "MoeAuthor"));
+            dstPayload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(mod))))));
+        }
+        dstPayload.emplace_back(Value(std::string("CardInfo")), Value(std::move(MsgPackPack(Value(std::move(cardInfo))))));
+        const Value dstAci(Value::Array{Value(int64_t{1}), Value(std::move(dstPayload))});
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), dstAci}});
+            return m;
+        };
+        // --- coordinate mode: the whole per-coordinate entry is replaced, other coordinates and CardInfo stay
+        card::Card dstCoord = makeMoe();
+        card::ApplyCoordinate(dstCoord, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& ci = dstCoord.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci.asBin());
+            CHECK(parsed.isMap());
+            const Value& e0 = parsed.atInt(0);
+            CHECK(e0.at("_creatornames").at(size_t(0)).asStr() == "TestAuthor");
+            CHECK(e0.at("_acckeep").at(size_t(0)).asInt() == 3);
+            CHECK(e0.at("_restrictioninfo").at("_gender").asInt() == 2);      // the source outfit-1 restriction
+            const Value& e3 = parsed.atInt(3);
+            CHECK(e3.at("_restrictioninfo").at("_gender").asInt() == 3);      // Moe's own outfit stays
+        }
+        {
+            const Value& ciCard = dstCoord.extended.at("Additional_Card_Info").at(size_t(1)).at("CardInfo");
+            Value cardParsed = MsgPackParse(ciCard.asBin());
+            CHECK(cardParsed.at("_cosplayready").asBool());                    // character-scoped: untouched
+        }
+        // --- clothing mode: keep flags travel, restrictions/author do not, CardInfo untouched
+        card::Card dstClothes = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothes, cl, copt);
+        {
+            const Value& ci = dstClothes.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci.asBin());
+            const Value& e0 = parsed.atInt(0);
+            CHECK(e0.at("_acckeep").at(size_t(0)).asInt() == 3);               // keep flags travel
+            CHECK(e0.at("_hairkeep").at(size_t(0)).asInt() == 4);
+            CHECK(e0.at("_creatornames").at(size_t(0)).asStr() == "MoeAuthor"); // author does not
+            CHECK(e0.at("_restrictioninfo").at("_gender").asInt() == 0);         // restrictions do not
+            const Value& e3 = parsed.atInt(3);
+            CHECK(e3.at("_restrictioninfo").at("_gender").asInt() == 3);         // outfit 3 untouched
+        }
+        // --- a target without ACI at all gains one (coordinate mode creates it)
+        card::Card dstNoAci = testMoeCard();
+        card::ApplyCoordinate(dstNoAci, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& ci2 = dstNoAci.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci2.asBin());
+            CHECK(parsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 3);
+            CHECK(parsed.atInt(0).at("_restrictioninfo").at("_gender").asInt() == 2);
+        }
+        // --- card source applies it per coordinate index, not blindly to 0
+        card::Card dstNoAciClothes = testMoeCard();
+        card::ClothingFile cl2 = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt2; copt2.outfit = 4;                       // apply to outfit slot 4
+        card::ApplyClothing(dstNoAciClothes, cl2, copt2);
+        const Value& ci3 = dstNoAciClothes.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+        Value parsed3 = MsgPackParse(ci3.asBin());
+        CHECK(parsed3.atInt(4).at("_acckeep").at(size_t(0)).asInt() == 3);         // lands in the slot it was applied to
+        CHECK(parsed3.atInt(0).isNil() || parsed3.atInt(0).size() == 0 || !parsed3.atInt(0).at("_creatornames").isArray());
+    });
+
+    test("coordinate import: Additional_Card_Info v1 - coordinate arrays travel in coordinate mode, keep flags in clothing mode", [] {
+        // build the source v1 payload with distinct markers per outfit
+        Value::Map srcPayload;
+        auto mkBin = [](Value v) { return Value(std::move(MsgPackPack(std::move(v)))); };
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{60 + i})}));
+            srcPayload.emplace_back(Value(std::string("AccKeep")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{80 + i})}));
+            srcPayload.emplace_back(Value(std::string("HairAcc")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(std::string("Author" + std::to_string(i))));
+            srcPayload.emplace_back(Value(std::string("Creator")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(i == 1)); a.emplace_back(Value(std::move(inner))); }
+            srcPayload.emplace_back(Value(std::string("CoordinateSaveBools")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(true));
+            srcPayload.emplace_back(Value(std::string("Personal_Clothing_Save")), mkBin(Value(std::move(a))));   // character-scoped: must not travel
+        }
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")),
+                                         Value(Value::Array{Value(int64_t{0}), Value(std::move(srcPayload))})}});
+        // dst with its own v1 payload with distinct markers
+        Value::Map dstPayload;
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{900 + i})}));
+            dstPayload.emplace_back(Value(std::string("AccKeep")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(std::string("MoeAuthor" + std::to_string(i))));
+            dstPayload.emplace_back(Value(std::string("Creator")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            dstPayload.emplace_back(Value(std::string("Cosplay_Academy_Ready")), Value(std::move(MsgPackPack(Value(false)))));
+            // the character-scoped key the test exists to preserve: dst's own must stay
+            Value::Array a2; for (int i = 0; i < 9; ++i) a2.emplace_back(Value(true));
+            dstPayload.emplace_back(Value(std::string("Personal_Clothing_Save")), mkBin(Value(std::move(a2))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(false)); a.emplace_back(Value(std::move(inner))); }
+            dstPayload.emplace_back(Value(std::string("CoordinateSaveBools")), mkBin(Value(std::move(a))));
+        }
+        Value dstAci(Value::Array{Value(int64_t{0}), Value(std::move(dstPayload))});
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), dstAci}});
+            return m;
+        };
+        // --- coordinate mode: per-coordinate arrays are replaced, character-scoped keys stay
+        card::Card dstCoord = makeMoe();
+        card::ApplyCoordinate(dstCoord, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& pay = dstCoord.extended.at("Additional_Card_Info").at(size_t(1));
+            Value creator = MsgPackParse(pay.at("Creator").asBin());
+            Value acckeep = MsgPackParse(pay.at("AccKeep").asBin());
+            Value hair = MsgPackParse(pay.at("HairAcc").asBin());
+            Value csb = MsgPackParse(pay.at("CoordinateSaveBools").asBin());
+            CHECK(creator.at(size_t(0)).asStr() == "Author1");       // source outfit 1
+            CHECK(creator.at(size_t(3)).asStr() == "MoeAuthor3");    // outfit 3 untouched
+            CHECK(acckeep.at(size_t(0)).at(size_t(0)).asInt() == 61);
+            CHECK(hair.at(size_t(0)).at(size_t(0)).asInt() == 81);
+            CHECK(csb.at(size_t(0)).at(size_t(0)).asBool());
+            CHECK(csb.at(size_t(3)).at(size_t(0)).asBool() == false);
+            const Value& psb = pay.at("Personal_Clothing_Save");
+            Value psbV = MsgPackParse(psb.asBin());
+            CHECK(psbV.at(size_t(0)).asBool());                       // character-scoped: source's true, but...
+            (void)psbV;
+            // the target's own Personal_Clothing_Save was true and must remain exactly that
+            Value psbCheck = MsgPackParse(pay.at("Personal_Clothing_Save").asBin());
+            bool allTrue = true; for (const auto& e : psbCheck.asArray()) allTrue = allTrue && e.asBool();
+            CHECK(allTrue);
+        }
+        // --- clothing mode: only AccKeep/HairAcc travel
+        card::Card dstClothes = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothes, cl, copt);
+        {
+            const Value& pay = dstClothes.extended.at("Additional_Card_Info").at(size_t(1));
+            Value creator = MsgPackParse(pay.at("Creator").asBin());
+            Value acckeep = MsgPackParse(pay.at("AccKeep").asBin());
+            Value hair = MsgPackParse(pay.at("HairAcc").asBin());
+            Value csb = MsgPackParse(pay.at("CoordinateSaveBools").asBin());
+            CHECK(creator.at(size_t(0)).asStr() == "MoeAuthor0");    // author does not travel
+            CHECK(acckeep.at(size_t(0)).at(size_t(0)).asInt() == 61);
+            CHECK(hair.at(size_t(0)).at(size_t(0)).asInt() == 81);
+            CHECK(csb.at(size_t(0)).at(size_t(0)).asBool() == false); // save-bools do not travel
+        }
+    });
+
+    test("coordinate import: ABMX creates KKEx on a vanilla target and rebases per coordinate", [] {
+        card::AbmxTable t;
+        {
+            card::AbmxMod out0; out0.scale = {1.2f, 1.2f, 1.2f}; out0.length = 1.2f;
+            card::AbmxMod out1; out1.scale = {2.5f, 2.5f, 2.5f}; out1.length = 2.5f;
+            t.bones["skirt"] = {out0, out1};
+        }
+        {
+            card::AbmxMod m; m.scale = {2.5f, 2.5f, 2.5f}; m.length = 2.5f;
+            t.bones["chest"] = {m};   // shared by every outfit
+        }
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{
+            {Value(std::string("KKABMPlugin.ABMData")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(t))}})})},
+        });
+        // --- a vanilla target without any KKEx gets one created, coordinate-scoped rebase
+        card::Card dst = testMoeCard();
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        card::AbmxTable merged = card::LoadAbmx(dst.extended);
+        const card::AbmxMod* skirt0 = merged.find("skirt", 0);
+        CHECK(skirt0 != nullptr && skirt0->scale.x == 2.5f);            // src's outfit-1 effective entry, at target coordinate 0
+        const card::AbmxMod* skirt5 = merged.find("skirt", 5);
+        CHECK(skirt5 != nullptr && skirt5->scale.x == 1.0f);            // other coordinates keep neutral identity
+        const card::AbmxMod* chest0 = merged.find("chest", 0);
+        CHECK(chest0 != nullptr && chest0->scale.x == 2.5f);            // shared by the whole source coordinate
+        CHECK(dst.outfits.size() == 7);
+        // --- a target with a blanket (length-1) list expands: the source's effective entry replaces only the replaced coordinate
+        card::Card dstBlanket = testMoeCard();
+        {
+            card::AbmxTable dt;
+            card::AbmxMod blanket; blanket.scale = {1.1f, 1.1f, 1.1f}; blanket.length = 1.1f;
+            dt.bones["skirt"] = {blanket};
+            dstBlanket.extended = Value(Value::Map{
+                {Value(std::string("KKABMPlugin.ABMData")),
+                 Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(dt))}})})},
+            });
+        }
+        card::ApplyCoordinate(dstBlanket, src, card::ApplyCoordinateOptions{});
+        card::AbmxTable expanded = card::LoadAbmx(dstBlanket.extended);
+        const card::AbmxMod* s0 = expanded.find("skirt", 0);
+        const card::AbmxMod* s5 = expanded.find("skirt", 5);
+        CHECK(s0 != nullptr && s0->scale.x == 2.5f);
+        CHECK(s5 != nullptr && s5->scale.x == 1.1f);
+        // --- unknown plugins in a dst with KKEx are preserved verbatim
+        Value ksox = Value(Value::Array{Value(int64_t{1}), Value(Value::Map{{Value(std::string("Marker")), Value(std::string("keep-me"))}})});
+        card::Card dstKsox = testMoeCard();
+        dstKsox.extended = Value(Value::Map{{Value(std::string("KSOX")), ksox}});
+        card::ApplyCoordinate(dstKsox, src, card::ApplyCoordinateOptions{});
+        CHECK(dstKsox.extended.at("KSOX").at(size_t(1)).at("Marker").asStr() == "keep-me");
+        // --- clothing path keeps the historical union rule (source wins whole shared bone)
+        card::Card dstClothing = testMoeCard();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothing, cl, copt);
+        card::AbmxTable mergedClothing = card::LoadAbmx(dstClothing.extended);
+        const card::AbmxMod* cs0 = mergedClothing.find("skirt", 0);
+        CHECK(cs0 != nullptr && cs0->scale.x == 1.2f);                 // whole list union: outfit-0 entry is used for outfit 0
+        const card::AbmxMod* cs1 = mergedClothing.find("skirt", 1);
+        CHECK(cs1 != nullptr && cs1->scale.x == 2.5f);                 // outfit-1 entry for outfit 1
+    });
+
+    test("coordinate import: per-coordinate plugins rebase (DynamicBoneEditor, HairAccessoryCustomizer, Accessory_States, pushup)", [] {
+        card::Card src = testToruCard();
+        // patch the source outfit: pins in slots 0, 4, 6 (used for the slot-remap assertions below)
+        src.outfits[1].accessory = testAccessoryMap({
+            testAccPart(124, 7777, "a_n_headside"), testAccPart(120, 0, ""), testAccPart(120, 0, ""), testAccPart(120, 0, ""),
+            testAccPart(124, 7778, "a_n_headside"), testAccPart(120, 0, ""), testAccPart(124, 7779, "a_n_headside"), testAccPart(120, 0, ""),
+        });
+        src.extended = Value(Value::Map{
+            {Value(std::string("Accessory_States")), testAccessoryStates({{1, 0, 3, 1, 2, false}, {1, 4, 5, 2, 1, true}, {3, 7, 2, 3, 2, false}})},
+            {Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+             Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                Value(std::move(testDynamicBoneRows({{1, {0, 21}}, {3, {4, 33}}, {1, {2, 22}}, {1, {4, 23}}, {1, {6, 24}}})))}})})},
+            {Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+             testHairAccessories({{1, {{0, 93}, {4, 90}, {6, 91}}}, {3, {{8, 92}}}})},
+            {Value(std::string("com.deathweasel.bepinex.pushup")), testPushupMulti({{1, 0.77, 0.66, 0.55}})},
+        });
+        const Value dstAci(Value::Map{});   // unused; kept for symmetry with the other fixtures
+        (void)dstAci;
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{
+                {Value(std::string("Accessory_States")), testAccessoryStates({{0, 0, 5, 6, 1, true}, {0, 3, 9, 4, 1, true}, {3, 7, 2, 3, 2, false}})},
+                {Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+                 Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                    Value(std::move(testDynamicBoneRows({{0, {0, 44}}, {0, {1, 45}}, {3, {4, 55}}, {0, {3, 46}}})))}})})},
+                {Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+                 testHairAccessories({{0, {{0, 73}, {1, 70}, {3, 72}}}, {3, {{2, 71}}}})},
+                {Value(std::string("com.deathweasel.bepinex.pushup")), testPushupMulti({{0, 0.11, 0.22, 0.33}, {3, 0.44, 0.55, 0.66}})},
+            });
+            return m;
+        };
+        // --- coordinate mode
+        card::Card dst = makeMoe();
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        // Accessory_States: outfit 0 = the source outfit-1 data (slots 0/4/6); outfit 3 kept
+        const Value& asd = dst.extended.at("Accessory_States").at(size_t(1)).at("CoordinateData");
+        Value asdParsed = MsgPackParse(asd.asBin());
+        CHECK(asdParsed.atInt(0).at("_slotinfo").atInt(0).at("_binding").asInt() == 3);
+        CHECK(asdParsed.atInt(0).at("_slotinfo").atInt(4).at("_binding").asInt() == 5);
+        CHECK(asdParsed.atInt(3).at("_slotinfo").atInt(7).at("_binding").asInt() == 2);
+        CHECK(asdParsed.atInt(0).at("_names").atInt(0).at("_name").asStr() == "state");
+        // DBE: outfit 0's stale rows dropped, source rows rebased 1:1, outfit 3 kept
+        const Value& dbe = dst.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+        Value dbeParsed = MsgPackParse(dbe.asBin());
+        std::set<int64_t> markers;
+        for (const auto& row : dbeParsed.asArray()) markers.insert(row.at("Marker").asInt());
+        CHECK(markers.count(21) == 1 && markers.count(23) == 1 && markers.count(24) == 1 && markers.count(55) == 1);
+        CHECK(markers.count(44) == 0 && markers.count(45) == 0 && markers.count(46) == 0 && markers.count(33) == 0 && markers.count(22) == 0);
+        // HairAccessories: outfit 0 = src slots 0/4/6; outfit 3 kept
+        const Value& hac = dst.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+        Value hacParsed = MsgPackParse(hac.asBin());
+        CHECK(hacParsed.atInt(0).atInt(0).at("Marker").asInt() == 93);
+        CHECK(hacParsed.atInt(0).atInt(4).at("Marker").asInt() == 90);
+        CHECK(hacParsed.atInt(0).atInt(6).at("Marker").asInt() == 91);
+        CHECK(hacParsed.atInt(3).atInt(2).at("Marker").asInt() == 71);
+        // pushup: outfit 0 = the source's garment physics; outfit 3 untouched (Moe's own)
+        const Value& top = dst.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_TopData");
+        Value topParsed = MsgPackParse(top.asBin());
+        CHECK(std::fabs(topParsed.atInt(0).at("Firmness").asFloat() - 0.77) < 1e-6);
+        CHECK(std::fabs(topParsed.atInt(3).at("Firmness").asFloat() - 0.44) < 1e-6);
+        const Value& body = dst.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_BodyData");
+        Value bodyParsed = MsgPackParse(body.asBin());
+        CHECK(std::fabs(bodyParsed.atInt(0).at("Firmness").asFloat() - 0.33) < 1e-6);   // the character's own body pushup survives (not ported)
+        CHECK(std::fabs(bodyParsed.atInt(3).at("Firmness").asFloat() - 0.66) < 1e-6);
+        // --- clothing mode: slots remapped around the kept hair (src slot 0 -> dst slot 1), unmapped src slots dropped
+        card::Card moe = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(moe, cl, copt);
+        const Value& asd2 = moe.extended.at("Accessory_States").at(size_t(1)).at("CoordinateData");
+        Value asd2Parsed = MsgPackParse(asd2.asBin());
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(1).at("_binding").asInt() == 3);   // src slot 0 -> dst slot 1 (dst slot 0 = Moe's kept hair)
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(0).at("_binding").asInt() == 5);   // Moe's slot-0 entry survives
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(3).at("_binding").asInt() == 9);   // Moe's slot-3 entry survives (unmapped)
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(4).at("_binding").asInt() == 5);   // src slot 4 -> dst slot 4 (remapped)
+        CHECK(asd2Parsed.atInt(3).at("_slotinfo").atInt(7).at("_binding").asInt() == 2);   // outfit 3 kept
+        const Value& dbe2 = moe.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+        Value dbe2Parsed = MsgPackParse(dbe2.asBin());
+        std::set<int64_t> keep;
+        for (const auto& row : dbe2Parsed.asArray()) keep.insert(row.at("Marker").asInt());
+        CHECK(keep.count(21) == 1 && keep.count(23) == 1 && keep.count(24) == 1 && keep.count(44) == 1 && keep.count(46) == 1 && keep.count(55) == 1);
+        CHECK(keep.count(45) == 0 && keep.count(33) == 0 && keep.count(22) == 0);   // replaced slots dropped, coord-3's kept row 33 ignored here
+        const Value& hac2 = moe.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+        Value hac2Parsed = MsgPackParse(hac2.asBin());
+        CHECK(hac2Parsed.atInt(0).atInt(1).at("Marker").asInt() == 93);             // src slot 0 -> dst slot 1
+        CHECK(hac2Parsed.atInt(0).atInt(0).at("Marker").asInt() == 73);             // Moe's kept slot-0 setting survives untouched
+        CHECK(hac2Parsed.atInt(0).atInt(4).at("Marker").asInt() == 90);             // src slot 4 -> dst slot 4
+        CHECK(hac2Parsed.atInt(0).atInt(6).at("Marker").asInt() == 91);             // src slot 6 -> dst slot 6
+        CHECK(hac2Parsed.atInt(3).atInt(2).at("Marker").asInt() == 71);             // outfit 3 kept
+        const Value& top2 = moe.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_TopData");
+        Value top2Parsed = MsgPackParse(top2.asBin());
+        CHECK(std::fabs(top2Parsed.atInt(0).at("Firmness").asFloat() - 0.77) < 1e-6);                // the garment is the source's: its physics travel
+        CHECK(std::fabs(top2Parsed.atInt(3).at("Firmness").asFloat() - 0.44) < 1e-6);                // outfit 3 untouched
+        const Value& body2 = moe.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_BodyData");
+        Value body2Parsed = MsgPackParse(body2.asBin());
+        CHECK(std::fabs(body2Parsed.atInt(0).at("Firmness").asFloat() - 0.33) < 1e-6);               // the character's own body pushup survives
+    });
+
+    test("coordinate import: sex mismatch warns accurately, never drops items", [] {
+        Value::Map sPrm;
+        sPrm.emplace_back(Value(std::string("sex")), Value(int64_t{0}));   // male source
+        sPrm.emplace_back(Value(std::string("lastname")), Value(std::string("Toru")));
+        sPrm.emplace_back(Value(std::string("firstname")), Value(std::string("Terada")));
+        Value kkex;
+        {
+            Value::Map m;
+            m.emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows());
+            m.emplace_back(Value(std::string("Additional_Card_Info")), testAciV0({{1, 2}, {3, 0}}));
+            kkex = Value(std::move(m));
+        }
+        const std::string path = writeTestCardFile("coordpng_male.png", testToruCoords(), Value(std::move(sPrm)),
+                                                   testToruStatus(), testToruHair(), std::move(kkex));
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, path, opt);
+        CHECK(rep.fromCoordinate);
+        bool sexNote = false, restrictionNote = false;
+        for (const std::string& n : rep.apply.notes) {
+            if (n.find("sex mismatch") != std::string::npos && n.find("2 mod row(s)") != std::string::npos) sexNote = true;
+            if (n.find("gender restriction flag") != std::string::npos && n.find("raw value 2") != std::string::npos) restrictionNote = true;
+        }
+        CHECK(sexNote && restrictionNote);
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);   // nothing dropped
+    });
+
+    test("coordinate import: unknown target plugins and unrelated rows survive verbatim", [] {
+        card::Card src = testToruCard();
+        card::Card dst = testMoeCard();
+        dst.extended = Value(Value::Map{
+            {Value(std::string("KSOX")), Value(Value::Array{Value(int64_t{1}), Value(Value::Map{{Value(std::string("Marker")), Value(std::string("keep-me"))}})})},
+            {Value(std::string("custom.plugin")), Value(Value::Map{{Value(std::string("custom.plugin.marker")), Value(std::string("this-must-survive"))}})},
+        });
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        CHECK(dst.extended.at("KSOX").at(size_t(1)).at("Marker").asStr() == "keep-me");
+        CHECK(dst.extended.at("custom.plugin").at("custom.plugin.marker").asStr() == "this-must-survive");
+        CHECK(dst.outfits[3].clothes.at("parts").at(size_t(0)).at("id").asInt() == 59);
+    });
+
+    test("coordinate import: round trip - import then export then re-import preserves the outfit", [] {
+        card::Card src = testToruCard();
+        // Toru's coordinate was saved with accessories visible (the exporter drops accessories hidden by showAccessory)
+        {
+            Value::Map st;
+            for (const auto& kv : src.status.asMap())
+                if (kv.first.isStr() && kv.first.asStr() == "showAccessory") st.emplace_back(kv.first, Value(testFlags(true)));
+                else st.emplace_back(kv.first, kv.second);
+            src.status = Value(std::move(st));
+        }
+        card::Card moe = testMoeCard();
+        card::ApplyCoordinate(moe, src, card::ApplyCoordinateOptions{});
+        card::ClothingExportOptions eopt;
+        eopt.outfit = 0;
+        moe.faceThumbnail = tinyPng();
+        const Bytes out = card::BuildClothingFileBytes(moe, eopt, nullptr);
+        const std::string tmp = tempPath("roundtrip_outfit.png");
+        { FILE* f = std::fopen(tmp.c_str(), "wb"); if (f) { std::fwrite(out.data(), 1, out.size(), f); std::fclose(f); } }
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        card::Card moe2 = testMoeCard();
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, tmp, copt);
+        CHECK(moe2.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        // Moe's own slot 0 (her hair pin) is kept; Toru's pin lands in the first free slot (1) - the same behaviour the clothing import guarantees.
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 9001);
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(1)).at("id").asInt() == 7777);
     });
 
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {

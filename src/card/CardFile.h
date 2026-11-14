@@ -124,6 +124,10 @@ struct ClothingFile {
     // Author-slot ids are still used as-is (card coordinates carry no
     // "local" ids); rows are rebased to the unprefixed shape a file stores.
     int srcCoordinate = 0;
+    // How many outfits the source had (1 for a real file; the card's outfit
+    // count for a synthesised source). The coordinate-scoped payload rebase
+    // uses it to size per-coordinate arrays.
+    int srcOutfitCount = 1;
 
     // Additional_Card_Info (CoordinateInfo): which slots the file asks to keep.
     // Empty (the sample) means no explicit preference; the merge below keeps
