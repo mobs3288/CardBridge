@@ -896,8 +896,8 @@ Value appendMeRows(const Value& charBin, const Bytes& clothingRows) {
 // behaviour can never drift from what was shipped.
 static bool abmxLegacyMerge() { return std::getenv("CARDBRIDGE_ABMX_LEGACY_MERGE") != nullptr; }
 
-// Writes the table back into the target's KKEx block (creating it when missing) and appends `note`.
-static void writeAbmxBack(Card& card, const AbmxTable& table, std::vector<std::string>& notes, const char* note) {
+// Writes the table back into the target's KKEx block (creating it when missing) and appends `note` to `notes` when non-null.
+static void writeAbmxBack(Card& card, const AbmxTable& table, std::vector<std::string>* notes, const char* note) {
     Bytes bin = PackAbmxBin(table);
     const auto setExtended = [&](const char* key, const Value& entry) {
         bool found = false;
@@ -916,7 +916,7 @@ static void writeAbmxBack(Card& card, const AbmxTable& table, std::vector<std::s
     const int64_t version = existing.isArray() ? existing.at(size_t(0)).asInt(3) : 3;
     Value::Array entry{Value(version), Value(std::move(payload))};
     setExtended("KKABMPlugin.ABMData", Value(std::move(entry)));
-    notes.emplace_back(note);
+    if (notes) notes->emplace_back(note);
 }
 
 // The coordinate-import rebase: the source coordinate's effective modifier replaces only the target
@@ -969,7 +969,7 @@ static void mergeAbmxPayloadsLegacy(Card& card, const Value& srcExtended, std::v
     } else {
         rebaseCoordinateSlot(charAbmx, srcAbmx, srcCoordinate, dstOutfit, dstOutfits);
     }
-    writeAbmxBack(card, charAbmx, notes, "ABMX: source's bone mods merged (skirt fit)");
+    writeAbmxBack(card, charAbmx, &notes, "ABMX: source's bone mods merged (skirt fit)");
 }
 
 // The ABMX import merge, matching the game's coordinate load (BoneController.OnCoordinateBeingLoaded):
@@ -1001,9 +1001,33 @@ void mergeAbmxPayloads(Card& card, const Value& srcExtended, std::vector<std::st
     } else {
         rebaseCoordinateSlot(charAbmx, srcAbmx, srcCoordinate, dstOutfit, dstOutfits);
     }
-    writeAbmxBack(card, charAbmx, notes,
+    writeAbmxBack(card, charAbmx, &notes,
                   srcAbmx.empty() ? "ABMX: outfit's coordinate-specific bone mods cleared"
                                   : "ABMX: source's bone mods merged (skirt fit)");
+}
+
+// The viewer's default-outfit load: the same clear the outfit import applies, but with no source merge.
+// Every coordinate-specific modifier on the in-memory card gets the displayed outfit's slot reset to the
+// empty modifier, so the default wardrobe renders exactly like a coordinate import with an ABMX-less source
+// would produce it. Other coordinates keep their entries. The caller logs when this returns true.
+// The plain CLI export never calls this. CARDBRIDGE_ABMX_LEGACY_MERGE=1 skips it entirely.
+bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::vector<std::string>* notes) {
+    if (abmxLegacyMerge()) return false;
+    AbmxTable charAbmx = LoadAbmx(card.extended);
+    const int m = dstOutfits > 0 && dstOutfit >= 0 && dstOutfit < dstOutfits ? dstOutfit : 0;
+    bool cleared = false;
+    for (auto& kv : charAbmx.bones) {
+        auto& list = kv.second;
+        if (list.size() <= 1 || m >= static_cast<int>(list.size())) continue;
+        AbmxMod& slot = list[static_cast<size_t>(m)];
+        if (slot.empty()) continue;   // already the empty modifier: nothing to reset
+        slot = AbmxMod{};            // BoneModifierData.Clear(): scale 1, rotation 0, position 0, length 1
+        cleared = true;
+    }
+    if (!cleared) return false;
+    if (!card.extended.isMap()) card.extended = Value(Value::Map{});
+    writeAbmxBack(card, charAbmx, notes, "ABMX: outfit's coordinate-specific bone mods cleared (default outfit load)");
+    return true;
 }
 
 // `clothToMerged[i]` is the merged slot holding source accessory slot i

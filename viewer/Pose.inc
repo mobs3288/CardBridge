@@ -615,6 +615,8 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     Log(std::string(clothingMode == 1 ? "coordinate import failed: " : "clothing failed: ") + e.what(), LogKind::Error);
                 }
             }
+            if (card::ClearOutfitCoordinateSlot(c, shown, static_cast<int>(c.outfits.size()), nullptr))
+                Log("ABMX: this outfit's coordinate-specific bone mods cleared (default outfit load; the export uses the same table)");
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;

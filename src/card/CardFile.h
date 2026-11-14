@@ -279,4 +279,12 @@ struct ApplyCoordinateReport {
 };
 ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCoordinateOptions& opt);
 
+// The viewer's default-outfit load applies the same treatment an outfit import does: the slot of the
+// displayed outfit is cleared of every coordinate-specific bone modifier on the target's in-memory ABMX
+// table (BoneModifierData.Clear(), i.e. scale 1, rotation 0, position 0, length 1). Other coordinates
+// keep their entries. Idempotent; a no-op when nothing needs clearing. Returns true when a slot was reset.
+// The card file itself is never written. Skipped entirely when CARDBRIDGE_ABMX_LEGACY_MERGE=1 is set
+// (pre-fix behaviour). The plain CLI export never calls this.
+bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::vector<std::string>* notes);
+
 } // namespace cardbridge::card
