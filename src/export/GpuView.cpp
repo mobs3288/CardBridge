@@ -1595,7 +1595,10 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 if (!gm.vb) continue;
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
-                    const int bucket = mat.alpha ? 2 : (!I.plain && detail::IsOverlayMaterial(scene, mat) ? 1 : 0);
+                    // A material the bake moved to the transparent pass (painted translucency) draws like the game's alpha
+                    // garments: depth-tested, never written, alpha-blended, among the transparent paint layers. The plain
+                    // (as-exported) view keeps bucket 2: that path also has no doubt the PMX would draw blended there.
+                    const int bucket = (!I.plain && mat.translucent) ? 1 : (mat.alpha ? 2 : (!I.plain && detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
                     if (bucket != pass) continue;
                     if (bucket == 1) {   // the game's transparent compositing: tested, not written, alpha-blended
                         ctx->OMSetDepthStencilState(I.depthOverlay, 0);

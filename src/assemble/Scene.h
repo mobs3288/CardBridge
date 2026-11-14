@@ -201,6 +201,8 @@ struct SceneTranslucency {
         int cutoffProp = -1;           // index into Scene::materials[].props of the _Cutoff property, while the bake holds the material over it
         Vec4 cutoffPrior{};            // its value before the bake (restored on revert)
         bool cutoffTouched = false;    // the _Cutoff was rewritten by the bake (and must be put back)
+        int shaderIndexHad = -1;       // the material's shader index before the bake swapped it to the alpha-capable twin (-1 = not swapped)
+        bool shaderSwapped = false;    // the bake swapped the material's shader for the sheer-cloth one
     };
     std::vector<Layer> layers;
 };

@@ -4,6 +4,7 @@
 #include "core/Bytes.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -96,6 +97,26 @@ bool Visible(const std::vector<char>* hiddenParts, size_t pi, const assemble::Sc
     if (!part.includeInExport) return false;
     if (flag == 2) return true;   // forced on (never painted: callers skip under pieces)
     return part.visibleInPreview && !flag;
+}
+
+// The index in scene.shaders of a cloth shader that blends with the texture's alpha instead of discarding
+// (the game's "main_alpha" family). A non-transparent Shader Forge/main_opaque garment ridden with the brush
+// keeps *this* shader while it holds alpha-painted texels; the original is restored on revert. If the card has
+// no such shader at all, -1 (keep the current one; the painted area will still show in the exported PMX).
+int AlphaTwinShaderIndex(const assemble::Scene& scene) {
+    int fallback = -1;
+    for (size_t i = 0; i < scene.shaders.size(); ++i) {
+        std::string d = scene.shaders[i].name;
+        for (auto& c : d) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool isClothFamily = d.rfind("shader forge/main_", 0) == 0 || d.rfind("shader forge/ib_", 0) == 0 || d.find("ib_") == 0;
+        if (!isClothFamily) continue;
+        if (d.find("main_alpha") != std::string::npos) return static_cast<int>(i);
+        if (fallback < 0 && !scene.shaders[i].zWrite && scene.shaders[i].queue >= 2500) fallback = static_cast<int>(i);
+    }
+    if (fallback >= 0) return fallback;
+    for (size_t i = 0; i < scene.shaders.size(); ++i)
+        if (!scene.shaders[i].zWrite && scene.shaders[i].queue >= 2500) return static_cast<int>(i);
+    return -1;
 }
 
 // Whether a part carries at least one texture-bound submesh (the brush needs a texture to write alpha into).
@@ -270,7 +291,7 @@ int TranslucencyStamp(assemble::Scene& scene, int layerIndex, float u, float v, 
 
 int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>* changedTextures) {
     strength01 = clampf(strength01, 0.0f, 1.0f);
-    const float drop = strength01 * 0.9f;   // a fully painted texel keeps a tenth of its alpha at full strength
+    const float drop = strength01 * 0.7f;   // a fully painted texel keeps thirty percent of its alpha at full strength
     auto& layers = scene.translucency.layers;
     std::vector<int> changed;
     for (auto& layer : layers) {
@@ -326,6 +347,24 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                         for (size_t k = 0; k < mat.props.size(); ++k)
                             if (mat.props[k].first == "_Cutoff") { layer.cutoffProp = static_cast<int>(k); layer.cutoffPrior = mat.props[k].second; layer.cutoffTouched = true; break; }
                         if (layer.cutoffTouched) mat.props[static_cast<size_t>(layer.cutoffProp)].second = {1e-3f, 0.0f, 0.0f, 0.0f};
+                        // A Shader Forge main_opaque garment is hard-authored to *discard* below 0.5 alpha - the painted area
+                        // would simply vanish. Swap the program for the alpha-cloth twin (the IBL_Shader_alpha/main_alpha the
+                        // game uses for genuinely sheer garments): same template, same properties, soft blend instead of the clip.
+                        // The original is restored on revert. The pinafore and friends ship in this shader, so the swap is a
+                        // no-op for them.
+                        layer.shaderSwapped = false;
+                        {
+                            std::string cur = (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) ? scene.shaders[static_cast<size_t>(mat.shaderIndex)].name : "";
+                            for (auto& c : cur) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            if (cur.find("alpha") == std::string::npos) {
+                                const int alpha = AlphaTwinShaderIndex(scene);
+                                if (alpha >= 0 && alpha != mat.shaderIndex) {
+                                    layer.shaderIndexHad = mat.shaderIndex;
+                                    mat.shaderIndex = alpha;
+                                    layer.shaderSwapped = true;
+                                }
+                            }
+                        }
                         layer.passHeld = true;
                     }
                 } else if (!pin && layer.passHeld) {
@@ -338,9 +377,12 @@ int TranslucencyApply(assemble::Scene& scene, float strength01, std::vector<int>
                         mat.translucent = layer.hadTranslucent;
                         if (layer.cutoffTouched && layer.cutoffProp >= 0 && static_cast<size_t>(layer.cutoffProp) < mat.props.size())
                             mat.props[static_cast<size_t>(layer.cutoffProp)].second = layer.cutoffPrior;
+                        if (layer.shaderSwapped && layer.shaderIndexHad >= 0 && static_cast<size_t>(layer.shaderIndexHad) < scene.shaders.size())
+                            mat.shaderIndex = layer.shaderIndexHad;
                     }
                     layer.passHeld = false;
                     layer.cutoffTouched = false;
+                    layer.shaderSwapped = false;
                 }
             }
         }

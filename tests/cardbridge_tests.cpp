@@ -3962,9 +3962,11 @@ void unitTests() {
                         cornerPx,
                         static_cast<int>((cornerPx >> 16) & 255u), static_cast<int>((cornerPx >> 8) & 255u), static_cast<int>(cornerPx & 255u));
         }
-        // centre: skin showing through (the shirt is ~10% opaque there). corner: the opaque shirt.
+        // centre: skin showing through a mostly-transparent shirt (the strength ceiling left the painted texel at ~30% alpha,
+        // so the centre is a skin/shirt blend, not pure skin). corner: the opaque shirt.
         const int c0 = rgbCh(centrePx, 0), c1 = rgbCh(centrePx, 1), c2 = rgbCh(centrePx, 2);
-        CHECK(std::fabs(static_cast<double>(c0) - 200.0) < 60.0 && std::fabs(static_cast<double>(c1) - 150.0) < 60.0 && std::fabs(static_cast<double>(c2) - 130.0) < 60.0);
+        const double expectedR = 0.7 * 200.0 + 0.3 * 245.0, expectedG = 0.7 * 150.0 + 0.3 * 245.0, expectedB = 0.7 * 130.0 + 0.3 * 248.0;
+        CHECK(std::fabs(static_cast<double>(c0) - expectedR) < 30.0 && std::fabs(static_cast<double>(c1) - expectedG) < 30.0 && std::fabs(static_cast<double>(c2) - expectedB) < 30.0);
         CHECK(c1 < rgbCh(cornerPx, 1) - 30);   // the painted half is clearly darker than the opaque half
     });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
