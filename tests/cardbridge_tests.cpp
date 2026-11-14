@@ -3481,6 +3481,97 @@ void unitTests() {
         CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(1)).at("id").asInt() == 7777);
     });
 
+    test("coordinate import from a Coordinate (outfit) file: wholesale semantics, not the merge", [] {
+        // export Toru's outfit 1 as an outfit file: top 2222, accessory slot 0 = 7777
+        card::Card src = testToruCard();
+        src.faceThumbnail = tinyPng();
+        {
+            // keep accessories (showAccessory true) and carry the UAR payload the export reads
+            Value::Map st;
+            for (const auto& kv : src.status.asMap())
+                if (kv.first.isStr() && kv.first.asStr() == "showAccessory") st.emplace_back(kv.first, Value(testFlags(true)));
+                else st.emplace_back(kv.first, kv.second);
+            src.status = Value(std::move(st));
+            src.extended = Value(Value::Map{{Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows()}});
+        }
+        card::ClothingExportOptions eopt;
+        eopt.outfit = 1;
+        eopt.name = "CoordProbe";
+        const Bytes fileBytes = card::BuildClothingFileBytes(src, eopt, nullptr);
+        const std::string tmp = tempPath("coord_outfit_file.png");
+        {
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (f) { std::fwrite(fileBytes.data(), 1, fileBytes.size(), f); std::fclose(f); }
+        }
+        // Moe, with a second accessory in slot 3 that the file leaves empty (must be cleared by a whole-coordinate import)
+        card::Card moe = testMoeCard();
+        {
+            Value::Array parts;
+            parts.emplace_back(testAccPart(123, 9001, "a_n_headside"));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(124, 5555, "a_n_hair"));
+            moe.outfits[0].accessory = testAccessoryMap(std::move(parts));
+            moe.rows.emplace_back(card::ResolveRow{"moe.friend", 5555, 100000001, "outfit0.accessory3.ChaFileAccessory.PartsInfo.id", 124});
+        }
+        // --- coordinate import from the outfit file: the whole coordinate replaces verbatim
+        card::ApplyClothingOptions copt;
+        copt.outfit = 0;
+        copt.coordinateImport = true;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, tmp, copt);
+        CHECK(!rep.fromCoordinate);                     // a Coordinate FILE, not a character card
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 7777);   // her hair pin is replaced, not kept
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(0)).at("type").asInt() == 124);
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(3)).at("id").asInt() == 0);       // empty file slot cleared the target's
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(3)).at("type").asInt() == 120);
+        bool moePinGone = false, moeFriendGone = false, topRow = false, pinRow = false;
+        for (const auto& r : moe.rows) {
+            if (r.slot == 9001 && r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id") moePinGone = true;
+            if (r.slot == 5555 && r.property == "outfit0.accessory3.ChaFileAccessory.PartsInfo.id") moeFriendGone = true;
+            if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 2222) topRow = true;
+            if (r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id" && r.slot == 7777) pinRow = true;
+        }
+        CHECK(!moePinGone && !moeFriendGone);   // rows for the replaced coordinate are dropped wholesale
+        CHECK(topRow && pinRow);                // the file's rows are rebased into the target outfit
+        CHECK(rep.apply.hairPreserved == 0);
+        // --- the same file as a clothing import keeps hair (default behaviour unchanged)
+        card::Card moe2 = testMoeCard();
+        {
+            Value::Array parts;
+            parts.emplace_back(testAccPart(123, 9001, "a_n_headside"));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(124, 5555, "a_n_hair"));
+            moe2.outfits[0].accessory = testAccessoryMap(std::move(parts));
+        }
+        card::ApplyClothingOptions copt2;
+        copt2.outfit = 0;   // coordinateImport defaults to false
+        const card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, tmp, copt2);
+        (void)rep2;
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 9001);   // her hair pin survives the clothing merge
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(1)).at("id").asInt() == 7777);   // the file's pin lands in the first free slot
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(3)).at("id").asInt() == 5555);   // slot 3 survives the clothing merge too
+        // --- a Coordinate PNG (character card) with coordinateImport=true: the whole-coordinate path, including Status
+        Value st(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})},
+                            {Value(std::string("clothesState")), Value(Bytes{3, 3, 3, 3, 3, 3, 3, 3, 3})},
+                            {Value(std::string("showAccessory")), Value(testFlags(false))}});
+        const std::string toruPath = writeTestCardFile("coord_card_import.png", testToruCoords(), testToruParameter(),
+                                                       std::move(st), testToruHair(), Value(Value::Map{}));
+        card::Card moe3 = testMoeCard();
+        card::ApplyClothingOptions copt3;
+        copt3.outfit = 0;
+        copt3.coordinateImport = true;
+        const card::OutfitSourceReport rep3 = card::ApplyOutfitSource(moe3, toruPath, copt3);
+        CHECK(rep3.fromCoordinate);
+        // Toru's coordinate 0 replaces Moe's: clothes id 100, her slot-0 hair pin is cleared (empty source slot),
+        // and clothesState travelled wholesale via ApplyCoordinate
+        CHECK(moe3.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 100);
+        CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("type").asInt() == 120);
+        CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 0);
+        CHECK(moe3.status.at("clothesState").asBin() == Bytes({3, 3, 3, 3, 3, 3, 3, 3, 3}));
+    });
+
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {
         using namespace exporter;
         constexpr uint64_t MB = 1024ULL * 1024ULL;

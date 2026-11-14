@@ -584,12 +584,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const std::string dropped = Slashes(WideToUtf8(buf));
             const card::ImageSourceKind sourceKind = card::DetectImageSource(dropped);
             if (sourceKind == card::ImageSourceKind::RegularClothing) {
-                // A regular clothing file: applied as today, on the outfit on screen, no dialog.
-                ApplyClothingFile(dropped);
-            } else if (sourceKind == card::ImageSourceKind::Coordinate) {
-                // A Koikatsu Coordinate PNG (a character card used as an outfit source):
-                // always ask how to import it. With no character on screen the modal explains
-                // that there is nothing to import onto yet (it offers "Open as character").
+                // A Koikatsu Coordinate (outfit) file: always ask how it goes onto the outfit on screen.
                 ShowCoordinateImportDialog(dropped);
             } else {
                 // Nothing on screen (open the card, as always), or a source we do not import:

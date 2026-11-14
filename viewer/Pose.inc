@@ -563,8 +563,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             if (applyClothing) {
                 ProgSet(0.20, clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
                 try {
-                    if (clothingMode == 1) {
-                        // Coordinate import: the whole coordinate replaces the outfit on screen, including accessories.
+                    const card::ImageSourceKind srcKind = card::DetectImageSource(clothingPath);
+                    if (clothingMode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
+                        // A character card used as a source: the whole-coordinate semantics (Status copies included).
                         card::Card src = card::LoadCard(clothingPath);
                         if (!src.supported) throw std::runtime_error(src.supportNote);
                         card::ApplyCoordinateOptions copt;
@@ -583,25 +584,31 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                             " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " + std::to_string(rep.accessoriesReplaced) +
                             " accessory slot(s) replaced; the whole coordinate was imported; in memory only, card not saved)");
                     } else {
-                        // Outfit import (regular clothing file, or a Coordinate PNG imported as clothing): the
-                        // extracted clothes + accessories go through the existing clothing import merge.
+                        // A Coordinate (outfit) file: as clothing (the merge) or as a coordinate (wholesale).
                         card::ApplyClothingOptions opt;
                         opt.outfit = shown;
-                        opt.srcOutfit = clothingSrcOutfit;
+                        opt.srcOutfit = clothingSrcOutfit;   // -1 for plain files
+                        if (clothingMode == 1) opt.coordinateImport = true;
                         const card::OutfitSourceReport rep = card::ApplyOutfitSource(c, clothingPath, opt);
                         {
                             std::lock_guard<std::recursive_mutex> lk(g.mu);
                             g.clothingOutfit = rep.apply.outfit;
-                            g.clothingName = rep.sourceName;
+                            g.clothingName = rep.sourceName + (clothingMode == 1 ? std::string(" (coordinate)") : std::string());
                             g.clothingSrcOutfit = rep.srcOutfit;
                         }
-                        out->clothing = rep.sourceName;
-                        Log(std::string(rep.fromCoordinate ? "coordinate (as clothing): " : "clothing: ") + rep.sourceName +
-                            " -> outfit " + std::to_string(rep.apply.outfit) +
-                            " (" + std::to_string(rep.apply.clothesReplaced) + " clothes slot(s) replaced, " +
-                            std::to_string(rep.apply.accessoriesAdded) + " accessory(ies) added" +
-                            (rep.apply.accessoriesRelocated ? ", " + std::to_string(rep.apply.accessoriesRelocated) + " moved to keep hair" : "") +
-                            ", " + std::to_string(rep.apply.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
+                        out->clothing = g.clothingName;
+                        if (clothingMode == 1) {
+                            Log("coordinate import: " + rep.sourceName + " -> outfit " + std::to_string(rep.apply.outfit) +
+                                " (the whole coordinate replaced verbatim, including accessories; " + std::to_string(rep.apply.clothesReplaced) +
+                                " clothes slot(s) replaced; in memory only, card not saved)");
+                        } else {
+                            Log(std::string(rep.fromCoordinate ? "coordinate (as clothing): " : "clothing: ") + rep.sourceName +
+                                " -> outfit " + std::to_string(rep.apply.outfit) +
+                                " (" + std::to_string(rep.apply.clothesReplaced) + " clothes slot(s) replaced, " +
+                                std::to_string(rep.apply.accessoriesAdded) + " accessory(ies) added" +
+                                (rep.apply.accessoriesRelocated ? ", " + std::to_string(rep.apply.accessoriesRelocated) + " moved to keep hair" : "") +
+                                ", " + std::to_string(rep.apply.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
+                        }
                     }
                 } catch (const std::exception& e) {
                     out->notes.push_back(e.what());

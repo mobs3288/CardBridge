@@ -4,14 +4,14 @@
 //   cardbridge-viewer [card.png] [--library <dir>] [--mods <dir>] [--outfit N] [--clothes <outfit.png>]
 //
 // Library and mods folders are remembered in %LOCALAPPDATA%\CardBridge\viewer.json. Drop a card on the window to open it.
-// Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the outfit on screen in memory only
-// (hair worn as accessories is kept; the card on disk is never saved). It stays pinned to that one outfit slot: switching
-// to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
-// A Koikatsu Coordinate PNG (a character card used as an outfit source, 【KoiKatuChara】 and Party/SP variants) dropped
+// Dropping an outfit file (KKCLOTHING .png) onto a loaded character asks how to import it (see below);
+// import is always in memory only (the card on disk is never saved), and it stays pinned to that one outfit
+// slot: switching to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// A Koikatsu Coordinate (outfit) file (【KoiKatuClothes】, what Koikatsu itself saves as a coordinate file) dropped
 // onto the viewer always asks how to import it: Import as Clothing (outfit contents only, merged as the clothing
-// import does - hair is kept) or Import as Coordinate (the whole coordinate replaces the slot, accessories included),
-// or Open as character (what a drop did before). With no character on screen (or while the current load is still
-// running) the dialog explains there is nothing to import onto yet and offers Open as character (or a Close button).
+// import does - hair is kept) or Import as Coordinate (the whole coordinate replaces the slot, accessories included,
+// including hair-type). With no character on screen (or while the current load is still running) the dialog explains
+// there is nothing to import onto yet and offers only Cancel. A dropped character card opens as a character, as usual.
 // In the Parts list the import is its own "Added outfit" group, apart from the base model's Body/Head/Hair/Outfit/
 // Accessories: its header checkbox toggles every added part at once, each item keeps its own checkbox, the slot
 // marked * is the base outfit it replaced (shown as OUTFIT (REPLACED)), and < > move it to another slot.

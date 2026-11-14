@@ -293,6 +293,37 @@ std::string dropAccessorySetBlocks(const std::string& xml, int coordinate) {
 
 } // namespace
 
+// Removes the target coordinate's own <accessorySet type="N"> block from the
+// card's moreAccessories XML. Used when the coordinate is replaced wholesale:
+// its extras travel inside the copied/applied coordinate payload, so the
+// target's stale XML block would double-append them on the next card load.
+// Flat XML (no wrapper) is left untouched - the card loader never attributes
+// those elements. Other coordinates' blocks are kept verbatim.
+namespace {
+void dropOutfitMoreAccessoriesXml(Card& card, int coordinate, std::vector<std::string>& notes) {
+    if (!card.extended.isMap()) return;
+    const Value& more = card.extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories");
+    if (!more.isStr()) return;
+    const std::string cleaned = dropAccessorySetBlocks(more.asStr(), coordinate);
+    if (cleaned == more.asStr()) return;
+    for (auto& kv : card.extended.map()) {
+        if (!kv.first.isStr() || kv.first.asStr() != "moreAccessories") continue;
+        if (!kv.second.isArray() || kv.second.size() < 2) continue;
+        const Value& payload = kv.second.at(size_t(1));
+        if (!payload.isMap()) continue;
+        Value version = kv.second.at(size_t(0));
+        Value::Map np;
+        for (const auto& pk : payload.asMap()) {
+            if (pk.first.isStr() && pk.first.asStr() == "additionalAccessories") np.emplace_back(pk.first, Value(cleaned));
+            else np.emplace_back(pk.first, pk.second);
+        }
+        kv.second = Value(Value::Array{Value(std::move(version)), Value(std::move(np))});
+        notes.emplace_back("MoreAccessories: outfit " + std::to_string(coordinate) + "'s stale XML block dropped");
+        return;
+    }
+}
+} // namespace
+
 Card LoadCard(const std::string& path) {
     Card c;
     c.path = path;
@@ -1751,6 +1782,29 @@ OutfitSourceReport ApplyOutfitSource(Card& card, const std::string& path, const 
         Card src = LoadCard(path);
         if (!src.supported)
             throw FormatError(std::string("the coordinate source is not supported: ") + src.supportNote);
+        if (opt.coordinateImport) {
+            // The wholesale coordinate semantics (wholesale replace incl.
+            // accessories, conflicts resolved with an identity slot map): the
+            // source coordinate replaces the slot exactly as saved.
+            ApplyCoordinateOptions copt;
+            copt.srcOutfit = opt.srcOutfit;
+            copt.dstOutfit = opt.outfit;
+            const ApplyCoordinateReport rep = ApplyCoordinate(card, src, copt);
+            out.fromCoordinate = true;
+            out.srcOutfit = rep.srcOutfit;
+            out.sourceName = rep.sourceName;
+            out.apply.outfit = rep.dstOutfit;
+            out.apply.clothesReplaced = rep.clothesReplaced;
+            out.apply.accessoriesAdded = rep.accessoriesReplaced;
+            out.apply.accessoriesRelocated = 0;
+            out.apply.hairPreserved = 0;   // coordinate import: hair accessories are replaced, not kept
+            out.apply.hairSlotsPreserved = 0;
+            if (card.hair.isMap() && card.hair.at("parts").isArray())
+                for (const auto& p : card.hair.at("parts").asArray())
+                    if (p.at("id").asInt(0) != 0) ++out.apply.hairSlotsPreserved;
+            out.apply.notes = rep.notes;
+            return out;
+        }
         ClothingFile cl = ExtractClothingFromCard(src, opt.srcOutfit);
         out.fromCoordinate = true;
         out.srcOutfit = cl.srcCoordinate;
@@ -1928,30 +1982,7 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
 
     // --- MoreAccessories: the target coordinate's stale XML block is dropped -
     // (its extras travel inside the coordinate payload; other coordinates keep theirs)
-    if (card.extended.isMap()) {
-        const Value& more = card.extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories");
-        if (more.isStr()) {
-            const std::string cleaned = dropAccessorySetBlocks(more.asStr(), m);
-            if (cleaned != more.asStr()) {
-                bool changed = false;
-                for (auto& kv : card.extended.map()) {
-                    if (!kv.first.isStr() || kv.first.asStr() != "moreAccessories") continue;
-                    if (!kv.second.isArray() || kv.second.size() < 2) continue;
-                    const Value& payload = kv.second.at(size_t(1));
-                    if (!payload.isMap()) continue;
-                    Value version = kv.second.at(size_t(0));
-                    Value::Map np;
-                    for (const auto& pk : payload.asMap()) {
-                        if (pk.first.isStr() && pk.first.asStr() == "additionalAccessories") np.emplace_back(pk.first, Value(cleaned));
-                        else np.emplace_back(pk.first, pk.second);
-                    }
-                    kv.second = Value(Value::Array{Value(std::move(version)), Value(std::move(np))});
-                    changed = true;
-                }
-                if (changed) rep.notes.emplace_back("MoreAccessories: outfit " + std::to_string(m) + "'s stale XML block dropped");
-            }
-        }
-    }
+    dropOutfitMoreAccessoriesXml(card, m, rep.notes);
 
     // --- provenance: the viewer/exporter list this under "Added outfit" ------
     card.hasClothing = true;
@@ -2087,11 +2118,34 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     for (auto& p : clothParts)
         if (p.isMap() && p.at("id").asInt(0) != 0) setPartId(p, translate(p.at("id").asInt()));
 
+    Value::Array merged;
+    std::vector<int> clothToMerged;
     const Value empty = emptyAccPart(charAcc, clothAcc);
-    Value::Array merged = charParts;
+    if (opt.coordinateImport) {
+        // Whole-coordinate import: the file's slots are the truth, verbatim -
+        // positioning, rotation, parenting, hide flags. Slots the file leaves
+        // empty clear the target's; hair-type accessories are replaced too
+        // (that is the difference from a clothing import). Slots beyond the
+        // file (a vanilla file declares 20; the target may hold MoreOutfits
+        // extras below 20+100) are the character's own and stay.
+        const size_t nCloth = clothParts.size();
+        merged.reserve(std::max(charParts.size(), nCloth));
+        for (size_t i = 0; i < nCloth; ++i) merged.push_back(clothParts[i]);
+        for (size_t i = nCloth; i < charParts.size(); ++i) merged.push_back(charParts[i]);
+        clothToMerged.assign(nCloth, -1);
+        rep.accessoriesRelocated = 0;
+        rep.accessoriesAdded = 0;
+        for (size_t i = 0; i < nCloth; ++i) {
+            if (isEmptyAcc(clothParts[i])) continue;   // empty file slot: clears the target's; not an "added" accessory
+            clothToMerged[i] = static_cast<int>(i);
+            ++rep.accessoriesAdded;
+        }
+        rep.hairPreserved = 0;   // wholesale: the coordinate replaces the target's
+    } else {
+    merged = charParts;
     const size_t nCloth = clothParts.size();
     while (merged.size() < nCloth) merged.push_back(empty);
-    std::vector<int> clothToMerged(nCloth, -1);
+    clothToMerged.assign(nCloth, -1);
     for (size_t i = 0; i < nCloth; ++i) {
         if (isEmptyAcc(clothParts[i])) continue;   // an empty outfit slot never clears the character
         const bool charEmpty = i >= charParts.size() || isEmptyAcc(charParts[i]);
@@ -2124,6 +2178,7 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
         for (size_t i = 0; i < charParts.size(); ++i)
             if (!isEmptyAcc(charParts[i]) && IsHairAccessoryPart(charParts[i], card.rows, outfit, static_cast<int>(i))) ++rep.hairPreserved;
     }
+    }   // end of the merge (non-coordinate) path
     // Write the merged list into the target outfit, keeping its version.
     if (target.accessory.isMap()) {
         for (auto& kv : target.accessory.map())
@@ -2138,12 +2193,18 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     // --- resolver rows: drop what was replaced, add the outfit's ----------
     const std::string prefix = "outfit" + std::to_string(outfit) + ".";
     std::set<int> replacedAcc;
-    for (size_t i = 0; i < charParts.size() && i < merged.size(); ++i) {
-        const bool same = (isEmptyAcc(charParts[i]) && isEmptyAcc(merged[i])) ||
-                          (!isEmptyAcc(charParts[i]) && !isEmptyAcc(merged[i]) &&
-                           charParts[i].at("type").asInt() == merged[i].at("type").asInt() &&
-                           charParts[i].at("id").asInt() == merged[i].at("id").asInt());
-        if (!same) replacedAcc.insert(static_cast<int>(i));
+    if (opt.coordinateImport) {
+        // Every slot the file declares counts as replaced (including ones the file leaves empty - they clear the target's):
+        // rows must not survive a coordinate that is gone wholesale.
+        for (size_t i = 0; i < clothToMerged.size() && i < merged.size(); ++i) replacedAcc.insert(static_cast<int>(i));
+    } else {
+        for (size_t i = 0; i < charParts.size() && i < merged.size(); ++i) {
+            const bool same = (isEmptyAcc(charParts[i]) && isEmptyAcc(merged[i])) ||
+                              (!isEmptyAcc(charParts[i]) && !isEmptyAcc(merged[i]) &&
+                               charParts[i].at("type").asInt() == merged[i].at("type").asInt() &&
+                               charParts[i].at("id").asInt() == merged[i].at("id").asInt());
+            if (!same) replacedAcc.insert(static_cast<int>(i));
+        }
     }
     std::vector<ResolveRow> kept;
     for (const auto& rr : card.rows) {
@@ -2180,21 +2241,26 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     syncExtendedResolvedRows(card, outfit, appended, &replacedAcc);
     // --- plugin payloads: the source's bone mods and material edits for the outfit ---
     {
+        const bool coordinateMode = opt.coordinateImport;   // the file's coordinate is the outfit wholesale
         mergeAbmxPayloads(card, clothes.extended, rep.notes, clothes.srcCoordinate, outfit,
-                          static_cast<int>(card.outfits.size()), /*coordinateMode=*/false);
+                          static_cast<int>(card.outfits.size()), /*coordinateMode=*/coordinateMode);
         mergeMaterialEditorPayloads(card, clothes.extended, outfit, clothToMerged, clothes.srcCoordinate, replacedAcc,
-                                    /*dropAllAccRows=*/false, rep.notes);
+                                    /*dropAllAccRows=*/coordinateMode, rep.notes);
         mergeKcoxPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
         mergeDynamicBonePayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
-                                 /*coordinateImport=*/false, replacedAcc, rep.notes);
+                                 /*coordinateImport=*/coordinateMode, replacedAcc, rep.notes);
         mergeHairAccessoryPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
-                                   /*coordinateImport=*/false, replacedAcc, rep.notes);
+                                   /*coordinateImport=*/coordinateMode, replacedAcc, rep.notes);
         mergeAccessoryStatesPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
-                                     /*coordinateImport=*/false, rep.notes);
+                                     /*coordinateImport=*/coordinateMode, rep.notes);
         mergePushupPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
         mergeAdditionalCardInfo(card, clothes.extended, clothes.srcCoordinate, clothes.srcOutfitCount, outfit,
-                                static_cast<int>(card.outfits.size()), /*coordinateImport=*/false, rep.notes);
+                                static_cast<int>(card.outfits.size()), /*coordinateImport=*/coordinateMode, rep.notes);
     }
+    // A coordinate import replaces the outfit wholesale: the target's own
+    // MoreAccessories block for this outfit is stale (the file's extras
+    // travel in the file's parts), so it is dropped like a Coordinate import does.
+    if (opt.coordinateImport) dropOutfitMoreAccessoriesXml(card, outfit, rep.notes);
     // Added-clothing provenance: which assembled parts came from the file.
     // Their ScenePart.group stays Outfit/Accessories (the exporter's Take-off
     // and mask logic key on it); the fromClothing flag is what the viewer

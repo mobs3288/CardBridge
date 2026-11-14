@@ -186,6 +186,16 @@ struct ApplyClothingOptions {
     bool keepHairAccessories = true;  // hair worn as accessories is never deleted (see below)
     int srcOutfit = -1;               // Coordinate sources only: which coordinate of the source card to extract
                                       // (-1: the source's own current outfit). Ignored for plain outfit files.
+    // Coordinate import of an outfit file: the file's coordinate is applied
+    // wholesale - accessories replace verbatim (slots the file leaves empty
+    // clear the target's, hair-type included), every resolver row and
+    // extended-plugin row scoped to the target outfit is dropped rather than
+    // re-indexed, matching a whole-coordinate replacement; the target's stale
+    // MoreAccessories XML block for the outfit is removed, and ABMX is
+    // rebased per coordinate. Additional_Card_Info travels in its coordinate
+    // sense (the full entry, not just keep flags). Regular clothing imports
+    // keep hair preservation, the merge, and the slot-local row re-indexing.
+    bool coordinateImport = false;
 };
 
 struct ApplyClothingReport {
@@ -217,9 +227,13 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
 // personality and every other coordinate are left behind) and then run
 // through the same ApplyClothing merge a regular outfit file takes - so
 // replacement, hair keeping, accessory placement, KCOX/ABMX/MaterialEditor
-// merging and resolver-row handling behave identically. Throws CardError
-// when the source is unreadable; never silently falls back to a different
-// source type.
+// merging and resolver-row handling behave identically. With
+// `opt.coordinateImport` set, a regular outfit file is applied wholesale
+// (the whole coordinate replaces the slot, accessories replaced including
+// hair-type) like a Coordinate import; a Coordinate file gets the same
+// semantics through the ApplyClothing path (its identity data still never
+// travels). Throws CardError when the source is unreadable; never silently
+// falls back to a different source type.
 struct OutfitSourceReport {
     bool fromCoordinate = false;    // the source was a character card (Koikatsu Coordinate PNG)
     int srcOutfit = -1;             // which coordinate of the source was imported (Coordinate sources)
