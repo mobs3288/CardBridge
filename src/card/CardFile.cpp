@@ -324,124 +324,9 @@ void dropOutfitMoreAccessoriesXml(Card& card, int coordinate, std::vector<std::s
 }
 } // namespace
 
-Card LoadCard(const std::string& path) {
-    Card c;
-    c.path = path;
-    Bytes file = fileio::ReadFile(path);
-    c.fileSize = file.size();
-    size_t end = pngEnd(file);   // throws NotPng / TruncatedPng
-    if (end >= file.size()) throw CardError(CardErrorKind::NoPayload, "PNG has no character data after the image");
-
-    ByteReader r(file.data() + end, file.size() - end, false);
-    std::string marker;
-    try {
-        c.productNo = r.i32();
-        marker = r.dotnetString();
-    } catch (const FormatError&) {
-        throw CardError(CardErrorKind::UnknownMarker, "data after the PNG does not start like a card");
-    }
-    bool clothes = false;
-    c.family = familyOf(marker, clothes);
-    c.marker = marker;
-    if (clothes) throw CardError(CardErrorKind::ClothesFile, "this is an outfit file (" + marker + "), not a character card");
-    if (c.family == CardFamily::Other)
-        throw CardError(CardErrorKind::UnknownMarker, "unrecognised card marker '" + marker + "'");
-
-    try {
-        c.formatVersion = r.dotnetString();
-        int32_t faceLen = r.i32();
-        if (faceLen < 0 || static_cast<size_t>(faceLen) > r.remaining()) throw FormatError("face image runs past the file");
-        c.faceThumbnail = r.bytes(static_cast<size_t>(faceLen));
-        int32_t hdrLen = r.i32();
-        if (hdrLen < 0 || static_cast<size_t>(hdrLen) > r.remaining()) throw FormatError("block header runs past the file");
-        Bytes hdrBytes = r.bytes(static_cast<size_t>(hdrLen));
-        Value hdr = MsgPackParse(hdrBytes);
-        int64_t dataSize = r.i64();
-        size_t dataStart = r.pos();
-        if (dataSize < 0 || static_cast<uint64_t>(dataSize) > r.remaining()) throw FormatError("block data shorter than the header says");
-        for (const auto& bi : hdr.at("lstInfo").asArray()) {
-            BlockInfo b;
-            b.name = bi.at("name").asStr();
-            b.version = bi.at("version").asStr();
-            b.pos = static_cast<uint64_t>(bi.at("pos").asInt());
-            b.size = static_cast<uint64_t>(bi.at("size").asInt());
-            if (b.pos + b.size > static_cast<uint64_t>(dataSize)) throw FormatError("block '" + b.name + "' lies outside the data");
-            c.blocks.push_back(b);
-        }
-
-        if (c.family == CardFamily::KoikatsuSunshine || c.family == CardFamily::EmotionCreators) {
-            c.supported = false;
-            c.supportNote = std::string("recognised as ") + FamilyName(c.family) + ", not converted yet (no matching game install to verify its asset bundles)";
-            c.sha256 = Sha256Hex(file);
-            return c;
-        }
-
-        // Blocks are parsed in place from the file bytes: copying each block
-        // first held the whole card (and its embedded textures) twice more.
-        auto blockReader = [&](const std::string& name) -> ByteReader {
-            for (const auto& b : c.blocks)
-                if (b.name == name)
-                    return ByteReader(file.data() + end + dataStart + b.pos, static_cast<size_t>(b.size), false);
-            return ByteReader();
-        };
-        auto hasBlock = [&](const std::string& name) {
-            for (const auto& b : c.blocks) if (b.name == name && b.size > 0) return true;
-            return false;
-        };
-
-        {
-            ByteReader cr = blockReader("Custom");
-            if (cr.size() == 0) throw FormatError("card has no Custom section");
-            Value* parts[3] = {&c.face, &c.body, &c.hair};
-            for (Value* p : parts) {
-                int32_t n = cr.i32();
-                if (n < 0 || static_cast<size_t>(n) > cr.remaining()) throw FormatError("Custom section runs past its data");
-                ByteReader sub(cr.ptr(), static_cast<size_t>(n), false);
-                *p = MsgPackRead(sub);
-                cr.skip(static_cast<size_t>(n));
-            }
-        }
-
-        {
-            ByteReader coord = blockReader("Coordinate");
-            if (coord.size() == 0) throw FormatError("card has no Coordinate section");
-            Value arr = MsgPackRead(coord);
-            for (const auto& el : arr.asArray()) {
-                Outfit o;
-                decodeCoordinate(el.asBin(), o);
-                c.outfits.push_back(std::move(o));
-            }
-        }
-
-        if (hasBlock("Parameter")) { ByteReader r = blockReader("Parameter"); c.parameter = MsgPackRead(r); }
-        if (hasBlock("Status")) { ByteReader r = blockReader("Status"); c.status = MsgPackRead(r); }
-
-        if (hasBlock("KKEx")) {
-            ByteReader r = blockReader("KKEx");
-            c.extended = MsgPackRead(r);
-            const Value& uar = c.extended.at("com.bepis.sideloader.universalautoresolver");
-            for (const auto& raw : uar.at(size_t(1)).at("info").asArray()) {
-                Value row = MsgPackParse(raw.asBin());
-                ResolveRow rr;
-                rr.modId = row.at("ModID").asStr();
-                rr.slot = row.at("Slot").asInt();
-                rr.localSlot = row.at("LocalSlot").asInt();
-                rr.property = row.at("Property").asStr();
-                rr.category = static_cast<int>(row.at("CategoryNo").asInt());
-                c.rows.push_back(std::move(rr));
-            }
-            appendMoreAccessories(c);
-        }
-    } catch (const CardError&) {
-        throw;
-    } catch (const FormatError& e) {
-        throw CardError(CardErrorKind::CorruptPayload, std::string("damaged card data: ") + e.what());
-    }
-
-    c.supported = true;
-    c.sha256 = Sha256Hex(file);
-    return c;
-}
+static const char* kMeLists[] = {"RendererPropertyList", "MaterialFloatPropertyList", "MaterialColorPropertyList",
+                                 "MaterialTexturePropertyList", "MaterialShaderList", "MaterialNamePropertyList",
+                                 "MaterialKeywordPropertyList", "ProjectorPropertyList"};
 
 std::string ClothingFile::displayName() const { return name; }
 
@@ -592,6 +477,205 @@ Value emptyAccPart(const Value& a, const Value& b) {
     return Value(std::move(part));
 }
 
+// Find in a raw map (string keys only); nullptr when absent or not a map.
+const Value* mapFind(const Value::Map& map, const char* key) {
+    for (const auto& kv : map)
+        if (kv.first.isStr() && kv.first.asStr() == key) return &kv.second;
+    return nullptr;
+}
+const Value* mapFind(const Value& map, const char* key) {
+    if (!map.isMap()) return nullptr;
+    for (const auto& kv : map.asMap())
+        if (kv.first.isStr() && kv.first.asStr() == key) return &kv.second;
+    return nullptr;
+}
+
+
+const Value* selectCoordinateEntry(const std::map<int64_t, Value>& entries, int srcCoordinate) {
+    if (entries.empty()) return nullptr;
+    if (srcCoordinate >= 0) {
+        auto it = entries.find(static_cast<int64_t>(srcCoordinate));
+        return it != entries.end() ? &it->second : nullptr;
+    }
+    return &entries.begin()->second;   // the file's only coordinate
+}
+
+
+// A real outfit file stores one coordinate verbatim, under whatever coordinate
+// index the author saved it with (community downloads carry e.g. CoordinateIndex 3).
+// Every coordinate-indexed payload in the file belongs to that one coordinate, so
+// detect its index from the payloads that carry one: the MaterialEditor rows and the
+// DynamicBoneEditor rows, plus the nested payloads keyed by coordinate (pushup bins,
+// keyed Additional_Card_Info). The majority wins; 0 when absent. Flat payloads carry
+// no index and are read shape-tolerantly regardless; ABMX per-coordinate lists use this value.
+int detectClothingFileCoordinateIndex(const Value& extended) {
+    std::map<int64_t, int64_t> counts;
+    auto tallyMeOrDbe = [&counts](const Value& bin) {
+        if (!bin.isBin() || bin.asBin().empty()) return;
+        try {
+            Value list = MsgPackParse(bin.asBin());
+            if (!list.isArray()) return;
+            int seen = 0;
+            for (const auto& item : list.asArray()) {
+                if (++seen > 64) break;
+                if (!item.isMap()) continue;
+                const Value& c = item.at("CoordinateIndex");
+                if (c.isInt()) ++counts[c.asInt()];
+            }
+        } catch (const FormatError&) {}
+    };
+    auto tallyKeyed = [&counts](const Value& bin) {
+        // nested {coordIdx: {...}}: a pure int map votes its keys (flat payloads have string keys)
+        if (!bin.isBin() || bin.asBin().empty()) return;
+        try {
+            Value parsed = MsgPackParse(bin.asBin());
+            if (!parsed.isMap()) return;
+            bool keyed = true;
+            for (const auto& kv : parsed.asMap()) if (!kv.first.isInt()) { keyed = false; break; }
+            if (!keyed) return;
+            for (const auto& kv : parsed.asMap()) ++counts[kv.first.asInt()];
+        } catch (const FormatError&) {}
+    };
+    const Value& me = extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+    if (me.isMap())
+        for (const char* key : kMeLists) tallyMeOrDbe(me.at(key));
+    const Value& dbe = extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1));
+    if (dbe.isMap()) tallyMeOrDbe(dbe.at("AccessoryDynamicBoneData"));
+    const Value& pushup = extended.at("com.deathweasel.bepinex.pushup").at(size_t(1));
+    if (pushup.isMap()) {
+        static const char* kPushups[] = {"Pushup_TopData", "Pushup_BraData", "Pushup_BodyData"};
+        for (const char* key : kPushups) tallyKeyed(pushup.at(key));
+    }
+    const Value& aci = extended.at("Additional_Card_Info").at(size_t(1));
+    if (aci.isMap()) tallyKeyed(aci.at("CoordinateInfo"));
+    if (counts.empty()) return 0;
+    int best = -1;
+    int64_t bestN = 0;
+    for (const auto& kv : counts) if (kv.second > bestN) { bestN = kv.second; best = static_cast<int>(kv.first); }
+    return best;
+}
+
+} // namespace
+
+Card LoadCard(const std::string& path) {
+    Card c;
+    c.path = path;
+    Bytes file = fileio::ReadFile(path);
+    c.fileSize = file.size();
+    size_t end = pngEnd(file);   // throws NotPng / TruncatedPng
+    if (end >= file.size()) throw CardError(CardErrorKind::NoPayload, "PNG has no character data after the image");
+
+    ByteReader r(file.data() + end, file.size() - end, false);
+    std::string marker;
+    try {
+        c.productNo = r.i32();
+        marker = r.dotnetString();
+    } catch (const FormatError&) {
+        throw CardError(CardErrorKind::UnknownMarker, "data after the PNG does not start like a card");
+    }
+    bool clothes = false;
+    c.family = familyOf(marker, clothes);
+    c.marker = marker;
+    if (clothes) throw CardError(CardErrorKind::ClothesFile, "this is an outfit file (" + marker + "), not a character card");
+    if (c.family == CardFamily::Other)
+        throw CardError(CardErrorKind::UnknownMarker, "unrecognised card marker '" + marker + "'");
+
+    try {
+        c.formatVersion = r.dotnetString();
+        int32_t faceLen = r.i32();
+        if (faceLen < 0 || static_cast<size_t>(faceLen) > r.remaining()) throw FormatError("face image runs past the file");
+        c.faceThumbnail = r.bytes(static_cast<size_t>(faceLen));
+        int32_t hdrLen = r.i32();
+        if (hdrLen < 0 || static_cast<size_t>(hdrLen) > r.remaining()) throw FormatError("block header runs past the file");
+        Bytes hdrBytes = r.bytes(static_cast<size_t>(hdrLen));
+        Value hdr = MsgPackParse(hdrBytes);
+        int64_t dataSize = r.i64();
+        size_t dataStart = r.pos();
+        if (dataSize < 0 || static_cast<uint64_t>(dataSize) > r.remaining()) throw FormatError("block data shorter than the header says");
+        for (const auto& bi : hdr.at("lstInfo").asArray()) {
+            BlockInfo b;
+            b.name = bi.at("name").asStr();
+            b.version = bi.at("version").asStr();
+            b.pos = static_cast<uint64_t>(bi.at("pos").asInt());
+            b.size = static_cast<uint64_t>(bi.at("size").asInt());
+            if (b.pos + b.size > static_cast<uint64_t>(dataSize)) throw FormatError("block '" + b.name + "' lies outside the data");
+            c.blocks.push_back(b);
+        }
+
+        if (c.family == CardFamily::KoikatsuSunshine || c.family == CardFamily::EmotionCreators) {
+            c.supported = false;
+            c.supportNote = std::string("recognised as ") + FamilyName(c.family) + ", not converted yet (no matching game install to verify its asset bundles)";
+            c.sha256 = Sha256Hex(file);
+            return c;
+        }
+
+        // Blocks are parsed in place from the file bytes: copying each block
+        // first held the whole card (and its embedded textures) twice more.
+        auto blockReader = [&](const std::string& name) -> ByteReader {
+            for (const auto& b : c.blocks)
+                if (b.name == name)
+                    return ByteReader(file.data() + end + dataStart + b.pos, static_cast<size_t>(b.size), false);
+            return ByteReader();
+        };
+        auto hasBlock = [&](const std::string& name) {
+            for (const auto& b : c.blocks) if (b.name == name && b.size > 0) return true;
+            return false;
+        };
+
+        {
+            ByteReader cr = blockReader("Custom");
+            if (cr.size() == 0) throw FormatError("card has no Custom section");
+            Value* parts[3] = {&c.face, &c.body, &c.hair};
+            for (Value* p : parts) {
+                int32_t n = cr.i32();
+                if (n < 0 || static_cast<size_t>(n) > cr.remaining()) throw FormatError("Custom section runs past its data");
+                ByteReader sub(cr.ptr(), static_cast<size_t>(n), false);
+                *p = MsgPackRead(sub);
+                cr.skip(static_cast<size_t>(n));
+            }
+        }
+
+        {
+            ByteReader coord = blockReader("Coordinate");
+            if (coord.size() == 0) throw FormatError("card has no Coordinate section");
+            Value arr = MsgPackRead(coord);
+            for (const auto& el : arr.asArray()) {
+                Outfit o;
+                decodeCoordinate(el.asBin(), o);
+                c.outfits.push_back(std::move(o));
+            }
+        }
+
+        if (hasBlock("Parameter")) { ByteReader r = blockReader("Parameter"); c.parameter = MsgPackRead(r); }
+        if (hasBlock("Status")) { ByteReader r = blockReader("Status"); c.status = MsgPackRead(r); }
+
+        if (hasBlock("KKEx")) {
+            ByteReader r = blockReader("KKEx");
+            c.extended = MsgPackRead(r);
+            const Value& uar = c.extended.at("com.bepis.sideloader.universalautoresolver");
+            for (const auto& raw : uar.at(size_t(1)).at("info").asArray()) {
+                Value row = MsgPackParse(raw.asBin());
+                ResolveRow rr;
+                rr.modId = row.at("ModID").asStr();
+                rr.slot = row.at("Slot").asInt();
+                rr.localSlot = row.at("LocalSlot").asInt();
+                rr.property = row.at("Property").asStr();
+                rr.category = static_cast<int>(row.at("CategoryNo").asInt());
+                c.rows.push_back(std::move(rr));
+            }
+            appendMoreAccessories(c);
+        }
+    } catch (const CardError&) {
+        throw;
+    } catch (const FormatError& e) {
+        throw CardError(CardErrorKind::CorruptPayload, std::string("damaged card data: ") + e.what());
+    }
+
+    c.supported = true;
+    c.sha256 = Sha256Hex(file);
+    return c;
+}
+
 // The accessory index encoded in a resolver property ("accessory8...."),
 // or -1 when there is none.
 int accessoryIndexOfProperty(const std::string& property) {
@@ -713,7 +797,9 @@ Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
     for (const auto& row : list.asArray()) {
         if (!row.isMap()) continue;
         const int64_t coord = row.at("CoordinateIndex").asInt(0);
-        if (coord != static_cast<int64_t>(srcCoordinate)) continue;   // only this source coordinate's rows travel
+        // srcCoordinate >= 0: only that source coordinate's rows travel (a card coordinates).
+        // srcCoordinate < 0: the source is one coordinate (an outfit file) — all its rows belong to it.
+        if (srcCoordinate >= 0 && coord != static_cast<int64_t>(srcCoordinate)) continue;
         Value nr = row;
         auto setKeyInt = [&](const char* k, int64_t v) {
             for (auto& kv : nr.map()) if (kv.first.isStr() && kv.first.asStr() == k) { kv.second = Value(v); return; }
@@ -929,9 +1015,6 @@ void mergeMaterialEditorPayloads(Card& card, const Value& srcExtended, int dstOu
         for (const auto& kv : charTex) dict.emplace_back(Value(kv.first), Value(kv.second));
         setPayloadBin("TextureDictionary", MsgPackPack(Value(std::move(dict))));
     }
-    static const char* kMeLists[] = {"RendererPropertyList", "MaterialFloatPropertyList", "MaterialColorPropertyList",
-                                     "MaterialTexturePropertyList", "MaterialShaderList", "MaterialNamePropertyList",
-                                     "MaterialKeywordPropertyList", "ProjectorPropertyList"};
     for (const char* key : kMeLists) {
         const Bytes rows = srcMe.isMap() ? mergeMeList(srcMe, key, dstOutfit, clothToMerged, texRemap, srcCoordinate) : Bytes{};
         const Value& cur = charMe.isMap() ? charMe.at(key) : Value::nil();
@@ -980,13 +1063,17 @@ std::map<std::string, std::pair<Bytes, bool>> parseCoordinateOverlays(const Valu
     if (!overlays.isMap()) return out;
     for (const auto& kv : overlays.asMap()) {
         if (kv.first.isInt()) {
-            if (kv.first.asInt() != coordinateIndex) continue;
+            if (coordinateIndex >= 0 && kv.first.asInt() != coordinateIndex) continue;   // card mode: this coordinate only
             if (!kv.second.isMap()) continue;
             for (const auto& g : kv.second.asMap())
                 if (g.first.isStr() && g.second.at(size_t(0)).isBin() && g.second.at(size_t(0)).size() > 0)
                     out[g.first.asStr()] = {g.second.at(size_t(0)).asBin(), g.second.at(size_t(1)).asBool()};
-        } else if (coordinateIndex == 0 && kv.first.isStr() && kv.second.isArray() && kv.second.size() >= 2 &&
-                   kv.second.at(size_t(0)).isBin() && kv.second.at(size_t(0)).size() > 0) {
+            continue;
+        }
+        // Flat shape (a single-coordinate file): every overlay belongs to the one coordinate,
+        // whatever index the author saved it under.
+        if (kv.first.isStr() && kv.second.isArray() && kv.second.size() >= 2 &&
+            kv.second.at(size_t(0)).isBin() && kv.second.at(size_t(0)).size() > 0) {
             out[kv.first.asStr()] = {kv.second.at(size_t(0)).asBin(), kv.second.at(size_t(1)).asBool()};
         }
     }
@@ -1110,15 +1197,29 @@ void mergeAccessoryStatesPayloads(Card& card, const Value& srcExtended, int srcC
     const Value& bin = payload.at("CoordinateData");
     if (!bin.isBin() || bin.asBin().empty()) return;
     std::map<int64_t, Value> srcCoords;
+    Value flatEntry;
+    bool flat = false;
     try {
         Value parsed = MsgPackParse(bin.asBin());
-        if (parsed.isMap())
-            for (const auto& kv : parsed.asMap())
-                if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
+        if (parsed.isMap()) {
+            // flat: the one coordinate's raw entry (_slotinfo at top level); nested: {coordIdx: {...}}
+            if (parsed.at("_slotinfo").isMap()) {
+                flat = true;
+                flatEntry = parsed;
+            } else {
+                for (const auto& kv : parsed.asMap())
+                    if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
+            }
+        }
     } catch (const FormatError&) {}
-    const auto sit = srcCoords.find(static_cast<int64_t>(srcCoordinate));
-    if (sit == srcCoords.end() || !sit->second.isMap()) return;   // nothing stored for this coordinate
-    const Value& srcEntry = sit->second;
+    Value srcEntryV;
+    if (flat) srcEntryV = flatEntry;
+    else {
+        const Value* sel = selectCoordinateEntry(srcCoords, srcCoordinate);
+        if (!sel || !sel->isMap()) return;   // nothing stored for this coordinate
+        srcEntryV = *sel;
+    }
+    const Value& srcEntry = srcEntryV;
 
     std::map<int64_t, Value> dstCoords;
     {
@@ -1232,7 +1333,7 @@ void mergeDynamicBonePayloads(Card& card, const Value& srcExtended, int srcCoord
             for (const auto& row : list.asArray()) {
                 if (!row.isMap()) continue;
                 const int64_t coord = row.at("CoordinateIndex").asInt(-1);
-                if (coord != static_cast<int64_t>(srcCoordinate)) continue;
+                if (srcCoordinate >= 0 && coord != static_cast<int64_t>(srcCoordinate)) continue;   // -1: a single-coordinate file, all its rows travel
                 Value nr = row;
                 const int64_t slot = row.at("Slot").asInt(-1);
                 int mapped = static_cast<int>(slot);
@@ -1272,30 +1373,64 @@ void mergeHairAccessoryPayloads(Card& card, const Value& srcExtended, int srcCoo
     if (!srcExtended.isMap()) return;
     const Value& payload = srcExtended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1));
     if (!payload.isMap()) return;
-    const Value& srcBin = payload.at("HairAccessories");
-    if (!srcBin.isBin() || srcBin.asBin().empty()) return;
-    std::map<int64_t, Value> srcCoords, dstCoords;
-    try {
-        Value parsed = MsgPackParse(srcBin.asBin());
-        if (parsed.isMap())
-            for (const auto& kv : parsed.asMap())
-                if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
-    } catch (const FormatError&) {}
+    const Value* srcBinP = mapFind(payload, "HairAccessories");
+    if (!srcBinP || !srcBinP->isBin() || srcBinP->asBin().empty()) srcBinP = mapFind(payload, "CoordinateHairAccessories");
+    if (!srcBinP || !srcBinP->isBin() || srcBinP->asBin().empty()) return;
+    const Value& srcBin = *srcBinP;
+    // Both shapes are seen in the wild: nested {coordIdx: {slotIdx: settings}} (cards) and
+    // the flat {slotIdx: settings} (outfit files written verbatim from the maker).
+    Value parsed;
+    try { parsed = MsgPackParse(srcBin.asBin()); } catch (const FormatError&) {}
+    if (!parsed.isMap()) return;
+    int shape = 0;   // 1 flat, 2 nested
+    {
+        bool sawStrVal = false, sawIntVal = false;
+        for (const auto& kv : parsed.asMap()) {
+            if (!kv.first.isInt() || !kv.second.isMap()) { shape = 0; return; }
+            bool valHasInt = false, valHasStr = false;
+            for (const auto& kv2 : kv.second.asMap()) {
+                if (kv2.first.isInt()) valHasInt = true; else valHasStr = true;
+            }
+            if (valHasInt) sawIntVal = true;
+            if (valHasStr) sawStrVal = true;
+        }
+        if (sawIntVal && !sawStrVal) shape = 2;
+        else if (sawStrVal) shape = 1;
+    }
+    Value srcEntry;
+    if (shape == 1) {
+        srcEntry = parsed;   // the file's one coordinate, as-is
+    } else {
+        std::map<int64_t, Value> srcCoords;
+        for (const auto& kv : parsed.asMap()) if (kv.first.isInt()) srcCoords.emplace(kv.first.asInt(), kv.second);
+        const Value* sel = selectCoordinateEntry(srcCoords, srcCoordinate);
+        if (!sel || !sel->isMap()) return;
+        srcEntry = *sel;
+    }
+    // The target always stores nested {coordIdx: {slotIdx: settings}} (cards are nested), whichever key it used -
+    // read both key names and both shapes; the flat shape is stored keyed at dstOutfit on write.
+    std::map<int64_t, Value> dstCoords;
     {
         const Value& dpayload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1));
-        const Value& dbin = dpayload.at("HairAccessories");
-        if (dpayload.isMap() && dbin.isBin() && !dbin.asBin().empty()) {
+        const Value* dbinP = dpayload.isMap() ? mapFind(dpayload, "HairAccessories") : nullptr;
+        if ((!dbinP || !dbinP->isBin() || dbinP->asBin().empty()) && dpayload.isMap()) dbinP = mapFind(dpayload, "CoordinateHairAccessories");
+        if (dbinP && dbinP->isBin() && !dbinP->asBin().empty()) {
             try {
-                Value dparsed = MsgPackParse(dbin.asBin());
-                if (dparsed.isMap())
-                    for (const auto& kv : dparsed.asMap())
-                        if (kv.first.isInt()) dstCoords.emplace(kv.first.asInt(), kv.second);
+                Value dparsed = MsgPackParse(dbinP->asBin());
+                if (dparsed.isMap()) {
+                    bool dstFlat = true;
+                    for (const auto& kv : dparsed.asMap()) {
+                        if (!kv.first.isInt() || !kv.second.isMap()) { dstFlat = false; break; }
+                        bool valHasStr = false;
+                        for (const auto& kv2 : kv.second.asMap()) if (!kv2.first.isInt()) { valHasStr = true; break; }
+                        if (!valHasStr) { dstFlat = false; break; }
+                    }
+                    if (dstFlat) dstCoords.emplace(static_cast<int64_t>(dstOutfit), dparsed);
+                    else for (const auto& kv : dparsed.asMap()) if (kv.first.isInt()) dstCoords.emplace(kv.first.asInt(), kv.second);
+                }
             } catch (const FormatError&) {}
         }
     }
-    const auto sit = srcCoords.find(static_cast<int64_t>(srcCoordinate));
-    if (sit == srcCoords.end() || !sit->second.isMap()) return;
-    const Value& srcEntry = sit->second;
     Value::Map merged;
     if (coordinateImport) {
         for (const auto& kv : srcEntry.asMap()) merged.emplace_back(kv.first, kv.second);
@@ -1419,13 +1554,6 @@ bool aciEntry(const Value& ext, int64_t& versionOut, Value::Map& payloadOut) {
     return true;
 }
 
-// Find in a raw map (string keys only); nullptr when absent.
-const Value* mapFind(const Value::Map& map, const char* key) {
-    for (const auto& kv : map)
-        if (kv.first.isStr() && kv.first.asStr() == key) return &kv.second;
-    return nullptr;
-}
-
 // The source coordinate's own gender-restriction flag from Additional_Card_Info
 // (v0 CoordinateInfo entries / v1 flat GenderType array), or -1 when absent.
 // The maker shows such a coordinate only to matching characters; the flag is a
@@ -1434,12 +1562,19 @@ int aciGenderRestriction(const Value& ext, int srcCoordinate, int srcOutfits) {
     int64_t version = 0;
     Value::Map payload;
     if (!aciEntry(ext, version, payload)) return -1;
-    const int64_t n = static_cast<int64_t>(srcCoordinate);
+    const int64_t n = srcCoordinate < 0 ? 0 : static_cast<int64_t>(srcCoordinate);   // a real file: its one coordinate is index 0
     const Value* ci = mapFind(payload, "CoordinateInfo");
     if (ci && ci->isBin() && !ci->asBin().empty()) {
         try {
             Value parsed = MsgPackParse(ci->asBin());
             if (!parsed.isMap()) return -1;
+            if (srcCoordinate < 0) {
+                // the flat per-coordinate entry itself (a real outfit file carries just its one coordinate)
+                const Value& ri = parsed.at("_restrictioninfo");
+                if (!ri.isMap()) return -1;
+                const Value& g = ri.at("_gender");
+                return g.isNumber() ? static_cast<int>(g.asInt()) : -1;
+            }
             for (const auto& kv : parsed.asMap()) {
                 if (!kv.first.isInt() || kv.first.asInt() != n) continue;
                 if (!kv.second.isMap()) return -1;
@@ -1510,7 +1645,6 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
     int64_t srcVersion = 0;
     Value::Map srcPayload;
     if (!aciEntry(srcExtended, srcVersion, srcPayload)) return;
-    const int64_t n = static_cast<int64_t>(srcCoordinate);
     int64_t dstVersion = 0;
     Value::Map dstPayload;
     const bool dstHad = card.extended.isMap() && aciEntry(card.extended, dstVersion, dstPayload);
@@ -1521,9 +1655,16 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
         Value srcInfo;
         try { srcInfo = MsgPackParse(srcCoordInfo->asBin()); } catch (const FormatError&) {}
         std::map<int64_t, Value> srcEntries;
-        if (srcInfo.isMap())
-            for (const auto& kv : srcInfo.asMap())
-                if (kv.first.isInt()) srcEntries.emplace(kv.first.asInt(), kv.second);
+        if (srcInfo.isMap()) {
+            bool anyInt = false;
+            for (const auto& kv : srcInfo.asMap()) if (kv.first.isInt()) anyInt = true;
+            if (anyInt) {
+                for (const auto& kv : srcInfo.asMap()) if (kv.first.isInt()) srcEntries.emplace(kv.first.asInt(), kv.second);
+            } else {
+                // the flat per-coordinate entry itself (a real outfit file carries just its one coordinate)
+                srcEntries.emplace(static_cast<int64_t>(srcCoordinate >= 0 ? srcCoordinate : 0), srcInfo);
+            }
+        }
         std::map<int64_t, Value> dstEntries;
         if (dstHad) {
             const Value* dbin = mapFind(dstPayload, "CoordinateInfo");
@@ -1536,9 +1677,9 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
                 } catch (const FormatError&) {}
             }
         }
-        const auto it = srcEntries.find(n);
-        if (it != srcEntries.end() && it->second.isMap()) {
-            const Value& srcEntry = it->second;
+        const Value* sel = selectCoordinateEntry(srcEntries, srcCoordinate);
+        if (sel != nullptr && sel->isMap()) {
+            const Value& srcEntry = *sel;
             if (coordinateImport) {
                 dstEntries[dstOutfit] = srcEntry;   // the coordinate, as saved, including restrictions and keep flags
                 ported = true;
@@ -1578,9 +1719,10 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
     // v1: per-coordinate keys are arrays (usually msgpack bins) spanning the source's outfits; copy index n -> m.
     // Character-scoped keys never travel: bools, non-array bins, and arrays whose size differs from the
     // source's outfit count (the character-scoped keeps are length 9, Cosplay_Academy_Ready a bare bool).
-    // srcOutfits == 1 means the source is a real outfit file; those carry no ACI in practice (verified
-    // against the installation), so nothing is ported rather than guessing at the array's shape.
-    if (srcOutfits < 2 || dstOutfits <= 0) return;
+    // A real outfit file stores only its one coordinate, so index 0 is read regardless of the array's span.
+    const int64_t nV1 = srcCoordinate < 0 ? 0 : static_cast<int64_t>(srcCoordinate);
+    const bool srcIsFile = srcCoordinate < 0;
+    if (dstOutfits <= 0) return;
     if (dstOutfits < static_cast<int>(dstOutfit) + 1) return;   // nothing sane to write into
     const auto v1Decode = [](const Value& v) -> Value {
         if (v.isBin() && !v.asBin().empty()) {
@@ -1595,8 +1737,10 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
         if (key.empty()) continue;
         if (key == "CoordinateInfo" || key == "CardInfo") continue;   // v0 leftovers in a v1 payload, if any
         const Value decoded = v1Decode(kv.second);
-        if (!decoded.isArray() || static_cast<int>(decoded.size()) != srcOutfits) continue;   // character-scoped, or outfit-shape we cannot map
-        const Value& srcAtN = decoded.at(static_cast<size_t>(n));
+        if (!decoded.isArray() || decoded.size() == 0) continue;
+        if (!srcIsFile && static_cast<int>(decoded.size()) != srcOutfits) continue;   // character-scoped, or outfit-shape we cannot map
+        if (static_cast<size_t>(nV1) >= decoded.size()) continue;
+        const Value& srcAtN = decoded.at(static_cast<size_t>(nV1));
         if (!coordinateImport) {
             if (key != "AccKeep" && key != "HairAcc") continue;   // clothing import: accessory keep flags only
         }
@@ -1620,8 +1764,6 @@ void mergeAdditionalCardInfo(Card& card, const Value& srcExtended, int srcCoordi
                                             : ("Additional_Card_Info: accessory keep flags imported (" + std::to_string(portedCount) + " key(s))"));
     }
 }
-
-} // namespace
 
 ClothingFile LoadClothingFile(const std::string& path) {
     ClothingFile c;
@@ -1718,6 +1860,13 @@ ClothingFile LoadClothingFile(const std::string& path) {
         throw;
     } catch (const FormatError& e) {
         throw CardError(CardErrorKind::CorruptPayload, std::string("damaged outfit data: ") + e.what());
+    }
+
+    // A real outfit file carries one coordinate verbatim, under whatever index
+    // the author saved it with; read that payload for the merges instead of assuming 0.
+    if (c.extended.isMap() || c.extended.isNil()) {
+        c.singleCoordinateSource = true;
+        c.srcCoordinate = detectClothingFileCoordinateIndex(c.extended);
     }
 
     c.supported = true;
@@ -2242,19 +2391,21 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     // --- plugin payloads: the source's bone mods and material edits for the outfit ---
     {
         const bool coordinateMode = opt.coordinateImport;   // the file's coordinate is the outfit wholesale
+        // A real outfit file IS its one coordinate: its coordinate-indexed payloads are read regardless of the index the author saved them under.
+        const int srcC = clothes.singleCoordinateSource ? -1 : clothes.srcCoordinate;
         mergeAbmxPayloads(card, clothes.extended, rep.notes, clothes.srcCoordinate, outfit,
                           static_cast<int>(card.outfits.size()), /*coordinateMode=*/coordinateMode);
-        mergeMaterialEditorPayloads(card, clothes.extended, outfit, clothToMerged, clothes.srcCoordinate, replacedAcc,
+        mergeMaterialEditorPayloads(card, clothes.extended, outfit, clothToMerged, srcC, replacedAcc,
                                     /*dropAllAccRows=*/coordinateMode, rep.notes);
-        mergeKcoxPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
-        mergeDynamicBonePayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+        mergeKcoxPayloads(card, clothes.extended, srcC, outfit, rep.notes);
+        mergeDynamicBonePayloads(card, clothes.extended, srcC, outfit, clothToMerged,
                                  /*coordinateImport=*/coordinateMode, replacedAcc, rep.notes);
-        mergeHairAccessoryPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+        mergeHairAccessoryPayloads(card, clothes.extended, srcC, outfit, clothToMerged,
                                    /*coordinateImport=*/coordinateMode, replacedAcc, rep.notes);
-        mergeAccessoryStatesPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, clothToMerged,
+        mergeAccessoryStatesPayloads(card, clothes.extended, srcC, outfit, clothToMerged,
                                      /*coordinateImport=*/coordinateMode, rep.notes);
-        mergePushupPayloads(card, clothes.extended, clothes.srcCoordinate, outfit, rep.notes);
-        mergeAdditionalCardInfo(card, clothes.extended, clothes.srcCoordinate, clothes.srcOutfitCount, outfit,
+        mergePushupPayloads(card, clothes.extended, srcC, outfit, rep.notes);
+        mergeAdditionalCardInfo(card, clothes.extended, srcC, clothes.srcOutfitCount, outfit,
                                 static_cast<int>(card.outfits.size()), /*coordinateImport=*/coordinateMode, rep.notes);
     }
     // A coordinate import replaces the outfit wholesale: the target's own

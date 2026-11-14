@@ -287,6 +287,52 @@ std::string writeTestCardFile(const std::string& name, const Value& coordinateBi
 
 Value testFlags(bool v) { Value::Array a; for (int i = 0; i < 20; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); }
 
+// ---- clothing-file fixture: encode a minimal 【KoiKatuClothes】 PNG (Koikatsu's coordinate file) ----
+// Layout after the image: productNo + marker + version + name + coordinate bytes
+// (i32 clothesLen + i32 accessoryLen + 1-byte enableMakeup + i32 makeupLen), then an
+// optional KKEx block with version and size. The payload stored below is one coordinate
+// verbatim; the KKEx below carries the coordinate-indexed plugin payloads as a real
+// Coordinate file from the maker does (under whatever author coordinate index it had).
+std::string writeTestClothingFile(const std::string& name, const Value& clothes, const Value& accessory,
+                                  bool enableMakeup, const Value& makeup, const Value& extended) {
+    Bytes file = tinyPng();
+    put32(file, 100);
+    putDotnetString(file, "\xE3\x80\x90KoiKatuClothes\xE3\x80\x91");   // a??KoiKatuClothesa?`
+    putDotnetString(file, "0.0.0");
+    putDotnetString(file, "Coordinate Probe");   // the file's own name (empty in some real files)
+    auto chunkSized = [&](const Value& v) {
+        Bytes b = MsgPackPack(v);
+        Bytes out;
+        put32(out, static_cast<int32_t>(b.size()));
+        out.insert(out.end(), b.begin(), b.end());
+        return out;
+    };
+    Bytes coord;
+    {
+        Bytes c1 = chunkSized(clothes);
+        Bytes c2 = chunkSized(accessory);
+        coord.insert(coord.end(), c1.begin(), c1.end());
+        coord.insert(coord.end(), c2.begin(), c2.end());
+    }
+    coord.push_back(enableMakeup ? 1 : 0);
+    {
+        Bytes m = chunkSized(makeup);
+        coord.insert(coord.end(), m.begin(), m.end());
+    }
+    put32(file, static_cast<int32_t>(coord.size()));
+    file.insert(file.end(), coord.begin(), coord.end());
+    if (!extended.isNil() && extended.isMap() && !extended.asMap().empty()) {
+        Bytes kkexBin = MsgPackPack(extended);
+        putDotnetString(file, "KKEx");
+        put32(file, 3);   // KKEx version
+        put32(file, static_cast<int32_t>(kkexBin.size()));
+        file.insert(file.end(), kkexBin.begin(), kkexBin.end());
+    }
+    const std::string path = tempPath(name);
+    fileio::WriteFile(path, file.data(), file.size());
+    return path;
+}
+
 // The source character for the Coordinate-PNG tests: Toru, a Koikatsu character card
 // whose outfit 1 (his current one) is a gym uniform: author-slot ids, resolver rows with
 // outfit1.* properties, one mod accessory, makeup enabled, all hair accessories off.
@@ -3570,6 +3616,157 @@ void unitTests() {
         CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("type").asInt() == 120);
         CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 0);
         CHECK(moe3.status.at("clothesState").asBin() == Bytes({3, 3, 3, 3, 3, 3, 3, 3, 3}));
+    });
+
+    test("Coordinate (outfit) file import: the file's own plugin payloads are read, not dropped", [] {
+        // A community Coordinate file from the maker: one coordinate, verbatim, with the author's
+        // CoordinateIndex (3) preserved everywhere - ME rows, DBE rows, HAC (flat), ACI (flat entry).
+        Value::Map meTexRow;
+        // MaterialTexturePropertyList: one MainTex row at CoordinateIndex 3, Slot 2 (a clothes slot)
+        {
+            Value::Map r;
+            r.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+            r.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            r.emplace_back(Value(std::string("Slot")), Value(int64_t{2}));
+            r.emplace_back(Value(std::string("MaterialName")), Value(std::string("cf_test_top")));
+            r.emplace_back(Value(std::string("Property")), Value(std::string("MainTex")));
+            r.emplace_back(Value(std::string("TexID")), Value(int64_t{7}));
+            r.emplace_back(Value(std::string("Offset")), Value::nil());
+            r.emplace_back(Value(std::string("OffsetOriginal")), Value::nil());
+            r.emplace_back(Value(std::string("Scale")), Value::nil());
+            r.emplace_back(Value(std::string("ScaleOriginal")), Value::nil());
+            r.emplace_back(Value(std::string("TexAnimationDef")), Value::nil());
+            meTexRow = std::move(r);
+        }
+        Value::Map srcTex;
+        srcTex.emplace_back(Value(int64_t{7}), Value(Bytes{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}));   // a PNG header blob stands in for the image
+        Value::Map mePayload;
+        mePayload.emplace_back(Value(std::string("TextureDictionary")), Value(std::move(MsgPackPack(Value(std::move(srcTex))))));
+        mePayload.emplace_back(Value(std::string("MaterialTexturePropertyList")), Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(meTexRow))})))));
+        // a uniform-length-1 ShaderList: shader replacement for the outfit's top material
+        {
+            Value::Map row;
+            row.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+            row.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            row.emplace_back(Value(std::string("Slot")), Value(int64_t{2}));
+            row.emplace_back(Value(std::string("MaterialName")), Value(std::string("cf_test_top")));
+            row.emplace_back(Value(std::string("ShaderName")), Value(std::string("xukmi/MainOpaquePlus")));
+            row.emplace_back(Value(std::string("ShaderNameOriginal")), Value(std::string("Shader Forge/main_opaque")));
+            mePayload.emplace_back(Value(std::string("MaterialShaderList")), Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(row))})))));
+        }
+        Value::Map kkex;
+        kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.materialeditor")),
+                          Value(Value::Array{Value(int64_t{0}), Value(std::move(mePayload))}));
+        // DynamicBoneEditor, CoordinateIndex 3 (the author's index)
+        {
+            Value::Map row;
+            row.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            row.emplace_back(Value(std::string("Slot")), Value(int64_t{4}));
+            row.emplace_back(Value(std::string("BoneName")), Value(std::string("acce_probe")));
+            row.emplace_back(Value(std::string("Radius")), Value(0.05));
+            row.emplace_back(Value(std::string("Enable")), Value(true));
+            kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+                              Value(Value::Array{Value(int64_t{0}),
+                                    Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                                          Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(row))}))))}})}));
+        }
+        // HairAccessoryCustomizer, flat {slotIdx: settings} ( Coordinate files carry the flat shape )
+        {
+            Value::Map st;
+            st.emplace_back(Value(std::string("HairGloss")), Value(true));
+            st.emplace_back(Value(std::string("Marker")), Value(int64_t{33}));
+            Value::Map hac;
+            hac.emplace_back(Value(int64_t{4}), Value(std::move(st)));
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("CoordinateHairAccessories")), Value(std::move(MsgPackPack(Value(std::move(hac))))));
+            kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+                              Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))}));
+        }
+        // Additional_Card_Info, the flat per-coordinate entry (v0 shape)
+        {
+            Value::Map entry;
+            entry.emplace_back(Value(std::string("_acckeep")), Value(Value::Array{Value(int64_t{6})}));
+            entry.emplace_back(Value(std::string("_hairkeep")), Value(Value::Array{Value(int64_t{2})}));
+            entry.emplace_back(Value(std::string("_creatornames")), Value(Value::Array{Value(std::string("ProbeAuthor"))}));
+            Value::Map ri;
+            ri.emplace_back(Value(std::string("_gender")), Value(int64_t{2}));
+            entry.emplace_back(Value(std::string("_restrictioninfo")), Value(std::move(ri)));
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(entry))))));
+            kkex.emplace_back(Value(std::string("Additional_Card_Info")),
+                             Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))}));
+        }
+        const Value clothes = testClothesMap({2222, 0, 0, 0, 0, 0, 0, 0, 0});
+        Value::Array accParts;
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(124, 7777, "a_n_hair"));
+        const Value accessory = testAccessoryMap(std::move(accParts));
+        const std::string path = writeTestClothingFile("coordfile_plugins.png", clothes, accessory,
+                                                       true, Value(Value::Map{}), Value(std::move(kkex)));
+        // --- clothing mode: the file's payloads are read (nothing dropped), rebased to the target outfit
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt; opt.outfit = 0;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, path, opt);
+        (void)rep;
+        const Value& me = moe.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        CHECK(me.isMap());
+        {
+            Value texRows = MsgPackParse(me.at("MaterialTexturePropertyList").asBin());
+            bool foundTex = false; int64_t assignedCoord = -1, texId = -1;
+            for (const auto& row : texRows.asArray()) {
+                if (row.at("Slot").asInt() == 2 && row.at("Property").asStr() == "MainTex") {
+                    foundTex = true; assignedCoord = row.at("CoordinateIndex").asInt(); texId = row.at("TexID").asInt();
+                }
+            }
+            CHECK(foundTex);
+            CHECK(assignedCoord == 0);            // rebased to the outfit it landed on
+            CHECK(texId == 7);                    // the source's texture travels (id preserved)
+        }
+        {
+            Value dict = MsgPackParse(me.at("TextureDictionary").asBin());
+            CHECK(dict.atInt(7).isBin());
+        }
+        {
+            Value shaderRows = MsgPackParse(me.at("MaterialShaderList").asBin());
+            bool foundShader = false;
+            for (const auto& row : shaderRows.asArray())
+                if (row.at("CoordinateIndex").asInt() == 0 && row.at("Slot").asInt() == 2) foundShader = true;
+            CHECK(foundShader);
+        }
+        {
+            const Value& dbeBin = moe.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+            Value dbeRows = MsgPackParse(dbeBin.asBin());
+            bool foundDbe = false;
+            for (const auto& row : dbeRows.asArray())
+                if (row.at("BoneName").asStr() == "acce_probe" && row.at("CoordinateIndex").asInt() == 0) foundDbe = true;
+            CHECK(foundDbe);
+        }
+        {
+            const Value& hacBin = moe.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+            Value hacParsed = MsgPackParse(hacBin.asBin());
+            CHECK(hacParsed.atInt(0).atInt(4).at("Marker").asInt() == 33);   // flat slot entry imported, keyed under the target outfit
+        }
+        {
+            const Value& aciBin = moe.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value aciParsed = MsgPackParse(aciBin.asBin());
+            CHECK(aciParsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 6);   // keep flags travel
+            CHECK(aciParsed.atInt(0).at("_hairkeep").at(size_t(0)).asInt() == 2);
+            CHECK(aciParsed.atInt(0).at("_restrictioninfo").isNil());               // restrictions do not (clothing mode)
+        }
+        // --- coordinate import (wholesale): the full ACI entry replaces the slot's entry, keep flags AND restrictions
+        card::Card moe2 = testMoeCard();
+        card::ApplyClothingOptions copt; copt.outfit = 0; copt.coordinateImport = true;
+        const card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, path, copt);
+        (void)rep2;
+        {
+            const Value& aciBin = moe2.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value aci2Parsed = MsgPackParse(aciBin.asBin());
+            CHECK(aci2Parsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 6);
+            CHECK(aci2Parsed.atInt(0).at("_restrictioninfo").at("_gender").asInt() == 2);
+        }
     });
 
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {

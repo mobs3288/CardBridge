@@ -161,6 +161,20 @@ Everything in this section was verified against the installed game data (Koikats
 
 - Vanilla cards carry a `Coordinate` array of 7; MoreOutfits cards up to 30 (observed sizes: 4, 5, 8–22, 30). Coordinate imports apply the asked outfit slot only; other outfits are never synthesized or deleted. `moreoutfits` stores `CoordinateNames` (`bin({coordIdx: name})`) which are **not** ported (the target names its own outfits).
 
+### 6.8 Coordinate-file plugin payload shapes (author-verbatim)
+
+Community downloads (exported by the maker as coordinate files, `【KoiKatuClothes】`) carry the coordinate's payload **verbatim**, including the author's `CoordinateIndex` — a coordinate saved as index 3 stays index 3 in the file. Every coordinate-indexed payload in the file belongs to its one coordinate, so CardBridge reads them whole:
+
+- **`Additional_Card_Info`** — `CoordinateInfo` is the *flat* per-coordinate entry (`{_makeup, _clothnot, _coordsavebool, _acckeep, _hairkeep, _creatornames, _set, _subset, _restrictioninfo}`) with no coordinate wrapper; merge helpers take it directly, clothing imports port only the accessory keep flags, Coordinate imports port the whole entry.
+- **`com.deathweasel.bepinex.hairaccessorycustomizer`** — `CoordinateHairAccessories` is the flat `{slotIdx: settings}` map (no coordinate level); merged 1:1 into the target outfit (keep slots the file doesn't touch survive). Payload key this variant uses; `HairAccessories` (nested, keyed by coordinate) is accepted too.
+- **`com.deathweasel.bepinex.materialeditor`** — rows carry the author's coordinate index (any value); **all** rows of a real file travel, rebased to the applied outfit.
+- **`com.deathweasel.bepinex.dynamicboneeditor`** — rows likewise; **ABMX** bone mods are read per the file's detected coordinate index (blanket entries apply regardless).
+- **`KCOX`** — the flat `{ct_*: [png, replace]}` shape is read for any index (every overlay in the file is the file's); `BodyMask` travels too. The `{coordIdx: {garment: ...}}` keyed shape is read when coordinate-indexed shapes are present.
+- **`Accessory_States`** — the `{coordIdx: {...}}` keyed shape and the flat `{_slotinfo, ...}` shape are both read.
+- **`MoreAccessories`** — flat XML (`<additionalAccessories>` with no `<accessorySet>` wrapper) in coordinate files; every element counts for the one coordinate.
+
+Detection: a file's own coordinate index is detected from the index-bearing payloads it carries (MaterialEditor rows and DynamicBoneEditor rows vote; a file with none reads flat shapes anyway), and `srcCoordinate` records it for the ABMX rebase. A file whose plugins carry no index at all (or only flat ones) merges identically — the flat readers need no index.
+
 ## 7. Tests
 
 `tests/cardbridge_tests.cpp` (all in-memory except where noted):

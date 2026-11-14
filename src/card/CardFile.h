@@ -128,6 +128,16 @@ struct ClothingFile {
     // count for a synthesised source). The coordinate-scoped payload rebase
     // uses it to size per-coordinate arrays.
     int srcOutfitCount = 1;
+    // True when this file is a real outfit file rather than a coordinate
+    // extracted from a character card. A real outfit file IS its one
+    // coordinate: every coordinate-indexed payload in it (MaterialEditor rows,
+    // DynamicBoneEditor rows, KCOX overlays, HairAccessoryCustomizer / pushup
+    // payloads, Additional_Card_Info) belongs to that one coordinate, whatever
+    // index the author saved it under. The merge reads those payloads
+    // tolerant-shape in that case (see the singleCoordinate parameter);
+    // `srcCoordinate` still records the author's index when it can be detected
+    // for the payloads that need one (ABMX per-coordinate lists).
+    bool singleCoordinateSource = false;
 
     // Additional_Card_Info (CoordinateInfo): which slots the file asks to keep.
     // Empty (the sample) means no explicit preference; the merge below keeps
