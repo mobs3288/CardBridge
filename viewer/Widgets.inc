@@ -87,15 +87,15 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int 
     const int mid = y + kRowH / 2;
     auto xOf = [&](float v) { return trackL + static_cast<int>(std::lround(std::clamp((v - r.lo) / (r.hi - r.lo), 0.0f, 1.0f) * (trackR - trackL))); };
     s.FillRound(RECT{trackL, mid - 2, trackR, mid + 2}, 2, ui::kLine);
-    const int a = std::min(xOf(r.def), xOf(*r.v)), b = std::max(xOf(r.def), xOf(*r.v));
+    const int a = std::min(xOf(r.def), xOf(r.Value())), b = std::max(xOf(r.def), xOf(r.Value()));
     if (b > a) s.FillRound(RECT{a, mid - 2, b, mid + 2}, 2, mark);
     s.Line(static_cast<float>(xOf(r.def)), static_cast<float>(mid - 5), static_cast<float>(xOf(r.def)), static_cast<float>(mid + 5), ui::kDim, 1.0f);   // where the card has it
-    s.FillDisc(static_cast<float>(xOf(*r.v)), static_cast<float>(mid), 6.5f, mark);
-    s.FillDisc(static_cast<float>(xOf(*r.v)), static_cast<float>(mid), 3.5f, ui::kBg);
+    s.FillDisc(static_cast<float>(xOf(r.Value())), static_cast<float>(mid), 6.5f, mark);
+    s.FillDisc(static_cast<float>(xOf(r.Value())), static_cast<float>(mid), 3.5f, ui::kBg);
     char val[24];
-    if (r.fmt) std::snprintf(val, sizeof val, r.fmt, static_cast<double>(*r.v));
-    else if (r.percent) std::snprintf(val, sizeof val, "%d", static_cast<int>(std::lround(*r.v * 100)));
-    else std::snprintf(val, sizeof val, "%+d", static_cast<int>(std::lround(*r.v)));
+    if (r.fmt) std::snprintf(val, sizeof val, r.fmt, static_cast<double>(r.Value()));
+    else if (r.percent) std::snprintf(val, sizeof val, "%d", static_cast<int>(std::lround(r.Value() * 100)));
+    else std::snprintf(val, sizeof val, "%+d", static_cast<int>(std::lround(r.Value())));
     s.TextRight(g.fontMono, changed ? ui::kAmber : ui::kSub, valueR, y + 3, val);
     return true;
 }

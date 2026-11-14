@@ -60,6 +60,7 @@
 #include "resolve/ModIndex.h"
 #include "resolve/Resolver.h"
 #include "shape/Shape.h"
+#include "shape/BodyMeasurements.h"
 #include "Ui.h"
 #include "core/Version.h"
 

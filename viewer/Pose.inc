@@ -383,7 +383,7 @@ bool ReshapeNow(bool final) {
     return true;
 }
 
-bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola || id == kNippleIn; }
+bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola || id == kNippleIn || IsBodyMeasureId(id); }
 
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).

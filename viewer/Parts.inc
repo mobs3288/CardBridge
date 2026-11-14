@@ -67,7 +67,9 @@ constexpr int kTrackL = 168, kTrackR = 300;
 float SliderValueAt(const SliderRef& r, int x, int trackL = kTrackL, int trackR = kTrackR) {
     float t = std::clamp(static_cast<float>(x - trackL) / std::max(1, trackR - trackL), 0.0f, 1.0f);
     float v = r.lo + t * (r.hi - r.lo);
-    return std::clamp(std::round(v / r.step) * r.step, r.lo, r.hi);
+    if (!std::isfinite(v)) return r.lo;
+    if (r.step > 0) v = std::round(v / r.step) * r.step;   // step 0: the typed value is kept exactly, no snap
+    return std::clamp(v, r.lo, r.hi);
 }
 
 int ButtonAt(const PanelLayout& l, int x, int y) {

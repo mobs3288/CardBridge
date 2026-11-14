@@ -46,6 +46,7 @@
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
+#include "shape/BodyMeasurements.h"
 #include "resolve/Resolver.h"
 
 #include "PmxReader.h"
@@ -819,6 +820,76 @@ void unitTests() {
         CHECK(near(v[0].y, -1.0f) && near(v[2].x, 0.0f) && near(v[1].x, -45.0f));
         anm.get("cf_s_Mouth_x", 1.5f, v, all);   // the plugin leaves these rotations clamped
         CHECK(near(v[0].x, 1.5f) && near(v[1].x, 90.0f));
+    });
+    test("body measurements: the bust drives only the bust size slider", [] {
+        std::vector<float> card(44, 0.5f), shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureBust, 0.75f);
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[4], 0.75f));
+        for (size_t i = 0; i < shape.size(); ++i) if (i != 4) CHECK(near(shape[i], 0.5f));
+    });
+    test("body measurements: waist moves width and depth by the same delta and keeps their difference", [] {
+        std::vector<float> card(44, 0.5f);
+        card[22] = 0.8f; card[23] = 0.2f;                    // the card's own asymmetry: wide, shallow
+        std::vector<float> shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, 0.45f);   // average 0.50 -> 0.45: -0.05 on both
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[22], 0.75f) && near(shape[23], 0.15f));   // delta -0.05 on both, difference kept
+        CHECK(near(shape[22] - shape[23], card[22] - card[23]));
+        CHECK(near(shape[24], 0.5f) && near(shape[4], 0.5f));     // the hip and the bust did not move
+    });
+    test("body measurements: hip moves width and depth and leaves the butt sliders alone", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureHip, 0.9f);
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[24], 0.9f) && near(shape[25], 0.9f));
+        CHECK(near(shape[26], 0.5f) && near(shape[27], 0.5f));    // butt size / angle are not part of the measurement
+        CHECK(near(shape[22], 0.5f) && near(shape[4], 0.5f));
+    });
+    test("body measurements: each slider is clamped to the maker's range without moving anything else", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        shape[22] = 1.9f;                                   // a SliderUnlocker card: wide slider almost at its end
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, 2.0f);   // delta +0.8
+        CHECK(near(shape[22], 2.0f) && near(shape[23], 1.3f));   // width pins at the max, depth follows as far as it can
+        std::vector<float> lo = card, hi = card;
+        shape::BodyMeasureSetTarget(lo, card, shape::kBodyMeasureHip, -0.5f);   // delta -1.0, inside the range
+        CHECK(near(lo[24], -0.5f) && near(lo[25], -0.5f));       // both sides the same
+        shape::BodyMeasureSetTarget(lo, card, shape::kBodyMeasureHip, -1.5f);   // delta -2.0, pinned at -1
+        CHECK(near(lo[24], -1.0f) && near(lo[25], -1.0f));
+        shape::BodyMeasureSetTarget(hi, card, shape::kBodyMeasureHip, 2.0f);
+        CHECK(near(hi[24], 2.0f) && near(hi[25], 2.0f));
+        lo = card;                                          // a card that sits outside -1..2 keeps its own bound
+        card[24] = -1.5f;
+        std::vector<float> unlocked = card;
+        shape::BodyMeasureSetTarget(unlocked, card, shape::kBodyMeasureHip, -1.5f);   // delta 0: already there, no crash
+        CHECK(unlocked[24] == -1.5f);
+        float l = 0.0f, h = 0.0f;
+        shape::BodyMeasureRange(card, shape::kBodyMeasureHip, l, h);
+        CHECK(l == -1.5f && h == 2.0f);                     // the row's range follows the card, not the nominal 0..1
+    });
+    test("body measurements: non-finite targets and sizes are refused, not stored", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        CHECK(!shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, std::numeric_limits<float>::quiet_NaN()));
+        CHECK(!shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, std::numeric_limits<float>::infinity()));
+        CHECK(shape == card);
+        std::vector<float> shortShape(4, 0.5f);
+        CHECK(shape::BodyMeasureAverage(shortShape, shape::kBodyMeasureBust) == 0.0f);
+        CHECK(!shape::BodyMeasureSetTarget(shortShape, {0.5f}, shape::kBodyMeasureBust, 0.7f));
+    });
+    test("body measurements: the card default is preserved exactly when the row is never touched", [] {
+        std::vector<float> card(44, 0.0f);
+        for (size_t i = 0; i < card.size(); ++i) card[i] = static_cast<float>(i) / 100.0f;   // a non-trivial card
+        const std::vector<float> before = card;
+        const float avg = shape::BodyMeasureAverage(card, shape::kBodyMeasureWaist);
+        CHECK(std::fabs(avg - (22.0f / 100.0f + 23.0f / 100.0f) / 2.0f) < 1e-6f);
+        float lo = 0.0f, hi = 0.0f;
+        shape::BodyMeasureRange(card, shape::kBodyMeasureWaist, lo, hi);
+        CHECK(lo == -1.0f && hi == 2.0f);
+        CHECK(card == before);
     });
     test("typeBone correction table: int32 count, 9 floats a row; a truncated table is refused", [] {
         Bytes d;

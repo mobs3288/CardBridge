@@ -647,7 +647,7 @@ bool WbClick(int x, int y, bool right) {
             g.sliderDrag = id;
             g.dragTrackL = l.trackL;   // ApplyPending reads the track the drag started on
             g.dragTrackR = l.trackR;
-            *r.v = SliderValueAt(r, x, l.trackL, l.trackR);
+            r.Set(SliderValueAt(r, x, l.trackL, l.trackR));
             MaterialSliderEdited(id, false);
             SetCapture(g.matHwnd);
             return true;
@@ -879,7 +879,7 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const bool live = IsLiveId(g.sliderDrag);
             if (!live && SliderFor(g.sliderDrag, r)) {
                 char msg[96];
-                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
+                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, r.Value(), r.def);
                 Log(msg);
             }
             const int released = g.sliderDrag;

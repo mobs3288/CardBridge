@@ -381,6 +381,12 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         }
     };
     if (tab == TabBody) {
+        // The BWH group first: one number per measurement, driving the underlying shape sliders together (see BwhFor).
+        rows.push_back({0, kBwhBust, "Body measurements (BWH)", "Body measurements"});
+        rows.push_back({1, kBwhBust, "Bust", "Body measurements"});
+        rows.push_back({1, kBwhWaist, "Waist", "Body measurements"});
+        rows.push_back({1, kBwhHip, "Hip", "Body measurements"});
+        rows.push_back({4, 0, "Shift+Left-click a row and type an exact value (%)", "Body measurements"});
         addSliders(shape::BodySliders(), 0, g.tw.body.size());
         // The band + cup pair for the Bust > Size row, right under it (inserting below the Size row, newest first).
         auto it = std::find_if(rows.begin(), rows.end(), [](const TweakRow& r) { return r.kind == 1 && r.id == kBodyBust; });
@@ -531,12 +537,13 @@ bool TweakChanged(int id) {
     if (id == kTransBrush) return g.transBrush;
     if (id == kTransErase) return g.transErase;
     if (id == kNipplePink) return !g.tw.pinkNipples;
-    return SliderFor(id, r) && std::fabs(*r.v - r.def) > 1e-4f;
+    return SliderFor(id, r) && std::fabs(r.Value() - r.def) > 1e-4f;
 }
 
 bool AnyTweak() {
     for (int i = 0; i < kFaceBase; ++i) if (TweakChanged(i)) return true;
     for (int i = kFaceBase; i < kNippleMm; ++i) if (TweakChanged(i)) return true;
+    if (TweakChanged(kBwhBust) || TweakChanged(kBwhWaist) || TweakChanged(kBwhHip)) return true;   // the macro rows (their target sliders already count above)
     if (TweakChanged(kNippleMm) || TweakChanged(kAreola) || g.tw.nippleInside) return true;
     if (TweakChanged(kSkinShade) || TweakChanged(kSkinShadeUnder) || TweakChanged(kSkinShadeTop) ||
         TweakChanged(kSkinShadeWidth) || TweakChanged(kSkinAo) ||
@@ -582,7 +589,7 @@ void ResetTweak(int id) {
         TransSwitchChanged(id);   // the toggle reverts the bake at once (the paint is kept)
     }
     else if (id == kNipplePink) g.tw.pinkNipples = true;
-    else if (SliderFor(id, r)) *r.v = r.def;
+    else if (SliderFor(id, r)) r.Set(r.def);
 }
 
 void ScheduleApplyTweaks() {

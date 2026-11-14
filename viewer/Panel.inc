@@ -212,7 +212,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
                         }
                         bool any = false;
-                        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
+                        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
+                            if (rows[k].kind == 1 || rows[k].kind == 2 || rows[k].kind == 6) any = any || TweakChanged(rows[k].id);
                         if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
                     } else if (row.kind == 4) {
                         const RECT infoClip{14, y, kPanel - 16, y + kRowH};

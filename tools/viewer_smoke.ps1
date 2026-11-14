@@ -5,7 +5,7 @@
   controls that do nothing.
 
 .DESCRIPTION
-  Steps (all by default, -Only picks some): parts, body, face, look, morphs, setup, bones, skeleton, bonedrag, undo, pose, slider, areola, apose, physics,
+  Steps (all by default, -Only picks some): parts, body, face, look, morphs, setup, bones, skeleton, bonedrag, undo, pose, slider, bwh, areola, apose, physics,
   asexported, export, materials, viewmode, gizmo, axeswidget. Each saves <Out>\NN_<step>.png and records checks. The viewer is started with CARDBRIDGE_TEST_HOOKS=1, which makes
   it answer a few test messages (layout dump, undo, redo, save / load pose) and use CARDBRIDGE_POSE_PATH / CARDBRIDGE_EXPORT_PARENT
   instead of file dialogs. A normal run of the viewer ignores all of that.
@@ -750,6 +750,39 @@ try {
             $lay = Layout
             $c = Shot 'morph_reset'
             Check 'morphs: the right-click reset puts the picture back' ([V]::DiffView($a.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($a.Path, $c.Path, $lay.panel))
+        }
+    }
+
+    # ---- the Body measurements (BWH) rows: three macro rows at the top of the Body tab ----
+    if (Want 'bwh') {
+        Write-Host 'body measurements (BWH)'
+        $lay = GoTab 1
+        $ids = @(22100, 22101, 22102)
+        foreach ($id in $ids) {
+            $row = $lay.rows | Where-Object { $_.id -eq $id -and $_.y -ge 0 } | Select-Object -First 1
+            Check "bwh: the measurement row $id is listed" ($null -ne $row)
+        }
+        # the underlying Bust > Size slider (id 4) sits further down the same tab; the rows are kind 1
+        $under = $lay.rows | Where-Object { $_.id -eq 4 -and $_.y -ge 0 }
+        Check 'bwh: the underlying bust slider is still listed too' ($null -ne $under)
+        # drag the Hip row: the width and depth sliders move together (the picture changes)
+        $hip = $lay.rows | Where-Object { $_.id -eq 22102 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -eq $hip) { Check 'bwh: the hip row is visible to drag' $false }
+        else {
+            $a = Shot 'before_bwh'
+            $x0 = [int]($lay.track[0] + 0.5 * ($lay.track[1] - $lay.track[0]))
+            $x1 = [int]($lay.track[0] + 0.9 * ($lay.track[1] - $lay.track[0]))
+            Drag $x0 ([int]$hip.y) $x1 ([int]$hip.y) 12 40
+            $answered = Hook 10 8000
+            $lay = WaitFor { param($l) -not $l.state.busy } 60
+            Check 'bwh: the window answers during and after the drag' ($answered -and $null -ne $lay)
+            $b = Shot 'bwh_hip'
+            $d = [V]::DiffView($a.Path, $b.Path, $lay.panel)
+            Check 'bwh: the hip measurement changes the picture' ($d -gt 0.0005) ("{0:P2} of the view" -f $d)
+            # put it back: right-click the row resets the measurement to the card
+            [void][V]::PostMessage($hwnd, 0x204, [IntPtr]0, [V]::L(60, [int]$hip.y)); Start-Sleep -Milliseconds 80
+            [void][V]::PostMessage($hwnd, 0x205, [IntPtr]0, [V]::L(60, [int]$hip.y)); Start-Sleep -Milliseconds 600
+            Check 'bwh: the window answers after the reset' (Hook 10)
         }
     }
 

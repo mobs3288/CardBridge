@@ -1,14 +1,58 @@
 // viewer fragment: slider access (included in order by main.cpp)
 
 // ---- tweak access ----------------------------------------------------------------------------------------------------
+// A row wraps either one float (almost all of them) or a virtual value with its own read / write: the three Body
+// measurements rows in the Body tab are one control each that drives the underlying shape sliders together. `get` /
+// `set` take over from `v` when set, so every call site goes through Value() / Set() and does not care which of the two
+// the row is. A step of 0 means the slider snaps to nothing: a typed number is kept exactly.
 struct SliderRef {
     float* v = nullptr;
     float def = 0, lo = 0, hi = 1, step = 0.01f;
     bool percent = true;   // shown as 0..100 %, otherwise as plain millimetres
     const char* fmt = nullptr;   // a printf format for the value (one double), instead of the two above
+    std::function<float()> get;          // a virtual read (Body measurements); overrides *v when set
+    std::function<void(float)> set;      // a virtual write; overrides *v = ... when set
+    bool Valid() const { return v != nullptr || static_cast<bool>(get); }
+    float Value() const { return get ? get() : (v ? *v : 0.0f); }
+    void Set(float nv) const { if (set) set(nv); else if (v) *v = nv; }
 };
 
+// ---- the Body tab's "Body measurements" group: Bust / Waist / Hip as one number each ---------------------------------
+// The game has no BWH slider: a measurement is a set of the shape sliders the maker multiplies into the body skeleton.
+// The mapping (bust -> body 4, waist -> body 22/23, hip -> body 24/25) and the delta / clamp maths live in
+// shape/BodyMeasurements.h so the logic is covered by the unit tests; "Butt size" stays outside the hip measurement.
+// Each row moves the sliders it drives by the same delta, keeping the card's own width / depth against each other and
+// clamping each slider by the same range the plain row uses (-1 .. 2, or the card's own value when it is outside that).
+// The stored number is a percentage of the 0..1 nominal range (50 = the card at half way, 100 = the top of the slider,
+// -100..200 for SliderUnlocker cards); the row's value is read live from the underlying sliders, so the individual
+// rows below still edit exactly what the measurement edits.
+bool IsBodyMeasureId(int id) { return id == kBwhBust || id == kBwhWaist || id == kBwhHip; }
+
+int BodyMeasureIndexOf(int id) {
+    if (id == kBwhBust) return shape::kBodyMeasureBust;
+    if (id == kBwhWaist) return shape::kBodyMeasureWaist;
+    return shape::kBodyMeasureHip;
+}
+
+bool BwhFor(int id, SliderRef& r) {
+    if (g.tw.body.size() != g.tw.bodyCard.size() || g.tw.body.empty()) return false;
+    const int measure = BodyMeasureIndexOf(id);
+    float lo = 0.0f, hi = 0.0f;
+    shape::BodyMeasureRange(g.tw.bodyCard, measure, lo, hi);
+    r.lo = lo * 100.0f; r.hi = hi * 100.0f; r.def = shape::BodyMeasureAverage(g.tw.bodyCard, measure) * 100.0f;
+    r.step = 0;                     // no snap: a typed number is kept exactly
+    r.percent = false;              // the value *is* the percentage; the box types what the row shows
+    r.fmt = "%.1f%%";
+    r.get = [id]() { return shape::BodyMeasureAverage(g.tw.body, BodyMeasureIndexOf(id)) * 100.0f; };
+    r.set = [id](float v) {
+        if (!std::isfinite(v)) return;
+        shape::BodyMeasureSetTarget(g.tw.body, g.tw.bodyCard, BodyMeasureIndexOf(id), v / 100.0f);
+    };
+    return true;
+}
+
 bool SliderFor(int id, SliderRef& r) {
+    if (IsBodyMeasureId(id)) return BwhFor(id, r);
     if (id >= 0 && id < kFaceBase) {
         if (static_cast<size_t>(id) >= g.tw.body.size()) return false;
         r.v = &g.tw.body[static_cast<size_t>(id)];
@@ -127,18 +171,18 @@ void BustActiveFromValue(float v, int& bandIdx, int& cupIdx) {
 int ActivePresetChip(int rowId) {
     if (rowId == kBustBand || rowId == kBustCup) {
         SliderRef r;
-        if (!SliderFor(kBodyBust, r) || !r.v) return -1;
-        if (*r.v < -0.005f || *r.v > 1.005f) return -1;   // dragged beyond the presets: no chip is "it"
+        if (!SliderFor(kBodyBust, r) || !r.Valid()) return -1;
+        if (r.Value() < -0.005f || r.Value() > 1.005f) return -1;   // dragged beyond the presets: no chip is "it"
         int b = 0, c = 0;
-        BustActiveFromValue(*r.v, b, c);
+        BustActiveFromValue(r.Value(), b, c);
         return rowId == kBustBand ? b : c;
     }
     if (rowId == kNippleSize) {
         SliderRef r;
-        if (!SliderFor(kNippleMm, r) || !r.v) return -1;
+        if (!SliderFor(kNippleMm, r) || !r.Valid()) return -1;
         int best = 0;
         float bestD = 1e30f;
-        for (int i = 0; i < 4; ++i) { const float d = std::fabs(*r.v - kNippleSizeMm[i]); if (d < bestD) { bestD = d; best = i; } }
+        for (int i = 0; i < 4; ++i) { const float d = std::fabs(r.Value() - kNippleSizeMm[i]); if (d < bestD) { bestD = d; best = i; } }
         return best;
     }
     return -1;
@@ -152,11 +196,11 @@ const char* PresetChipText(int rowId, int i) {
 void ApplyPresetChip(int rowId, int chip) {
     if (rowId == kBustBand || rowId == kBustCup) {
         SliderRef r;
-        if (!SliderFor(kBodyBust, r) || !r.v) return;
+        if (!SliderFor(kBodyBust, r) || !r.Valid()) return;
         int b = 0, c = 0;
-        BustActiveFromValue(*r.v, b, c);
+        BustActiveFromValue(r.Value(), b, c);
         if (rowId == kBustBand) b = std::clamp(chip, 0, kBustBandCount - 1); else c = std::clamp(chip, 0, kBustCupCount - 1);
-        *r.v = static_cast<float>(b * kBustCupCount + c) / static_cast<float>(kPresetCombos - 1);
+        r.Set(static_cast<float>(b * kBustCupCount + c) / static_cast<float>(kPresetCombos - 1));
         TweakEdited(kBodyBust, true);
         char msg[64];
         std::snprintf(msg, sizeof msg, "bust size: %s%s", kBustBandLabels[b], kBustCupLabels[c]);
@@ -166,9 +210,9 @@ void ApplyPresetChip(int rowId, int chip) {
     }
     if (rowId == kNippleSize) {
         SliderRef r;
-        if (!SliderFor(kNippleMm, r) || !r.v) return;
+        if (!SliderFor(kNippleMm, r) || !r.Valid()) return;
         chip = std::clamp(chip, 0, 3);
-        *r.v = std::clamp(kNippleSizeMm[chip], r.lo, r.hi);
+        r.Set(std::clamp(kNippleSizeMm[chip], r.lo, r.hi));
         TweakEdited(kNippleMm, true);
         char msg[48];
         std::snprintf(msg, sizeof msg, "nipple size: %s (%+.0f mm)", kNippleSizeLabels[chip], static_cast<double>(kNippleSizeMm[chip]));

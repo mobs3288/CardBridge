@@ -149,7 +149,8 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
               kTransBrush = 307, kTransErase = 308,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
               kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
-              kMorphBase = 30000, kMorphResetAll = 23000;   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
+              kMorphBase = 30000, kMorphResetAll = 23000,   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
+              kBwhBust = 22100, kBwhWaist = 22101, kBwhHip = 22102;   // the Body measurements macro rows: one number per measurement, not a card index
 constexpr int kBodyBust = 4;   // the Bust > Size slider in shape::BodySliders() (body slider ids are the shape's index, 0..43)
 struct TweakRow {
     int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row), 6 a preset-chips row (band / cup / nipple size)

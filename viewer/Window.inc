@@ -127,7 +127,7 @@ void ApplyPending() {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
             // The drag may be on the panel's track or on the workbench's wider one:
             // both record which one they started on.
-            *r.v = SliderValueAt(r, g.dragX, g.dragTrackL > 0 ? g.dragTrackL : kTrackL, g.dragTrackR > 0 ? g.dragTrackR : kTrackR);
+            r.Set(SliderValueAt(r, g.dragX, g.dragTrackL > 0 ? g.dragTrackL : kTrackL, g.dragTrackR > 0 ? g.dragTrackR : kTrackR));
         }
         TweakEdited(g.sliderDrag, false);
         InvalidateSliderRow(g.sliderDrag);
@@ -1044,7 +1044,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const bool live = IsLiveId(g.sliderDrag);
             if (!live && SliderFor(g.sliderDrag, r)) {
                 char msg[96];
-                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
+                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, r.Value(), r.def);
                 Log(msg);
             }
             const int released = g.sliderDrag;
@@ -1131,7 +1131,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         if (row >= 1 && row <= kBoneEditCount && SliderFor(kBoneEdit + row - 1, r)) {
                             const float step = r.step * (g.shiftDown ? 10.0f : 1.0f);
                             const PoseState before = CapturePose();
-                            *r.v = std::clamp(*r.v + (d > 0 ? step : -step), r.lo, r.hi);
+                            r.Set(std::clamp(r.Value() + (d > 0 ? step : -step), r.lo, r.hi));
                             ApplyPoseLive();
                             PoseChanged(before, true);
                             InvalidateList();

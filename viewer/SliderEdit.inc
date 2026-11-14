@@ -16,10 +16,10 @@ std::string SliderEditTrim(const std::string& s) {
 std::string SliderEditInitText(const SliderRef& r) {
     char b[40];
     if (r.percent) {   // the row shows v*100 as an integer; the box holds (and parses) the same
-        std::snprintf(b, sizeof b, "%d", static_cast<int>(std::lround(*r.v * 100.0f)));
+        std::snprintf(b, sizeof b, "%d", static_cast<int>(std::lround(r.Value() * 100.0f)));
         return b;
     }
-    std::snprintf(b, sizeof b, "%.4f", static_cast<double>(*r.v));
+    std::snprintf(b, sizeof b, "%.4f", static_cast<double>(r.Value()));
     std::string s = b;
     while (s.size() > 1 && s.back() == '0') s.pop_back();
     if (!s.empty() && s.back() == '.') s.pop_back();
@@ -38,11 +38,11 @@ bool SliderEditParse(const std::string& buf, double& out) {
 }
 void BeginSliderEdit(int id) {
     SliderRef r;
-    if (!SliderFor(id, r) || !r.v) return;
+    if (!SliderFor(id, r) || !r.Valid()) return;
     if (g.sliderEdit == id) return;                      // already typing here
     if (g.sliderEdit >= 0) EndSliderEdit(true);          // another row was open: commit it first
     g.sliderEdit = id;
-    g.sliderEditOrig = *r.v;
+    g.sliderEditOrig = r.Value();
     g.sliderEditBuf = SliderEditInitText(r);
     g.sliderEditMatPushed = false;
     g.sliderEditPoseBefore = CapturePose();
@@ -55,26 +55,26 @@ void EndSliderEdit(bool commit) {
     const int id = g.sliderEdit;
     if (id < 0) return;
     SliderRef r;
-    if (SliderFor(id, r) && r.v) {
+    if (SliderFor(id, r) && r.Valid()) {
         if (commit) {
             double v = 0;
             if (SliderEditParse(g.sliderEditBuf, v)) {
                 if (r.percent) v /= 100.0;
                 v = std::clamp(v, static_cast<double>(r.lo), static_cast<double>(r.hi));
                 if (r.step > 0) v = std::round(v / static_cast<double>(r.step)) * static_cast<double>(r.step);
-                *r.v = static_cast<float>(v);
+                r.Set(static_cast<float>(v));
             } else {
-                *r.v = g.sliderEditOrig;   // not a number: the value stays what it was
+                r.Set(g.sliderEditOrig);   // not a number: the value stays what it was
                 if (!SliderEditTrim(g.sliderEditBuf).empty()) Log("not a number; the value was kept", LogKind::Warn);
             }
         } else {
-            *r.v = g.sliderEditOrig;       // Esc: put it back, exactly
+            r.Set(g.sliderEditOrig);       // Esc: put it back, exactly
         }
         TweakEdited(id, true);           // the same release path a drag ends with (re-shape / pose / material rebuild)
         PoseChanged(g.sliderEditPoseBefore);   // one undo step for a pose field (a no-op when nothing moved)
         if (!IsLiveId(id) && !IsMatId(id)) {
             char msg[96];
-            std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", id, static_cast<double>(*r.v), static_cast<double>(r.def));
+            std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", id, static_cast<double>(r.Value()), static_cast<double>(r.def));
             Log(msg);
         }
     }

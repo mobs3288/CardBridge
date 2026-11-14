@@ -43,6 +43,7 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (row.kind == 0) {
         bool any = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
+            if (rows[k].kind == 4 || rows[k].kind == 5) continue;   // text / action rows are not sliders to reset
             any = any || TweakChanged(rows[k].id);
             ResetTweak(rows[k].id);
         }
@@ -119,7 +120,7 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     }
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
-    *r.v = SliderValueAt(r, x);
+    r.Set(SliderValueAt(r, x));
     TweakEdited(row.id, false);
     SetCapture(g.hwnd);
     InvalidatePanel();
@@ -168,11 +169,11 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         const int id = kBoneEdit + row - 1;
         SliderRef r;
         if (!SliderFor(id, r)) return;
-        if (right) { *r.v = r.def; ApplyPoseLive(); InvalidatePanel(); return; }
+        if (right) { r.Set(r.def); ApplyPoseLive(); InvalidatePanel(); return; }
         if (g.shiftDown) { BeginSliderEdit(id); return; }   // type the value with the keyboard
         if (x < kTrackL - 8) return;
         g.sliderDrag = id;
-        *r.v = SliderValueAt(r, x);
+        r.Set(SliderValueAt(r, x));
         SetCapture(g.hwnd);
         ApplyPoseLive();
         InvalidatePanel();
