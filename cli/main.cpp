@@ -145,12 +145,12 @@ void usage() {
         "             [--auto-cloth]                  opt-in: synthesize loose chains for hanging cloth missing authored physics\n"
         "                                            (disabled by default: synthesised chains were collapsing cloth onto the body;\n"
         "                                            --no-auto-cloth / CARDBRIDGE_NO_AUTO_CLOTH=1 keep it off)\n"
-        "             [--fix-garment-intersections]  opt-in: push any garment vertex that pierces the body back out along the body's\n"
-        "                                            own surface by its own penetration depth (plus a small clearance); the silhouette\n"
-        "                                            is preserved. Body, head, hair, the nude-morph skin pieces and footwear are never\n"
-        "                                            touched; the corrected count is written to the manifest as issues. Off by default\n"
-        "                                            (existing exports stay byte-identical); CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1 forces\n"
-        "                                            it on, =0 force-disables it)\n"
+        "             [--no-fix-garment-intersections]  turn the garment-vs-body clipping correction OFF (it is ON by default). The correction\n"
+        "                                            pushes any garment vertex that pierces the body back out along the body's own surface by\n"
+        "                                            its own penetration depth (plus a small clearance); the silhouette is preserved. Body,\n"
+        "                                            head, hair, the nude-morph skin pieces and footwear are never touched; the corrected count\n"
+        "                                            is written to the manifest as issues. CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 also forces\n"
+        "                                            it off. ([--fix-garment-intersections] is kept for compatibility: it does nothing now)\n"
         "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
         "                                             [--jiggle-mass F] [--jiggle-stiffness F] [--jiggle-damping F]\n"
         "                                             [--jiggle-gravity F] [--jiggle-amplitude-vertical F]\n"
@@ -938,9 +938,11 @@ int cmdConvert(const Args& a) {
         // settles it at load. Without it the exported PMX starts at the authored pose and every joint locks fighting gravity -
         // stiff paper cloth, not fabric.
         assemble::BakeGarmentSettle(scene);
-        // Optional, non-destructive clipping correction: a garment vertex buried in the skin gets pushed back out along the body's
-        // own surface (opt-in with --fix-garment-intersections; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 force-disables it).
-        if (a.has("fix-garment-intersections") || std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS") && std::string(std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS")) != "0")
+        // Garment-vs-body clipping correction, on by default: a garment vertex buried in the skin is pushed back out along the body's
+        // own surface. --no-fix-garment-intersections or CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turn it off.
+        const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");
+        const bool fixOff = a.has("no-fix-garment-intersections") || (fixEnv && std::string(fixEnv) == "0");
+        if (!fixOff)
             assemble::FixGarmentIntersections(scene);
     }
     poseTimer.Stop();
@@ -1211,7 +1213,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

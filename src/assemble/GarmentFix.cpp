@@ -11,7 +11,8 @@
 //
 // Exclusions (documented, by role rather than by asset name): the body itself, the hidden "under pieces"
 // (the skin kept for the nude morphs), footwear (a shoe encloses the foot), the Head and the Hair group.
-// The pass is opt-in; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 keeps it off even for a caller that turns it on.
+// The pass is on by default (every supported card benefits automatically); CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0
+// keeps it off even for a caller that enables it on purpose.
 
 #include "assemble/Assembler.h"
 

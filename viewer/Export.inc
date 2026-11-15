@@ -39,8 +39,9 @@ void StartExport() {
             if (ProgCancelled()) throw Cancelled{};
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggle, sag);   // the bust/hips as they hang under gravity
-            if (const char* env = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS"); env && std::string(env) != "0")
-                assemble::FixGarmentIntersections(scene);   // opt-in garment-vs-body clipping correction
+            // garment-vs-body clipping correction (on by default; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turns it off)
+            if (const char* env = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS"); !env || std::string(env) != "0")
+                assemble::FixGarmentIntersections(scene);
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // hidden items leave the PMX entirely (meshes, chains and their own bones); the preview is the viewer, 1:1
             if (matCopy.IsDirty()) material::ReportUnsupported(scene, matCopy);   // unsupported workbench fields are reported, never silently dropped
             Log("baking the game shader textures");
