@@ -120,6 +120,12 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     }
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
+    if (IsBodyMeasureId(row.id)) {   // a measurement row: grabbing it anchors the drag; movement does the coupled-delta move (see ApplyPending)
+        BwhDragBegin(row.id);
+        SetCapture(g.hwnd);
+        InvalidatePanel();
+        return;
+    }
     r.Set(SliderValueAt(r, x));
     TweakEdited(row.id, false);
     SetCapture(g.hwnd);

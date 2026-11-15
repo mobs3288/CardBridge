@@ -762,9 +762,47 @@ try {
             $row = $lay.rows | Where-Object { $_.id -eq $id -and $_.y -ge 0 } | Select-Object -First 1
             Check "bwh: the measurement row $id is listed" ($null -ne $row)
         }
-        # the underlying Bust > Size slider (id 4) sits further down the same tab; the rows are kind 1
-        $under = $lay.rows | Where-Object { $_.id -eq 4 -and $_.y -ge 0 }
-        Check 'bwh: the underlying bust slider is still listed too' ($null -ne $under)
+        # the underlying Bust > Size slider (id 4) sits further down the same tab; it scrolls into view
+        $under = $lay.rows | Where-Object { $_.id -eq 4 -and $_.y -ge 0 } | Select-Object -First 1
+        $wr = New-Object V+RECT
+        [void][V]::GetWindowRect($hwnd, [ref]$wr)
+        $wx = $wr.Left + 160; $wy = $wr.Top + 400
+        for ($i = 0; $i -lt 8 -and $null -eq $under; $i++) {
+            [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](-120 * 65536), [V]::L($wx, $wy))   # wheel down
+            Start-Sleep -Milliseconds 120
+            $lay = Layout
+            $under = $lay.rows | Where-Object { $_.id -eq 4 -and $_.y -ge 0 } | Select-Object -First 1
+        }
+        Check 'bwh: the underlying bust slider scrolls into view too' ($null -ne $under)
+        for ($i = 0; $i -lt 10; $i++) { [void][V]::PostMessage($hwnd, 0x20A, [IntPtr](120 * 65536), [V]::L($wx, $wy)); Start-Sleep -Milliseconds 60 }   # back to the top
+        # type an exact value into the Waist row: Shift+Left-click, clear, type, Enter (the cm entry solves against the skin)
+        $lay = Layout   # list is back at the top
+        $waist = $lay.rows | Where-Object { $_.id -eq 22101 -and $_.y -ge 0 } | Select-Object -First 1
+        if ($null -ne $waist) {
+            $a = Shot 'bwh_waist_before_type'
+            $WM_KEYDOWN = 0x100; $WM_CHAR = 0x102; $VK_SHIFT = 0x10; $VK_DELETE = 0x2E; $VK_RETURN = 0x0D
+            [void][V]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$VK_SHIFT, [IntPtr]0)
+            Click 60 ([int]$waist.y) 600
+            [void][V]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$VK_DELETE, [IntPtr]0)
+            # the digits go through WM_KEYDOWN: SliderEditKey reads them from the virtual keys, not from translation
+            foreach ($ch in @('1', '3', '0')) { [void][V]::PostMessage($hwnd, 0x100, [IntPtr][char]$ch, [IntPtr]0) }
+            [void][V]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$VK_RETURN, [IntPtr]0)
+            [void][V]::PostMessage($hwnd, 0x101, [IntPtr]$VK_SHIFT, [IntPtr]0)
+            Start-Sleep -Milliseconds 300
+            $answered = Hook 10 15000   # the typed value solves against the skin: many re-shapes, then one full re-shape
+            $lay = WaitFor { param($l) -not $l.state.busy } 120
+            $b = Shot 'bwh_waist_typed'
+            $d = [V]::DiffView($a.Path, $b.Path, $lay.panel)
+            Check 'bwh: typing an exact cm value re-shapes the character' ($answered -and $null -ne $lay -and $d -gt 0.0005) ("{0:P2} of the view" -f $d)
+            # put it back: right-click the row resets the measurement to the card
+            [void][V]::PostMessage($hwnd, 0x204, [IntPtr]0, [V]::L(60, [int]$waist.y)); Start-Sleep -Milliseconds 80
+            [void][V]::PostMessage($hwnd, 0x205, [IntPtr]0, [V]::L(60, [int]$waist.y)); Start-Sleep -Milliseconds 800
+            Check 'bwh: the window answers after the typed reset' (Hook 10)
+            $lay = Layout
+            $c = Shot 'bwh_waist_restored'
+            $back = [V]::DiffView($a.Path, $c.Path, $lay.panel)
+            Check 'bwh: resetting the typed value puts the card back (tolerates physics settling)' ($back -lt 0.02) ("view diff {0:P3}" -f $back)
+        } else { Check 'bwh: the waist row is visible to type into' $false }
         # drag the Hip row: the width and depth sliders move together (the picture changes)
         $hip = $lay.rows | Where-Object { $_.id -eq 22102 -and $_.y -ge 0 } | Select-Object -First 1
         if ($null -eq $hip) { Check 'bwh: the hip row is visible to drag' $false }

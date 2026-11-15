@@ -1,5 +1,8 @@
 // viewer fragment: slider access (included in order by main.cpp)
 
+bool ReshapeNow(bool final);   // defined in Pose.inc
+void TweakEdited(int id, bool released);   // defined in Pose.inc
+
 // ---- tweak access ----------------------------------------------------------------------------------------------------
 // A row wraps either one float (almost all of them) or a virtual value with its own read / write: the three Body
 // measurements rows in the Body tab are one control each that drives the underlying shape sliders together. `get` /
@@ -17,15 +20,13 @@ struct SliderRef {
     void Set(float nv) const { if (set) set(nv); else if (v) *v = nv; }
 };
 
-// ---- the Body tab's "Body measurements" group: Bust / Waist / Hip as one number each ---------------------------------
-// The game has no BWH slider: a measurement is a set of the shape sliders the maker multiplies into the body skeleton.
-// The mapping (bust -> body 4, waist -> body 22/23, hip -> body 24/25) and the delta / clamp maths live in
-// shape/BodyMeasurements.h so the logic is covered by the unit tests; "Butt size" stays outside the hip measurement.
-// Each row moves the sliders it drives by the same delta, keeping the card's own width / depth against each other and
-// clamping each slider by the same range the plain row uses (-1 .. 2, or the card's own value when it is outside that).
-// The stored number is a percentage of the 0..1 nominal range (50 = the card at half way, 100 = the top of the slider,
-// -100..200 for SliderUnlocker cards); the row's value is read live from the underlying sliders, so the individual
-// rows below still edit exactly what the measurement edits.
+// ---- the Body tab's "Body measurements" group: Bust / Waist / Hip as real measurements -------------------------------
+// The maker has no BWH slider, so the rows read the skin: the perimeter of the torso at the bust / waist / hip heights,
+// in metres (the scene's unit), shown as cm. Each row couples the sliders that drive one measurement (bust -> body 4,
+// waist -> body 22/23, hip -> body 24/25, the bones those tables deform): a drag moves them together, keeping the card's
+// own width against its depth. Typing a value solves for the coupling: the typed cm is reached by re-shaping in a closed
+// loop until the measured perimeter matches (the slider clamps are the reachability limits; the closest reachable value
+// wins when the target is out of reach). Dragging is live like any body slider; the underlying row below moves with it.
 bool IsBodyMeasureId(int id) { return id == kBwhBust || id == kBwhWaist || id == kBwhHip; }
 
 int BodyMeasureIndexOf(int id) {
@@ -34,9 +35,109 @@ int BodyMeasureIndexOf(int id) {
     return shape::kBodyMeasureHip;
 }
 
+const std::array<int, 2>& BodyMeasureSliders(int measure) {
+    static const std::array<int, 2> bust = {4, -1};
+    static const std::array<int, 2> waist = {22, 23};
+    static const std::array<int, 2> hip = {24, 25};
+    return measure == shape::kBodyMeasureBust ? bust : measure == shape::kBodyMeasureWaist ? waist : hip;
+}
+
+float BwhValueCm(int id) {   // the measured perimeter in cm (0 when the measurement is unavailable)
+    if (!g.bwhMeasure.valid) return 0.0f;
+    switch (BodyMeasureIndexOf(id)) {
+        case shape::kBodyMeasureBust: return g.bwhMeasure.bust * 100.0f;
+        case shape::kBodyMeasureWaist: return g.bwhMeasure.waist * 100.0f;
+        default: return g.bwhMeasure.hip * 100.0f;
+    }
+}
+float BwhCardDefCm(int id) {   // the card's own measurement, what the row's reset restores to
+    return g.bwhCardDef[BodyMeasureIndexOf(id)] * 100.0f;
+}
+
+void BwhApplyCoupled(int measure, float delta, const std::array<float, 2>& base) {
+    const auto& sliders = BodyMeasureSliders(measure);
+    for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i) {
+        const size_t s = static_cast<size_t>(sliders[static_cast<size_t>(i)]);
+        const float card = g.tw.bodyCard[s];
+        g.tw.body[s] = std::clamp(base[static_cast<size_t>(i)] + delta, shape::BodyMeasureSliderLo(card), shape::BodyMeasureSliderHi(card));
+    }
+}
+float BwhMeasureFor(int measure) {
+    switch (measure) {
+        case shape::kBodyMeasureBust: return g.bwhMeasure.bust;
+        case shape::kBodyMeasureWaist: return g.bwhMeasure.waist;
+        default: return g.bwhMeasure.hip;
+    }
+}
+
+// Solve for the coupled delta that lands the measurement on `targetCm`. Re-shapes many times with g.bwhSolving set (the
+// screen stays still) and leaves the body at the best result; the typed commit re-shapes once more with the full path.
+void BodyMeasureSolve(int id, float targetCm) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L) return;
+    const int measure = BodyMeasureIndexOf(id);
+    if (!g.bwhMeasure.valid) {   // no body to measure: fall back to the plain coupled-delta mapping
+        shape::BodyMeasureSetTarget(g.tw.body, g.tw.bodyCard, measure, std::clamp(targetCm, -100.0f, 200.0f) / 100.0f);
+        return;
+    }
+    const auto& sliders = BodyMeasureSliders(measure);
+    std::array<float, 2> backup{};
+    for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i)
+        backup[static_cast<size_t>(i)] = g.tw.body[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
+    float dLo = -1e9f, dHi = 1e9f;
+    for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i) {
+        const float card = g.tw.bodyCard[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
+        dLo = std::max(dLo, shape::BodyMeasureSliderLo(card) - backup[static_cast<size_t>(i)]);
+        dHi = std::min(dHi, shape::BodyMeasureSliderHi(card) - backup[static_cast<size_t>(i)]);
+    }
+    if (dLo > dHi) return;
+    const float target = std::clamp(targetCm, 10.0f, 200.0f) * 0.01f;
+    g.bwhSolving = true;
+    auto measureAt = [&](float d) {
+        BwhApplyCoupled(measure, d, backup);
+        ReshapeNow(false);   // suppressed: updates the measurement, touches nothing on screen
+        return BwhMeasureFor(measure);
+    };
+    const float atLo = measureAt(dLo), atHi = measureAt(dHi);
+    float bestD = dLo, bestErr = std::fabs(atLo - target);
+    if (std::fabs(atHi - target) < bestErr) { bestD = dHi; bestErr = std::fabs(atHi - target); }
+    const bool straddles = (atLo - target) * (atHi - target) <= 0.0f;
+    if (straddles) {
+        float lo = dLo, hi = dHi, plo = atLo;
+        for (int it = 0; it < 14; ++it) {
+            const float mid = 0.5f * (lo + hi);
+            const float p = measureAt(mid);
+            const float err = std::fabs(p - target);
+            if (err < bestErr) { bestErr = err; bestD = mid; }
+            if ((plo < target) == (p < target)) { lo = mid; plo = p; } else hi = mid;
+        }
+    }
+    BwhApplyCoupled(measure, bestD, backup);
+    ReshapeNow(false);
+    g.bwhSolving = false;
+    if (bestErr > 0.005f) {
+        const char* name = id == kBwhBust ? "Bust" : id == kBwhWaist ? "Waist" : "Hip";
+        char msg[96];
+        std::snprintf(msg, sizeof msg, "%s cannot reach %.1f cm on this card; nearest is %.1f cm", name, static_cast<double>(targetCm),
+                      static_cast<double>(BwhValueCm(id)));
+        Log(msg, LogKind::Warn);
+    }
+}
+
 bool BwhFor(int id, SliderRef& r) {
     if (g.tw.body.size() != g.tw.bodyCard.size() || g.tw.body.empty()) return false;
     const int measure = BodyMeasureIndexOf(id);
+    if (g.bwhMeasure.valid) {
+        const float current = BwhValueCm(id);
+        const float def = BwhCardDefCm(id);
+        r.lo = std::max(20.0f, def - 40.0f); r.hi = std::min(180.0f, def + 40.0f);
+        if (r.hi - r.lo < 40.0f) { r.lo = 20.0f; r.hi = 180.0f; }
+        r.def = def; r.step = 0; r.percent = false; r.fmt = "%.1f cm";
+        r.get = [id]() { return BwhValueCm(id); };
+        r.set = [id](float v) { BodyMeasureSolve(id, v); };
+        (void)current;
+        return true;
+    }
     float lo = 0.0f, hi = 0.0f;
     shape::BodyMeasureRange(g.tw.bodyCard, measure, lo, hi);
     r.lo = lo * 100.0f; r.hi = hi * 100.0f; r.def = shape::BodyMeasureAverage(g.tw.bodyCard, measure) * 100.0f;
@@ -49,6 +150,27 @@ bool BwhFor(int id, SliderRef& r) {
         shape::BodyMeasureSetTarget(g.tw.body, g.tw.bodyCard, BodyMeasureIndexOf(id), v / 100.0f);
     };
     return true;
+}
+
+void BwhDragBegin(int id) {
+    const auto& sliders = BodyMeasureSliders(BodyMeasureIndexOf(id));
+    g.bwhDragId = id;
+    for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i)
+        g.bwhDragBase[static_cast<size_t>(i)] = g.tw.body[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
+}
+void BwhDragAt(int id, float frac) {
+    if (g.bwhDragId != id) BwhDragBegin(id);
+    const int measure = BodyMeasureIndexOf(id);
+    const auto& sliders = BodyMeasureSliders(measure);
+    float dLo = -1e9f, dHi = 1e9f;
+    for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i) {
+        const float card = g.tw.bodyCard[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
+        dLo = std::max(dLo, shape::BodyMeasureSliderLo(card) - g.bwhDragBase[static_cast<size_t>(i)]);
+        dHi = std::min(dHi, shape::BodyMeasureSliderHi(card) - g.bwhDragBase[static_cast<size_t>(i)]);
+    }
+    if (dLo > dHi) return;
+    const float d = dLo + std::clamp(frac, 0.0f, 1.0f) * (dHi - dLo);
+    BwhApplyCoupled(measure, d, g.bwhDragBase);
 }
 
 bool SliderFor(int id, SliderRef& r) {
@@ -126,7 +248,6 @@ bool SliderFor(int id, SliderRef& r) {
 
 // Pose controls change the picture at once, no re-assembly. Morphs too: a weight is a live edit, like a pose bone.
 bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount) || (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())); }
-void TweakEdited(int id, bool released);   // defined in Pose.inc
 void TransSwitchChanged(int id);   // defined in Paint.inc (the translucency switch: apply or revert the bake at once)
 void TransApplyNow();              // defined in Paint.inc (re-applies the baked alpha from the stored masks)
 void TransClearPaint();            // defined in Paint.inc (the "clear the brush" button)

@@ -330,9 +330,24 @@ void ApplySkinLook(bool rebuildMap) {
 // A body or face slider, the nipple switch or offset: re-shapes the assembled scene in place (a few milliseconds, no loading) and re-skins the
 // views. `final` (the slider was let go) also rebuilds the normal map frames, which are left alone while dragging. False when it cannot
 // be done and the character has to be assembled again.
+// Re-measure the body's bust / waist / hip for the "Body measurements" group (slider rows show cm, typed entry solves
+// against the skin). Cheap enough to run on every reshape; the scene holds the rest pose, so pose edits don't skew it.
+void UpdateBodyMeasurements() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || L->scene.bones.empty()) return;
+    g.bwhMeasure = measure::Measure(L->scene);
+    if (!g.bwhCardDefSet) {
+        if (g.bwhMeasure.valid) {
+            g.bwhCardDef[0] = g.bwhMeasure.bust; g.bwhCardDef[1] = g.bwhMeasure.waist; g.bwhCardDef[2] = g.bwhMeasure.hip;
+            g.bwhCardDefSet = true;
+        }
+    }
+}
+
 bool ReshapeNow(bool final) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.busy || !g.resolver || L->scene.bones.empty()) return false;
+    const bool solving = g.bwhSolving;      // the typed cm entry re-shapes many times in a row: keep the screen still
     assemble::AssembleOptions ao;
     ao.outfit = L->outfit;
     {
@@ -351,10 +366,11 @@ bool ReshapeNow(bool final) {
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
-    RebuildMorphDelta();   // the shape offsets moved with the bones (and the rest pose); the accumulated morph offsets move with them
+    if (!solving) RebuildMorphDelta();   // the shape offsets moved with the bones (and the rest pose); the accumulated morph offsets move with them
+    UpdateBodyMeasurements();            // the scene holds the new rest pose; cheap enough for every reshape
     const double t1 = NowMs();
-    if (g.gpuOk) g.gpu.Refresh(final);
-    if (final && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
+    if (!solving && g.gpuOk) g.gpu.Refresh(final);
+    if (final && !solving && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
         const int ti = L->scene.skinShade.texture;
         if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, g.tw.skinShadeUnder, g.tw.skinShadeTop, g.tw.skinShadeWidth, true)) {
             if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
@@ -369,7 +385,7 @@ bool ReshapeNow(bool final) {
     }
     g.prof.reshape += t1 - t0;
     g.prof.refresh += NowMs() - t1;
-    if (g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
+    if (!solving && g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
         assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
         g.gpuExp.Refresh(final);
     }
@@ -378,8 +394,8 @@ bool ReshapeNow(bool final) {
     g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;
     const float bustSize = g.tw.body.size() > 4 ? g.tw.body[4] : 0.5f;
     g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);  // reset target follows the new shape; the slider itself stays put
-    if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
-    ApplyPoseLive();
+    if (!solving && g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    if (!solving) ApplyPoseLive();
     return true;
 }
 
@@ -624,6 +640,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
                     g.tw = Tweaks();
+                    g.bwhCardDefSet = false;   // the measurement baseline is re-captured from the freshly assembled card
                     g.tw.skinShade = g.settings.skinShade;          // persisted default from the Setup tab (and the Look slider); share value with the settings file
                     g.tw.skinShadeUnder = g.settings.skinShadeUnder;
                     g.tw.skinShadeTop = g.settings.skinShadeTop;

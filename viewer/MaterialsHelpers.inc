@@ -589,6 +589,12 @@ void ResetTweak(int id) {
         TransSwitchChanged(id);   // the toggle reverts the bake at once (the paint is kept)
     }
     else if (id == kNipplePink) g.tw.pinkNipples = true;
+    else if (IsBodyMeasureId(id)) {   // a measurement row: restore the card's coupled sliders exactly (not a cm solve)
+        const int measure = BodyMeasureIndexOf(id);
+        const auto& sliders = BodyMeasureSliders(measure);
+        for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i)
+            g.tw.body[static_cast<size_t>(sliders[static_cast<size_t>(i)])] = g.tw.bodyCard[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
+    }
     else if (SliderFor(id, r)) r.Set(r.def);
 }
 

@@ -60,7 +60,8 @@ void EndSliderEdit(bool commit) {
             double v = 0;
             if (SliderEditParse(g.sliderEditBuf, v)) {
                 if (r.percent) v /= 100.0;
-                v = std::clamp(v, static_cast<double>(r.lo), static_cast<double>(r.hi));
+                if (IsBodyMeasureId(id)) v = std::clamp(v, 1.0, 500.0);   // the typed cm is kept; reachability is the solve's job
+                else v = std::clamp(v, static_cast<double>(r.lo), static_cast<double>(r.hi));
                 if (r.step > 0) v = std::round(v / static_cast<double>(r.step)) * static_cast<double>(r.step);
                 r.Set(static_cast<float>(v));
             } else {
@@ -92,6 +93,7 @@ bool SliderEditKey(UINT wp) {
     if (wp == VK_DELETE) { g.sliderEditBuf.clear(); InvalidatePanel(); InvalidateWorkbench(); return true; }
     int ch = -1;
     if (wp >= '0' && wp <= '9') ch = static_cast<int>(wp);
+    else if (wp >= VK_NUMPAD0 && wp <= VK_NUMPAD9) ch = '0' + static_cast<int>(wp - VK_NUMPAD0);
     else if (wp >= VK_NUMPAD0 && wp <= VK_NUMPAD9) ch = '0' + static_cast<int>(wp - VK_NUMPAD0);
     else if (wp == VK_OEM_MINUS || wp == VK_SUBTRACT) ch = '-';
     else if (wp == VK_OEM_PLUS || wp == VK_ADD) ch = '+';

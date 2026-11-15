@@ -313,6 +313,14 @@ struct App {
     std::set<std::string> collapsedGroups;
     std::set<std::string> collapsedMorphs;   // morph groups folded in the Morphs tab (Brows / Eyes / Mouth / Other)
     Tweaks tw;
+    // The Body tab's "Body measurements" group reads the skin. Re-measured on every reshape (the scene holds the rest
+    // pose, so bone pose edits don't skew it); the baseline is the card's own measurement, captured on load.
+    measure::Result bwhMeasure;
+    float bwhCardDef[3] = {0, 0, 0};            // the card's own bust / waist / hip, in metres (the row's "unchanged" marker)
+    bool bwhCardDefSet = false;                 // baseline captured (set false when a fresh card is loaded)
+    bool bwhSolving = false;                    // typed cm entry is re-shaping many times in a row: keep the screen still
+    std::array<float, 2> bwhDragBase{};         // the coupled sliders' values when a drag began (the delta mapping anchor)
+    int bwhDragId = -1;                         // the BWH row being dragged, or -1
     // The Morphs tab: every vertex morph the exported PMX carries (the game's FaceBlendShape expressions, the raw blend shapes
     // and the MMD standard ones, exactly as the export picks them), accumulated per weight on top of the rest shape. Weights are
     // live-only: they are not exported and not saved (the PMX carries the morphs; MMD plays them). morphDelta is the per-mesh

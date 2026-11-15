@@ -61,6 +61,7 @@
 #include "resolve/Resolver.h"
 #include "shape/Shape.h"
 #include "shape/BodyMeasurements.h"
+#include "measure/BodyMeasure.h"
 #include "Ui.h"
 #include "core/Version.h"
 
@@ -74,6 +75,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <functional>

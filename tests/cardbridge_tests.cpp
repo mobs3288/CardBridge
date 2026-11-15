@@ -47,6 +47,7 @@
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
 #include "shape/BodyMeasurements.h"
+#include "measure/BodyMeasure.h"
 #include "resolve/Resolver.h"
 
 #include "PmxReader.h"
@@ -890,6 +891,199 @@ void unitTests() {
         shape::BodyMeasureRange(card, shape::kBodyMeasureWaist, lo, hi);
         CHECK(lo == -1.0f && hi == 2.0f);
         CHECK(card == before);
+    });
+    test("body measurements: a known lathe profile reads bust / waist / hip in order", [] {
+        using namespace assemble;
+        Scene s;
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 74, segs = 48;
+        struct Key { float y, r; };
+        const Key keys[] = {
+            {0.00f, 0.075f}, {0.30f, 0.090f}, {0.45f, 0.150f},   // hips ~94 cm
+            {0.62f, 0.130f}, {0.78f, 0.090f},                    // waist ~57 cm
+            {0.95f, 0.120f}, {1.10f, 0.148f},                    // bust ~93 cm
+            {1.25f, 0.125f}, {1.35f, 0.085f}, {1.45f, 0.060f},
+        };
+        auto radiusAt = [&](float y) {
+            for (int i = 0; i + 1 < 10; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[9].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const auto near = [](float a, float b, float tol) { return std::fabs(a - b) < tol; };
+        CHECK(near(result.waist, 2.0f * 3.14159265f * 0.090f, 0.04f));   // ~57 cm
+        CHECK(near(result.hip, 2.0f * 3.14159265f * 0.150f, 0.04f));     // ~94 cm
+        CHECK(near(result.bust, 2.0f * 3.14159265f * 0.148f, 0.04f));    // ~93 cm
+        CHECK(result.hipY < result.waistY);   // hips sit below the waist
+        CHECK(result.bustY > result.waistY);  // and the bust above it
+        CHECK(measure::TorsoPerimeterAt(s, 0.78f) > 0.45f && measure::TorsoPerimeterAt(s, 0.78f) < 0.75f);
+    });
+    test("body measurements: horizontal T-pose arms are not part of the torso contour", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        s.bones.push_back({"cf_j_arm00_L", 0, {}, "rig"});
+        s.bones.push_back({"cf_j_arm00_R", 0, {}, "rig"});
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 60, segs = 40;
+        auto radiusAt = [](float y) {
+            struct Key { float y, r; };
+            const Key keys[] = {{0.00f, 0.075f}, {0.45f, 0.150f}, {0.78f, 0.090f}, {1.10f, 0.148f}, {1.45f, 0.060f}};
+            for (int i = 0; i + 1 < 5; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[4].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        // A T-pose arm along +x at chest height (y ~ 1.16): a long thin tube sticking out of the chest.
+        const int armStart = static_cast<int>(mesh.vertices.size());
+        const int armSegs = 40, armRings = 2;
+        for (int ring = 0; ring <= armRings; ++ring) {
+            const float x = 0.20f + (0.62f - 0.20f) * static_cast<float>(ring) / static_cast<float>(armRings);
+            for (int si = 0; si < armSegs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(armSegs);
+                SceneVertex v;
+                v.pos = {x, 1.16f + 0.048f * std::cos(a), 0.048f * std::sin(a)};
+                v.bone[0] = 1;          // bound to cf_j_arm00_L
+                v.weight[0] = 1.0f;
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        for (int ring = 0; ring < armRings; ++ring)
+            for (int si = 0; si < armSegs; ++si) {
+                const int a = armStart + ring * armSegs + si, b = armStart + ring * armSegs + (si + 1) % armSegs;
+                const int c = armStart + (ring + 1) * armSegs + si, d = armStart + (ring + 1) * armSegs + (si + 1) % armSegs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const auto near = [](float a, float b, float tol) { return std::fabs(a - b) < tol; };
+        CHECK(near(result.bust, 2.0f * 3.14159265f * 0.148f, 0.04f));   // the arm tube did not inflate the chest
+    });
+    test("body measurements: an under piece is the base body's own skin, not a second surface", [] {
+        using namespace assemble;
+        Scene s;
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 74, segs = 48;
+        struct Key { float y, r; };
+        const Key keys[] = {
+            {0.00f, 0.075f}, {0.45f, 0.150f}, {0.78f, 0.090f}, {1.10f, 0.148f}, {1.45f, 0.060f},
+        };
+        auto radiusAt = [&](float y) {
+            for (int i = 0; i + 1 < 5; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[4].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        s.meshes.push_back(mesh);   // the cut-out under piece: the same surface a second time
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        ScenePart u; u.id = "body.under.top"; u.group = "Body"; u.underPiece = true; u.underOf = "body"; u.meshes = {1};
+        s.parts.push_back(u);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const float expect = 2.0f * 3.14159265f * 0.148f;
+        CHECK(std::fabs(result.bust - expect) < 0.04f);   // one surface, not two
+    });
+    test("body measurements: no body part means an invalid result, never a crash", [] {
+        using namespace assemble;
+        Scene s;
+        const auto result = measure::Measure(s);
+        CHECK(!result.valid);
+        CHECK(measure::TorsoPerimeterAt(s, 1.0f) == 0.0f);
     });
     test("typeBone correction table: int32 count, 9 floats a row; a truncated table is refused", [] {
         Bytes d;

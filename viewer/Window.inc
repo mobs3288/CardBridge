@@ -122,12 +122,19 @@ void ApplyPending() {
     if (!g.dragPending) return;
     g.dragPending = false;
     if (g.sliderDrag >= 0) {
-        SliderRef r;
-        if (SliderFor(g.sliderDrag, r)) {
-            std::lock_guard<std::recursive_mutex> lk(g.mu);
-            // The drag may be on the panel's track or on the workbench's wider one:
-            // both record which one they started on.
-            r.Set(SliderValueAt(r, g.dragX, g.dragTrackL > 0 ? g.dragTrackL : kTrackL, g.dragTrackR > 0 ? g.dragTrackR : kTrackR));
+        const int trackL = g.dragTrackL > 0 ? g.dragTrackL : kTrackL;
+        const int trackR = g.dragTrackR > 0 ? g.dragTrackR : kTrackR;
+        if (IsBodyMeasureId(g.sliderDrag)) {   // a measurement row: the coupled sliders move by the delta this drag position maps to
+            const float frac = std::clamp(static_cast<float>(g.dragX - trackL) / static_cast<float>(std::max(1, trackR - trackL)), 0.0f, 1.0f);
+            BwhDragAt(g.sliderDrag, frac);
+        } else {
+            SliderRef r;
+            if (SliderFor(g.sliderDrag, r)) {
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
+                // The drag may be on the panel's track or on the workbench's wider one:
+                // both record which one they started on.
+                r.Set(SliderValueAt(r, g.dragX, trackL, trackR));
+            }
         }
         TweakEdited(g.sliderDrag, false);
         InvalidateSliderRow(g.sliderDrag);
@@ -464,6 +471,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const float bustSize = g.tw.bodyCard.size() > 4 ? g.tw.bodyCard[4] : 0.5f;
             g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);
             g.sag = g.sagDefault;   // follow the card: each card starts at its own hang
+            UpdateBodyMeasurements();   // the measurements exist from the first frame, not only after an edit
         }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         if (L && g.applyKeep)
