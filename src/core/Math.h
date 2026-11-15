@@ -21,6 +21,14 @@ struct Mat4 {
     static Mat4 TRS(Vec3 t, Quat q, Vec3 s) {
         float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
         if (n > 0) { q.x /= n; q.y /= n; q.z /= n; q.w /= n; }
+        // A bone whose local scale is exactly zero (e.g. an ABMX mod zeroing an eye-squash axis in the card)
+        // makes the world matrix singular; inverse() then returns identity and any vertex captured against
+        // that bone blows up on the next re-shape. Keep such bones invertible: flat to a micron is flat.
+        const float zeroScale = 1e-6f;
+        auto clampScale = [&](float s) { return std::fabs(s) < zeroScale ? std::copysign(zeroScale, s == 0.0f ? 1.0f : s) : s; };
+        s.x = clampScale(s.x);
+        s.y = clampScale(s.y);
+        s.z = clampScale(s.z);
         float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
         float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
         float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;

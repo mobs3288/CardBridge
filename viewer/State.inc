@@ -39,6 +39,44 @@ struct Loaded {
     std::string clothing;             // the outfit file applied in memory, if any (never saved)
 };
 
+// ---- the Optimize tab: triangle reduction & LOD generation ------------------
+// What Apply commits the export to (an empty OptApplied = the export writes the original, the default).
+struct OptApplied {
+    bool set = false;              // set by the tab's Apply button; cleared by Reset
+    float reduction = 0.0f;        // 0..1 fraction of triangles to remove from the written PMX
+    std::vector<exporter::ExportOptions::LodTarget> lods;   // selected LOD targets in LOD 1..4 order (label + remaining fraction)
+};
+
+// One LOD level as generated this session. The PMX files are only written on export; this cache is for the tab's previews and stats.
+struct OptLod {
+    std::shared_ptr<assemble::Scene> scene;   // null when not generated; kept for the individual LOD previews
+    size_t triangles = 0, vertices = 0;
+    double seconds = 0.0;
+    bool pending = false;          // generation queued or running
+    bool failed = false;
+};
+
+struct OptState {
+    int preset = 2;                // 0..4 = mesh::kSimplifyPresets, 5 = Custom
+    float reduction = 0.4f;        // the slider; 0..1 (shown as 0..100%)
+    bool lodSelected[4] = {true, true, true, true};        // LOD 1..4 checkboxes
+    float lodTarget[4] = {0.6f, 0.3f, 0.15f, 0.05f};       // the remaining-fraction target per level (independent, 5..95%)
+    OptLod lods[4];
+    OptApplied applied;            // what the next export writes
+    bool busy = false;             // a generation is running (slider preview or LODs)
+    bool stale = true;             // the settings changed since the preview was generated
+    std::shared_ptr<assemble::Scene> simplified;   // the generated preview scene at `simplifiedFor` (textures included: the GPU view reads them)
+    float simplifiedFor = -1.0f;   // the reduction the cached preview/stats were built for
+    size_t simplifiedTris = 0, simplifiedVerts = 0;
+    double simplifiedSeconds = 0.0;
+    int previewLod = 0;            // 0 = original, 1 = simplified preview, 2..5 = LOD 1..4
+    int hover = -1;                // hovered control for paint feedback (kOpt* ids)
+    int dragX = 0;                 // the slider drag's pointer x
+    int dragging = 0;              // 1 while the slider is dragged
+    // WM_OPT_READY hands the generated results from the worker to the UI thread:
+    int pendingPreviewFor = -1;    // the slider reduction snapshot the worker worked on (-1 = LODs only)
+};
+
 constexpr int kPanel = 380;
 constexpr int kRowH = 20;
 
@@ -64,34 +102,152 @@ struct Tweaks {
     float skinShadeUnder = 1.0f;                           // the fold under the breasts (0..2); saved in the viewer's settings
     float skinShadeTop = 1.2f;                             // the top extent of the cleavage: 0 = none, 1 = the full breast line, 2 = toward the base of the neck; saved in the viewer's settings
     float skinShadeWidth = 0.6f;                          // how wide the cleavage line runs (0.1 = hairline, 1 = default, 2 = broad); saved in the viewer's settings
+    float skinAo = 0.85f;                                // Koikatsu's own look baked in (base body normal lighting + the card's detail line mask); 0 = off; saved in the viewer's settings
+    float transSizeCm = 4.0f;                             // translucency brush radius, centimetres
+    float transStrength = 0.65f;                          // how see-through a fully painted texel becomes (0..1, like the morph weights)
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabBones, TabMaterials, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Bones", "Mats", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Proportions", "Optimize", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
+constexpr int kTransClear = 20019;   // the Look tab's "clear the brush from every garment" button
+// The Optimize tab's controls (its own range; nothing else uses it). 31000..31005 presets, 31010..31013 LOD checkboxes,
+// 31020 Generate LODs, 31021 Apply, 31022 Reset, 31030..31035 preview chips (original, simplified, LOD 1..4).
+constexpr int kOptPresetOriginal = 31000, kOptPresetHigh = 31001, kOptPresetBalanced = 31002, kOptPresetPerformance = 31003, kOptPresetAggressive = 31004, kOptPresetCustom = 31005;
+constexpr int kOptLodBase = 31010, kOptGenerate = 31020, kOptApply = 31021, kOptReset = 31022, kOptPreviewBase = 31030;
+constexpr int kOptLodDown = 31040, kOptLodUp = 31050;   // per-level target steppers: 31040..31043, 31050..31053 (LOD 1..4)
+
+// What the Optimize worker hands to the UI thread on WM_OPT_READY (like expPending for the export bake).
+struct OptPending {
+    int kind = 0;                    // 0 = slider preview, 1 = LOD generation
+    std::shared_ptr<assemble::Scene> simplified;   // kind 0: the generated preview (null on cancel/failure)
+    float simplifiedFor = 0.0f;
+    mesh::SceneSimplifyStats simplifiedStats;      // kind 0
+    std::vector<mesh::LodResult> lods;             // kind 1
+    bool done = false;
+    bool cancelled = false;
+};
+
+// ---- the Selective Import window (Selective.inc) ------------------------------------------------
+// A second top-level window, like the Material Workbench: a dedicated multi-view outfit composer for
+// the clothing import. The user picks, per component, Add / Replace / Keep existing / Skip;
+// three real 3D views (current character, imported source, proposed result) render it. Nothing is
+// applied until Apply; Cancel discards the whole thing.
+struct SelView {
+    exporter::ViewCamera cam;
+    std::vector<uint32_t> frame;
+    int fw = 0, fh = 0;        // the size `frame` was rendered at (guarded by frameMtx)
+    std::mutex frameMtx;        // the render worker swaps `frame` while WM_PAINT blits it
+    std::atomic<bool> dirty{true};   // the picture needs re-rendering (scene/pose/camera/highlights changed)
+    // Every view owns its Direct3D device. (View 0 used to render through the main window's device, but
+    // the pictures are produced on the render worker now, and a device context is not safe to use from two threads.)
+    exporter::GpuView gpu;
+    std::atomic<bool> gpuOk{false};
+    exporter::ViewStatePtr swState = exporter::NewViewState();   // the software fallback's cache
+    std::shared_ptr<const assemble::Scene> scene;   // null until the worker finishes (for view 0: aliases the loaded character)
+    std::vector<char> hidden;                  // effective hidden parts for this view's scene
+    std::atomic<int> state{0};              // 0 idle, 1 building, 2 ready, 3 failed
+    std::string error;
+    std::vector<std::vector<int>> compParts;   // per component index: scene part indices (parallel to comps)
+    std::vector<Mat4> previewSkin;             // views 1 and 2: the shared A-pose's skin matrices (empty = rest pose)
+    std::map<std::string, int> placedAcc;      // source accessory key -> merged slot (where each chosen accessory landed)
+};
+
+struct SelectiveComp {
+    card::SelectiveComponent comp;
+    std::string sourceName;    // the source item's display name (resolved from the previews; falls back to the slot label)
+    std::string existingName;  // the counterpart's display name (empty when there is no counterpart)
+    std::string sourceStatus;  // "resolved-mod", "missing-mod", ... - shown on a missing item
+    std::string modName;       // the mod the source item comes from, when known
+    bool missing = false;      // the source item failed to resolve (nothing to import / blocked)
+};
+
+struct SelectiveState {
+    HWND hwnd = nullptr;
+    bool open = false;
+    int session = 0;   // incremented per open; stale build messages from a previous window are ignored
+    std::mutex selGpuMu;   // uploads (worker threads) vs. rendering (UI thread) vs. drop-on-close
+    // the source file and where it will land
+    std::string srcPath;
+    bool srcIsCoordinate = false;
+    std::string srcName;
+    int srcOutfit = -1;      // coordinate sources: which coordinate of the source (-1 until resolved)
+    int dstOutfit = -1;      // the outfit slot the import lands on (the on-screen outfit)
+    // the three views: current character / imported source / proposed result
+    SelView views[3];
+    std::vector<SelectiveComp> comps;
+    std::map<std::string, card::SelectiveAction> decisions;
+    std::atomic<int> hoverComp{-1}, selComp{-1};   // hover (transient) and selected (sticky, -1 = none)
+    std::atomic<int> hoverAction{0};               // hit id of a row/right-column/link button (0 = none; see SelBtn)
+    int listScroll = 0;
+    float listPos = 0;
+    bool linkCams = true, aPose = true;
+    int dragging = 0;                   // 1 orbit, 2 pan (which button)
+    int dragView = -1;                  // which viewport the drag started in
+    int dragX = 0, dragY = 0;           // last pointer position
+    POINT downAt{0, 0};                 // press position (for the click-vs-drag distinction)
+    bool dragMoved = false;
+    // the render worker: all Direct3D work happens here (never on the UI thread), so hover, camera drags
+    // and list scrolling never wait for a picture. WM_SEL_FRAME wakes the paint path when fresh frames land.
+    std::thread renderWorker;
+    std::mutex renderMtx;
+    std::condition_variable renderCv;
+    bool renderStop = false;            // set on close; the worker wakes, drops out and is joined
+    // the build debounce (a decision change rebuilds the proposed scene 250 ms later)
+    ULONGLONG debounceTick = 0;
+    int proposalGen = 0;                // requests outstanding for the proposed scene (generation counter)
+    bool proposalQueued = false;        // a rebuild is pending the debounce
+    bool buildingProposal = false;      // a proposal worker is running
+    // validation for the Apply button (recomputed at paint; error text blocks Apply)
+    std::string validation;             // empty = apply is fine
+    bool validationError = false;
+    std::vector<std::string> notes;     // warning lines for the user (hair replaced, relocated, ...)
+    std::string status;                 // footer line
+    ULONGLONG lastHoverPick = 0;        // the pick throttle
+};
 void SettingsAction(int id);
+void MorphSlideEdited();   // Morphs tab: a slider moved, or the tab cleared the weights
+void LoadMorphCatalog();   // after a character is built: collect the exported PMX's vertex morphs (weights all 0)
+void BeginMorphEdit(int morphIndex);   // Morphs tab: type a display name for the morph (Shift+click its row)
+void EndMorphEdit(bool commit);        // Enter commits (the alias is kept in settings); Esc restores the original
+bool MorphEditKey(UINT wp);            // while the rename box is open the keyboard goes to it
+bool MorphEditChar(wchar_t ch);        // typed characters; called from WM_CHAR
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
-              kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212,
+               kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
+               kTransStrength = 214, kTransSize = 215,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
-              kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9;   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+              kTransBrush = 307, kTransErase = 308,
+              kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
+              kPropMaster = 23100, kPropSugs0 = 23101, kPropSugsMax = 23199,   // Proportions tab: master switch, then one switch per suggested correction
+               kPropActSuggest = 23200, kPropActApply = 23201, kPropActReset = 23202,
+               kPropPresetHead = 23210, kPropPresetBody = 23211, kPropPresetFace = 23212, kPropPresetOverall = 23213,
+               kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
+              kMorphBase = 30000, kMorphResetAll = 23000,   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
+              kBwhBust = 22100, kBwhWaist = 22101, kBwhHip = 22102;   // the Body measurements macro rows: one number per measurement, not a card index
+constexpr int kBodyBust = 4;   // the Bust > Size slider in shape::BodySliders() (body slider ids are the shape's index, 0..43)
 struct TweakRow {
-    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row)
+    int kind = 0;        // 0 group header (id -1: nothing to reset), 1 slider, 2 switch, 4 plain text, 5 a settings action (a button row), 6 a preset-chips row (band / cup / nipple size)
     int id = 0;
     std::string label, group;
 };
 
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
+    // The tab strip: when the full strip does not fit the panel, it scrolls horizontally. tabStrip is the visible clip window;
+    // tabLeft / tabRight are the < > arrow buttons; tabMaxScroll is the furthest the strip can move (pixels).
+    bool tabScrollable = false;
+    RECT tabStrip{}, tabLeft{}, tabRight{};
+    int tabMaxScroll = 0;
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
-    RECT clothingReset{}, clothingPrev{}, clothingNext{};
+    RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
@@ -107,63 +263,30 @@ struct PanelLayout {
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
 constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
 
-PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows) {
-    PanelLayout l;
-    l.logo = {12, 12, 68, 68};
-    const int by = 98, bh = 26;
-    l.open = {10, by, 58, by + bh};
-    l.exportPmx = {64, by, 156, by + bh};
-    l.issues = {162, by, 214, by + bh};
-    l.reset = {220, by, 288, by + bh};
-    l.all = {294, by, 324, by + bh};
-    l.asExported = {330, by, 370, by + bh};
-    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
-    // then the imported-outfit status line with its reset button.
-    l.outfitNameTop = 138;
-    l.outfitChipsTop = 160;
-    l.outfitClothTop = 184;
-    l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
-    l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
-    l.clothingReset = {206, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // Seven tabs, 42 px each with a 2 px gap, so the right-hand status line
-    // ("34 parts", "0 edited", ...) keeps its own room instead of overlapping
-    // the last tab.
-    for (int i = 0; i < TabCount; ++i) l.tabs[i] = {8 + i * 44, 216, 50 + i * 44, 240};
-    l.partsHeadingTop = 222;
-    l.partsTop = 248;
-    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
-    l.footerTop = H - 36;
-    l.logBottom = l.footerTop - 4;
-    l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
-    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
-    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
-    l.boneListTop = l.partsTop + kRowH;
-    l.boneListBottom = l.boneEditTop - 4;
-    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
-    l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
-    l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
-    const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
-    l.boneResetOne = {10, ry, 145, ry + kRowH};
-    l.boneResetAll = {149, ry, 262, ry + kRowH};
-    l.boneUndo = {10, ay, 56, ay + kRowH};
-    l.boneRedo = {60, ay, 110, ay + kRowH};
-    l.boneSave = {114, ay, 190, ay + kRowH};
-    l.boneLoad = {194, ay, 268, ay + kRowH};
-    l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
-    l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
-    l.matListTop = l.partsTop + kRowH + 34;
-    l.matListBottom = l.partsBottom;
-    return l;
-}
+PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows);   // defined after App (needs g)
+
+// One entry of the Proportions tab's suggestion list: the op plus whether the user wants it applied.
+struct PropSugItem {
+    assemble::CorrectionOp op;
+    bool applied = false;
+};
 
 struct App {
     HWND hwnd = nullptr;
     Settings settings;
     std::string cardPath;
-    // An outfit file applied in memory only (never saved as a card): the path
-    // of the clothing file and the outfit slot it overwrote. Empty = none.
+    // An outfit file (or a Coordinate PNG) applied in memory only (never saved as a card): the path
+    // and the outfit slot it overwrote. Empty = none.
+    // clothingMode: 0 = outfit import (a regular clothing file, or a Coordinate PNG imported as clothing -
+    // the extracted clothes+accessories are merged via the clothing import); 1 = Coordinate import (the
+    // whole coordinate replaces the slot, including accessories); 2 = selective import (only the components
+    // the user chose in the Selective Import window are merged; g.selectiveDecisions carries the choice).
+    // clothingSrcOutfit: for a Coordinate source, which coordinate of the source card is imported (-1 = the source's own current outfit).
     std::string clothingPath, clothingName;
     int clothingOutfit = -1;
+    int clothingMode = 0;
+    int clothingSrcOutfit = -1;
+    std::map<std::string, card::SelectiveAction> selectiveDecisions;   // the pinned selective import's per-component choices (session only)
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up
@@ -171,7 +294,7 @@ struct App {
     // library state, built once
     resolve::ModIndex mods;
     resolve::ListTable lists;
-    std::unique_ptr<resolve::Resolver> resolver;
+    std::shared_ptr<resolve::Resolver> resolver;   // shared with the worker threads (assembly in flight keeps it alive)
     std::string resolverKey;
 
     std::shared_ptr<Loaded> loaded;
@@ -193,6 +316,9 @@ struct App {
     std::shared_ptr<assemble::Scene> expScene, expPending;   // pending: filled by the bake thread, taken over on WM_EXP_READY
     std::shared_ptr<Loaded> expFor, expPendingFor;           // the loaded character the baked copy belongs to
     bool showExp = false, expOk = false, expGrade = false, expPendingGrade = false;
+    OptState opt;                      // the Optimize tab (triangle reduction, presets, LODs)
+    OptPending optPending;             // what the Optimize worker produced; adopted on WM_OPT_READY
+    SelectiveState sel;                // the Selective Import window (Selective.inc)
     std::atomic<bool> expBusy{false};
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
@@ -202,10 +328,16 @@ struct App {
     int viewHoverCell = -1;          // the mode strip cell the cursor is over (-1 = none); repaint only that band
     ULONGLONG lastInput = 0;   // tick of the last camera change: the game shaders run only once the view has been still for a moment
     bool interacting = false, dirty = true, showIssues = false, textured = true, shaded = true;
+    bool shiftDown = false, ctrlDown = false;   // tracked here (a posted key works like a real one); read these, not GetKeyState
     POINT last{};
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0, logScroll = 0;        // list scroll targets, in rows
     float partPos = 0, bonePos = 0;           // what the lists show now: the targets, eased (smooth scrolling)
+    int tabScroll = 0;                        // the tab strip's horizontal scroll, in pixels
+    float tabPos = 0;                         // eased position of the tab strip
+    bool tabDragging = false, tabDragMoved = false;
+    int tabDragAnchor = 0;                    // x of the press that may become a strip drag
+    float tabDragStart = 0;                   // tabPos when that press began
     ui::Surface panel;                        // the panel, drawn off screen and copied where it changed
     // Mouse movement during a drag is only noted here; Frame() applies it once per picture, so a fast mouse cannot queue up work.
     bool dragPending = false;
@@ -213,14 +345,54 @@ struct App {
     float boneDragDx = 0, boneDragDy = 0;     // bone drag: movement since the last picture
     ULONGLONG lastFrameTick = 0;
     bool animating = false;                   // a list is still easing towards its scroll target
-    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs
+    int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs, 21 export clothing
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
     int loadingOutfit = -1;               // outfit the worker is assembling, or -1
     int soloPart = -1;
+    bool listScroll = false;       // the gesture became a list scroll (the row's click is swallowed)
+    int listPressY = -1;           // the y of the press in the list, or -1 when the list is not pressed
+    int listPressX = 0;            // the x of the press
+    float listPressPos = 0.0f;     // partPos at the press: the list offset the drag maps from
     std::set<std::string> collapsedGroups;
+    std::set<std::string> collapsedMorphs;   // morph groups folded in the Morphs tab (Brows / Eyes / Mouth / Other)
     Tweaks tw;
+    // Proportion correction (optional; faithful when empty). The card is never modified: corrections live in a
+    // separate layer applied in the assemble/reshape pipeline. Per-card state; suggestions are recomputed on demand.
+    bool propEnabled = true;                               // master layer switch; no applied ops => faithful regardless
+    std::string propCardKey;                               // the card the layer currently belongs to (a different card clears it)
+    std::vector<PropSugItem> propSugs;                     // the current suggestion list, with applied flags
+    std::vector<assemble::ProportionFinding> propFindings;   // diagnostics, computed once per load (or on demand)
+    // The Body tab's "Body measurements" group reads the skin. Re-measured on every reshape (the scene holds the rest
+    // pose, so bone pose edits don't skew it); the baseline is the card's own measurement, captured on load.
+    measure::Result bwhMeasure;
+    float bwhCardDef[3] = {0, 0, 0};            // the card's own bust / waist / hip, in metres (the row's "unchanged" marker)
+    bool bwhCardDefSet = false;                 // baseline captured (set false when a fresh card is loaded)
+    bool bwhSolving = false;                    // typed cm entry is re-shaping many times in a row: keep the screen still
+    std::array<float, 2> bwhDragBase{};         // the coupled sliders' values when a drag began (the delta mapping anchor)
+    int bwhDragId = -1;                         // the BWH row being dragged, or -1
+    // The Morphs tab: every vertex morph the exported PMX carries (the game's FaceBlendShape expressions, the raw blend shapes
+    // and the MMD standard ones, exactly as the export picks them), accumulated per weight on top of the rest shape. Weights are
+    // live-only: they are not exported and not saved (the PMX carries the morphs; MMD plays them). morphDelta is the per-mesh
+    // accumulation at the current weights, handed to the renderers.
+    exporter::LiveMorphCatalog morphCatalog;
+    std::vector<float> morphWeights;              // parallel to `morphCatalog.morphs`; 0..1, the sliders show 0..100
+    std::vector<std::vector<Vec3>> morphDelta;    // parallel to scene.meshes; empty for meshes no active morph touches
     int tab = TabParts;
+    int optScroll = 0;                      // the Optimize tab's vertical scroll, in pixels (wheel when the window is short)
     int sliderDrag = -1;                      // slider id being dragged, or -1
+    // Shift+Left-click on a slider: type its value with the keyboard. The edit is modal for the mouse/keyboard until
+    // Enter commits (the typed number, clamped and snapped to the slider's step), Esc restores the value it had, or any
+    // click ends it (committing). Live upload happens on commit only; the row shows the typed text with a caret.
+    int sliderEdit = -1;                      // slider id being typed into, or -1
+    std::string sliderEditBuf;                // the text typed so far
+    float sliderEditOrig = 0;                 // the stored value when the edit began (Esc restores it)
+    bool sliderEditMatPushed = false;         // one material-undo step per typing session
+    PoseState sliderEditPoseBefore;           // the pose when the edit began (a pose slider pushes one undo step on commit)
+    // Shift+Left-click on a morph row: type a display name for it. Enter commits (the alias is kept in the viewer's settings,
+    // so it survives restarts), Esc puts the original back. The PMX is untouched - MMD motions key morphs by name.
+    int morphEdit = -1;                       // morph index being renamed, or -1
+    std::string morphEditBuf;                 // the text typed so far
+    std::string morphEditOrig;                // the alias when the edit began (Esc restores it)
     std::vector<exporter::ShaderLayer> layerDefs;   // extra HLSL shading layers found in the layers folder (the GPU view runs them)
     std::map<std::string, char> keepHidden;   // part checkboxes to restore after a tweak reload
     bool applyKeep = false;
@@ -299,6 +471,17 @@ struct App {
     float gizmoAcc[3] = {0, 0, 0};            // world delta applied during the current drag (for the log line)
     float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
     int hoverAccChip = -1;                    // the accessory chip under the pointer in the panel, -1 = none
+    // Translucent clothes (Look tab): the brush paints the see-through area of the garment under the cursor. The mask is
+    // baked into the garment's own texture (see export/Translucency.cpp): session-only, kept in the scene, undone by the toggle.
+    bool transBrush = false;                  // the toggle: off by default, like every brush that changes pixels
+    bool transErase = false;                  // erase the paint instead of laying it down (right-drag always erases)
+    bool transPaintPending = false;           // the pointer moved during a stroke; applied once per picture
+    int transPaintX = 0, transPaintY = 0;     // the pointer in view pixels (the stroke's current position)
+    bool transEraseStroke = false;            // the current stroke erases (right-drag or the erase switch)
+    int paintPart = -1;                     // the part the current stroke paints (-1 = none); its front and back shells share the atlas and are painted together
+    float paintAnchorU = 0.0f, paintAnchorV = 0.0f;   // the last stamped UV: the stroke interpolates from here
+    bool paintAnchorSet = false;
+    int transHoverX = -1, transHoverY = -1;   // the pointer in view pixels for the brush ring; -1 when not over the view or the mode is off
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
@@ -333,6 +516,85 @@ struct App {
     HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr;
 };
 App g;
+
+PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
+    PanelLayout l;
+    l.logo = {12, 12, 68, 68};
+    const int by = 98, bh = 26;
+    l.open = {10, by, 58, by + bh};
+    l.exportPmx = {64, by, 156, by + bh};
+    l.issues = {162, by, 214, by + bh};
+    l.reset = {220, by, 288, by + bh};
+    l.all = {294, by, 324, by + bh};
+    l.asExported = {330, by, 370, by + bh};
+    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
+    // then the imported-outfit status line with its reset button.
+    l.outfitNameTop = 138;
+    l.outfitChipsTop = 160;
+    l.outfitClothTop = 184;
+    l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
+    l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
+    l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
+    l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
+    // The tab strip: if the labels fit the panel they are centred and static; otherwise the strip scrolls
+    // horizontally inside a clipped window, with small "<" ">" arrow buttons at the ends (wheel / drag also scroll it).
+    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 55, 46, 30};
+    constexpr int kTabPad = 8, kTabGap = 4, kTabArrowW = 16;
+    int tabsTotal = 0;
+    for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
+    const int stripWidth = tabsTotal + kTabGap * (TabCount - 1);
+    const int avail = kPanel - 24;
+    if (stripWidth <= avail) {
+        l.tabScrollable = false;
+        const int tabGap = std::max(1, (avail - tabsTotal) / (TabCount - 1));
+        const int used = tabsTotal + tabGap * (TabCount - 1);
+        int tx = (kPanel - used) / 2;
+        for (int i = 0; i < TabCount; ++i) {
+            const int w = kTabTextW[i] + kTabPad;
+            l.tabs[i] = {tx, 216, tx + w, 240};
+            tx += w + tabGap;
+        }
+    } else {
+        l.tabScrollable = true;
+        l.tabLeft = {8, 216, 8 + kTabArrowW, 240};
+        l.tabRight = {kPanel - 8 - kTabArrowW, 216, kPanel - 8, 240};
+        l.tabStrip = {8 + kTabArrowW + 4, 214, kPanel - 8 - kTabArrowW - 4, 242};
+        l.tabMaxScroll = std::max(0, stripWidth - (kPanel - 24 - 2 * (kTabArrowW + 4)));
+        const int off = static_cast<int>(std::lround(std::clamp(std::max(0.0f, g.tabPos), 0.0f, static_cast<float>(l.tabMaxScroll))));
+        int tx = l.tabStrip.left + 2 - off;
+        for (int i = 0; i < TabCount; ++i) {
+            const int w = kTabTextW[i] + kTabPad;
+            l.tabs[i] = {tx, 216, tx + w, 240};
+            tx += w + kTabGap;
+        }
+    }
+    l.partsHeadingTop = 222;
+    l.partsTop = 248;
+    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
+    l.footerTop = H - 36;
+    l.logBottom = l.footerTop - 4;
+    l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
+    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
+    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
+    l.boneListTop = l.partsTop + kRowH;
+    l.boneListBottom = l.boneEditTop - 4;
+    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
+    l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
+    l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
+    const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
+    l.boneResetOne = {10, ry, 145, ry + kRowH};
+    l.boneResetAll = {149, ry, 262, ry + kRowH};
+    l.boneUndo = {10, ay, 56, ay + kRowH};
+    l.boneRedo = {60, ay, 110, ay + kRowH};
+    l.boneSave = {114, ay, 190, ay + kRowH};
+    l.boneLoad = {194, ay, 268, ay + kRowH};
+    l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
+    l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
+    l.matListTop = l.partsTop + kRowH + 34;
+    l.matListBottom = l.partsBottom;
+    return l;
+}
+
 
 PanelLayout Lay(int H) { return LayoutFor(H, g.tab == TabBones && !g.showIssues, kBoneEditRows); }
 
@@ -409,11 +671,19 @@ constexpr UINT WM_EXP_READY = WM_APP + 4;
 constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (lParam 1 = ok, 2 = cancelled)
 constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
 constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: repaint the bar
+constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finished (wParam: 1 cancelled, 2 failed)
+constexpr UINT WM_SEL_READY = WM_APP + 9;      // the Selective Import window's workers finished (wParam: 0 = imported source view, 1 = proposed scene; lParam = session)
+constexpr UINT WM_SEL_FRAME = WM_APP + 10;     // the render worker produced fresh pictures; repaint
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
 constexpr UINT WM_BENCH = WM_APP + 41;   // CARDBRIDGE_BENCH: run the scripted timing session (see RunBench)
 void RunBench();
+void SelectiveOpen(const std::string& path);   // the Selective Import window (Selective.inc): per-component outfit import preview
+void SelectiveClose();
+void SelectiveInvalidateView();
+void SelectivePoseChanged();                   // called when the pose moved: reskins the static previews
+void SelApply();                               // apply the selective import (through the validation guard)
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 
 std::shared_ptr<Loaded> Current() {

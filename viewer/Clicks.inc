@@ -2,11 +2,25 @@
 
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
 void TweakClick(int x, int y, const PanelLayout& l, bool right) {
+    if (g.tab == TabOptimize) return;   // the Optimize tab routes its own clicks (OptTabClick)
+    if (g.tab == TabProportions) {
+        const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+        const int pidx = RowIndexAt(rows.size(), l, x, y);
+        if (pidx >= 0) ProportionsClick(pidx, rows[static_cast<size_t>(pidx)], right);
+        return;
+    }
     std::vector<TweakRow> rows = BuildTweakRows(g.tab);
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;
     const TweakRow& row = rows[static_cast<size_t>(idx)];
     if (row.kind == 5) { if (!right) SettingsAction(row.id); return; }   // outside the lock: it opens dialogs
+    if (row.kind == 6) {   // a preset-chips row (band / cup / nipple size): one click sets the slider
+        if (!right) {
+            const int chip = PresetChipAt(row.id, x);
+            if (chip >= 0) ApplyPresetChip(row.id, chip);
+        }
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     if (row.kind == 4 || (row.kind == 0 && row.id < 0)) return;
     if (row.kind == 2 && row.id >= kLayerBase && row.id < kBoneEdit) {   // a shader layer: no re-assembly, just another frame
@@ -18,9 +32,24 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
         return;
     }
+    if (row.kind == 0 && g.tab == TabMorphs) {   // a morph group header: click folds / unfolds it; the right chip (or a right-click) resets the group's sliders
+        if (x >= kPanel - 64 || right) {          // the "reset" affordance on the right, or a right-click
+            size_t n = 0;
+            for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
+                if (rows[k].kind == 1 && TweakChanged(rows[k].id)) { ResetTweak(rows[k].id); ++n; }
+            if (n) { MorphSlideEdited(); Log("reset " + row.label + " (" + std::to_string(n) + " morph(s))"); }
+            return;
+        }
+        if (g.collapsedMorphs.count(row.group)) g.collapsedMorphs.erase(row.group);
+        else g.collapsedMorphs.insert(row.group);
+        g.hoverRow = -1;
+        InvalidatePanel();
+        return;
+    }
     if (row.kind == 0) {
         bool any = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
+            if (rows[k].kind == 4 || rows[k].kind == 5) continue;   // text / action rows are not sliders to reset
             any = any || TweakChanged(rows[k].id);
             ResetTweak(rows[k].id);
         }
@@ -61,6 +90,13 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         TweakEdited(row.id, true);
         return;
     }
+    if (row.kind == 2 && (row.id == kTransBrush || row.id == kTransErase)) {
+        bool& v = row.id == kTransBrush ? g.transBrush : g.transErase;
+        if (right) ResetTweak(row.id); else v = !v;
+        Log(row.label + ": " + (v ? "on" : "off"));
+        TransSwitchChanged(row.id);
+        return;
+    }
     if (row.kind == 2) {
         if (right) ResetTweak(row.id); else g.tw.nippleInside = !g.tw.nippleInside;
         Log(row.label + ": " + (g.tw.nippleInside ? "on" : "off"));
@@ -70,12 +106,33 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     SliderRef r;
     if (!SliderFor(row.id, r)) return;
     if (right) {
+        if (g.tab == TabMorphs && row.id >= kMorphBase && row.id < kMorphBase + static_cast<int>(g.morphCatalog.morphs.size())) {
+            const std::string& name = g.morphCatalog.morphs[static_cast<size_t>(row.id - kMorphBase)].name;
+            if (g.settings.morphAliases.erase(name)) { SaveSettings(g.settings); Log("rename cleared for \"" + name + "\""); }
+            else if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
+            return;
+        }
         if (TweakChanged(row.id)) { ResetTweak(row.id); Log("reset " + row.label); TweakEdited(row.id, true); }
+        return;
+    }
+    if (g.shiftDown) {   // Shift+click: type the value with the keyboard (a morph row: its display name instead)
+        if (g.tab == TabMorphs && row.id >= kMorphBase && row.id < kMorphBase + static_cast<int>(g.morphCatalog.morphs.size())) {
+            if (g.morphEdit >= 0) EndMorphEdit(true);   // another row had the box: commit it first
+            BeginMorphEdit(row.id - kMorphBase);
+            return;
+        }
+        BeginSliderEdit(row.id);
         return;
     }
     if (x < kTrackL - 8) return;
     g.sliderDrag = row.id;
-    *r.v = SliderValueAt(r, x);
+    if (IsBodyMeasureId(row.id)) {   // a measurement row: grabbing it anchors the drag; movement does the coupled-delta move (see ApplyPending)
+        BwhDragBegin(row.id);
+        SetCapture(g.hwnd);
+        InvalidatePanel();
+        return;
+    }
+    r.Set(SliderValueAt(r, x));
     TweakEdited(row.id, false);
     SetCapture(g.hwnd);
     InvalidatePanel();
@@ -124,10 +181,11 @@ void BonesTabClick(int x, int y, const PanelLayout& l, bool right) {
         const int id = kBoneEdit + row - 1;
         SliderRef r;
         if (!SliderFor(id, r)) return;
-        if (right) { *r.v = r.def; ApplyPoseLive(); InvalidatePanel(); return; }
+        if (right) { r.Set(r.def); ApplyPoseLive(); InvalidatePanel(); return; }
+        if (g.shiftDown) { BeginSliderEdit(id); return; }   // type the value with the keyboard
         if (x < kTrackL - 8) return;
         g.sliderDrag = id;
-        *r.v = SliderValueAt(r, x);
+        r.Set(SliderValueAt(r, x));
         SetCapture(g.hwnd);
         ApplyPoseLive();
         InvalidatePanel();
@@ -477,6 +535,8 @@ void SettingsAction(int id) {
         SaveSettings(g.settings);
         Log("settings forgotten: the library and the mods folder are looked for again at the next start (the library on disk stays)", LogKind::Warn);
         break;
+    case kMorphResetAll: ResetAllMorphs(); break;
+    case kTransClear: TransClearPaint(); break;
     default: break;
     }
     InvalidatePanel();

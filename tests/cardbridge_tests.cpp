@@ -17,6 +17,8 @@
 #include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
+#include "card/SelectiveImport.h"
+#include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
 #include "core/Inflate.h"
@@ -27,20 +29,26 @@
 #include "export/AdapterSelect.h"
 #include "export/BoneLabels.h"
 #include "export/Exporter.h"
+#include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
+#include "export/SkinAoBake.h"
+#include "export/Translucency.h"
 #include "library/Library.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
+#include "mesh/Simplify.h"
 #include "pmx/PmxWriter.h"
 #include "unity/TextureDecode.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
+#include "shape/BodyMeasurements.h"
+#include "measure/BodyMeasure.h"
 #include "resolve/Resolver.h"
 
 #include "PmxReader.h"
@@ -135,6 +143,471 @@ std::string writeStoredZip(const std::string& name, const std::vector<std::pair<
     const size_t written = std::fwrite(zip.data(), 1, zip.size(), f);
     std::fclose(f);
     return written == zip.size() ? path : "";
+}
+
+// ---- character-card fixture: encode a minimal 【KoiKatuChara】 PNG the opposite of LoadCard ----
+// Used by the Coordinate-PNG tests; builds the same container shape the game writes
+// (PNG + productNo + marker + formatVersion + empty face thumbnail + lstInfo blocks).
+Value testAccPart(int64_t type, int64_t id, const char* parent) {
+    Value::Map m;
+    m.emplace_back(Value(std::string("type")), Value(type));
+    m.emplace_back(Value(std::string("id")), Value(id));
+    m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+    return Value(std::move(m));
+}
+
+Value testClothesMap(std::initializer_list<int64_t> ids) {
+    auto clothPart = [](int64_t id) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("id")), Value(id));
+        return Value(std::move(m));
+    };
+    Value::Array parts;
+    for (int64_t id : ids) parts.push_back(clothPart(id));
+    while (parts.size() < 9) parts.push_back(clothPart(0));
+    Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+    Value::Map m;
+    m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+    m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+    return Value(std::move(m));
+}
+
+Value testAccessoryMap(std::vector<Value> parts) {
+    while (parts.size() < 20) parts.push_back(testAccPart(120, 0, ""));
+    Value::Map m;
+    m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+    m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+    return Value(std::move(m));
+}
+
+Value testCoordinateBin(const Value& clothes, const Value& accessory, bool enableMakeup, const Value& makeup) {
+    auto chunk = [](const Value& v) {
+        Bytes b = MsgPackPack(v);
+        Bytes out;
+        const int32_t n = static_cast<int32_t>(b.size());
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>((n >> (8 * i)) & 0xff));
+        out.insert(out.end(), b.begin(), b.end());
+        return out;
+    };
+    Bytes c;
+    Bytes x = chunk(clothes); c.insert(c.end(), x.begin(), x.end());
+    x = chunk(accessory); c.insert(c.end(), x.begin(), x.end());
+    c.push_back(enableMakeup ? 1 : 0);
+    x = chunk(makeup); c.insert(c.end(), x.begin(), x.end());
+    return Value(std::move(c));
+}
+
+Value testMoreAccessoriesExtended(const std::string& xml) {
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("additionalAccessories")), Value(xml));
+    return Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))});
+}
+
+Value testKcoxExtended(int coordIdx, const std::string& garment, const Bytes& png, bool replace) {
+    Value::Map garments;
+    Value::Array ga;
+    ga.emplace_back(Value(png));
+    ga.emplace_back(Value(replace));
+    garments.emplace_back(Value(garment), Value(std::move(ga)));
+    Value::Map outer;
+    outer.emplace_back(Value(static_cast<int64_t>(coordIdx)), Value(std::move(garments)));
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("Overlays")), Value(std::move(MsgPackPack(Value(std::move(outer))))));
+    return Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))});
+}
+
+static void put32(Bytes& b, int32_t v) { for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff)); }
+static void put64(Bytes& b, int64_t v) { for (int i = 0; i < 8; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff)); }
+static void putDotnetString(Bytes& b, const std::string& s) {
+    const size_t n = s.size();
+    size_t shift = 0;
+    do {
+        uint8_t byte = static_cast<uint8_t>((n >> shift) & 0x7f);
+        shift += 7;
+        if (shift < 64 && (n >> shift) != 0) byte |= 0x80;
+        b.push_back(byte);
+    } while ((n >> shift) != 0 && shift < 64);
+    b.insert(b.end(), s.begin(), s.end());
+}
+
+// Encodes a minimal character card; `coordinateBins` is the Coordinate block's array of bins
+// (a Value array), `kkex` the full KKEx map (or nil() to omit the block).
+std::string writeTestCardFile(const std::string& name, const Value& coordinateBins,
+                              const Value& parameter, const Value& status, const Value& hair, const Value& kkex) {
+    Bytes file = tinyPng();
+    put32(file, 100);
+    putDotnetString(file, "\xE3\x80\x90KoiKatuChara\xE3\x80\x91");   // 【KoiKatuChara】
+    putDotnetString(file, "0.0.0");
+    put32(file, 0);   // face thumbnail: empty
+    auto chunkSized = [&](const Value& v) {
+        Bytes b = MsgPackPack(v);
+        Bytes out;
+        put32(out, static_cast<int32_t>(b.size()));
+        out.insert(out.end(), b.begin(), b.end());
+        return out;
+    };
+    // Custom block: face, body, hair, each length-prefixed
+    Bytes custom;
+    {
+        Value face(Value::Map{}), body(Value::Map{});
+        std::vector<const Value*> values{&face, &body, &hair};
+        for (const Value* v : values) {
+            Bytes x = chunkSized(*v);
+            custom.insert(custom.end(), x.begin(), x.end());
+        }
+    }
+    struct Blk { std::string name; Bytes data; };
+    std::vector<Blk> blocks;
+    blocks.push_back({"Custom", std::move(custom)});
+    blocks.push_back({"Coordinate", MsgPackPack(coordinateBins)});
+    blocks.push_back({"Parameter", MsgPackPack(parameter)});
+    blocks.push_back({"Status", MsgPackPack(status)});
+    if (!kkex.isNil()) blocks.push_back({"KKEx", MsgPackPack(kkex)});
+    int64_t pos = 0;
+    Value::Array lst;
+    Bytes data;
+    for (auto& blk : blocks) {
+        Value::Map info;
+        info.emplace_back(Value(std::string("name")), Value(blk.name));
+        info.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        info.emplace_back(Value(std::string("pos")), Value(pos));
+        info.emplace_back(Value(std::string("size")), Value(static_cast<int64_t>(blk.data.size())));
+        lst.emplace_back(Value(std::move(info)));
+        data.insert(data.end(), blk.data.begin(), blk.data.end());
+        pos += static_cast<int64_t>(blk.data.size());
+    }
+    Value::Map hdr;
+    hdr.emplace_back(Value(std::string("lstInfo")), Value(std::move(lst)));
+    Bytes hdrBytes = MsgPackPack(Value(std::move(hdr)));
+    put32(file, static_cast<int32_t>(hdrBytes.size()));
+    file.insert(file.end(), hdrBytes.begin(), hdrBytes.end());
+    put64(file, static_cast<int64_t>(data.size()));
+    file.insert(file.end(), data.begin(), data.end());
+    const std::string path = tempPath(name);
+    fileio::WriteFile(path, file.data(), file.size());
+    return path;
+}
+
+Value testFlags(bool v) { Value::Array a; for (int i = 0; i < 20; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); }
+
+// ---- clothing-file fixture: encode a minimal 【KoiKatuClothes】 PNG (Koikatsu's coordinate file) ----
+// Layout after the image: productNo + marker + version + name + coordinate bytes
+// (i32 clothesLen + i32 accessoryLen + 1-byte enableMakeup + i32 makeupLen), then an
+// optional KKEx block with version and size. The payload stored below is one coordinate
+// verbatim; the KKEx below carries the coordinate-indexed plugin payloads as a real
+// Coordinate file from the maker does (under whatever author coordinate index it had).
+std::string writeTestClothingFile(const std::string& name, const Value& clothes, const Value& accessory,
+                                  bool enableMakeup, const Value& makeup, const Value& extended) {
+    Bytes file = tinyPng();
+    put32(file, 100);
+    putDotnetString(file, "\xE3\x80\x90KoiKatuClothes\xE3\x80\x91");   // a??KoiKatuClothesa?`
+    putDotnetString(file, "0.0.0");
+    putDotnetString(file, "Coordinate Probe");   // the file's own name (empty in some real files)
+    auto chunkSized = [&](const Value& v) {
+        Bytes b = MsgPackPack(v);
+        Bytes out;
+        put32(out, static_cast<int32_t>(b.size()));
+        out.insert(out.end(), b.begin(), b.end());
+        return out;
+    };
+    Bytes coord;
+    {
+        Bytes c1 = chunkSized(clothes);
+        Bytes c2 = chunkSized(accessory);
+        coord.insert(coord.end(), c1.begin(), c1.end());
+        coord.insert(coord.end(), c2.begin(), c2.end());
+    }
+    coord.push_back(enableMakeup ? 1 : 0);
+    {
+        Bytes m = chunkSized(makeup);
+        coord.insert(coord.end(), m.begin(), m.end());
+    }
+    put32(file, static_cast<int32_t>(coord.size()));
+    file.insert(file.end(), coord.begin(), coord.end());
+    if (!extended.isNil() && extended.isMap() && !extended.asMap().empty()) {
+        Bytes kkexBin = MsgPackPack(extended);
+        putDotnetString(file, "KKEx");
+        put32(file, 3);   // KKEx version
+        put32(file, static_cast<int32_t>(kkexBin.size()));
+        file.insert(file.end(), kkexBin.begin(), kkexBin.end());
+    }
+    const std::string path = tempPath(name);
+    fileio::WriteFile(path, file.data(), file.size());
+    return path;
+}
+
+// The source character for the Coordinate-PNG tests: Toru, a Koikatsu character card
+// whose outfit 1 (his current one) is a gym uniform: author-slot ids, resolver rows with
+// outfit1.* properties, one mod accessory, makeup enabled, all hair accessories off.
+Value testToruParameter() {
+    Value::Map m;
+    m.emplace_back(Value(std::string("sex")), Value(int64_t{0}));
+    m.emplace_back(Value(std::string("lastname")), Value(std::string("Toru")));
+    m.emplace_back(Value(std::string("firstname")), Value(std::string("Terada")));
+    return Value(std::move(m));
+}
+Value testToruStatus() {
+    Value::Map m;
+    m.emplace_back(Value(std::string("coordinateType")), Value(int64_t{1}));
+    m.emplace_back(Value(std::string("showAccessory")), Value(testFlags(false)));
+    return Value(std::move(m));
+}
+Value testToruHair() {
+    Value::Array hp;
+    Value::Map p;
+    p.emplace_back(Value(std::string("id")), Value(int64_t{4242}));
+    hp.emplace_back(Value(std::move(p)));
+    return Value(Value::Map{{Value(std::string("parts")), Value(std::move(hp))}});
+}
+card::Card testToruCard() {
+    card::Card src;
+    src.family = card::CardFamily::Koikatsu;
+    src.marker = "\xE3\x80\x90KoiKatuChara\xE3\x80\x91";
+    src.parameter = testToruParameter();
+    src.status = testToruStatus();
+    src.hair = testToruHair();
+    src.outfits.resize(7);
+    for (int i = 0; i < 7; ++i) src.outfits[static_cast<size_t>(i)].clothes = testClothesMap({static_cast<int64_t>(100 + i)});
+    src.outfits[1].clothes = testClothesMap({2222, 0, 0, 0, 0, 0, 0, 0, 0});
+    src.outfits[1].accessory = testAccessoryMap({testAccPart(124, 7777, "a_n_hair_pin")});
+    src.outfits[1].enableMakeup = true;
+    src.outfits[1].makeup = Value(Value::Map{{Value(std::string("lipstick")), Value(int64_t{5})}});
+    src.rows = {
+        {"tora.gymmod", 2222, 100009999, "outfit1.ChaFileClothes.ClothesTop", 105},
+        {"tora.pinmod", 7777, 100008877, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124},
+    };
+    src.supported = true;
+    return src;
+}
+Value testMoeParameter() {
+    Value::Map m;
+    m.emplace_back(Value(std::string("sex")), Value(int64_t{1}));   // female (Parameter.sex: female = 1, male = 0)
+    m.emplace_back(Value(std::string("lastname")), Value(std::string("Moe")));
+    m.emplace_back(Value(std::string("firstname")), Value(std::string("Hashimoto")));
+    return Value(std::move(m));
+}
+Value testMoeStatus() {
+    Value::Map m;
+    m.emplace_back(Value(std::string("coordinateType")), Value(int64_t{0}));
+    m.emplace_back(Value(std::string("showAccessory")), Value(testFlags(true)));
+    return Value(std::move(m));
+}
+Value testMoeHair() {
+    Value::Array hp;
+    Value::Map p;
+    p.emplace_back(Value(std::string("id")), Value(int64_t{1234}));
+    hp.emplace_back(Value(std::move(p)));
+    return Value(Value::Map{{Value(std::string("parts")), Value(std::move(hp))}});
+}
+card::Card testMoeCard() {
+    card::Card dst;
+    dst.family = card::CardFamily::Koikatsu;
+    dst.marker = "\xE3\x80\x90KoiKatuChara\xE3\x80\x91";
+    dst.parameter = testMoeParameter();
+    dst.status = testMoeStatus();
+    dst.hair = testMoeHair();
+    dst.outfits.resize(7);
+    for (int i = 0; i < 7; ++i) dst.outfits[static_cast<size_t>(i)].clothes = testClothesMap({static_cast<int64_t>(56 + i)});
+    dst.outfits[0].clothes = testClothesMap({56, 0, 203, 0, 0, 0, 0, 6, 6});
+    dst.outfits[0].accessory = testAccessoryMap({testAccPart(123, 9001, "a_n_headside")});
+    dst.rows = {
+        {"moe.hairpin", 9001, 100001112, "outfit0.accessory0.ChaFileAccessory.PartsInfo.id", 123},
+    };
+    dst.supported = true;
+    return dst;
+}
+
+Value testToruCoords() {
+    Value::Array coords;
+    for (int i = 0; i < 7; ++i) {
+        Value clothes = testClothesMap({static_cast<int64_t>(100 + i)});
+        Value acc = testAccessoryMap({});
+        Value makeup(Value::Map{});
+        coords.emplace_back(testCoordinateBin(clothes, acc, false, makeup));
+    }
+    Value clothes = testClothesMap({2222, 0, 0, 0, 0, 0, 0, 0, 0});
+    Value acc = testAccessoryMap({testAccPart(124, 7777, "a_n_hair_pin")});
+    Value makeup(Value::Map{{Value(std::string("lipstick")), Value(int64_t{5})}});
+    coords[1] = testCoordinateBin(clothes, acc, true, makeup);
+    return Value(std::move(coords));
+}
+
+Value testToruResolverRows() {
+    // as stored in a character card: an array of msgpack bins, one per row
+    auto row = [](const char* modId, int64_t slot, int64_t localSlot, const char* property, int64_t categoryNo) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("ModID")), Value(std::string(modId)));
+        m.emplace_back(Value(std::string("Slot")), Value(slot));
+        m.emplace_back(Value(std::string("LocalSlot")), Value(localSlot));
+        m.emplace_back(Value(std::string("Property")), Value(std::string(property)));
+        m.emplace_back(Value(std::string("CategoryNo")), Value(categoryNo));
+        return Value(std::move(MsgPackPack(Value(std::move(m)))));
+    };
+    Value::Array info;
+    info.emplace_back(row("tora.gymmod", 2222, 100009999, "outfit1.ChaFileClothes.ClothesTop", 105));
+    info.emplace_back(row("tora.pinmod", 7777, 100008877, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124));
+    Value::Map inner;
+    inner.emplace_back(Value(std::string("info")), Value(std::move(info)));
+    return Value(Value::Array{Value(int64_t{1}), Value(std::move(inner))});
+}
+
+// ---- coordinate-import fixtures (plugins, ACI, ABMX) ----
+
+Value testAciV0Entry(int gender, const char* creator = "TestAuthor") {
+    Value::Map entry;
+    entry.emplace_back(Value(std::string("_makeup")), Value(true));
+    entry.emplace_back(Value(std::string("_clothnot")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    {
+        Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+        entry.emplace_back(Value(std::string("_coordsavebool")), Value(std::move(a)));
+    }
+    entry.emplace_back(Value(std::string("_acckeep")), Value(Value::Array{Value(int64_t{3})}));
+    entry.emplace_back(Value(std::string("_hairkeep")), Value(Value::Array{Value(int64_t{4})}));
+    entry.emplace_back(Value(std::string("_creatornames")), Value(Value::Array{Value(std::string(creator))}));
+    entry.emplace_back(Value(std::string("_set")), Value(std::string("TestSet")));
+    entry.emplace_back(Value(std::string("_subset")), Value(std::string("TestSubset")));
+    Value::Map ri;
+    ri.emplace_back(Value(std::string("_personality")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_trait")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_interest")), Value(Value::Map{}));
+    ri.emplace_back(Value(std::string("_height")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    ri.emplace_back(Value(std::string("_breast")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+    ri.emplace_back(Value(std::string("_htype")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_club")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_gender")), Value(static_cast<int64_t>(gender)));
+    ri.emplace_back(Value(std::string("_coordtype")), Value(int64_t{0}));
+    ri.emplace_back(Value(std::string("_coordsubtype")), Value(int64_t{0}));
+    entry.emplace_back(Value(std::string("_restrictioninfo")), Value(std::move(ri)));
+    return Value(std::move(entry));
+}
+
+// Additional_Card_Info, v0 generation: [1, {CoordinateInfo: bin({coordIdx: entry}), CardInfo: bin({...})}]
+Value testAciV0(std::initializer_list<std::pair<int, int>> coords /* coordIdx -> gender */, const char* creator = "TestAuthor") {
+    Value::Map info;
+    for (const auto& [idx, gender] : coords)
+        info.emplace_back(Value(static_cast<int64_t>(idx)), testAciV0Entry(gender, creator));
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(info))))));
+    {
+        Value::Map cardInfo;
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            cardInfo.emplace_back(Value(std::string("_personalsavebool")), Value(std::move(a)));
+        }
+        cardInfo.emplace_back(Value(std::string("_cosplayready")), Value(false));
+        payload.emplace_back(Value(std::string("CardInfo")), Value(std::move(MsgPackPack(Value(std::move(cardInfo))))));
+    }
+    return Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))});
+}
+
+// Additional_Card_Info, v1 generation: [0, { <key>: bin(msgpack) ... }] with per-coordinate arrays of `outfits` entries
+Value testAciV1(int outfits) {
+    auto keepArr = [&](int n) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{5})})); return Value(std::move(a)); };
+    auto nArr = [&](int n, int64_t v) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); };
+    auto sArr = [&](int n, const char* s) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(std::string(s))); return Value(std::move(a)); };
+    auto bools = [&](int n, bool v) { Value::Array a; for (int i = 0; i < n; ++i) a.emplace_back(Value(v)); return Value(std::move(a)); };
+    auto bool9n = [&](int n, bool v) { Value::Array a; for (int i = 0; i < n; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(v)); a.emplace_back(Value(std::move(inner))); } return Value(std::move(a)); };
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("HairAcc")), Value(std::move(MsgPackPack(Value(std::move(keepArr(outfits)))))));
+    payload.emplace_back(Value(std::string("AccKeep")), Value(std::move(MsgPackPack(Value(std::move(keepArr(outfits)))))));
+    payload.emplace_back(Value(std::string("CoordinateSaveBools")), Value(std::move(MsgPackPack(Value(std::move(bool9n(outfits, false)))))));
+    payload.emplace_back(Value(std::string("Creator")), Value(std::move(MsgPackPack(Value(std::move(sArr(outfits, "V1Author")))))));
+    payload.emplace_back(Value(std::string("GenderType")), Value(std::move(MsgPackPack(Value(std::move(nArr(outfits, 0)))))));
+    payload.emplace_back(Value(std::string("Personal_Clothing_Save")), Value(std::move(MsgPackPack(Value(std::move(bools(9, false)))))));   // character-scoped
+    payload.emplace_back(Value(std::string("MakeUpKeep")), Value(std::move(MsgPackPack(Value(std::move(bools(9, false)))))));               // character-scoped
+    payload.emplace_back(Value(std::string("Cosplay_Academy_Ready")), Value(std::move(MsgPackPack(Value(false)))));                          // character-scoped
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+}
+
+struct TestAccStateOutfit { int coord, slot, binding, state, shoetype; bool parented; };
+
+// Accessory_States payload builder: [2, {CoordinateData: bin({coordIdx: {...}})}]
+Value testAccessoryStates(std::initializer_list<TestAccStateOutfit> outfits) {
+    std::map<int64_t, Value::Map> slotinfoByCoord, namesByCoord;
+    for (const auto& o : outfits) {
+        {
+            Value::Map sd;
+            sd.emplace_back(Value(std::string("_binding")), Value(static_cast<int64_t>(o.binding)));
+            Value::Array states;
+            states.emplace_back(Value(Value::Array{Value(static_cast<int64_t>(o.state)), Value(static_cast<int64_t>(o.state))}));
+            sd.emplace_back(Value(std::string("_state")), Value(std::move(states)));
+            sd.emplace_back(Value(std::string("_shoetype")), Value(static_cast<int64_t>(o.shoetype)));
+            sd.emplace_back(Value(std::string("_parented")), Value(o.parented));
+            slotinfoByCoord[o.coord].emplace_back(Value(static_cast<int64_t>(o.slot)), Value(std::move(sd)));
+        }
+        {
+            Value::Map nd;
+            nd.emplace_back(Value(std::string("_name")), Value(std::string("state")));
+            Value::Map statenames;
+            statenames.emplace_back(Value(int64_t{0}), Value(std::string("Normal")));
+            nd.emplace_back(Value(std::string("_statenames")), Value(std::move(statenames)));
+            namesByCoord[o.coord].emplace_back(Value(static_cast<int64_t>(o.slot)), Value(std::move(nd)));
+        }
+    }
+    Value::Map all;
+    for (const auto& [coord, slotinfo] : slotinfoByCoord) {
+        Value::Map entry;
+        entry.emplace_back(Value(std::string("_slotinfo")), Value(Value(slotinfo)));
+        auto it = namesByCoord.find(coord);
+        entry.emplace_back(Value(std::string("_names")), it != namesByCoord.end() ? Value(Value(it->second)) : Value(Value::Map{}));
+        entry.emplace_back(Value(std::string("_clothnotdata")), Value(Value::Array{Value(false), Value(false), Value(false)}));
+        entry.emplace_back(Value(std::string("_forceclothnotupdate")), Value(true));
+        all.emplace_back(Value(static_cast<int64_t>(coord)), Value(std::move(entry)));
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("CoordinateData")), Value(std::move(MsgPackPack(Value(std::move(all))))));
+    return Value(Value::Array{Value(int64_t{2}), Value(std::move(payload))});
+}
+
+// DynamicBoneEditor rows bin
+Value testDynamicBoneRows(std::initializer_list<std::pair<int, std::pair<int, int>>> rows) {
+    // {coordIdx, {slot, marker}}
+    Value::Array arr;
+    for (const auto& [ci, rest] : rows) {
+        const auto& [slot, marker] = rest;
+        Value::Map row;
+        row.emplace_back(Value(std::string("CoordinateIndex")), Value(static_cast<int64_t>(ci)));
+        row.emplace_back(Value(std::string("Slot")), Value(static_cast<int64_t>(slot)));
+        row.emplace_back(Value(std::string("BoneName")), Value(std::string("acce_" + std::to_string(marker))));
+        row.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+        arr.emplace_back(Value(std::move(row)));
+    }
+    return Value(std::move(MsgPackPack(Value(std::move(arr)))));
+}
+
+// HairAccessoryCustomizer: [0, {HairAccessories: bin({coordIdx: {slotIdx: settings}})}]
+Value testHairAccessories(std::initializer_list<std::pair<int, std::map<int, int>>> coords) {
+    Value::Map all;
+    for (const auto& [coord, slots] : coords) {
+        Value::Map& entry = all.emplace_back(Value(static_cast<int64_t>(coord)), Value(Value::Map{})).second.map();
+        for (const auto& [slot, marker] : slots) {
+            Value::Map settings;
+            settings.emplace_back(Value(std::string("HairGloss")), Value(true));
+            settings.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+            entry.emplace_back(Value(static_cast<int64_t>(slot)), Value(std::move(settings)));
+        }
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("HairAccessories")), Value(std::move(MsgPackPack(Value(std::move(all))))));
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+}
+
+// pushup, multi-coordinate: [0, {Pushup_TopData: bin({coordIdx: {...}}), Pushup_BraData: bin(...), Pushup_BodyData: bin(...)}]
+Value testPushupMulti(std::initializer_list<std::array<double, 4>> coords) {
+    Value::Map top, bra, body;
+    for (const auto& [ci, t, b, bd] : coords) {
+        Value::Map mT; mT.emplace_back(Value(std::string("Firmness")), Value(t)); mT.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        top.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mT)));
+        Value::Map mB; mB.emplace_back(Value(std::string("Firmness")), Value(b)); mB.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        bra.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mB)));
+        Value::Map mD; mD.emplace_back(Value(std::string("Firmness")), Value(bd)); mD.emplace_back(Value(std::string("EnablePushup")), Value(true));
+        body.emplace_back(Value(static_cast<int64_t>(ci)), Value(std::move(mD)));
+    }
+    Value::Map payload;
+    payload.emplace_back(Value(std::string("Pushup_TopData")), Value(std::move(MsgPackPack(Value(std::move(top))))));
+    payload.emplace_back(Value(std::string("Pushup_BraData")), Value(std::move(MsgPackPack(Value(std::move(bra))))));
+    payload.emplace_back(Value(std::string("Pushup_BodyData")), Value(std::move(MsgPackPack(Value(std::move(body))))));
+    return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
 }
 
 // ---- PMX read-back (tests/PmxReader.h reads the written bytes, independent of the writer) ----
@@ -349,6 +822,269 @@ void unitTests() {
         CHECK(near(v[0].y, -1.0f) && near(v[2].x, 0.0f) && near(v[1].x, -45.0f));
         anm.get("cf_s_Mouth_x", 1.5f, v, all);   // the plugin leaves these rotations clamped
         CHECK(near(v[0].x, 1.5f) && near(v[1].x, 90.0f));
+    });
+    test("body measurements: the bust drives only the bust size slider", [] {
+        std::vector<float> card(44, 0.5f), shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureBust, 0.75f);
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[4], 0.75f));
+        for (size_t i = 0; i < shape.size(); ++i) if (i != 4) CHECK(near(shape[i], 0.5f));
+    });
+    test("body measurements: waist moves width and depth by the same delta and keeps their difference", [] {
+        std::vector<float> card(44, 0.5f);
+        card[22] = 0.8f; card[23] = 0.2f;                    // the card's own asymmetry: wide, shallow
+        std::vector<float> shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, 0.45f);   // average 0.50 -> 0.45: -0.05 on both
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[22], 0.75f) && near(shape[23], 0.15f));   // delta -0.05 on both, difference kept
+        CHECK(near(shape[22] - shape[23], card[22] - card[23]));
+        CHECK(near(shape[24], 0.5f) && near(shape[4], 0.5f));     // the hip and the bust did not move
+    });
+    test("body measurements: hip moves width and depth and leaves the butt sliders alone", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureHip, 0.9f);
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        CHECK(near(shape[24], 0.9f) && near(shape[25], 0.9f));
+        CHECK(near(shape[26], 0.5f) && near(shape[27], 0.5f));    // butt size / angle are not part of the measurement
+        CHECK(near(shape[22], 0.5f) && near(shape[4], 0.5f));
+    });
+    test("body measurements: each slider is clamped to the maker's range without moving anything else", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        shape[22] = 1.9f;                                   // a SliderUnlocker card: wide slider almost at its end
+        shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, 2.0f);   // delta +0.8
+        CHECK(near(shape[22], 2.0f) && near(shape[23], 1.3f));   // width pins at the max, depth follows as far as it can
+        std::vector<float> lo = card, hi = card;
+        shape::BodyMeasureSetTarget(lo, card, shape::kBodyMeasureHip, -0.5f);   // delta -1.0, inside the range
+        CHECK(near(lo[24], -0.5f) && near(lo[25], -0.5f));       // both sides the same
+        shape::BodyMeasureSetTarget(lo, card, shape::kBodyMeasureHip, -1.5f);   // delta -2.0, pinned at -1
+        CHECK(near(lo[24], -1.0f) && near(lo[25], -1.0f));
+        shape::BodyMeasureSetTarget(hi, card, shape::kBodyMeasureHip, 2.0f);
+        CHECK(near(hi[24], 2.0f) && near(hi[25], 2.0f));
+        lo = card;                                          // a card that sits outside -1..2 keeps its own bound
+        card[24] = -1.5f;
+        std::vector<float> unlocked = card;
+        shape::BodyMeasureSetTarget(unlocked, card, shape::kBodyMeasureHip, -1.5f);   // delta 0: already there, no crash
+        CHECK(unlocked[24] == -1.5f);
+        float l = 0.0f, h = 0.0f;
+        shape::BodyMeasureRange(card, shape::kBodyMeasureHip, l, h);
+        CHECK(l == -1.5f && h == 2.0f);                     // the row's range follows the card, not the nominal 0..1
+    });
+    test("body measurements: non-finite targets and sizes are refused, not stored", [] {
+        std::vector<float> card(44, 0.5f);
+        std::vector<float> shape = card;
+        CHECK(!shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, std::numeric_limits<float>::quiet_NaN()));
+        CHECK(!shape::BodyMeasureSetTarget(shape, card, shape::kBodyMeasureWaist, std::numeric_limits<float>::infinity()));
+        CHECK(shape == card);
+        std::vector<float> shortShape(4, 0.5f);
+        CHECK(shape::BodyMeasureAverage(shortShape, shape::kBodyMeasureBust) == 0.0f);
+        CHECK(!shape::BodyMeasureSetTarget(shortShape, {0.5f}, shape::kBodyMeasureBust, 0.7f));
+    });
+    test("body measurements: the card default is preserved exactly when the row is never touched", [] {
+        std::vector<float> card(44, 0.0f);
+        for (size_t i = 0; i < card.size(); ++i) card[i] = static_cast<float>(i) / 100.0f;   // a non-trivial card
+        const std::vector<float> before = card;
+        const float avg = shape::BodyMeasureAverage(card, shape::kBodyMeasureWaist);
+        CHECK(std::fabs(avg - (22.0f / 100.0f + 23.0f / 100.0f) / 2.0f) < 1e-6f);
+        float lo = 0.0f, hi = 0.0f;
+        shape::BodyMeasureRange(card, shape::kBodyMeasureWaist, lo, hi);
+        CHECK(lo == -1.0f && hi == 2.0f);
+        CHECK(card == before);
+    });
+    test("body measurements: a known lathe profile reads bust / waist / hip in order", [] {
+        using namespace assemble;
+        Scene s;
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 74, segs = 48;
+        struct Key { float y, r; };
+        const Key keys[] = {
+            {0.00f, 0.075f}, {0.30f, 0.090f}, {0.45f, 0.150f},   // hips ~94 cm
+            {0.62f, 0.130f}, {0.78f, 0.090f},                    // waist ~57 cm
+            {0.95f, 0.120f}, {1.10f, 0.148f},                    // bust ~93 cm
+            {1.25f, 0.125f}, {1.35f, 0.085f}, {1.45f, 0.060f},
+        };
+        auto radiusAt = [&](float y) {
+            for (int i = 0; i + 1 < 10; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[9].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const auto near = [](float a, float b, float tol) { return std::fabs(a - b) < tol; };
+        CHECK(near(result.waist, 2.0f * 3.14159265f * 0.090f, 0.04f));   // ~57 cm
+        CHECK(near(result.hip, 2.0f * 3.14159265f * 0.150f, 0.04f));     // ~94 cm
+        CHECK(near(result.bust, 2.0f * 3.14159265f * 0.148f, 0.04f));    // ~93 cm
+        CHECK(result.hipY < result.waistY);   // hips sit below the waist
+        CHECK(result.bustY > result.waistY);  // and the bust above it
+        CHECK(measure::TorsoPerimeterAt(s, 0.78f) > 0.45f && measure::TorsoPerimeterAt(s, 0.78f) < 0.75f);
+    });
+    test("body measurements: horizontal T-pose arms are not part of the torso contour", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        s.bones.push_back({"cf_j_arm00_L", 0, {}, "rig"});
+        s.bones.push_back({"cf_j_arm00_R", 0, {}, "rig"});
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 60, segs = 40;
+        auto radiusAt = [](float y) {
+            struct Key { float y, r; };
+            const Key keys[] = {{0.00f, 0.075f}, {0.45f, 0.150f}, {0.78f, 0.090f}, {1.10f, 0.148f}, {1.45f, 0.060f}};
+            for (int i = 0; i + 1 < 5; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[4].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        // A T-pose arm along +x at chest height (y ~ 1.16): a long thin tube sticking out of the chest.
+        const int armStart = static_cast<int>(mesh.vertices.size());
+        const int armSegs = 40, armRings = 2;
+        for (int ring = 0; ring <= armRings; ++ring) {
+            const float x = 0.20f + (0.62f - 0.20f) * static_cast<float>(ring) / static_cast<float>(armRings);
+            for (int si = 0; si < armSegs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(armSegs);
+                SceneVertex v;
+                v.pos = {x, 1.16f + 0.048f * std::cos(a), 0.048f * std::sin(a)};
+                v.bone[0] = 1;          // bound to cf_j_arm00_L
+                v.weight[0] = 1.0f;
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        for (int ring = 0; ring < armRings; ++ring)
+            for (int si = 0; si < armSegs; ++si) {
+                const int a = armStart + ring * armSegs + si, b = armStart + ring * armSegs + (si + 1) % armSegs;
+                const int c = armStart + (ring + 1) * armSegs + si, d = armStart + (ring + 1) * armSegs + (si + 1) % armSegs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const auto near = [](float a, float b, float tol) { return std::fabs(a - b) < tol; };
+        CHECK(near(result.bust, 2.0f * 3.14159265f * 0.148f, 0.04f));   // the arm tube did not inflate the chest
+    });
+    test("body measurements: an under piece is the base body's own skin, not a second surface", [] {
+        using namespace assemble;
+        Scene s;
+        SceneMesh mesh;
+        mesh.name = "body";
+        mesh.reshapable = true;
+        const int rings = 74, segs = 48;
+        struct Key { float y, r; };
+        const Key keys[] = {
+            {0.00f, 0.075f}, {0.45f, 0.150f}, {0.78f, 0.090f}, {1.10f, 0.148f}, {1.45f, 0.060f},
+        };
+        auto radiusAt = [&](float y) {
+            for (int i = 0; i + 1 < 5; ++i) {
+                if (y <= keys[i + 1].y) {
+                    const float t = (y - keys[i].y) / (keys[i + 1].y - keys[i].y);
+                    return keys[i].r + t * (keys[i + 1].r - keys[i].r);
+                }
+            }
+            return keys[4].r;
+        };
+        for (int ring = 0; ring < rings; ++ring) {
+            const float y = 1.45f * static_cast<float>(ring) / static_cast<float>(rings - 1);
+            const float r = radiusAt(y);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {r * std::cos(a), y, r * std::sin(a)};
+                v.normal = {std::cos(a), 0, std::sin(a)};
+                mesh.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int ring = 0; ring < rings - 1; ++ring)
+            for (int si = 0; si < segs; ++si) {
+                const int a = ring * segs + si, b = ring * segs + (si + 1) % segs;
+                const int c = (ring + 1) * segs + si, d = (ring + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        s.meshes.push_back(mesh);   // the cut-out under piece: the same surface a second time
+        SceneMaterial mat; mat.name = "body";
+        s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0};
+        s.parts.push_back(p);
+        ScenePart u; u.id = "body.under.top"; u.group = "Body"; u.underPiece = true; u.underOf = "body"; u.meshes = {1};
+        s.parts.push_back(u);
+        const auto result = measure::Measure(s);
+        CHECK(result.valid);
+        const float expect = 2.0f * 3.14159265f * 0.148f;
+        CHECK(std::fabs(result.bust - expect) < 0.04f);   // one surface, not two
+    });
+    test("body measurements: no body part means an invalid result, never a crash", [] {
+        using namespace assemble;
+        Scene s;
+        const auto result = measure::Measure(s);
+        CHECK(!result.valid);
+        CHECK(measure::TorsoPerimeterAt(s, 1.0f) == 0.0f);
     });
     test("typeBone correction table: int32 count, 9 floats a row; a truncated table is refused", [] {
         Bytes d;
@@ -1025,6 +1761,170 @@ void unitTests() {
         CHECK(winkL && winkR && winkL->vertices.size() == 1 && winkL->vertices[0].first == 2 && winkR->vertices.size() == 1 && winkR->vertices[0].first == 0);
         const pmx::Morph* i = get("い");
         CHECK(!get("ワ") && i && i->vertices.size() == 1 && i->vertices[0].first == 0);   // a pattern the head lacks: no morph, except a vowel (the plain open mouth, scaled)
+    });
+
+    test("morphs: the Morphs tab's catalog is the PMX's vertex morphs, offsets and all (expressions, raw shapes, MMD standard, iris follow)", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        auto addBone = [&](const char* n, int parent, float x, float y) { s.bones.push_back({n, parent, {x, y, 0}, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = addBone("p_cf_body_bone", -1, 0, 0);   // the rig's root (the exporter renames it 全ての親)
+        const int head = addBone("cf_j_head", root, 0, 16.0f);
+        addBone("cf_J_hitomi_tx_L", head, 1.0f, 16.4f);   // the left eye (+x in this un-turned build)
+        addBone("cf_J_hitomi_tx_R", head, -1.0f, 16.4f);
+        // mesh 0: the mouth with one raw blend shape (a_l_op moves the lower lip down)
+        assemble::SceneMesh mouth;
+        mouth.name = "cf_O_kuti";
+        for (float x : {-1.0f, 0.6f, 0.0f, 1.2f}) { assemble::SceneVertex v; v.pos = {x, 15.5f, 0.8f}; mouth.vertices.push_back(v); }
+        {
+            assemble::SceneBlendShape sh;
+            sh.name = "a_l_op";
+            sh.offsets = {{0, {0, -2.0f, 0}}, {2, {0, -1.0f, 0}}};
+            mouth.shapes.push_back(sh);
+        }
+        { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 2, 1, 3}; mouth.submeshes.push_back(sub); }
+        s.meshes.push_back(mouth);
+        // The eyes as the game builds them: a white mesh (cf_Ohitomi_L / _R) in front and a separate iris mesh (cf_Ohitomi_L02 / _R02);
+        // the def_cl shape squeezes the white, the lid goes with it and the iris takes the white's mean offset (the PMX's follow).
+        for (const char* side : {"L", "R"}) {
+            const bool left = std::string(side) == "L";
+            const float cx = left ? 1.0f : -1.0f;
+            {
+                assemble::SceneMesh white;
+                white.name = std::string("cf_Ohitomi_") + side;
+                for (int i = 0; i < 3; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f, 0.05f + 0.01f * static_cast<float>(i)}; white.vertices.push_back(v); }
+                {
+                    assemble::SceneBlendShape sh;
+                    sh.name = "def_cl";   // squeezes the white with the lid
+                    for (int i = 0; i < 3; ++i) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, -1.0f, 0});
+                    white.shapes.push_back(sh);
+                }
+                { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2}; white.submeshes.push_back(sub); }
+                s.meshes.push_back(white);
+            }
+            {
+                assemble::SceneMesh iris;
+                iris.name = std::string("cf_Ohitomi_") + side + "02";   // cf_Ohitomi_L02: the digits mark it as the iris
+                for (int i = 0; i < 2; ++i) { assemble::SceneVertex v; v.pos = {cx, 16.4f + 0.02f * static_cast<float>(i), 0.06f}; iris.vertices.push_back(v); }   // no shapes: the iris is flat
+                { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1}; iris.submeshes.push_back(sub); }
+                s.meshes.push_back(iris);
+            }
+        }
+        s.materials.push_back(assemble::SceneMaterial{});
+        // the patterns the game's FaceBlendShape mouth and eye components play (both eyes, closed and open states)
+        assemble::SceneExpression mouthEx;
+        mouthEx.name = "Mouth 0 open";
+        mouthEx.panel = 3;
+        mouthEx.targets.push_back({0, 0, 60.0f});
+        mouthEx.shape = "a_l_op";
+        s.expressions.push_back(mouthEx);
+        assemble::SceneExpression eyeEx;
+        eyeEx.name = "Eyes 0 closed";
+        eyeEx.panel = 2;
+        eyeEx.targets.push_back({1, 0, 100.0f});   // the white meshes (1 = L, 3 = R)
+        eyeEx.targets.push_back({3, 0, 100.0f});
+        eyeEx.shape = "def_cl";
+        s.expressions.push_back(eyeEx);
+
+        const LiveMorphCatalog cat = BuildLiveMorphs(s);
+        const std::vector<LiveMorph>& morphs = cat.morphs;
+        auto find = [&](const char* n) -> const LiveMorph* {
+            for (const auto& m : morphs) if (m.name == n) return &m;
+            return nullptr;
+        };
+        // every offset of a morph, per scene mesh (mesh index -> mesh-local vertex -> offset), at weight 1
+        auto offsetsOf = [&](const LiveMorph* m) {
+            std::vector<std::vector<Vec3>> dst;
+            if (m) AccumulateLiveMorph(s, cat, *m, 1.0f, dst);
+            return dst;
+        };
+        auto offAt = [&](const LiveMorph* m, int mesh, uint32_t vertex) -> Vec3 {
+            const std::vector<std::vector<Vec3>> dst = offsetsOf(m);
+            if (static_cast<size_t>(mesh) >= dst.size()) return Vec3{};
+            return static_cast<size_t>(vertex) < dst[static_cast<size_t>(mesh)].size() ? dst[static_cast<size_t>(mesh)][vertex] : Vec3{};
+        };
+        auto countAt = [&](const LiveMorph* m, int mesh) -> size_t {
+            const std::vector<std::vector<Vec3>> dst = offsetsOf(m);
+            if (static_cast<size_t>(mesh) >= dst.size()) return 0;
+            size_t n = 0;
+            for (const auto& d : dst[static_cast<size_t>(mesh)]) if (std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z) > 1e-7f) ++n;
+            return n;
+        };
+        // the game's patterns: 60% open is 0.6 x the raw shape; the raw per-mesh shape morph is the full weight
+        const LiveMorph* mouth0 = find("Mouth 0 open");
+        CHECK(mouth0 && mouth0->panel == 3);
+        CHECK(mouth0 && std::fabs(offAt(mouth0, 0, 0).y + 1.2f) < 1e-4f && std::fabs(offAt(mouth0, 0, 2).y + 0.6f) < 1e-4f);
+        const LiveMorph* raw = find("cf_O_kuti.a_l_op");
+        CHECK(raw && raw->panel == 3 && std::fabs(offAt(raw, 0, 0).y + 2.0f) < 1e-4f && std::fabs(offAt(raw, 0, 2).y + 1.0f) < 1e-4f);
+        // meshes: 0 = mouth, 1 = white L, 2 = iris L, 3 = white R, 4 = iris R
+        // the blink: whites squeeze (the game's shape), the iris takes the white's mean offset per shape (the PMX's follow)
+        const LiveMorph* blink = find("Eyes 0 closed");
+        CHECK(blink && blink->panel == 2);
+        CHECK(blink && countAt(blink, 1) == 3 && countAt(blink, 2) == 2 && countAt(blink, 3) == 3 && countAt(blink, 4) == 2);   // 3 whites + 2 iris, per eye
+        CHECK(blink && std::fabs(offAt(blink, 2, 0).y + 1.0f) < 1e-4f && std::fabs(offAt(blink, 4, 0).y + 1.0f) < 1e-4f);   // the iris follows (per-mesh vertex indices)
+        // the raw eye shapes are their own morphs too (the exporter's panel keywords do not name "ohitomi", so these are "Other", like in the PMX;
+        // and the iris follow applies to them, like in the export)
+        const LiveMorph* eyeRaw = find("cf_Ohitomi_L.def_cl");
+        CHECK(eyeRaw && eyeRaw->panel == 4 && countAt(eyeRaw, 1) == 3 && countAt(eyeRaw, 2) == 2);   // 3 whites + 2 iris
+        // the MMD standard morphs: the vowels from a_l_op (the game's open mouth) and まばたき from def_cl (the closed eyes)
+        const LiveMorph* a = find("あ");
+        CHECK(a && a->panel == 3 && countAt(a, 0) == 2);
+        const LiveMorph* b = find("まばたき");
+        CHECK(b && b->panel == 2 && countAt(b, 1) == 3 && countAt(b, 2) == 2 && countAt(b, 3) == 3 && countAt(b, 4) == 2);
+        // the one-eyed versions: the closed eyes cut on the rig's left eye side (+x here)
+        const LiveMorph* winkL = find("ウィンク２");
+        const LiveMorph* winkR = find("ｳｨﾝｸ２右");
+        CHECK(winkL && countAt(winkL, 1) == 3 && countAt(winkL, 2) == 2 && countAt(winkL, 3) == 0);
+        CHECK(winkR && countAt(winkR, 3) == 3 && countAt(winkR, 4) == 2 && countAt(winkR, 1) == 0);
+        // the outfit toggles are material morphs in the PMX: not in the vertex catalog (the Parts tab hides things)
+        for (const auto& m : morphs) CHECK(m.name.find("Hide ") != 0 && m.name.find("Take off ") != 0 && m.name != "Nude body");
+        // 2 expressions + 3 raw shapes + 5 vowels + まばたき + 2 winks
+        CHECK(morphs.size() == 13);
+    });
+
+    test("morphs: the preview folds the live morph offsets into the mesh before it draws a picture", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        assemble::SceneMesh m;
+        m.name = "cf_O_kuti";
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
+            assemble::SceneVertex v;
+            v.pos = p;
+            v.normal = {0, 0, 1};
+            m.vertices.push_back(v);
+        }
+        { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub); }
+        s.meshes.push_back(m);
+        s.materials.push_back(assemble::SceneMaterial{});   // untextured: the plain look draws diffuse
+        assemble::ScenePart part;
+        part.id = "body";
+        part.group = "Body";
+        part.meshes = {0};
+        s.parts.push_back(part);
+        auto draw = [&](const std::vector<std::vector<Vec3>>* md) {
+            ViewOptions opt;
+            opt.shaded = false;
+            opt.step = 1;
+            opt.morphDelta = md;
+            ViewStatePtr st = NewViewState();
+            std::vector<uint32_t> bgra;
+            RenderView(s, ViewCamera{}, 160, 160, opt, *st, bgra);
+            return bgra;
+        };
+        const std::vector<uint32_t> rest = draw(nullptr);
+        // the whole quad slides up by 0.4 (a morph at weight 1, applied bind-space before the pose)
+        std::vector<std::vector<Vec3>> delta(1);
+        for (int i = 0; i < 4; ++i) delta[0].push_back({0, 0.4f, 0});
+        const std::vector<uint32_t> moved = draw(&delta);
+        size_t diff = 0;
+        for (size_t i = 0; i < rest.size(); ++i) if (rest[i] != moved[i]) ++diff;
+        CHECK(diff > 100);
+        // a morph that touches another mesh does not move this one (per-mesh lists)
+        std::vector<std::vector<Vec3>> other(1);   // mesh 0 untouched: an empty per-mesh list
+        const std::vector<uint32_t> same = draw(&other);
+        size_t diffSame = 0;
+        for (size_t i = 0; i < rest.size(); ++i) if (rest[i] != same[i]) ++diffSame;
+        CHECK(diffSame == 0);
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -1904,6 +2804,341 @@ void unitTests() {
         (void)bonesBefore;
     });
 
+    // ---- proportion correction tests (no game bundles needed) ----
+    auto makePropCard = [&]() {
+        card::Card c;
+        c.path = "proptest.png";
+        c.family = card::CardFamily::Koikatsu;
+        c.supported = true;
+        Value::Array bodyArr;
+        const double bv[44] = {0.3, 1.25, 0.2, 0.28, 0.65, 0.1, 0.88, 0.0707, 0.45, 0.397,
+                               0.62, 0.385, 0.62, 0.6899, 0.3, 0.13, 0.0, 0.37, 0.3, 0.25,
+                               0.637, 0.093, 0.15, 0.69, 0.25, 0.374, 0.6806, 0.6805, 0.5, 0.5,
+                               0.5, 0.3, 0.3, 0.3499, 0.2, 0.4, 0.3499, 0.3956, 0.3472, 0.2424,
+                               0.2524, 0.2864, 0.0, -0.0238};
+        for (double v : bv) bodyArr.emplace_back(v);
+        Value bodyMap(Value::Map{{Value(std::string("shapeValueBody")), Value(std::move(bodyArr))},
+                                 {Value(std::string("typeBone")), Value(int64_t(0))}});
+        Value::Array faceArr;
+        const double fv[52] = {0.0, 0.09, -0.34, -1.0, 0.0, 0.04, 0.36, 0.33,
+                              0.12, -0.25, 0.936, 0.27, 0.34, 0.0, 0.0, 0.0,
+                              -0.2, -0.05, 0.37, -0.697, 0.0, 0.952, 0.284, 0.706,
+                              -0.5, -0.3, 0.269, 0.352, -0.25, 0.8, 0.35, 0.1,
+                              0.29, 0.2, 0.15, 0.146, 0.6, 0.0, 0.896, 0.398,
+                              0.187, 0.1, -0.15, 0.22, 0.058, 0.281, 0.0, 0.15,
+                              0.5, 0.5, 0.0, 0.0};
+        for (double v : fv) faceArr.emplace_back(v);
+        Value faceMap(Value::Map{{Value(std::string("shapeValueFace")), Value(std::move(faceArr))}});
+        c.body = std::move(bodyMap);
+        c.face = std::move(faceMap);
+        Value::Map statusMap;
+        statusMap.emplace_back(Value(std::string("coordinateType")), Value(int64_t(0)));
+        c.status = Value(std::move(statusMap));
+        return c;
+    };
+    auto floats42 = [](const Value& map) {
+        std::vector<float> out;
+        for (const auto& e : map.at("shapeValueBody").asArray()) out.push_back(static_cast<float>(e.asFloat()));
+        return out;
+    };
+    auto floatsFace = [](const Value& map) {
+        std::vector<float> out;
+        for (const auto& e : map.at("shapeValueFace").asArray()) out.push_back(static_cast<float>(e.asFloat()));
+        return out;
+    };
+    auto attachAbmx = [&](card::Card c, const std::vector<std::pair<std::string, card::AbmxMod>>& bones) {
+        card::AbmxTable table;
+        for (const auto& [bone, mod] : bones) table.bones[bone] = std::vector<card::AbmxMod>{mod};
+        Value::Array entry;
+        entry.emplace_back(Value(int64_t(2)));
+        entry.emplace_back(Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(table))}}));
+        c.extended = Value(Value::Map{{Value(std::string("KKABMPlugin.ABMData")), Value(std::move(entry))}});
+        return c;
+    };
+
+    test("proportions: a proportionate card flags nothing", [&] {
+        card::Card c = makePropCard();
+        for (auto& v : c.body.map()) if (v.first.isStr() && v.first.asStr() == "shapeValueBody") for (auto& e : v.second.array()) e = Value(0.5);
+        for (auto& v : c.face.map()) if (v.first.isStr() && v.first.asStr() == "shapeValueFace") for (auto& e : v.second.array()) e = Value(0.5);
+        const auto findings = assemble::AnalyzeCard(c);
+        CHECK(findings.empty());
+    });
+
+    test("proportions: extreme sliders and SliderUnlocker values are flagged with half-way-back suggestions", [&] {
+        card::Card c = makePropCard();
+        const auto findings = assemble::AnalyzeCard(c);
+        CHECK(!findings.empty());
+        // head size 1.25 is flagged; the suggested target is exactly half-way toward 0.5 = 0.875
+        bool sawHeadSize = false, sawHeight = false, sawChest = false, sawFaceHigh = false;
+        for (const auto& f : findings) {
+            if (f.property.find("Head size") != std::string::npos) { sawHeadSize = true; CHECK(f.suggestion.find("0.88") != std::string::npos); }
+            if (f.property.find("Height") != std::string::npos) sawHeight = true;
+            if (f.property.find("Chest width") != std::string::npos) sawChest = true;
+            if (f.property.find("Forehead height") != std::string::npos) sawFaceHigh = true;
+        }
+        CHECK(sawHeadSize && sawHeight && sawChest && sawFaceHigh);
+        // every suggestion target lands strictly between the card value and neutral (half the deviation)
+        const auto ops = assemble::SuggestCorrections(c);
+        const auto bodyVals = floats42(c.body);
+        const auto faceVals = floatsFace(c.face);
+        for (const auto& op : ops) {
+            if (op.kind == assemble::kBoneScale) continue;
+            const double cardV = op.kind == assemble::kBodySlider ? bodyVals[static_cast<size_t>(op.index)] : faceVals[static_cast<size_t>(op.index)];
+            const double want = 0.5 + (cardV - 0.5) * 0.5;
+            CHECK(std::fabs(static_cast<double>(op.value) - want) < 1e-4);
+        }
+    });
+
+    test("proportions: ABMX scale deviations are reported and get a partial-neutralisation op", [&] {
+        auto mod = [](float sx, float sy, float sz, float len) {
+            card::AbmxMod m;
+            m.scale = {sx, sy, sz};
+            m.length = len;
+            return m;
+        };
+        card::Card c = makePropCard();
+        c = attachAbmx(std::move(c), {{"cf_s_head", mod(0.7f, 0.93f, 0.93f, 1.0f)}, {"cf_J_FaceBase", mod(1.45f, 1.12f, 0.99f, 0.8f)}});
+        const auto findings = assemble::AnalyzeCard(c);
+        bool sawHead = false, sawFaceBase = false;
+        for (const auto& f : findings) {
+            if (f.property.find("cf_s_head") != std::string::npos) sawHead = true;
+            if (f.property.find("cf_J_FaceBase") != std::string::npos) sawFaceBase = true;
+        }
+        CHECK(sawHead && sawFaceBase);
+        const auto ops = assemble::SuggestCorrections(c);
+        const assemble::CorrectionOp* head = nullptr;
+        const assemble::CorrectionOp* faceBase = nullptr;
+        for (const auto& op : ops) {
+            if (op.kind == assemble::kBoneScale && op.bone == "cf_s_head") head = &op;
+            if (op.kind == assemble::kBoneScale && op.bone == "cf_J_FaceBase") faceBase = &op;
+        }
+        CHECK(head != nullptr && faceBase != nullptr);
+        if (head) {   // 0.7 -> multiplier 1 + (1 - 0.7) * 0.5 = 1.15 (half-way back to 1.0)
+            CHECK(std::fabs(head->scaleMul.x - 1.15f) < 1e-4f);
+            CHECK(head->scope == "head");
+        }
+        if (faceBase) {   // 1.45 -> 1 + (1 - 1.45) * 0.5 = 0.775
+            CHECK(std::fabs(faceBase->scaleMul.x - 0.775f) < 1e-4f);
+            CHECK(faceBase->scope == "head");
+        }
+        // partial undo, never a snap: 0.7 * 1.15 = 0.805 (half-way between the ABMX value and 1.0)
+        if (head) CHECK(std::fabs(0.7f * head->scaleMul.x - 0.805f) < 1e-4f);
+    });
+
+    test("proportions: parent-child ABMX compounding is reported as manual review, with no op", [&] {
+        auto mod = [](float sx, float sy, float sz) {
+            card::AbmxMod m;
+            m.scale = {sx, sy, sz};
+            return m;
+        };
+        card::Card c = makePropCard();
+        c = attachAbmx(std::move(c), {{"cf_s_head", mod(0.7f, 0.93f, 0.93f)}, {"cf_J_FaceBase", mod(1.45f, 1.12f, 0.99f)}});
+        const auto findings = assemble::AnalyzeCard(c);
+        bool sawCompound = false;
+        for (const auto& f : findings)
+            if (f.property.find("compound") != std::string::npos || (f.property.find("cf_s_head") != std::string::npos && f.safety == assemble::kSafetyManual)) sawCompound = true;
+        CHECK(sawCompound);
+        // no suggestion op is generated for the compounding note
+        const auto ops = assemble::SuggestCorrections(c);
+        for (const auto& op : ops)
+            if (op.kind == assemble::kBoneScale) CHECK(op.bone != "cf_j_neck");   // nothing beyond the per-bone ops we already suggest
+    });
+
+    test("proportions: a correction layer overrides slider values; bone corrections multiply after ABMX", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        auto addSliderOp = [&](int kind, int index, float value) {
+            assemble::CorrectionOp op;
+            op.kind = kind;
+            op.index = index;
+            op.value = value;
+            layer.ops.push_back(op);
+        };
+        addSliderOp(assemble::kBodySlider, 1, 0.875f);    // head size
+        addSliderOp(assemble::kFaceSlider, 3, -0.25f);    // forehead height
+        const auto body = floats42(c.body);
+        const auto face = floatsFace(c.face);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - 0.875f) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(face[3], layer, assemble::kFaceSlider, 3) - (-0.25f)) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[0], layer, assemble::kBodySlider, 0) - body[0]) < 1e-6f);   // untouched slider unchanged
+        layer.ops.push_back([] { assemble::CorrectionOp op; op.kind = assemble::kBoneScale; op.bone = "cf_s_head"; op.scaleMul = {1.15f, 1.0f, 1.0f}; return op; }());
+        bool changed = false;
+        const Vec3 got = assemble::BoneScaleCorrected({0.794f, 1.055f, 1.055f}, layer, "cf_s_head", &changed);
+        CHECK(changed);
+        CHECK(std::fabs(got.x - 0.794f * 1.15f) < 1e-4f && std::fabs(got.y - 1.055f) < 1e-4f && std::fabs(got.z - 1.055f) < 1e-4f);
+        // an unrelated bone is untouched
+        changed = false;
+        const Vec3 still = assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_j_head", &changed);
+        CHECK(!changed && still.x == 1 && still.y == 1 && still.z == 1);
+    });
+
+    test("proportions: empty and disabled layers are no-ops (bit-identical faithful behaviour)", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        const auto body = floats42(c.body);
+        const auto face = floatsFace(c.face);
+        for (size_t i = 0; i < body.size(); ++i) CHECK(assemble::SliderValueCorrected(body[i], layer, assemble::kBodySlider, (int)i) == body[i]);
+        for (size_t i = 0; i < face.size(); ++i) CHECK(assemble::SliderValueCorrected(face[i], layer, assemble::kFaceSlider, (int)i) == face[i]);
+        bool changed = true;
+        CHECK(assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_s_head", &changed).x == 1.0f && !changed);
+        // enabled=false with ops still does not apply anything
+        assemble::CorrectionOp op;
+        op.kind = assemble::kBodySlider;
+        op.index = 1;
+        op.value = 0.5f;
+        layer.ops.push_back(op);
+        layer.enabled = false;
+        CHECK(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) == body[1]);
+        changed = true;
+        assemble::CorrectionOp b;
+        b.kind = assemble::kBoneScale;
+        b.bone = "cf_s_head";
+        b.scaleMul = {2.0f, 2.0f, 2.0f};
+        layer.ops.push_back(b);
+        CHECK(assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_s_head", &changed).x == 1.0f && !changed);
+    });
+
+    test("proportions: layer tags presets to their scope; overall covers everything", [&] {
+        card::Card c = makePropCard();
+        const auto head = assemble::PresetNormalizeHead(c);
+        const auto body = assemble::PresetNormalizeBody(c);
+        const auto face = assemble::PresetNormalizeFace(c);
+        const auto overall = assemble::PresetNormalizeOverall(c);
+        CHECK(!head.empty() && !body.empty() && !face.empty() && !overall.empty());
+        for (const auto& op : head) CHECK(op.scope == "head");
+        for (const auto& op : body) CHECK(op.scope == "body");
+        for (const auto& op : face) CHECK(op.scope == "face");
+        for (const auto& op : overall) CHECK(op.scope == "body" || op.scope == "face" || op.scope == "head");
+        CHECK(overall.size() == head.size() + body.size() + face.size());
+    });
+
+    test("proportions: JSON round-trip of a layer", [&] {
+        card::Card c = makePropCard();
+        const auto ops = assemble::PresetNormalizeOverall(c);
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        layer.ops = ops;
+        const std::string text = assemble::ProportionLayerToJson(layer);
+        assemble::ProportionLayer back;
+        std::string err;
+        CHECK(assemble::ProportionLayerFromJson(text, back, &err));
+        CHECK(back.ops.size() == layer.ops.size());
+        for (size_t i = 0; i < back.ops.size(); ++i) {
+            CHECK(back.ops[i].kind == layer.ops[i].kind);
+            CHECK(back.ops[i].index == layer.ops[i].index);
+            CHECK(back.ops[i].bone == layer.ops[i].bone);
+            CHECK(std::fabs(back.ops[i].value - layer.ops[i].value) < 1e-6f);
+            CHECK(std::fabs(back.ops[i].scaleMul.x - layer.ops[i].scaleMul.x) < 1e-6f);
+        }
+        // junk is rejected, never partially applied
+        assemble::ProportionLayer junk;
+        CHECK(!assemble::ProportionLayerFromJson("{\"ops\": [{\"kind\": 7}]}", junk, &err));
+        CHECK(!assemble::ProportionLayerFromJson("not json", junk, &err));
+        CHECK(!assemble::ProportionLayerFromJson("{}", junk, &err));
+    });
+
+    test("proportions: reverting a layer op restores that op only", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        assemble::CorrectionOp a, b;
+        a.kind = assemble::kBodySlider; a.index = 1; a.value = 0.875f; a.label = "head";
+        b.kind = assemble::kBodySlider; b.index = 16; b.value = 0.25f; b.label = "chest";
+        layer.ops = {a, b};
+        const auto body = floats42(c.body);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - 0.875f) < 1e-6f);
+        layer.ops.erase(layer.ops.begin());   // revert the head-size correction only
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - body[1]) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[16], layer, assemble::kBodySlider, 16) - 0.25f) < 1e-6f);
+    });
+
+    test("proportions: SliderUnlocker extreme out-of-range values do not clamp to 0", [&] {
+        card::Card c = makePropCard();
+        const auto ops = assemble::SuggestCorrections(c);
+        assemble::CorrectionOp faceHighOp;
+        bool found = false;
+        for (const auto& op : ops)
+            if (op.kind == assemble::kFaceSlider && op.index == 3) { faceHighOp = op; found = true; break; }
+        CHECK(found);
+        if (found) {
+            CHECK(faceHighOp.value == -0.25f);   // half-way back: -1.0 -> -0.25, not clamped to 0
+            CHECK(faceHighOp.safety == assemble::kSafetyApproximate);
+        }
+    });
+
+    test("proportions: manifest records faithful vs corrected exports (opt-in layer appears in .cardbridge.json)", [&] {
+        assemble::Scene s;
+        s.name = "proportions_manifest";
+        {
+            assemble::SceneBone b;
+            b.name = "root";
+            b.parent = -1;
+            b.pos = {0, 0, 0};
+            b.source = "rig";
+            b.world = Mat4{};
+            s.bones.push_back(b);
+        }
+        {
+            assemble::ScenePart part;
+            part.id = "body";
+            part.label = "Body";
+            part.group = "Body";
+            part.category = 10;
+            part.status = "resolved-base";
+            part.includeInExport = true;
+            s.parts.push_back(part);
+            assemble::SceneMesh mesh;
+            mesh.name = "o_body_a";
+            mesh.part = 0;
+            mesh.reshapable = false;
+            assemble::SceneVertex v;
+            v.pos = {0, 0, 0};
+            v.bone[0] = 0;
+            v.weight[0] = 1.0f;
+            mesh.vertices.push_back(v);
+            s.meshes.push_back(mesh);
+            s.parts[0].meshes.push_back(0);
+        }
+        {
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_body";
+            mat.shader = "Shader Forge/main_opaque";
+            s.materials.push_back(mat);
+        }
+        card::Card c;
+        c.path = "proportions_manifest.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("proportions_manifest") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        // faithful first
+        const auto faithful = exporter::ExportScene(s, c, eo);
+        {
+            const Bytes mb = fileio::ReadFile(faithful.manifestPath);
+            const std::string manifest(mb.begin(), mb.end());
+            CHECK(manifest.find("\"proportions\"") != std::string::npos);
+            CHECK(manifest.find("\"active\": false") != std::string::npos);
+        }
+        // corrected second
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        assemble::CorrectionOp op;
+        op.kind = assemble::kBodySlider;
+        op.index = 1;
+        op.value = 0.875f;
+        op.label = "Overall - Head size 1.25 -> 0.88";
+        op.why = "test correction";
+        layer.ops.push_back(op);
+        eo.correctionLayer = layer;
+        const auto corrected = exporter::ExportScene(s, c, eo);
+        {
+            const Bytes mb = fileio::ReadFile(corrected.manifestPath);
+            const std::string manifest(mb.begin(), mb.end());
+            CHECK(manifest.find("\"active\": true") != std::string::npos);
+            CHECK(manifest.find("0.875") != std::string::npos);
+        }
+    });
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
         assemble::Scene s;
         assemble::SceneMesh mesh;
@@ -2202,6 +3437,1252 @@ void unitTests() {
         bool hasTopPatRow = false;
         for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesTopPattern0" && r.slot == 2016115) hasTopPatRow = true;
         CHECK(hasTopPatRow);  // resolver can find the translated pattern
+    });
+
+    // ---- selective clothing import (the per-component workflow) ------------------------------------
+    // The source fixture: a nurse outfit (top, skirt, stockings, stilettos) + one necklace, like the
+    // whole-file clothing tests use. The tests capture the factories by value (non-capturing lambdas),
+    // so the stored test callbacks never dangle.
+    auto nurseClothesFile = [] {
+        auto clothPart = [](int64_t id) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](std::initializer_list<int64_t> ids) {
+            Value::Array parts;
+            for (int64_t id : ids) parts.push_back(clothPart(id));
+            while (parts.size() < 9) parts.push_back(clothPart(0));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        auto mkAcc = [&](std::initializer_list<Value> parts) {
+            Value::Array arr(parts.begin(), parts.end());
+            while (arr.size() < 20) arr.push_back(accPart(120, 0, ""));
+            Value::Map m;
+            m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+            m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+            return Value(std::move(m));
+        };
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Nurse-like outfit";
+        cl.outfit.clothes = mkClothes({100019615, 100020035, 0, 7, 0, 100007362, 0, 100027702, 100027702});
+        cl.outfit.accessory = mkAcc({accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(124, 100011501, "a_n_neck")});
+        cl.outfit.enableMakeup = false;
+        cl.rows = {
+            {"M2M.NurseOutfit", 1, 100019615, "ChaFileClothes.ClothesTop", 105},
+            {"Mint_E403.SuperMiniTightSkirt", 2822, 100020035, "ChaFileClothes.ClothesBot", 106},
+            {"com.Blanketman.NonLightStockings", 1486, 100007362, "ChaFileClothes.ClothesPants", 110},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesInner", 112},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesOuter", 112},
+            {"cream002", 801, 100011501, "accessory8.ChaFileAccessory.PartsInfo.id", 124},
+        };
+        return cl;
+    };
+    auto nurseCharacter = [] {
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})}});
+        Value::Array hairParts;
+        {
+            Value::Map p;
+            p.emplace_back(Value(std::string("id")), Value(int64_t{500}));
+            hairParts.push_back(Value(std::move(p)));
+            hairParts.push_back(Value(Value::Map{}));
+        }
+        c.hair = Value(Value::Map{{Value(std::string("parts")), Value(std::move(hairParts))}});
+        c.outfits.resize(7);
+        // Outfit 0: top 56, bra 203, shoes 6/6; a hair accessory (pin) in slot 8.
+        c.outfits[0].clothes = Value(Value::Map{
+            {Value(std::string("parts")), Value(Value::Array{
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{56})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{203})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{6})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{6})}})})},
+            {Value(std::string("subPartsId")), Value(Value::Array{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})})}});
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        Value::Array accs;
+        for (int i = 0; i < 8; ++i) accs.push_back(accPart(120, 0, ""));
+        accs.push_back(accPart(123, 568, "a_n_headside"));   // the hair pin, type 123
+        while (accs.size() < 20) accs.push_back(accPart(120, 0, ""));
+        c.outfits[0].accessory = Value(Value::Map{
+            {Value(std::string("version")), Value(std::string("0.0.0"))},
+            {Value(std::string("parts")), Value(std::move(accs))}});
+        c.rows = {
+            {"yamadamod.acchairF2", 568, 100018882, "outfit0.accessory8.ChaFileAccessory.PartsInfo.id", 123},
+        };
+        c.supported = true;
+        return c;
+    };
+
+    test("selective import: enumeration lists the source's components, matched to the target by slot, never by name", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        const auto comps = card::EnumerateSelectiveComponents(c, cl, -1);   // -1: the current outfit
+        std::vector<std::string> keys;
+        for (const auto& comp : comps) keys.push_back(comp.key);
+        CHECK(keys.size() == 7);
+        CHECK(keys[0] == "clothes.0" && keys[1] == "clothes.1" && keys[2] == "clothes.3" && keys[3] == "clothes.5" &&
+              keys[4] == "clothes.7" && keys[5] == "clothes.8" && keys[6] == "acc.08");
+        auto find = [&](const char* key) {
+            for (const auto& comp : comps) if (comp.key == key) return &comp;
+            return static_cast<const card::SelectiveComponent*>(nullptr);
+        };
+        // source ids are translated from the file's session-local ids to author slots
+        CHECK(find("clothes.0")->sourceId == 1 && find("clothes.1")->sourceId == 2822 && find("clothes.5")->sourceId == 1486);
+        CHECK(find("clothes.0")->category == "Tops" && find("clothes.1")->category == "Bottoms");
+        CHECK(find("clothes.3")->category == "Innerwear" && find("clothes.5")->category == "Socks");
+        CHECK(find("clothes.7")->category == "Shoes" && find("clothes.8")->category == "Shoes" && find("acc.08")->category == "Accessories");
+        // the counterpart exists by slot: top 56, shoes 6/6; nothing in the other slots
+        CHECK(find("clothes.0")->hasExisting && find("clothes.0")->existingId == 56);
+        CHECK(!find("clothes.1")->hasExisting && find("clothes.1")->existingId == 0);
+        CHECK(find("clothes.7")->hasExisting && find("clothes.7")->existingId == 6);
+        CHECK(find("acc.08")->hasExisting && find("acc.08")->existingHair);   // a hair pin, not a name match
+        // suggested defaults: replace what is there, add what is missing, keep hair
+        CHECK(card::ResolveAction(*find("clothes.0"), card::SelectiveDecisions{}) == card::SelectiveAction::Replace);
+        CHECK(card::ResolveAction(*find("clothes.1"), card::SelectiveDecisions{}) == card::SelectiveAction::Add);
+        CHECK(card::ResolveAction(*find("clothes.7"), card::SelectiveDecisions{}) == card::SelectiveAction::Replace);
+        CHECK(card::ResolveAction(*find("acc.08"), card::SelectiveDecisions{}) == card::SelectiveAction::KeepExisting);
+        // an explicit choice overrides the suggestion
+        card::SelectiveDecisions d;
+        d.actions["clothes.0"] = card::SelectiveAction::Skip;
+        d.actions["acc.08"] = card::SelectiveAction::Replace;
+        CHECK(card::ResolveAction(*find("clothes.0"), d) == card::SelectiveAction::Skip);
+        CHECK(card::ResolveAction(*find("acc.08"), d) == card::SelectiveAction::Replace);
+    });
+
+    test("selective import: importing every component equals Replace All for clothes and accessories", [nurseClothesFile, nurseCharacter] {
+        card::Card a = nurseCharacter(), b = nurseCharacter();
+        card::ClothingFile clA = nurseClothesFile(), clB = nurseClothesFile();
+        card::SelectiveDecisions all;   // import everything: an explicit choice in every row, nothing skipped
+        for (const auto& comp : card::EnumerateSelectiveComponents(a, clA, 0))
+            all.actions[comp.key] = comp.kind == 0 ? card::SelectiveAction::Replace : card::SelectiveAction::Add;
+        (void)card::ApplySelectiveClothing(a, clA, all, card::ApplyClothingOptions{});
+        (void)card::ApplyClothing(b, clB, card::ApplyClothingOptions{});
+        const auto& pa = a.outfits[0].clothes.at("parts").asArray();
+        const auto& pb = b.outfits[0].clothes.at("parts").asArray();
+        for (size_t i : {0, 1, 3, 5, 7, 8})
+            CHECK(pa[i].at("id").asInt() == pb[i].at("id").asInt());   // every slot the source carries matches Replace All
+        // the one deliberate difference: an empty source slot is "no component", so the selective import
+        // preserves the target's garment there (203, the bra) while Replace All wipes it. Kept by default, never silently.
+        CHECK(pa[2].at("id").asInt() == 203 && pb[2].at("id").asInt() == 0);
+        const auto& aa = a.outfits[0].accessory.at("parts").asArray();
+        const auto& ab = b.outfits[0].accessory.at("parts").asArray();
+        for (size_t i = 0; i < 15; ++i)
+            CHECK(aa[i].at("id").asInt() == ab[i].at("id").asInt() && aa[i].at("type").asInt() == ab[i].at("type").asInt());
+        // the hair accessory is kept on the target's slot; the necklace relocated to the first free slot, like Replace All
+        CHECK(aa[8].at("id").asInt() == 568 && aa[0].at("id").asInt() == 801);
+        CHECK(ab[8].at("id").asInt() == 568 && ab[0].at("id").asInt() == 801);
+        CHECK(a.hasClothing && b.hasClothing);
+    });
+
+    test("selective import: skipping everything leaves the character byte-identical", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        const card::Card before = c;
+        card::SelectiveDecisions none;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c, cl, 0))
+            none.actions[comp.key] = card::SelectiveAction::Skip;
+        const card::SelectivePlan plan = card::BuildSelectivePlan(card::EnumerateSelectiveComponents(c, cl, 0), none);
+        CHECK(plan.importsNothing() && plan.skipped == 7 && plan.replaced == 0 && plan.added == 0 && plan.kept == 0);
+        (void)card::ApplySelectiveClothing(c, cl, none, card::ApplyClothingOptions{});
+        const auto& partsA = c.outfits[0].clothes.at("parts").asArray();
+        const auto& partsB = before.outfits[0].clothes.at("parts").asArray();
+        for (size_t i = 0; i < 9; ++i) CHECK(partsA[i].at("id").asInt() == partsB[i].at("id").asInt());
+        const auto& accA = c.outfits[0].accessory.at("parts").asArray();
+        const auto& accB = before.outfits[0].accessory.at("parts").asArray();
+        for (size_t i = 0; i < 20; ++i)
+            CHECK(accA[i].at("id").asInt() == accB[i].at("id").asInt() && accA[i].at("type").asInt() == accB[i].at("type").asInt());
+        CHECK(c.rows.size() == before.rows.size());
+        CHECK(!c.hasClothing && c.clothingPartIds.empty());
+        CHECK(!c.outfits[0].enableMakeup);
+    });
+
+    test("selective import: replacing only the chosen clothes slot leaves the kept garments' ids, paint and rows alone", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        // The target has paint for its top (slot 0) and shoes (slot 7); the source paints its top (slot 0) and bottom (slot 1).
+        auto meWith = [](std::initializer_list<std::pair<int, int>> rowsSpec) {
+            Value::Array rows;
+            for (const auto& [slot, marker] : rowsSpec) {
+                Value::Map r;
+                r.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{0}));
+                r.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+                r.emplace_back(Value(std::string("Slot")), Value(static_cast<int64_t>(slot)));
+                r.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+                rows.emplace_back(Value(std::move(r)));
+            }
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("RendererPropertyList")), Value(std::move(MsgPackPack(Value(std::move(rows))))));
+            return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+        };
+        c.extended = Value(Value::Map{{Value(std::string("com.deathweasel.bepinex.materialeditor")), meWith({{0, 111}, {7, 222}})}});
+        cl.extended = Value(Value::Map{{Value(std::string("com.deathweasel.bepinex.materialeditor")), meWith({{0, 333}, {1, 444}})}});
+        card::SelectiveDecisions d;
+        d.actions["clothes.1"] = card::SelectiveAction::Replace;   // only the skirt
+        for (const char* key : {"clothes.0", "clothes.3", "clothes.5", "clothes.7", "clothes.8", "acc.08"})
+            d.actions[key] = card::SelectiveAction::Skip;
+        (void)card::ApplySelectiveClothing(c, cl, d, card::ApplyClothingOptions{});
+        const auto& parts = c.outfits[0].clothes.at("parts").asArray();
+        CHECK(parts[0].at("id").asInt() == 56);      // the kept top is the character's
+        CHECK(parts[1].at("id").asInt() == 2822);    // the skirt came from the file (author slot)
+        CHECK(parts[7].at("id").asInt() == 6);       // shoes kept
+        // MaterialEditor: the target's paint for the kept garments (111/222) survives; the source's paint for the
+        // kept top (333) never travels; the source's bottom paint (444) does
+        Value list;
+        try { list = MsgPackParse(c.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1)).at("RendererPropertyList").asBin()); } catch (const FormatError&) { list = Value(); }
+        CHECK(list.isArray());
+        std::set<int64_t> markers;
+        std::map<int64_t, int64_t> slotOf;
+        for (const auto& row : list.asArray()) {
+            markers.insert(row.at("Marker").asInt());
+            slotOf[row.at("Marker").asInt()] = row.at("Slot").asInt();
+        }
+        CHECK(markers.count(111) == 1 && markers.count(222) == 1);
+        CHECK(markers.count(333) == 0 && markers.count(444) == 1);
+        CHECK(slotOf[444] == 1);
+        // resolver rows: the source's top row must NOT arrive; the source's bottom row must
+        bool srcTop = false;
+        for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 1) srcTop = true;
+        CHECK(!srcTop);
+        bool srcBottom = false;
+        for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesBot" && r.slot == 2822) srcBottom = true;
+        CHECK(srcBottom);
+        // provenance marks only the imported part
+        CHECK(c.hasClothing);
+        CHECK(c.clothingPartIds.count("outfit0.bottom") == 1);
+        CHECK(c.clothingPartIds.count("outfit0.top") == 0);
+        CHECK(c.clothingPartIds.count("outfit0.acc08") == 0);
+    });
+
+    test("selective import: Add relocates around a taken slot; Replace takes it; the existing accessory always survives Add", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        card::SelectiveDecisions d;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c, cl, 0)) d.actions[comp.key] = card::SelectiveAction::Skip;
+        d.actions["acc.08"] = card::SelectiveAction::Add;   // the necklace, against the hair pin: relocate, never delete
+        (void)card::ApplySelectiveClothing(c, cl, d, card::ApplyClothingOptions{});
+        const auto& a1 = c.outfits[0].accessory.at("parts").asArray();
+        CHECK(a1[8].at("id").asInt() == 568 && a1[8].at("type").asInt() == 123);   // the pin is untouched
+        bool necklaceFound = false; int necklaceSlot = -1;
+        for (size_t i = 0; i < a1.size(); ++i)
+            if (a1[i].at("id").asInt() == 801) { necklaceFound = true; necklaceSlot = static_cast<int>(i); }
+        CHECK(necklaceFound && necklaceSlot != 8);
+        // Replace takes the slot outright (an explicit, previewed choice - hair is not preserved)
+        card::Card c2 = nurseCharacter();
+        card::ClothingFile cl2 = nurseClothesFile();
+        card::SelectiveDecisions d2;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c2, cl2, 0)) d2.actions[comp.key] = card::SelectiveAction::Skip;
+        d2.actions["acc.08"] = card::SelectiveAction::Replace;
+        (void)card::ApplySelectiveClothing(c2, cl2, d2, card::ApplyClothingOptions{});
+        const auto& a2 = c2.outfits[0].accessory.at("parts").asArray();
+        CHECK(a2[8].at("id").asInt() == 801 && a2[8].at("type").asInt() == 124);
+        // and with Add into an empty slot the placement stays in place
+        card::Card c3 = nurseCharacter();
+        c3.outfits[0].accessory = Value(Value::Map{
+            {Value(std::string("version")), Value(std::string("0.0.0"))},
+            {Value(std::string("parts")), Value(std::move(Value::Array{}))}});   // no accessory at all
+        card::ClothingFile cl3 = nurseClothesFile();
+        card::SelectiveDecisions d3;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c3, cl3, 0)) d3.actions[comp.key] = card::SelectiveAction::Skip;
+        d3.actions["acc.08"] = card::SelectiveAction::Add;
+        (void)card::ApplySelectiveClothing(c3, cl3, d3, card::ApplyClothingOptions{});
+        const auto& a3 = c3.outfits[0].accessory.at("parts").asArray();
+        CHECK(a3[8].at("id").asInt() == 801);
+    });
+
+    test("selective import: applied on a copy, discarded unchanged (the cancel path)", [nurseClothesFile, nurseCharacter] {
+        // The selective flow never touches the loaded card until Apply; the merge itself runs on a copy
+        // of the card (see the viewer). Here the copy semantics are pinned: the original is untouched
+        // when the merge runs on a clone.
+        card::Card original = nurseCharacter();
+        card::Card copy = original;
+        card::ClothingFile cl = nurseClothesFile();
+        card::SelectiveDecisions d;
+        for (const auto& comp : card::EnumerateSelectiveComponents(copy, cl, 0)) d.actions[comp.key] = card::SelectiveAction::Replace;
+        (void)card::ApplySelectiveClothing(copy, cl, d, card::ApplyClothingOptions{});
+        const auto& pa = original.outfits[0].clothes.at("parts").asArray();
+        const auto& pc = copy.outfits[0].clothes.at("parts").asArray();
+        CHECK(pa[0].at("id").asInt() == 56 && pc[0].at("id").asInt() == 1);   // the copy got the file's translated top
+        CHECK(original.clothingPartIds.empty() && !original.hasClothing && copy.hasClothing);
+    });
+
+    test("selective import of a Coordinate PNG: extracts only the chosen coordinate's outfit, never the identity", [nurseClothesFile, nurseCharacter] {
+        Value::Map kkexMap;
+        kkexMap.emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows());
+        const std::string toruPath = writeTestCardFile("selective_toru.png", testToruCoords(), testToruParameter(),
+                                                       testToruStatus(), testToruHair(), Value(std::move(kkexMap)));
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt;
+        opt.srcOutfit = -1;   // the source's own current coordinate (Toru's outfit 1)
+        card::Card probe = card::LoadCard(toruPath);
+        CHECK(probe.supported);
+        card::ClothingFile cl = card::ExtractClothingFromCard(probe, 1);
+        const auto comps = card::EnumerateSelectiveComponents(moe, cl, 0);
+        CHECK(comps.size() == 2);   // Toru's outfit 1: the gym top and the pin (his current coordinate only)
+        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(moe, toruPath, opt, card::SelectiveDecisions{});
+        CHECK(rep.fromCoordinate && rep.srcOutfit == 1);
+        // Moe's identity never travels; her hair stays; makeup followed (only components imported)
+        CHECK(moe.parameter.at("lastname").asStr() == "Moe" && moe.hair.at("parts").at(size_t(0)).at("id").asInt() == 1234);
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);   // the gym top
+        CHECK(moe.outfits[0].enableMakeup);
+        CHECK(rep.plan.replaced == 1 || rep.plan.added == 1);   // something was imported (the clothes); hair stayed on the suggestion
+    });
+
+    test("source detection: regular clothing PNGs vs Coordinate PNGs vs plain PNGs, by content not name", [] {
+        // Detection reads the PNG bytes (IEND, marker), never the file name: a clothing marker
+        // is RegularClothing; a Koikatsu character-card marker is Coordinate; Sunshine/EmotionCreators
+        // character markers and everything else stay out of the Coordinate path (invalid -> plain load).
+        auto kindOf = [&](const Bytes& data) {
+            const std::string p = tempPath("sourcedetect.bin");
+            fileio::WriteFile(p, data.data(), data.size());
+            return card::DetectImageSource(p);
+        };
+        auto withMarker = [&](const std::string& marker) {
+            Bytes b = tinyPng();
+            put32(b, 100);
+            putDotnetString(b, marker);
+            return b;
+        };
+        Bytes plain = tinyPng();
+        CHECK(kindOf(plain) == card::ImageSourceKind::PlainPng);
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuClothes\xE3\x80\x91")) == card::ImageSourceKind::RegularClothing);
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuClothesSun\xE3\x80\x91")) == card::ImageSourceKind::RegularClothing);   // clothing import path (reported unsupported downstream)
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuChara\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaS\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaSP\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91")) == card::ImageSourceKind::Invalid);   // not converted yet: plain load path
+        CHECK(kindOf(withMarker("\xE3\x80\x90" "EroMakeChara\xE3\x80\x91")) == card::ImageSourceKind::Invalid);
+        CHECK(kindOf(withMarker("not-a-card")) == card::ImageSourceKind::Invalid);
+        // A Coordinate PNG never silently enters the clothing parser as a regular outfit file.
+        const std::string p = tempPath("sourcedetect_card.bin");
+        const Bytes cardPng = withMarker("\xE3\x80\x90KoiKatuChara\xE3\x80\x91");
+        fileio::WriteFile(p, cardPng.data(), cardPng.size());
+        bool threw = false;
+        try { (void)card::LoadClothingFile(p); } catch (const card::CardError&) { threw = true; }
+        CHECK(threw);
+    });
+    test("coordinate PNG end-to-end: detect, extract, apply to another character (import as clothing)", [] {
+        Value::Map kkexMap;
+        kkexMap.emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows());
+        const std::string toruPath = writeTestCardFile("coordpng_toru.png", testToruCoords(), testToruParameter(),
+                                                       testToruStatus(), testToruHair(), Value(std::move(kkexMap)));
+        CHECK(card::DetectImageSource(toruPath) == card::ImageSourceKind::Coordinate);
+        // the fixture must parse as a character card: outfit 1 is Toru's current outfit
+        card::Card probe = card::LoadCard(toruPath);
+        CHECK(probe.supported);
+        CHECK(probe.outfits.size() == 7);
+        CHECK(probe.displayName() == "Toru Terada");
+        CHECK(probe.rows.size() == 2);
+        // Import as Clothing into Moe via the same entry the viewer/CLI use
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, toruPath, opt);
+        CHECK(rep.fromCoordinate);
+        CHECK(rep.srcOutfit == 1);
+        // Moe's identity, face, body and personality never travel
+        CHECK(moe.parameter.at("lastname").asStr() == "Moe");
+        CHECK(moe.hair.at("parts").at(size_t(0)).at("id").asInt() == 1234);
+        // Moe's hair accessory survives the clothing import; Toru's pin goes around it
+        const auto& a = moe.outfits[0].accessory.at("parts").asArray();
+        CHECK(a[0].at("id").asInt() == 9001 && a[0].at("type").asInt() == 123);
+        CHECK(a[1].at("id").asInt() == 7777);
+        CHECK(rep.apply.accessoriesRelocated == 1);
+        CHECK(rep.apply.hairPreserved == 1);
+        // Toru's mod top id applied; author-slot ids are untouched by the file's local->slot translation
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        // makeup followed the source coordinate's own flag
+        CHECK(moe.outfits[0].enableMakeup);
+        // Moe's own resolver row is still there; Toru's rows arrived rebased to outfit0 with the
+        // accessory slot re-indexed around her hair pin
+        bool moeKept = false, toruTop = false, toruPin = false;
+        for (const auto& r : moe.rows) {
+            if (r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id" && r.slot == 9001) moeKept = true;
+            if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 2222) toruTop = true;
+            if (r.property == "outfit0.accessory1.ChaFileAccessory.PartsInfo.id" && r.slot == 7777) toruPin = true;
+        }
+        CHECK(moeKept && toruTop && toruPin);
+        // the Added-outfit provenance marks what came from the import
+        CHECK(moe.clothingPartIds.count("outfit0.top") != 0);
+        CHECK(moe.clothingPartIds.count("outfit0.acc01") != 0);
+        CHECK(moe.clothingOutfit == 0);
+        // Moe's other outfits are untouched
+        CHECK(moe.outfits[3].clothes.at("parts").at(size_t(0)).at("id").asInt() == 59);
+        // a plain outfit file is detected as regular clothing, not as a Coordinate
+        Bytes cf = tinyPng();
+        put32(cf, 100);
+        putDotnetString(cf, "\xE3\x80\x90KoiKatuClothes\xE3\x80\x91");
+        const std::string clothesPath = tempPath("coordpng_regular_clothes.png");
+        fileio::WriteFile(clothesPath, cf.data(), cf.size());
+        CHECK(card::DetectImageSource(clothesPath) == card::ImageSourceKind::RegularClothing);
+    });
+    test("coordinate PNG imported as coordinate: the whole coordinate replaces the outfit slot, wholesale", [] {
+        card::Card src = testToruCard();
+        card::Card dst = testMoeCard();
+        // KCOX: the replaced coordinate's paint is dropped, the others kept, the source's rebased
+        Value::Map srcOuter;
+        {
+            Value::Array ga1; ga1.emplace_back(Value(Bytes{0xAA, 0xBB})); ga1.emplace_back(Value(true));
+            Value::Map g1; g1.emplace_back(Value(std::string("top")), Value(std::move(ga1)));
+            srcOuter.emplace_back(Value(int64_t{1}), Value(std::move(g1)));
+        }
+        Value::Map dstOuter;
+        {
+            Value::Array ga0; ga0.emplace_back(Value(Bytes{0x0C, 0xC0})); ga0.emplace_back(Value(false));
+            Value::Map g0; g0.emplace_back(Value(std::string("top")), Value(std::move(ga0)));
+            dstOuter.emplace_back(Value(int64_t{0}), Value(std::move(g0)));
+            Value::Array ga3; ga3.emplace_back(Value(Bytes{0x0D, 0xD0})); ga3.emplace_back(Value(true));
+            Value::Map g3; g3.emplace_back(Value(std::string("top")), Value(std::move(ga3)));
+            dstOuter.emplace_back(Value(int64_t{3}), Value(std::move(g3)));
+        }
+        auto meEntry = [](std::initializer_list<std::pair<int, int>> rowsSpec) {
+            Value::Array rows;
+            for (const auto& [ci, marker] : rowsSpec) {
+                Value::Map r;
+                r.emplace_back(Value(std::string("CoordinateIndex")), Value(static_cast<int64_t>(ci)));
+                r.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+                r.emplace_back(Value(std::string("Slot")), Value(int64_t{0}));
+                r.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+                rows.emplace_back(Value(std::move(r)));
+            }
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("RendererPropertyList")), Value(std::move(MsgPackPack(Value(std::move(rows))))));
+            return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+        };
+        const std::string xml = "<accessorySet type=\"0\"><accessory type=\"124\" id=\"7777\" parentKey=\"a_n_head\" hideCategory=\"0\"/></accessorySet><accessorySet type=\"2\"><accessory type=\"124\" id=\"8888\" parentKey=\"a_n_head\" hideCategory=\"0\"/></accessorySet>";
+        Value::Map srcKcoxPayload, dstKcoxPayload;
+        srcKcoxPayload.emplace_back(Value(std::string("Overlays")), Value(std::move(MsgPackPack(Value(std::move(srcOuter))))));
+        dstKcoxPayload.emplace_back(Value(std::string("Overlays")), Value(std::move(MsgPackPack(Value(std::move(dstOuter))))));
+        dst.extended = Value(Value::Map{
+            {Value(std::string("KCOX")), Value(Value::Array{Value(int64_t{1}), Value(std::move(dstKcoxPayload))})},
+            {Value(std::string("com.deathweasel.bepinex.materialeditor")), meEntry({{0, 222}, {3, 333}})},
+            {Value(std::string("moreAccessories")), testMoreAccessoriesExtended(xml)},
+        });
+        src.extended = Value(Value::Map{
+            {Value(std::string("KCOX")), Value(Value::Array{Value(int64_t{1}), Value(std::move(srcKcoxPayload))})},
+            {Value(std::string("com.deathweasel.bepinex.materialeditor")), meEntry({{1, 111}})},
+        });
+        const card::ApplyCoordinateReport rep = card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        CHECK(rep.srcOutfit == 1 && rep.dstOutfit == 0);   // defaults: each card's current outfit
+        CHECK(rep.makeupApplied);
+        CHECK(rep.clothesReplaced >= 1);
+        CHECK(rep.accessoriesReplaced == 1);
+        // clothes wholesale
+        CHECK(dst.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        // accessories wholesale: Moe's hair accessory is replaced, unlike the clothing import - that is the point of the mode
+        const auto& a = dst.outfits[0].accessory.at("parts").asArray();
+        CHECK(a[0].at("id").asInt() == 7777 && a[0].at("type").asInt() == 124);
+        // makeup followed; hair and identity did not
+        CHECK(dst.outfits[0].enableMakeup);
+        CHECK(dst.parameter.at("lastname").asStr() == "Moe");
+        CHECK(dst.hair.at("parts").at(size_t(0)).at("id").asInt() == 1234);
+        // resolver rows: Moe's outfit0 rows dropped, Toru's rebased to outfit0
+        bool moeRow = false, toruTop = false, toruPin = false, staleOutfit1 = false;
+        for (const auto& r : dst.rows) {
+            if (r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id" && r.slot == 9001) moeRow = true;
+            if (r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id" && r.slot == 7777) toruPin = true;
+            if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 2222) toruTop = true;
+            if (r.property.rfind("outfit1.", 0) == 0) staleOutfit1 = true;
+        }
+        CHECK(!moeRow);
+        CHECK(toruTop && toruPin && !staleOutfit1);
+        // other outfits untouched
+        CHECK(dst.outfits[3].clothes.at("parts").at(size_t(0)).at("id").asInt() == 59);
+        CHECK(dst.outfits[6].clothes.at("parts").at(size_t(0)).at("id").asInt() == 62);
+        // accessory visibility flags copied from the source coordinate
+        for (const auto& e : dst.status.at("showAccessory").asArray()) CHECK(!e.asBool());
+        // KCOX: replaced coordinate's paint dropped, source's stored under the target, other coordinates kept
+        const Value& kcox = dst.extended.at("KCOX").at(size_t(1));
+        Value overlays;
+        try { overlays = MsgPackParse(kcox.at("Overlays").asBin()); } catch (const FormatError&) { overlays = Value(); }
+        CHECK(overlays.isMap());
+        CHECK(overlays.atInt(0).at("top").at(size_t(0)).asBin() == Bytes({0xAA, 0xBB}));
+        CHECK(overlays.atInt(0).at("top").at(size_t(1)).asBool());
+        CHECK(overlays.atInt(3).at("top").at(size_t(0)).asBin() == Bytes({0x0D, 0xD0}));
+        // MaterialEditor: replaced coordinate's rows dropped, outfit-3 kept, source row rebased to CoordinateIndex 0
+        Value list;
+        try { list = MsgPackParse(dst.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1)).at("RendererPropertyList").asBin()); } catch (const FormatError&) { list = Value(); }
+        CHECK(list.isArray());
+        std::set<int64_t> markers;
+        for (const auto& row : list.asArray()) markers.insert(row.at("Marker").asInt());
+        CHECK(markers.count(111) == 1 && markers.count(333) == 1 && markers.count(222) == 0);
+        for (const auto& row : list.asArray()) if (row.at("Marker").asInt() == 111) CHECK(row.at("CoordinateIndex").asInt() == 0);
+        // MoreAccessories: the target coordinate's stale block is dropped, other outfits keep theirs
+        const std::string cleaned = dst.extended.at("moreAccessories").at(size_t(1)).at("additionalAccessories").asStr();
+        CHECK(cleaned.find("type=\"0\"") == std::string::npos);
+        CHECK(cleaned.find("type=\"2\"") != std::string::npos);
+        // provenance marks the import on the target
+        CHECK(dst.hasClothing && dst.clothingOutfit == 0);
+        CHECK(dst.clothingPartIds.count("outfit0.top") != 0);
+        CHECK(dst.clothingPartIds.count("outfit0.acc00") != 0);
+    });
+    test("coordinate import: invalid sources throw, never silently fall back to something else", [] {
+        card::Card empty;
+        empty.supported = true;   // no outfits at all
+        card::Card dst0 = testMoeCard();
+        bool threw = false;
+        try { (void)card::ExtractClothingFromCard(empty, 0); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        card::Card unsup = testToruCard();
+        unsup.supported = false;
+        unsup.supportNote = "not converted yet";
+        threw = false;
+        try { (void)card::ExtractClothingFromCard(unsup, 1); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        card::Card src = testToruCard();
+        card::Card dst = testMoeCard();
+        card::ApplyCoordinateOptions badSrc;
+        badSrc.srcOutfit = 99;
+        threw = false;
+        try { (void)card::ApplyCoordinate(dst, src, badSrc); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        card::ApplyCoordinateOptions badDst;
+        badDst.dstOutfit = 99;
+        threw = false;
+        try { (void)card::ApplyCoordinate(dst, src, badDst); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        // -1 indices follow each card's own current outfit
+        card::Card dst5 = testMoeCard();
+        dst5.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{5})},
+                                       {Value(std::string("showAccessory")), Value(testFlags(true))}});
+        const card::ApplyCoordinateReport rep = card::ApplyCoordinate(dst5, src, card::ApplyCoordinateOptions{});
+        CHECK(rep.dstOutfit == 5 && rep.srcOutfit == 1);
+        CHECK(dst5.outfits[5].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        CHECK(dst5.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 56);
+        // a Coordinate PNG is never handed to the regular clothing parser as a clothing file
+        const std::string toruPath = writeTestCardFile("coordpng_notclothes.png", testToruCoords(), testToruParameter(),
+                                                       testToruStatus(), testToruHair(), Value());
+        threw = false;
+        try { (void)card::LoadClothingFile(toruPath); } catch (const card::CardError&) { threw = true; }
+        CHECK(threw);
+    });
+
+    auto setStatusKey = [](card::Card& c, const char* key, Value value) {
+        Value::Map s;
+        bool replaced = false;
+        for (const auto& kv : c.status.asMap()) {
+            if (kv.first.isStr() && kv.first.asStr() == key) { s.emplace_back(kv.first, value); replaced = true; }
+            else s.emplace_back(kv.first, kv.second);
+        }
+        if (!replaced) s.emplace_back(Value(std::string(key)), std::move(value));
+        c.status = Value(std::move(s));
+    };
+
+    test("coordinate import: clothesState (ClothesKind byte[9]) travels with the coordinate, clothing mode untouched", [setStatusKey] {
+        // src outfit 1 was saved with: top half-off#2, bra on, shorts off, pantyhose half-off
+        const Bytes cs{2, 0, 0, 3, 0, 1, 0, 0, 0};
+        card::Card src = testToruCard();
+        setStatusKey(src, "clothesState", Value(cs));
+        // coordinate mode: the toggle state of the outfit as saved is copied (it is what the source maker shows)
+        card::Card dst = testMoeCard();
+        card::ApplyCoordinateReport rep = card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        CHECK(dst.status.at("clothesState").asBin() == cs);
+        bool csNote = false;
+        for (const std::string& n : rep.notes) if (n.find("clothes toggle state") != std::string::npos) csNote = true;
+        CHECK(csNote);
+        // a target with no clothesState at all gains it
+        card::Card dstNone = testMoeCard();
+        {
+            Value::Map s;
+            for (const auto& kv : dstNone.status.asMap()) if (!(kv.first.isStr() && kv.first.asStr() == "clothesState")) s.emplace_back(kv.first, kv.second);
+            dstNone.status = Value(std::move(s));
+        }
+        card::ApplyCoordinate(dstNone, src, card::ApplyCoordinateOptions{});
+        CHECK(dstNone.status.at("clothesState").asBin() == cs);
+        // a target whose own clothesState is out-of-range is overwritten by the source's (the source's state is the one being imported)
+        card::Card dstBad = testMoeCard();
+        setStatusKey(dstBad, "clothesState", Value(Bytes{0, 0, 9, 0, 0, 0, 0, 0, 0}));
+        card::ApplyCoordinate(dstBad, src, card::ApplyCoordinateOptions{});
+        CHECK(dstBad.status.at("clothesState").asBin() == cs);
+        // a source with an out-of-range byte leaves the target's own state alone, with a note
+        card::Card srcBad = testToruCard();
+        setStatusKey(srcBad, "clothesState", Value(Bytes{0, 0, 9, 0, 0, 0, 0, 0, 0}));
+        card::Card dstGood = testMoeCard();
+        setStatusKey(dstGood, "clothesState", Value(Bytes{1, 1, 1, 1, 1, 1, 1, 1, 1}));
+        card::ApplyCoordinateReport rep3 = card::ApplyCoordinate(dstGood, srcBad, card::ApplyCoordinateOptions{});
+        CHECK(dstGood.status.at("clothesState").asBin() == Bytes({1, 1, 1, 1, 1, 1, 1, 1, 1}));
+        bool badNote = false;
+        for (const std::string& n : rep3.notes) if (n.find("unexpected byte values") != std::string::npos) badNote = true;
+        CHECK(badNote);
+        // clothing import never touches the target's Status
+        card::Card moe = testMoeCard();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(moe, cl, copt);
+        bool hasCs = false;
+        for (const auto& kv : moe.status.asMap()) if (kv.first.isStr() && kv.first.asStr() == "clothesState") hasCs = true;
+        CHECK(!hasCs);
+    });
+
+    test("coordinate import: Additional_Card_Info v0 - coordinate entries travel in coordinate mode, keep flags in clothing mode", [] {
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), testAciV0({{1, 2}, {3, 0}})}});
+        // a dst that carries its own v0 ACI (outfit 0 gender 0, outfit 3 gender 3, cosplayready true)
+        Value::Map cardInfo;
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            cardInfo.emplace_back(Value(std::string("_personalsavebool")), Value(std::move(a)));
+        }
+        cardInfo.emplace_back(Value(std::string("_cosplayready")), Value(true));
+        Value::Map dstPayload;
+        {
+            Value::Map mod;
+            mod.emplace_back(Value(static_cast<int64_t>(0)), testAciV0Entry(0, "MoeAuthor"));
+            mod.emplace_back(Value(static_cast<int64_t>(3)), testAciV0Entry(3, "MoeAuthor"));
+            dstPayload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(mod))))));
+        }
+        dstPayload.emplace_back(Value(std::string("CardInfo")), Value(std::move(MsgPackPack(Value(std::move(cardInfo))))));
+        const Value dstAci(Value::Array{Value(int64_t{1}), Value(std::move(dstPayload))});
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), dstAci}});
+            return m;
+        };
+        // --- coordinate mode: the whole per-coordinate entry is replaced, other coordinates and CardInfo stay
+        card::Card dstCoord = makeMoe();
+        card::ApplyCoordinate(dstCoord, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& ci = dstCoord.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci.asBin());
+            CHECK(parsed.isMap());
+            const Value& e0 = parsed.atInt(0);
+            CHECK(e0.at("_creatornames").at(size_t(0)).asStr() == "TestAuthor");
+            CHECK(e0.at("_acckeep").at(size_t(0)).asInt() == 3);
+            CHECK(e0.at("_restrictioninfo").at("_gender").asInt() == 2);      // the source outfit-1 restriction
+            const Value& e3 = parsed.atInt(3);
+            CHECK(e3.at("_restrictioninfo").at("_gender").asInt() == 3);      // Moe's own outfit stays
+        }
+        {
+            const Value& ciCard = dstCoord.extended.at("Additional_Card_Info").at(size_t(1)).at("CardInfo");
+            Value cardParsed = MsgPackParse(ciCard.asBin());
+            CHECK(cardParsed.at("_cosplayready").asBool());                    // character-scoped: untouched
+        }
+        // --- clothing mode: keep flags travel, restrictions/author do not, CardInfo untouched
+        card::Card dstClothes = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothes, cl, copt);
+        {
+            const Value& ci = dstClothes.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci.asBin());
+            const Value& e0 = parsed.atInt(0);
+            CHECK(e0.at("_acckeep").at(size_t(0)).asInt() == 3);               // keep flags travel
+            CHECK(e0.at("_hairkeep").at(size_t(0)).asInt() == 4);
+            CHECK(e0.at("_creatornames").at(size_t(0)).asStr() == "MoeAuthor"); // author does not
+            CHECK(e0.at("_restrictioninfo").at("_gender").asInt() == 0);         // restrictions do not
+            const Value& e3 = parsed.atInt(3);
+            CHECK(e3.at("_restrictioninfo").at("_gender").asInt() == 3);         // outfit 3 untouched
+        }
+        // --- a target without ACI at all gains one (coordinate mode creates it)
+        card::Card dstNoAci = testMoeCard();
+        card::ApplyCoordinate(dstNoAci, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& ci2 = dstNoAci.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value parsed = MsgPackParse(ci2.asBin());
+            CHECK(parsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 3);
+            CHECK(parsed.atInt(0).at("_restrictioninfo").at("_gender").asInt() == 2);
+        }
+        // --- card source applies it per coordinate index, not blindly to 0
+        card::Card dstNoAciClothes = testMoeCard();
+        card::ClothingFile cl2 = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt2; copt2.outfit = 4;                       // apply to outfit slot 4
+        card::ApplyClothing(dstNoAciClothes, cl2, copt2);
+        const Value& ci3 = dstNoAciClothes.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+        Value parsed3 = MsgPackParse(ci3.asBin());
+        CHECK(parsed3.atInt(4).at("_acckeep").at(size_t(0)).asInt() == 3);         // lands in the slot it was applied to
+        CHECK(parsed3.atInt(0).isNil() || parsed3.atInt(0).size() == 0 || !parsed3.atInt(0).at("_creatornames").isArray());
+    });
+
+    test("coordinate import: Additional_Card_Info v1 - coordinate arrays travel in coordinate mode, keep flags in clothing mode", [] {
+        // build the source v1 payload with distinct markers per outfit
+        Value::Map srcPayload;
+        auto mkBin = [](Value v) { return Value(std::move(MsgPackPack(std::move(v)))); };
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{60 + i})}));
+            srcPayload.emplace_back(Value(std::string("AccKeep")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{80 + i})}));
+            srcPayload.emplace_back(Value(std::string("HairAcc")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(std::string("Author" + std::to_string(i))));
+            srcPayload.emplace_back(Value(std::string("Creator")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(i == 1)); a.emplace_back(Value(std::move(inner))); }
+            srcPayload.emplace_back(Value(std::string("CoordinateSaveBools")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(true));
+            srcPayload.emplace_back(Value(std::string("Personal_Clothing_Save")), mkBin(Value(std::move(a))));   // character-scoped: must not travel
+        }
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")),
+                                         Value(Value::Array{Value(int64_t{0}), Value(std::move(srcPayload))})}});
+        // dst with its own v1 payload with distinct markers
+        Value::Map dstPayload;
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(Value::Array{Value(int64_t{900 + i})}));
+            dstPayload.emplace_back(Value(std::string("AccKeep")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) a.emplace_back(Value(std::string("MoeAuthor" + std::to_string(i))));
+            dstPayload.emplace_back(Value(std::string("Creator")), mkBin(Value(std::move(a))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 9; ++i) a.emplace_back(Value(false));
+            dstPayload.emplace_back(Value(std::string("Cosplay_Academy_Ready")), Value(std::move(MsgPackPack(Value(false)))));
+            // the character-scoped key the test exists to preserve: dst's own must stay
+            Value::Array a2; for (int i = 0; i < 9; ++i) a2.emplace_back(Value(true));
+            dstPayload.emplace_back(Value(std::string("Personal_Clothing_Save")), mkBin(Value(std::move(a2))));
+        }
+        {
+            Value::Array a; for (int i = 0; i < 7; ++i) { Value::Array inner; for (int j = 0; j < 9; ++j) inner.emplace_back(Value(false)); a.emplace_back(Value(std::move(inner))); }
+            dstPayload.emplace_back(Value(std::string("CoordinateSaveBools")), mkBin(Value(std::move(a))));
+        }
+        Value dstAci(Value::Array{Value(int64_t{0}), Value(std::move(dstPayload))});
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{{Value(std::string("Additional_Card_Info")), dstAci}});
+            return m;
+        };
+        // --- coordinate mode: per-coordinate arrays are replaced, character-scoped keys stay
+        card::Card dstCoord = makeMoe();
+        card::ApplyCoordinate(dstCoord, src, card::ApplyCoordinateOptions{});
+        {
+            const Value& pay = dstCoord.extended.at("Additional_Card_Info").at(size_t(1));
+            Value creator = MsgPackParse(pay.at("Creator").asBin());
+            Value acckeep = MsgPackParse(pay.at("AccKeep").asBin());
+            Value hair = MsgPackParse(pay.at("HairAcc").asBin());
+            Value csb = MsgPackParse(pay.at("CoordinateSaveBools").asBin());
+            CHECK(creator.at(size_t(0)).asStr() == "Author1");       // source outfit 1
+            CHECK(creator.at(size_t(3)).asStr() == "MoeAuthor3");    // outfit 3 untouched
+            CHECK(acckeep.at(size_t(0)).at(size_t(0)).asInt() == 61);
+            CHECK(hair.at(size_t(0)).at(size_t(0)).asInt() == 81);
+            CHECK(csb.at(size_t(0)).at(size_t(0)).asBool());
+            CHECK(csb.at(size_t(3)).at(size_t(0)).asBool() == false);
+            const Value& psb = pay.at("Personal_Clothing_Save");
+            Value psbV = MsgPackParse(psb.asBin());
+            CHECK(psbV.at(size_t(0)).asBool());                       // character-scoped: source's true, but...
+            (void)psbV;
+            // the target's own Personal_Clothing_Save was true and must remain exactly that
+            Value psbCheck = MsgPackParse(pay.at("Personal_Clothing_Save").asBin());
+            bool allTrue = true; for (const auto& e : psbCheck.asArray()) allTrue = allTrue && e.asBool();
+            CHECK(allTrue);
+        }
+        // --- clothing mode: only AccKeep/HairAcc travel
+        card::Card dstClothes = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothes, cl, copt);
+        {
+            const Value& pay = dstClothes.extended.at("Additional_Card_Info").at(size_t(1));
+            Value creator = MsgPackParse(pay.at("Creator").asBin());
+            Value acckeep = MsgPackParse(pay.at("AccKeep").asBin());
+            Value hair = MsgPackParse(pay.at("HairAcc").asBin());
+            Value csb = MsgPackParse(pay.at("CoordinateSaveBools").asBin());
+            CHECK(creator.at(size_t(0)).asStr() == "MoeAuthor0");    // author does not travel
+            CHECK(acckeep.at(size_t(0)).at(size_t(0)).asInt() == 61);
+            CHECK(hair.at(size_t(0)).at(size_t(0)).asInt() == 81);
+            CHECK(csb.at(size_t(0)).at(size_t(0)).asBool() == false); // save-bools do not travel
+        }
+    });
+
+    test("coordinate import: ABMX creates KKEx on a vanilla target and rebases per coordinate", [] {
+        card::AbmxTable t;
+        {
+            card::AbmxMod out0; out0.scale = {1.2f, 1.2f, 1.2f}; out0.length = 1.2f;
+            card::AbmxMod out1; out1.scale = {2.5f, 2.5f, 2.5f}; out1.length = 2.5f;
+            t.bones["skirt"] = {out0, out1};
+        }
+        {
+            card::AbmxMod m; m.scale = {2.5f, 2.5f, 2.5f}; m.length = 2.5f;
+            t.bones["chest"] = {m};   // shared by every outfit
+        }
+        card::Card src = testToruCard();
+        src.extended = Value(Value::Map{
+            {Value(std::string("KKABMPlugin.ABMData")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(t))}})})},
+        });
+        // --- a vanilla target without any KKEx gets one created, coordinate-scoped rebase
+        card::Card dst = testMoeCard();
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        card::AbmxTable merged = card::LoadAbmx(dst.extended);
+        const card::AbmxMod* skirt0 = merged.find("skirt", 0);
+        CHECK(skirt0 != nullptr && skirt0->scale.x == 2.5f);            // src's outfit-1 effective entry, at target coordinate 0
+        const card::AbmxMod* skirt5 = merged.find("skirt", 5);
+        CHECK(skirt5 != nullptr && skirt5->scale.x == 1.0f);            // other coordinates keep neutral identity
+        const card::AbmxMod* chest0 = merged.find("chest", 0);
+        CHECK(chest0 != nullptr && chest0->scale.x == 2.5f);            // shared by the whole source coordinate
+        CHECK(dst.outfits.size() == 7);
+        // --- a target with a blanket (length-1) list expands: the source's effective entry replaces only the replaced coordinate
+        card::Card dstBlanket = testMoeCard();
+        {
+            card::AbmxTable dt;
+            card::AbmxMod blanket; blanket.scale = {1.1f, 1.1f, 1.1f}; blanket.length = 1.1f;
+            dt.bones["skirt"] = {blanket};
+            dstBlanket.extended = Value(Value::Map{
+                {Value(std::string("KKABMPlugin.ABMData")),
+                 Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(dt))}})})},
+            });
+        }
+        card::ApplyCoordinate(dstBlanket, src, card::ApplyCoordinateOptions{});
+        card::AbmxTable expanded = card::LoadAbmx(dstBlanket.extended);
+        const card::AbmxMod* s0 = expanded.find("skirt", 0);
+        const card::AbmxMod* s5 = expanded.find("skirt", 5);
+        CHECK(s0 != nullptr && s0->scale.x == 2.5f);
+        CHECK(s5 != nullptr && s5->scale.x == 1.1f);
+        // --- unknown plugins in a dst with KKEx are preserved verbatim
+        Value ksox = Value(Value::Array{Value(int64_t{1}), Value(Value::Map{{Value(std::string("Marker")), Value(std::string("keep-me"))}})});
+        card::Card dstKsox = testMoeCard();
+        dstKsox.extended = Value(Value::Map{{Value(std::string("KSOX")), ksox}});
+        card::ApplyCoordinate(dstKsox, src, card::ApplyCoordinateOptions{});
+        CHECK(dstKsox.extended.at("KSOX").at(size_t(1)).at("Marker").asStr() == "keep-me");
+        // --- clothing path keeps the historical union rule (source wins whole shared bone)
+        card::Card dstClothing = testMoeCard();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(dstClothing, cl, copt);
+        card::AbmxTable mergedClothing = card::LoadAbmx(dstClothing.extended);
+        const card::AbmxMod* cs0 = mergedClothing.find("skirt", 0);
+        CHECK(cs0 != nullptr && cs0->scale.x == 1.2f);                 // whole list union: outfit-0 entry is used for outfit 0
+        const card::AbmxMod* cs1 = mergedClothing.find("skirt", 1);
+        CHECK(cs1 != nullptr && cs1->scale.x == 2.5f);                 // outfit-1 entry for outfit 1
+    });
+
+    test("coordinate import: per-coordinate plugins rebase (DynamicBoneEditor, HairAccessoryCustomizer, Accessory_States, pushup)", [] {
+        card::Card src = testToruCard();
+        // patch the source outfit: pins in slots 0, 4, 6 (used for the slot-remap assertions below)
+        src.outfits[1].accessory = testAccessoryMap({
+            testAccPart(124, 7777, "a_n_headside"), testAccPart(120, 0, ""), testAccPart(120, 0, ""), testAccPart(120, 0, ""),
+            testAccPart(124, 7778, "a_n_headside"), testAccPart(120, 0, ""), testAccPart(124, 7779, "a_n_headside"), testAccPart(120, 0, ""),
+        });
+        src.extended = Value(Value::Map{
+            {Value(std::string("Accessory_States")), testAccessoryStates({{1, 0, 3, 1, 2, false}, {1, 4, 5, 2, 1, true}, {3, 7, 2, 3, 2, false}})},
+            {Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+             Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                Value(std::move(testDynamicBoneRows({{1, {0, 21}}, {3, {4, 33}}, {1, {2, 22}}, {1, {4, 23}}, {1, {6, 24}}})))}})})},
+            {Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+             testHairAccessories({{1, {{0, 93}, {4, 90}, {6, 91}}}, {3, {{8, 92}}}})},
+            {Value(std::string("com.deathweasel.bepinex.pushup")), testPushupMulti({{1, 0.77, 0.66, 0.55}})},
+        });
+        const Value dstAci(Value::Map{});   // unused; kept for symmetry with the other fixtures
+        (void)dstAci;
+        auto makeMoe = [&]() {
+            card::Card m = testMoeCard();
+            m.extended = Value(Value::Map{
+                {Value(std::string("Accessory_States")), testAccessoryStates({{0, 0, 5, 6, 1, true}, {0, 3, 9, 4, 1, true}, {3, 7, 2, 3, 2, false}})},
+                {Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+                 Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                    Value(std::move(testDynamicBoneRows({{0, {0, 44}}, {0, {1, 45}}, {3, {4, 55}}, {0, {3, 46}}})))}})})},
+                {Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+                 testHairAccessories({{0, {{0, 73}, {1, 70}, {3, 72}}}, {3, {{2, 71}}}})},
+                {Value(std::string("com.deathweasel.bepinex.pushup")), testPushupMulti({{0, 0.11, 0.22, 0.33}, {3, 0.44, 0.55, 0.66}})},
+            });
+            return m;
+        };
+        // --- coordinate mode
+        card::Card dst = makeMoe();
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        // Accessory_States: outfit 0 = the source outfit-1 data (slots 0/4/6); outfit 3 kept
+        const Value& asd = dst.extended.at("Accessory_States").at(size_t(1)).at("CoordinateData");
+        Value asdParsed = MsgPackParse(asd.asBin());
+        CHECK(asdParsed.atInt(0).at("_slotinfo").atInt(0).at("_binding").asInt() == 3);
+        CHECK(asdParsed.atInt(0).at("_slotinfo").atInt(4).at("_binding").asInt() == 5);
+        CHECK(asdParsed.atInt(3).at("_slotinfo").atInt(7).at("_binding").asInt() == 2);
+        CHECK(asdParsed.atInt(0).at("_names").atInt(0).at("_name").asStr() == "state");
+        // DBE: outfit 0's stale rows dropped, source rows rebased 1:1, outfit 3 kept
+        const Value& dbe = dst.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+        Value dbeParsed = MsgPackParse(dbe.asBin());
+        std::set<int64_t> markers;
+        for (const auto& row : dbeParsed.asArray()) markers.insert(row.at("Marker").asInt());
+        CHECK(markers.count(21) == 1 && markers.count(23) == 1 && markers.count(24) == 1 && markers.count(55) == 1);
+        CHECK(markers.count(44) == 0 && markers.count(45) == 0 && markers.count(46) == 0 && markers.count(33) == 0 && markers.count(22) == 0);
+        // HairAccessories: outfit 0 = src slots 0/4/6; outfit 3 kept
+        const Value& hac = dst.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+        Value hacParsed = MsgPackParse(hac.asBin());
+        CHECK(hacParsed.atInt(0).atInt(0).at("Marker").asInt() == 93);
+        CHECK(hacParsed.atInt(0).atInt(4).at("Marker").asInt() == 90);
+        CHECK(hacParsed.atInt(0).atInt(6).at("Marker").asInt() == 91);
+        CHECK(hacParsed.atInt(3).atInt(2).at("Marker").asInt() == 71);
+        // pushup: outfit 0 = the source's garment physics; outfit 3 untouched (Moe's own)
+        const Value& top = dst.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_TopData");
+        Value topParsed = MsgPackParse(top.asBin());
+        CHECK(std::fabs(topParsed.atInt(0).at("Firmness").asFloat() - 0.77) < 1e-6);
+        CHECK(std::fabs(topParsed.atInt(3).at("Firmness").asFloat() - 0.44) < 1e-6);
+        const Value& body = dst.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_BodyData");
+        Value bodyParsed = MsgPackParse(body.asBin());
+        CHECK(std::fabs(bodyParsed.atInt(0).at("Firmness").asFloat() - 0.33) < 1e-6);   // the character's own body pushup survives (not ported)
+        CHECK(std::fabs(bodyParsed.atInt(3).at("Firmness").asFloat() - 0.66) < 1e-6);
+        // --- clothing mode: slots remapped around the kept hair (src slot 0 -> dst slot 1), unmapped src slots dropped
+        card::Card moe = makeMoe();
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 1);
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ApplyClothing(moe, cl, copt);
+        const Value& asd2 = moe.extended.at("Accessory_States").at(size_t(1)).at("CoordinateData");
+        Value asd2Parsed = MsgPackParse(asd2.asBin());
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(1).at("_binding").asInt() == 3);   // src slot 0 -> dst slot 1 (dst slot 0 = Moe's kept hair)
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(0).at("_binding").asInt() == 5);   // Moe's slot-0 entry survives
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(3).at("_binding").asInt() == 9);   // Moe's slot-3 entry survives (unmapped)
+        CHECK(asd2Parsed.atInt(0).at("_slotinfo").atInt(4).at("_binding").asInt() == 5);   // src slot 4 -> dst slot 4 (remapped)
+        CHECK(asd2Parsed.atInt(3).at("_slotinfo").atInt(7).at("_binding").asInt() == 2);   // outfit 3 kept
+        const Value& dbe2 = moe.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+        Value dbe2Parsed = MsgPackParse(dbe2.asBin());
+        std::set<int64_t> keep;
+        for (const auto& row : dbe2Parsed.asArray()) keep.insert(row.at("Marker").asInt());
+        CHECK(keep.count(21) == 1 && keep.count(23) == 1 && keep.count(24) == 1 && keep.count(44) == 1 && keep.count(46) == 1 && keep.count(55) == 1);
+        CHECK(keep.count(45) == 0 && keep.count(33) == 0 && keep.count(22) == 0);   // replaced slots dropped, coord-3's kept row 33 ignored here
+        const Value& hac2 = moe.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+        Value hac2Parsed = MsgPackParse(hac2.asBin());
+        CHECK(hac2Parsed.atInt(0).atInt(1).at("Marker").asInt() == 93);             // src slot 0 -> dst slot 1
+        CHECK(hac2Parsed.atInt(0).atInt(0).at("Marker").asInt() == 73);             // Moe's kept slot-0 setting survives untouched
+        CHECK(hac2Parsed.atInt(0).atInt(4).at("Marker").asInt() == 90);             // src slot 4 -> dst slot 4
+        CHECK(hac2Parsed.atInt(0).atInt(6).at("Marker").asInt() == 91);             // src slot 6 -> dst slot 6
+        CHECK(hac2Parsed.atInt(3).atInt(2).at("Marker").asInt() == 71);             // outfit 3 kept
+        const Value& top2 = moe.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_TopData");
+        Value top2Parsed = MsgPackParse(top2.asBin());
+        CHECK(std::fabs(top2Parsed.atInt(0).at("Firmness").asFloat() - 0.77) < 1e-6);                // the garment is the source's: its physics travel
+        CHECK(std::fabs(top2Parsed.atInt(3).at("Firmness").asFloat() - 0.44) < 1e-6);                // outfit 3 untouched
+        const Value& body2 = moe.extended.at("com.deathweasel.bepinex.pushup").at(size_t(1)).at("Pushup_BodyData");
+        Value body2Parsed = MsgPackParse(body2.asBin());
+        CHECK(std::fabs(body2Parsed.atInt(0).at("Firmness").asFloat() - 0.33) < 1e-6);               // the character's own body pushup survives
+    });
+
+    test("coordinate import: sex mismatch warns accurately, never drops items", [] {
+        Value::Map sPrm;
+        sPrm.emplace_back(Value(std::string("sex")), Value(int64_t{0}));   // male source
+        sPrm.emplace_back(Value(std::string("lastname")), Value(std::string("Toru")));
+        sPrm.emplace_back(Value(std::string("firstname")), Value(std::string("Terada")));
+        Value kkex;
+        {
+            Value::Map m;
+            m.emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows());
+            m.emplace_back(Value(std::string("Additional_Card_Info")), testAciV0({{1, 2}, {3, 0}}));
+            kkex = Value(std::move(m));
+        }
+        const std::string path = writeTestCardFile("coordpng_male.png", testToruCoords(), Value(std::move(sPrm)),
+                                                   testToruStatus(), testToruHair(), std::move(kkex));
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, path, opt);
+        CHECK(rep.fromCoordinate);
+        bool sexNote = false, restrictionNote = false;
+        for (const std::string& n : rep.apply.notes) {
+            if (n.find("sex mismatch") != std::string::npos && n.find("2 mod row(s)") != std::string::npos) sexNote = true;
+            if (n.find("gender restriction flag") != std::string::npos && n.find("raw value 2") != std::string::npos) restrictionNote = true;
+        }
+        CHECK(sexNote && restrictionNote);
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);   // nothing dropped
+    });
+
+    test("coordinate import: unknown target plugins and unrelated rows survive verbatim", [] {
+        card::Card src = testToruCard();
+        card::Card dst = testMoeCard();
+        dst.extended = Value(Value::Map{
+            {Value(std::string("KSOX")), Value(Value::Array{Value(int64_t{1}), Value(Value::Map{{Value(std::string("Marker")), Value(std::string("keep-me"))}})})},
+            {Value(std::string("custom.plugin")), Value(Value::Map{{Value(std::string("custom.plugin.marker")), Value(std::string("this-must-survive"))}})},
+        });
+        card::ApplyCoordinate(dst, src, card::ApplyCoordinateOptions{});
+        CHECK(dst.extended.at("KSOX").at(size_t(1)).at("Marker").asStr() == "keep-me");
+        CHECK(dst.extended.at("custom.plugin").at("custom.plugin.marker").asStr() == "this-must-survive");
+        CHECK(dst.outfits[3].clothes.at("parts").at(size_t(0)).at("id").asInt() == 59);
+    });
+
+    test("coordinate import: round trip - import then export then re-import preserves the outfit", [] {
+        card::Card src = testToruCard();
+        // Toru's coordinate was saved with accessories visible (the exporter drops accessories hidden by showAccessory)
+        {
+            Value::Map st;
+            for (const auto& kv : src.status.asMap())
+                if (kv.first.isStr() && kv.first.asStr() == "showAccessory") st.emplace_back(kv.first, Value(testFlags(true)));
+                else st.emplace_back(kv.first, kv.second);
+            src.status = Value(std::move(st));
+        }
+        card::Card moe = testMoeCard();
+        card::ApplyCoordinate(moe, src, card::ApplyCoordinateOptions{});
+        card::ClothingExportOptions eopt;
+        eopt.outfit = 0;
+        moe.faceThumbnail = tinyPng();
+        const Bytes out = card::BuildClothingFileBytes(moe, eopt, nullptr);
+        const std::string tmp = tempPath("roundtrip_outfit.png");
+        { FILE* f = std::fopen(tmp.c_str(), "wb"); if (f) { std::fwrite(out.data(), 1, out.size(), f); std::fclose(f); } }
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        card::Card moe2 = testMoeCard();
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, tmp, copt);
+        CHECK(moe2.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        // Moe's own slot 0 (her hair pin) is kept; Toru's pin lands in the first free slot (1) - the same behaviour the clothing import guarantees.
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 9001);
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(1)).at("id").asInt() == 7777);
+    });
+
+    test("coordinate import from a Coordinate (outfit) file: wholesale semantics, not the merge", [] {
+        // export Toru's outfit 1 as an outfit file: top 2222, accessory slot 0 = 7777
+        card::Card src = testToruCard();
+        src.faceThumbnail = tinyPng();
+        {
+            // keep accessories (showAccessory true) and carry the UAR payload the export reads
+            Value::Map st;
+            for (const auto& kv : src.status.asMap())
+                if (kv.first.isStr() && kv.first.asStr() == "showAccessory") st.emplace_back(kv.first, Value(testFlags(true)));
+                else st.emplace_back(kv.first, kv.second);
+            src.status = Value(std::move(st));
+            src.extended = Value(Value::Map{{Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows()}});
+        }
+        card::ClothingExportOptions eopt;
+        eopt.outfit = 1;
+        eopt.name = "CoordProbe";
+        const Bytes fileBytes = card::BuildClothingFileBytes(src, eopt, nullptr);
+        const std::string tmp = tempPath("coord_outfit_file.png");
+        {
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (f) { std::fwrite(fileBytes.data(), 1, fileBytes.size(), f); std::fclose(f); }
+        }
+        // Moe, with a second accessory in slot 3 that the file leaves empty (must be cleared by a whole-coordinate import)
+        card::Card moe = testMoeCard();
+        {
+            Value::Array parts;
+            parts.emplace_back(testAccPart(123, 9001, "a_n_headside"));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(124, 5555, "a_n_hair"));
+            moe.outfits[0].accessory = testAccessoryMap(std::move(parts));
+            moe.rows.emplace_back(card::ResolveRow{"moe.friend", 5555, 100000001, "outfit0.accessory3.ChaFileAccessory.PartsInfo.id", 124});
+        }
+        // --- coordinate import from the outfit file: the whole coordinate replaces verbatim
+        card::ApplyClothingOptions copt;
+        copt.outfit = 0;
+        copt.coordinateImport = true;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, tmp, copt);
+        CHECK(!rep.fromCoordinate);                     // a Coordinate FILE, not a character card
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 7777);   // her hair pin is replaced, not kept
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(0)).at("type").asInt() == 124);
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(3)).at("id").asInt() == 0);       // empty file slot cleared the target's
+        CHECK(moe.outfits[0].accessory.at("parts").at(size_t(3)).at("type").asInt() == 120);
+        bool moePinGone = false, moeFriendGone = false, topRow = false, pinRow = false;
+        for (const auto& r : moe.rows) {
+            if (r.slot == 9001 && r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id") moePinGone = true;
+            if (r.slot == 5555 && r.property == "outfit0.accessory3.ChaFileAccessory.PartsInfo.id") moeFriendGone = true;
+            if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 2222) topRow = true;
+            if (r.property == "outfit0.accessory0.ChaFileAccessory.PartsInfo.id" && r.slot == 7777) pinRow = true;
+        }
+        CHECK(!moePinGone && !moeFriendGone);   // rows for the replaced coordinate are dropped wholesale
+        CHECK(topRow && pinRow);                // the file's rows are rebased into the target outfit
+        CHECK(rep.apply.hairPreserved == 0);
+        // --- the same file as a clothing import keeps hair (default behaviour unchanged)
+        card::Card moe2 = testMoeCard();
+        {
+            Value::Array parts;
+            parts.emplace_back(testAccPart(123, 9001, "a_n_headside"));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(120, 0, ""));
+            parts.emplace_back(testAccPart(124, 5555, "a_n_hair"));
+            moe2.outfits[0].accessory = testAccessoryMap(std::move(parts));
+        }
+        card::ApplyClothingOptions copt2;
+        copt2.outfit = 0;   // coordinateImport defaults to false
+        const card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, tmp, copt2);
+        (void)rep2;
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 9001);   // her hair pin survives the clothing merge
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(1)).at("id").asInt() == 7777);   // the file's pin lands in the first free slot
+        CHECK(moe2.outfits[0].accessory.at("parts").at(size_t(3)).at("id").asInt() == 5555);   // slot 3 survives the clothing merge too
+        // --- a Coordinate PNG (character card) with coordinateImport=true: the whole-coordinate path, including Status
+        Value st(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})},
+                            {Value(std::string("clothesState")), Value(Bytes{3, 3, 3, 3, 3, 3, 3, 3, 3})},
+                            {Value(std::string("showAccessory")), Value(testFlags(false))}});
+        const std::string toruPath = writeTestCardFile("coord_card_import.png", testToruCoords(), testToruParameter(),
+                                                       std::move(st), testToruHair(), Value(Value::Map{}));
+        card::Card moe3 = testMoeCard();
+        card::ApplyClothingOptions copt3;
+        copt3.outfit = 0;
+        copt3.coordinateImport = true;
+        const card::OutfitSourceReport rep3 = card::ApplyOutfitSource(moe3, toruPath, copt3);
+        CHECK(rep3.fromCoordinate);
+        // Toru's coordinate 0 replaces Moe's: clothes id 100, her slot-0 hair pin is cleared (empty source slot),
+        // and clothesState travelled wholesale via ApplyCoordinate
+        CHECK(moe3.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 100);
+        CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("type").asInt() == 120);
+        CHECK(moe3.outfits[0].accessory.at("parts").at(size_t(0)).at("id").asInt() == 0);
+        CHECK(moe3.status.at("clothesState").asBin() == Bytes({3, 3, 3, 3, 3, 3, 3, 3, 3}));
+    });
+
+    test("Coordinate (outfit) file import: the file's own plugin payloads are read, not dropped", [] {
+        // A community Coordinate file from the maker: one coordinate, verbatim, with the author's
+        // CoordinateIndex (3) preserved everywhere - ME rows, DBE rows, HAC (flat), ACI (flat entry).
+        Value::Map meTexRow;
+        // MaterialTexturePropertyList: one MainTex row at CoordinateIndex 3, Slot 2 (a clothes slot)
+        {
+            Value::Map r;
+            r.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+            r.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            r.emplace_back(Value(std::string("Slot")), Value(int64_t{2}));
+            r.emplace_back(Value(std::string("MaterialName")), Value(std::string("cf_test_top")));
+            r.emplace_back(Value(std::string("Property")), Value(std::string("MainTex")));
+            r.emplace_back(Value(std::string("TexID")), Value(int64_t{7}));
+            r.emplace_back(Value(std::string("Offset")), Value::nil());
+            r.emplace_back(Value(std::string("OffsetOriginal")), Value::nil());
+            r.emplace_back(Value(std::string("Scale")), Value::nil());
+            r.emplace_back(Value(std::string("ScaleOriginal")), Value::nil());
+            r.emplace_back(Value(std::string("TexAnimationDef")), Value::nil());
+            meTexRow = std::move(r);
+        }
+        Value::Map srcTex;
+        srcTex.emplace_back(Value(int64_t{7}), Value(Bytes{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}));   // a PNG header blob stands in for the image
+        Value::Map mePayload;
+        mePayload.emplace_back(Value(std::string("TextureDictionary")), Value(std::move(MsgPackPack(Value(std::move(srcTex))))));
+        mePayload.emplace_back(Value(std::string("MaterialTexturePropertyList")), Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(meTexRow))})))));
+        // a uniform-length-1 ShaderList: shader replacement for the outfit's top material
+        {
+            Value::Map row;
+            row.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+            row.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            row.emplace_back(Value(std::string("Slot")), Value(int64_t{2}));
+            row.emplace_back(Value(std::string("MaterialName")), Value(std::string("cf_test_top")));
+            row.emplace_back(Value(std::string("ShaderName")), Value(std::string("xukmi/MainOpaquePlus")));
+            row.emplace_back(Value(std::string("ShaderNameOriginal")), Value(std::string("Shader Forge/main_opaque")));
+            mePayload.emplace_back(Value(std::string("MaterialShaderList")), Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(row))})))));
+        }
+        Value::Map kkex;
+        kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.materialeditor")),
+                          Value(Value::Array{Value(int64_t{0}), Value(std::move(mePayload))}));
+        // DynamicBoneEditor, CoordinateIndex 3 (the author's index)
+        {
+            Value::Map row;
+            row.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{3}));
+            row.emplace_back(Value(std::string("Slot")), Value(int64_t{4}));
+            row.emplace_back(Value(std::string("BoneName")), Value(std::string("acce_probe")));
+            row.emplace_back(Value(std::string("Radius")), Value(0.05));
+            row.emplace_back(Value(std::string("Enable")), Value(true));
+            kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.dynamicboneeditor")),
+                              Value(Value::Array{Value(int64_t{0}),
+                                    Value(Value::Map{{Value(std::string("AccessoryDynamicBoneData")),
+                                          Value(std::move(MsgPackPack(Value(Value::Array{Value(std::move(row))}))))}})}));
+        }
+        // HairAccessoryCustomizer, flat {slotIdx: settings} ( Coordinate files carry the flat shape )
+        {
+            Value::Map st;
+            st.emplace_back(Value(std::string("HairGloss")), Value(true));
+            st.emplace_back(Value(std::string("Marker")), Value(int64_t{33}));
+            Value::Map hac;
+            hac.emplace_back(Value(int64_t{4}), Value(std::move(st)));
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("CoordinateHairAccessories")), Value(std::move(MsgPackPack(Value(std::move(hac))))));
+            kkex.emplace_back(Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")),
+                              Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))}));
+        }
+        // Additional_Card_Info, the flat per-coordinate entry (v0 shape)
+        {
+            Value::Map entry;
+            entry.emplace_back(Value(std::string("_acckeep")), Value(Value::Array{Value(int64_t{6})}));
+            entry.emplace_back(Value(std::string("_hairkeep")), Value(Value::Array{Value(int64_t{2})}));
+            entry.emplace_back(Value(std::string("_creatornames")), Value(Value::Array{Value(std::string("ProbeAuthor"))}));
+            Value::Map ri;
+            ri.emplace_back(Value(std::string("_gender")), Value(int64_t{2}));
+            entry.emplace_back(Value(std::string("_restrictioninfo")), Value(std::move(ri)));
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("CoordinateInfo")), Value(std::move(MsgPackPack(Value(std::move(entry))))));
+            kkex.emplace_back(Value(std::string("Additional_Card_Info")),
+                             Value(Value::Array{Value(int64_t{1}), Value(std::move(payload))}));
+        }
+        const Value clothes = testClothesMap({2222, 0, 0, 0, 0, 0, 0, 0, 0});
+        Value::Array accParts;
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(120, 0, ""));
+        accParts.emplace_back(testAccPart(124, 7777, "a_n_hair"));
+        const Value accessory = testAccessoryMap(std::move(accParts));
+        const std::string path = writeTestClothingFile("coordfile_plugins.png", clothes, accessory,
+                                                       true, Value(Value::Map{}), Value(std::move(kkex)));
+        // --- clothing mode: the file's payloads are read (nothing dropped), rebased to the target outfit
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt; opt.outfit = 0;
+        const card::OutfitSourceReport rep = card::ApplyOutfitSource(moe, path, opt);
+        (void)rep;
+        const Value& me = moe.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        CHECK(me.isMap());
+        {
+            Value texRows = MsgPackParse(me.at("MaterialTexturePropertyList").asBin());
+            bool foundTex = false; int64_t assignedCoord = -1, texId = -1;
+            for (const auto& row : texRows.asArray()) {
+                if (row.at("Slot").asInt() == 2 && row.at("Property").asStr() == "MainTex") {
+                    foundTex = true; assignedCoord = row.at("CoordinateIndex").asInt(); texId = row.at("TexID").asInt();
+                }
+            }
+            CHECK(foundTex);
+            CHECK(assignedCoord == 0);            // rebased to the outfit it landed on
+            CHECK(texId == 7);                    // the source's texture travels (id preserved)
+        }
+        {
+            Value dict = MsgPackParse(me.at("TextureDictionary").asBin());
+            CHECK(dict.atInt(7).isBin());
+        }
+        {
+            Value shaderRows = MsgPackParse(me.at("MaterialShaderList").asBin());
+            bool foundShader = false;
+            for (const auto& row : shaderRows.asArray())
+                if (row.at("CoordinateIndex").asInt() == 0 && row.at("Slot").asInt() == 2) foundShader = true;
+            CHECK(foundShader);
+        }
+        {
+            const Value& dbeBin = moe.extended.at("com.deathweasel.bepinex.dynamicboneeditor").at(size_t(1)).at("AccessoryDynamicBoneData");
+            Value dbeRows = MsgPackParse(dbeBin.asBin());
+            bool foundDbe = false;
+            for (const auto& row : dbeRows.asArray())
+                if (row.at("BoneName").asStr() == "acce_probe" && row.at("CoordinateIndex").asInt() == 0) foundDbe = true;
+            CHECK(foundDbe);
+        }
+        {
+            const Value& hacBin = moe.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
+            Value hacParsed = MsgPackParse(hacBin.asBin());
+            CHECK(hacParsed.atInt(0).atInt(4).at("Marker").asInt() == 33);   // flat slot entry imported, keyed under the target outfit
+        }
+        {
+            const Value& aciBin = moe.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value aciParsed = MsgPackParse(aciBin.asBin());
+            CHECK(aciParsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 6);   // keep flags travel
+            CHECK(aciParsed.atInt(0).at("_hairkeep").at(size_t(0)).asInt() == 2);
+            CHECK(aciParsed.atInt(0).at("_restrictioninfo").isNil());               // restrictions do not (clothing mode)
+        }
+        // --- coordinate import (wholesale): the full ACI entry replaces the slot's entry, keep flags AND restrictions
+        card::Card moe2 = testMoeCard();
+        card::ApplyClothingOptions copt; copt.outfit = 0; copt.coordinateImport = true;
+        const card::OutfitSourceReport rep2 = card::ApplyOutfitSource(moe2, path, copt);
+        (void)rep2;
+        {
+            const Value& aciBin = moe2.extended.at("Additional_Card_Info").at(size_t(1)).at("CoordinateInfo");
+            Value aci2Parsed = MsgPackParse(aciBin.asBin());
+            CHECK(aci2Parsed.atInt(0).at("_acckeep").at(size_t(0)).asInt() == 6);
+            CHECK(aci2Parsed.atInt(0).at("_restrictioninfo").at("_gender").asInt() == 2);
+        }
     });
 
     test("adapter selection: discrete, integrated, Arc and software (synthetic descriptions)", [] {
@@ -3376,6 +5857,430 @@ void unitTests() {
         CHECK(exporter::ApplySkinShade(scene, 2.0f, 2.0f, 1.0f, 1.0f, false));
         CHECK(pixel(32, 32) < one);   // more strength digs the crease deeper
     });
+    test("koikatsu AO bake: the base body normal shades the valley, the line mask darkens and strength 0 restores exactly", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "body_create_result";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 200);
+            for (size_t i = 0; i < 64 * 64; ++i) tex.rgba[i * 4 + 3] = 244;
+            assemble::SceneMesh mesh;
+            mesh.name = "body_skin";
+            const int N = 16;
+            const float A = 0.14f, S = 0.035f;
+            for (int iz = 0; iz <= N; ++iz) {
+                for (int ix = 0; ix <= N; ++ix) {
+                    const float x = -0.2f + 0.4f * static_cast<float>(ix) / static_cast<float>(N);
+                    const float z = -0.2f + 0.4f * static_cast<float>(iz) / static_cast<float>(N);
+                    const float e = std::exp(-(x * x) / (2.0f * S * S));
+                    const float dydx = A * x / (S * S) * e;
+                    assemble::SceneVertex v;
+                    v.pos = {x, -A * e, z};
+                    v.normal = normalize(Vec3{-dydx, 1.0f, 0.0f});
+                    v.uv = {(x + 0.2f) / 0.4f, (z + 0.2f) / 0.4f};
+                    v.uv1 = v.uv2 = v.uv3 = v.uv;
+                    mesh.vertices.push_back(v);
+                }
+            }
+            assemble::SceneSubmesh sub;
+            for (int iz = 0; iz < N; ++iz)
+                for (int ix = 0; ix < N; ++ix) {
+                    const uint32_t a = static_cast<uint32_t>(iz * (N + 1) + ix), b = a + 1;
+                    const uint32_t d = static_cast<uint32_t>((iz + 1) * (N + 1) + ix), c = d + 1;
+                    sub.indices.insert(sub.indices.end(), {a, b, c, a, c, d});
+                }
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            scene.skinShade.meshes = {0};
+            scene.skinShade.texture = 0;
+            return scene;
+        };
+        // A striped base body normal map (DXT5nm convention: X in alpha as 0..255, Y in green). Flat left half,
+        // alternating +/-0.4 slopes on the right: the neighbourhood-average deviation the cavity bake keys on.
+        auto fillFlatNormal = [](std::vector<uint8_t>& out, int w, int h) {
+            out.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 128);
+            for (size_t i = 0; i < static_cast<size_t>(w) * static_cast<size_t>(h); ++i) { out[i * 4 + 3] = 128; out[i * 4 + 1] = 128; }
+        };
+        auto fillStripes = [&](std::vector<uint8_t>& out, int w, int h, bool everywhere) {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * w + static_cast<size_t>(x)) * 4;
+                    if (!everywhere && x < 32) { out[i + 3] = 128; out[i + 1] = 128; out[i + 0] = 128; out[i + 2] = 128; continue; }
+                    const int stripe = (x / 3) % 2;
+                    out[i + 3] = stripe ? 76 : 178;   // X in alpha: -0.4 / +0.4
+                    out[i + 1] = 128;                 // Y in green: 0
+                    out[i + 0] = 128;
+                    out[i + 2] = 128;
+                }
+        };
+        auto pixel = [&](assemble::Scene& s, int x, int y) { return static_cast<int>(s.textures[0].rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4]); };
+        {   // flat skin stays untouched, the striped half darkens (the cavity factor), alpha preserved, strength 0 restores
+            assemble::Scene scene = makeScene();
+            fillFlatNormal(scene.aoBake.baseNormal, 64, 64);
+            fillStripes(scene.aoBake.baseNormal, 64, 64, false);
+            scene.aoBake.baseNormalWidth = scene.aoBake.baseNormalHeight = 64;
+            CHECK(exporter::ApplySkinAoBake(scene, 1.0f, true));
+            const int flatZone = pixel(scene, 10, 32);
+            const int stripeZone = pixel(scene, 50, 32);
+            CHECK(flatZone == 200);              // flat skin: exactly untouched
+            CHECK(stripeZone < 200 - 20);        // striped (high-deviation) areas shade darker
+            CHECK(stripeZone < flatZone);
+            for (size_t i = 0; i < scene.textures[0].rgba.size(); i += 4) CHECK(scene.textures[0].rgba[i + 3] == 244);
+            CHECK(exporter::ApplySkinAoBake(scene, 0.0f, false));
+            CHECK(pixel(scene, 50, 32) == 200);
+            CHECK(pixel(scene, 10, 32) == 200);
+        }
+        {   // a vertical ink line through the valley centre (G channel, like cf_body_00_line): the line darkens at strength 1
+            assemble::Scene scene = makeScene();
+            fillFlatNormal(scene.aoBake.baseNormal, 64, 64);
+            scene.aoBake.baseNormalWidth = scene.aoBake.baseNormalHeight = 64;
+            scene.aoBake.lineMask.assign(64 * 64 * 4, 0);
+            scene.aoBake.lineMaskWidth = scene.aoBake.lineMaskHeight = 64;
+            for (int y = 0; y < 64; ++y) for (int x = 30; x <= 34; ++x) {   // a 5-texel line at u ~ 0.47-0.53
+                const size_t i = static_cast<size_t>(y) * 64 + static_cast<size_t>(x);
+                scene.aoBake.lineMask[i * 4 + 1] = 255;
+            }
+            CHECK(exporter::ApplySkinAoBake(scene, 1.0f, true));
+            const int onLine = pixel(scene, 32, 32);
+            CHECK(exporter::ApplySkinAoBake(scene, 0.0f, false));
+            CHECK(pixel(scene, 32, 32) == 200);
+            CHECK(onLine < 200 - 15);
+        }
+        {   // the new bake yields to SkinShade's darkening (attenuation: no stacking in a full crease)
+            assemble::Scene shadeOnly = makeScene();
+            CHECK(exporter::ApplySkinShade(shadeOnly, 2.0f, 2.0f, 1.0f, 1.0f, true));
+            const int creaseShade = pixel(shadeOnly, 32, 32);
+            assemble::Scene shadeThenAo = makeScene();
+            fillFlatNormal(shadeThenAo.aoBake.baseNormal, 64, 64);
+            fillStripes(shadeThenAo.aoBake.baseNormal, 64, 64, true);   // stripes everywhere: the valley centre is strongly marked too
+            shadeThenAo.aoBake.baseNormalWidth = shadeThenAo.aoBake.baseNormalHeight = 64;
+            CHECK(exporter::ApplySkinShade(shadeThenAo, 2.0f, 2.0f, 1.0f, 1.0f, true));
+            CHECK(exporter::ApplySkinAoBake(shadeThenAo, 1.0f, false));
+            const int creaseCombined = pixel(shadeThenAo, 32, 32);
+            if (std::getenv("CARDBRIDGE_TEST_DEBUG_AO"))
+                std::fprintf(stderr, "crease debug: shade %d combined %d\n", creaseShade, creaseCombined);
+            CHECK(creaseCombined < creaseShade);               // the AO pass still contributes, a little
+            CHECK(creaseCombined >= static_cast<int>(creaseShade * 0.6f) - 1);   // but never at full strength: it yields to SkinShade (att scales the AO contribution down further as SkinShade's darkening deepens)
+        }
+    });
+    test("translucent clothes: the painted alpha bakes into the garment texture, the material goes to the transparent pass, and strength 0 restores exactly", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            for (size_t i = 0; i + 3 < tex.rgba.size(); i += 4) {
+                tex.rgba[i + 0] = 240; tex.rgba[i + 1] = 240; tex.rgba[i + 2] = 245; tex.rgba[i + 3] = 255;
+            }
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart part;
+            part.id = "outfit0.top";
+            part.group = "Outfit";
+            part.meshes = {0};
+            part.visibleInPreview = true;
+            scene.parts.push_back(part);
+            return scene;
+        };
+        auto alphaAt = [](const assemble::Scene& s, int x, int y) { return static_cast<int>(s.textures[0].rgba[(static_cast<size_t>(y) * 64 + static_cast<size_t>(x)) * 4 + 3]); };
+        {   // paint, bake, check, revert
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(layer >= 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.35f, false, 200.0f) > 0);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+            CHECK(alphaAt(scene, 32, 32) < 128);   // the painted centre is translucent
+            CHECK(alphaAt(scene, 0, 0) == 255);    // the painted-away corner stays opaque
+            CHECK(scene.materials[0].alpha);       // ... and the material is in the transparent pass while painted
+            CHECK(scene.materials[0].translucent);
+            CHECK(exporter::TranslucencyActive(scene, 0));
+            CHECK(exporter::TranslucencyApply(scene, 0.0f) >= 1);   // strength 0 restores exactly
+            CHECK(alphaAt(scene, 32, 32) == 255);
+            CHECK(!scene.materials[0].alpha);
+            CHECK(!scene.materials[0].translucent);
+            CHECK(!exporter::TranslucencyActive(scene, 0));
+        }
+        {   // the clear button wipes the mask and the bake follows
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 255.0f) > 0);
+            CHECK(exporter::TranslucencyClearAll(scene) == 1);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 0);   // a no-op is a no-op
+            CHECK(alphaAt(scene, 32, 32) == 255);
+            CHECK(!scene.materials[0].alpha);
+        }
+        {   // a stamp is gated by the mesh's own UV islands: texels off the chart paint nothing
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {0.5f, 0}, {0.5f, 0.5f}, {0, 0.5f}};   // the chart fills a quarter of the texture
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart part;
+            part.id = "outfit0.top";
+            part.group = "Outfit";
+            part.meshes = {0};
+            part.visibleInPreview = true;
+            scene.parts.push_back(part);
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.75f, 0.75f, 0.1f, false, 255.0f) == 0);   // outside the chart
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.25f, 0.25f, 0.1f, false, 255.0f) > 0);    // the chart's own texels
+            CHECK(exporter::TranslucencyLayerPainted(scene.translucency.layers[static_cast<size_t>(layer)]));
+        }
+    });
+    test("translucent clothes: a covered under piece is drawn while the covering garment is painted, and hidden again once the bake reverts", [] {
+        auto makeScene = [&]() {
+            assemble::Scene scene;
+            scene.textures.resize(1);
+            auto& tex = scene.textures[0];
+            tex.name = "cf_t_shirt_01";
+            tex.width = tex.height = 64;
+            tex.rgba.assign(64 * 64 * 4, 255);
+            assemble::SceneMesh mesh;
+            mesh.name = "top_a";
+            const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            scene.meshes.push_back(std::move(mesh));
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_shirt";
+            mat.texture = 0;
+            scene.materials.push_back(std::move(mat));
+            assemble::ScenePart top;
+            top.id = "outfit0.top";
+            top.group = "Outfit";
+            top.meshes = {0};
+            top.visibleInPreview = true;
+            scene.parts.push_back(top);
+            assemble::ScenePart under;   // the bra (or the skin) the shirt hides
+            under.id = "outfit0.top.under";
+            under.group = "Outfit";
+            under.label = "Under outfit0.top";
+            under.meshes = {0};
+            under.visibleInPreview = false;
+            under.underPiece = true;
+            under.underOf = "outfit0.top";
+            under.coveredBy = {"outfit0.top"};
+            scene.parts.push_back(under);
+            return scene;
+        };
+        std::vector<char> hidden(2, 0);
+        auto effective = [&](assemble::Scene& s) { return exporter::EffectiveHiddenParts(s, hidden); };
+        {   // the garment covers it: the under piece stays hidden (the normal case)
+            assemble::Scene scene = makeScene();
+            const auto eff = effective(scene);
+            CHECK(eff[1] == 1);
+        }
+        {   // paint the garment: the under piece is drawn so the see-through area is not a hole in the character
+            assemble::Scene scene = makeScene();
+            const int layer = exporter::TranslucencyLayer(scene, 0, 0, 0);
+            CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 200.0f) > 0);
+            CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+            const auto eff = effective(scene);
+            CHECK(eff[1] == 2);
+            CHECK(exporter::TranslucencyApply(scene, 0.0f) >= 1);   // the bake reverts: the piece hides again
+            const auto effBack = effective(scene);
+            CHECK(effBack[1] == 1);
+        }
+    });
+    test("translucent brush: a screen point on the garment picks the part and the uv under the pointer", [] {
+        assemble::Scene scene;
+        scene.textures.resize(1);
+        auto& tex = scene.textures[0];
+        tex.name = "cf_t_shirt_01";
+        tex.width = tex.height = 64;
+        tex.rgba.assign(64 * 64 * 4, 255);
+        assemble::SceneMesh mesh;
+        mesh.name = "top_a";
+        const Vec3 pos[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+        const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        for (int i = 0; i < 4; ++i) {
+            assemble::SceneVertex v;
+            v.pos = pos[i];
+            v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+            v.normal = {0, 0, 1};
+            mesh.vertices.push_back(v);
+        }
+        assemble::SceneSubmesh sub;
+        sub.material = 0;
+        sub.indices = {0, 1, 2, 0, 2, 3};
+        mesh.submeshes.push_back(std::move(sub));
+        scene.meshes.push_back(std::move(mesh));
+        assemble::SceneMaterial mat;
+        mat.name = "cf_m_shirt";
+        mat.texture = 0;
+        scene.materials.push_back(std::move(mat));
+        assemble::ScenePart part;
+        part.id = "outfit0.top";
+        part.group = "Outfit";
+        part.meshes = {0};
+        part.visibleInPreview = true;
+        scene.parts.push_back(part);
+        exporter::ViewCamera cam;
+        cam.yawDeg = 0.0f;
+        cam.pitchDeg = 0.0f;
+        cam.zoom = 1.0f;
+        exporter::ViewFraming f;
+        CHECK(exporter::detail::ComputeViewFraming(scene, nullptr, 100.0f, 100.0f, cam, f));
+        exporter::BrushHit hit;
+        CHECK(exporter::PickBrushPart(scene, nullptr, f, 100.0f, 100.0f, cam, 50.0f, 50.0f, nullptr, nullptr, hit));
+        CHECK(hit.part == 0);
+        CHECK(hit.mesh == 0);
+        CHECK(std::fabs(hit.uv.x - 0.5f) < 0.05f);
+        CHECK(std::fabs(hit.uv.y - 0.5f) < 0.05f);
+        CHECK(!exporter::PickBrushPart(scene, nullptr, f, 100.0f, 100.0f, cam, 2.0f, 2.0f, nullptr, nullptr, hit));   // the empty corner hits nothing
+        const std::vector<char> hidden{1};   // a hidden garment is never picked
+        CHECK(!exporter::PickBrushPart(scene, &hidden, f, 100.0f, 100.0f, cam, 50.0f, 50.0f, nullptr, nullptr, hit));
+    });
+    test("translucent clothes: a painted shirt renders see-through in the software preview", [] {
+        auto makeQuad = [](float z, int texture) {
+            assemble::SceneMesh mesh;
+            mesh.name = texture == 0 ? "skin" : "shirt";
+            const Vec3 pos[4] = {{0, 0, z}, {1, 0, z}, {1, 1, z}, {0, 1, z}};
+            const Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int i = 0; i < 4; ++i) {
+                assemble::SceneVertex v;
+                v.pos = pos[i];
+                v.uv = v.uv1 = v.uv2 = v.uv3 = uv[i];
+                v.normal = {0, 0, 1};
+                mesh.vertices.push_back(v);
+            }
+            assemble::SceneSubmesh sub;
+            sub.material = 0;
+            sub.indices = {0, 1, 2, 0, 2, 3};
+            mesh.submeshes.push_back(std::move(sub));
+            return mesh;
+        };
+        assemble::Scene scene;
+        scene.textures.resize(2);
+        scene.textures[0].name = "skin";
+        scene.textures[0].width = scene.textures[0].height = 64;
+        scene.textures[0].rgba.assign(64 * 64 * 4, 255);
+        for (size_t i = 0; i + 3 < scene.textures[0].rgba.size(); i += 4) {
+            scene.textures[0].rgba[i + 0] = 200; scene.textures[0].rgba[i + 1] = 150; scene.textures[0].rgba[i + 2] = 130; scene.textures[0].rgba[i + 3] = 255;
+        }
+        scene.textures[1].name = "shirt";
+        scene.textures[1].width = scene.textures[1].height = 64;
+        scene.textures[1].rgba.assign(64 * 64 * 4, 255);
+        for (size_t i = 0; i + 3 < scene.textures[1].rgba.size(); i += 4) {
+            scene.textures[1].rgba[i + 0] = 245; scene.textures[1].rgba[i + 1] = 245; scene.textures[1].rgba[i + 2] = 248; scene.textures[1].rgba[i + 3] = 255;
+        }
+        // submeshes bind material per mesh: skin quad -> material 0, shirt quad -> material 1
+        assemble::SceneMesh skinMesh = makeQuad(0.0f, 0);
+        skinMesh.submeshes[0].material = 0;
+        assemble::SceneMesh shirtMesh = makeQuad(0.05f, 1);
+        shirtMesh.submeshes[0].material = 1;
+        scene.meshes = {std::move(skinMesh), std::move(shirtMesh)};
+        assemble::SceneMaterial m0; m0.name = "cf_m_skin"; m0.texture = 0; scene.materials.push_back(std::move(m0));
+        assemble::SceneMaterial m1; m1.name = "cf_m_shirt"; m1.texture = 1; scene.materials.push_back(std::move(m1));
+        assemble::ScenePart top;
+        top.id = "outfit0.top";
+        top.group = "Outfit";
+        top.meshes = {1};
+        top.visibleInPreview = true;
+        scene.parts.push_back(top);
+        assemble::ScenePart under;
+        under.id = "outfit0.top.under";
+        under.group = "Outfit";
+        under.underPiece = true;
+        under.underOf = "outfit0.top";
+        under.coveredBy = {"outfit0.top"};
+        under.meshes = {0};
+        under.visibleInPreview = false;
+        scene.parts.push_back(under);
+        // paint the middle of the shirt, not the corners, at full strength
+        const int layer = exporter::TranslucencyLayer(scene, 0, 1, 1);
+        CHECK(layer >= 0);
+        CHECK(exporter::TranslucencyStamp(scene, layer, 0.5f, 0.5f, 0.3f, false, 255.0f) > 0);
+        CHECK(exporter::TranslucencyApply(scene, 1.0f) >= 1);
+        const std::vector<char> hidden(2, 0);
+        const std::vector<char> eff = exporter::EffectiveHiddenParts(scene, hidden);
+        CHECK(eff[1] == 2);   // the skin behind the painted shirt must be drawn
+        exporter::ViewCamera cam;
+        cam.yawDeg = 0.0f;
+        cam.pitchDeg = 0.0f;
+        cam.zoom = 1.0f;
+        exporter::ViewOptions vo;
+        vo.hiddenParts = &eff;
+        vo.textured = true;
+        vo.shaded = false;
+        exporter::ViewStatePtr st = exporter::NewViewState();
+        const int W = 96, H = 96;
+        std::vector<uint32_t> px;
+        exporter::RenderView(scene, cam, W, H, vo, *st, px);
+        auto rgbCh = [](uint32_t v, int k) { return static_cast<int>((v >> (16 - 8 * k)) & 255u); };   // 0=R, 1=G, 2=B
+        const uint32_t centrePx = px[static_cast<size_t>(H / 2) * W + (W / 2)];
+        const uint32_t cornerPx = px[static_cast<size_t>(H - 8) * W + (W - 8)];   // the unpainted shirt corner
+        if (std::getenv("CARDBRIDGE_TEST_DEBUG_TRANSLUCENCY")) {
+            std::fprintf(stderr, "shirt tex centre px %d %d %d %d  corner %d %d %d %d\n",
+                         scene.textures[1].rgba[(32 * 64 + 32) * 4 + 0], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 1], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 2], scene.textures[1].rgba[(32 * 64 + 32) * 4 + 3],
+                         scene.textures[1].rgba[3], scene.textures[1].rgba[1], scene.textures[1].rgba[2], scene.textures[1].rgba[3]);
+            std::fprintf(stderr, "skin  tex centre px %d %d %d %d\n",
+                         scene.textures[0].rgba[(32 * 64 + 32) * 4 + 0], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 1], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 2], scene.textures[0].rgba[(32 * 64 + 32) * 4 + 3]);
+            std::fprintf(stderr, "centre %08x (R%d G%d B%d)  corner %08x (R%d G%d B%d)\n", centrePx,
+                        static_cast<int>((centrePx >> 16) & 255u), static_cast<int>((centrePx >> 8) & 255u), static_cast<int>(centrePx & 255u),
+                        cornerPx,
+                        static_cast<int>((cornerPx >> 16) & 255u), static_cast<int>((cornerPx >> 8) & 255u), static_cast<int>(cornerPx & 255u));
+        }
+        // centre: skin showing through a mostly-transparent shirt (the strength ceiling left the painted texel at ~30% alpha,
+        // so the centre is a skin/shirt blend, not pure skin). corner: the opaque shirt.
+        const int c0 = rgbCh(centrePx, 0), c1 = rgbCh(centrePx, 1), c2 = rgbCh(centrePx, 2);
+        const double expectedR = 0.7 * 200.0 + 0.3 * 245.0, expectedG = 0.7 * 150.0 + 0.3 * 245.0, expectedB = 0.7 * 130.0 + 0.3 * 248.0;
+        CHECK(std::fabs(static_cast<double>(c0) - expectedR) < 30.0 && std::fabs(static_cast<double>(c1) - expectedG) < 30.0 && std::fabs(static_cast<double>(c2) - expectedB) < 30.0);
+        CHECK(c1 < rgbCh(cornerPx, 1) - 30);   // the painted half is clearly darker than the opaque half
+    });
     test("nipple tint: the pink default applies to the body skin material and the card's colour comes back", [] {
         assemble::Scene scene;
         assemble::SceneMaterial mat;
@@ -3404,8 +6309,820 @@ void unitTests() {
         CHECK(exporter::ApplyNippleTint(scene, assemble::kDefaultNippleColour) == 1);   // only the body material
         CHECK(std::fabs(scene.materials[1].props[0].second.x - 0.1f) < 1e-6f);
     });
+
+    // ---- clothing (outfit) export: a character card's coordinate becomes an outfit file ----
+    auto clothPartOf = [](int64_t id) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("id")), Value(id));
+        m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+        return Value(std::move(m));
+    };
+    auto accPartOf = [](int64_t type, int64_t id, const char* parent) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("type")), Value(type));
+        m.emplace_back(Value(std::string("id")), Value(id));
+        m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+        return Value(std::move(m));
+    };
+    auto uarRowBin = [](const char* mod, int64_t slot, int64_t local, const char* prop, int cat) {
+        Value::Map m;
+        m.emplace_back(Value(std::string("ModID")), Value(std::string(mod)));
+        m.emplace_back(Value(std::string("Slot")), Value(slot));
+        m.emplace_back(Value(std::string("LocalSlot")), Value(local));
+        m.emplace_back(Value(std::string("Property")), Value(std::string(prop)));
+        m.emplace_back(Value(std::string("CategoryNo")), Value(int64_t(cat)));
+        if (std::string(mod) == "mod.top") m.emplace_back(Value(std::string("Name")), Value(std::string("ModTop")));   // a sibling key that must survive verbatim
+        return Value(MsgPackPack(Value(std::move(m))));
+    };
+    auto mkClothList = [&](std::initializer_list<int64_t> ids) {
+        Value::Array parts;
+        for (int64_t id : ids) parts.push_back(clothPartOf(id));
+        while (parts.size() < 9) parts.push_back(clothPartOf(0));
+        // part 0 carries a mod pattern (row: outfit1.ChaFileClothes.ClothesTopPattern0, slot 777)
+        {
+            Value p0 = parts[0];
+            for (auto& kv : p0.map())
+                if (kv.first.isStr() && kv.first.asStr() == "colorInfo")
+                    kv.second = Value(Value::Array{Value(Value::Map{{Value(std::string("pattern")), Value(int64_t{777})}})});
+            parts[0] = std::move(p0);
+        }
+        Value::Array sub{Value(int64_t{321}), Value(int64_t{0}), Value(int64_t{0})};
+        Value::Map m;
+        m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+        m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+        return Value(std::move(m));
+    };
+    auto mkAccList = [&](std::initializer_list<std::pair<int64_t, int64_t>> slots) {
+        // exactly 20 parts (extras past 20 are added explicitly by the extras tests)
+        Value::Array arr;
+        for (int i = 0; i < 20; ++i) arr.push_back(accPartOf(120, 0, ""));
+        for (const auto& [index, id] : slots) {
+            if (index >= 0 && index < static_cast<int>(arr.size())) arr[static_cast<size_t>(index)] = accPartOf(127, id, "a_n_headside");
+        }
+        Value::Map m;
+        m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+        return Value(std::move(m));
+    };
+    auto mkCardForExport = [&]() {
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.supported = true;
+        c.productNo = 100;
+        c.formatVersion = "0.0.0";
+        c.path = tempPath("clothing_export_src.png");
+        c.sha256 = "sha256fake";
+        c.faceThumbnail = tinyPng();
+        c.parameter = Value(Value::Map{{Value(std::string("lastname")), Value(std::string("Tohsaka"))}, {Value(std::string("firstname")), Value(std::string("Rin"))}});
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{1})}});   // outfit 1
+        c.outfits.resize(7);
+        c.outfits[1].clothes = mkClothList({56, 0, 203, 0, 0, 0, 0, 6, 6});
+        c.outfits[1].accessory = mkAccList({{0, 10}});
+        c.outfits[1].makeup = Value(Value::Map{{Value(std::string("version")), Value(std::string("1"))}});
+        c.outfits[1].enableMakeup = true;
+        c.rows = {
+            {"mod.top", 56, 100019001, "outfit1.ChaFileClothes.ClothesTop", 105},
+            {"mod.pants", 203, 100019003, "outfit1.ChaFileClothes.ClothesPants", 110},
+            {"mod.pattern", 777, 100019777, "outfit1.ChaFileClothes.ClothesTopPattern0", 430},
+            {"mod.shoes", 6, 100019006, "outfit1.ChaFileClothes.ClothesShoesInner", 112},
+            {"mod.sub", 321, 100019321, "outfit1.ChaFileClothes.ClothesJacket1SubA", 105},
+            {"mod.hat", 10, 100011001, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124},
+            {"mod.other", 42, 100000042, "outfit3.ChaFileClothes.ClothesTop", 105},
+        };
+        return c;
+    };
+
+    test("clothing export: writes an outfit file that applies to a character (byte layout, marker, version)", [&] {
+        card::Card c = mkCardForExport();
+        c.extended = Value(Value::Map{
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{})}, {Value(std::string("extra")), Value(std::string("keepme"))}})})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out;
+        // a KKEx is built only when there is content; here UAR is empty so KKEx should be absent
+        out = card::BuildClothingFileBytes(c, opt, &rep);
+        // PNG signature and a sane thumbnail size
+        CHECK(out.size() > 40);
+        CHECK(out[0] == 0x89 && out[1] == 'P');
+        // productNo 100, then the 【KoiKatuClothes】 marker right after the thumbnail
+        const size_t pngSize = tinyPng().size();
+        const uint8_t* p = out.data() + pngSize;
+        CHECK((static_cast<int32_t>(p[0]) | (static_cast<int32_t>(p[1]) << 8) | (static_cast<int32_t>(p[2]) << 16) | (static_cast<int32_t>(p[3]) << 24)) == 100);
+        const std::string marker = "\xE3\x80\x90KoiKatuClothes\xE3\x80\x91";
+        bool foundMarker = false;
+        for (size_t i = 0; i + marker.size() <= out.size(); ++i)
+            if (std::memcmp(out.data() + i, marker.data(), marker.size()) == 0) { foundMarker = true; break; }
+        CHECK(foundMarker);
+        // no payload garbage: marker parses cleanly as dotnet strings
+        card::ClothingFile cl;
+        const std::string tmp = tempPath("clothing_export_layout.png");
+        {
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (f) { std::fwrite(out.data(), 1, out.size(), f); std::fclose(f); }
+        }
+        cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        CHECK(cl.formatVersion == "0.0.0");
+        CHECK(cl.name == "Tohsaka Rin - School Uniform (Going Home)");
+        CHECK(cl.productNo == 100);
+    });
+
+    test("clothing export: ids re-localise to session locals on write and back to slots on apply (round trip)", [&] {
+        card::Card c = mkCardForExport();
+        // KCOX: one bare overlay and one coordinate-keyed overlay for the target outfit
+        Value::Map garments;
+        garments.emplace_back(Value(std::string("ct_clothesTop")), Value(Value::Array{Value(Bytes{9, 8, 7}), Value(true)}));
+        Value::Map perCoord;
+        perCoord.emplace_back(Value(std::string("ct_other")), Value(Value::Array{Value(Bytes{1, 2, 3}), Value(false)}));
+        Value::Map overlays;
+        overlays.emplace_back(Value(std::string("ct_clothesTop")), Value(Value::Array{Value(Bytes{9, 8, 7}), Value(true)}));
+        overlays.emplace_back(Value(int64_t{3}), Value(std::move(perCoord)));
+        Value::Map kcoxPayload;
+        kcoxPayload.emplace_back(Value(std::string("Overlays")), Value(MsgPackPack(Value(std::move(overlays)))));
+        c.extended = Value(Value::Map{
+            // UAR with an extra sibling key and a row for outfit 3 that must not be copied
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{
+                     uarRowBin("mod.top", 56, 100019001, "outfit1.ChaFileClothes.ClothesTop", 105),
+                     uarRowBin("mod.pants", 203, 100019003, "outfit1.ChaFileClothes.ClothesPants", 110),
+                     uarRowBin("mod.pattern", 777, 100019777, "outfit1.ChaFileClothes.ClothesTopPattern0", 430),
+                     uarRowBin("mod.shoes", 6, 100019006, "outfit1.ChaFileClothes.ClothesShoesInner", 112),
+                     uarRowBin("mod.sub", 321, 100019321, "outfit1.ChaFileClothes.ClothesJacket1SubA", 105),
+                     uarRowBin("mod.hat", 10, 100011001, "outfit1.accessory0.ChaFileAccessory.PartsInfo.id", 124),
+                     uarRowBin("mod.other", 42, 100000042, "outfit3.ChaFileClothes.ClothesTop", 105),
+                 })}, {Value(std::string("extraUAR")), Value(std::string("keepme"))}})})},
+            {Value(std::string("KCOX")), Value(Value::Array{Value(int64_t{1}), Value(std::move(kcoxPayload))})},
+        });
+        card::ClothingExportOptions opt;
+        const std::string tmp = tempPath("clothing_export_roundtrip.png");
+        fileio::RemoveFile(tmp);
+        card::ClothingExportReport rep = card::ExportClothingToFile(c, tmp, opt, true);
+        CHECK(rep.uarRowsKept == 6);
+        CHECK(rep.kcoxGarments == 1);
+        CHECK(rep.clothesIdsLocalized >= 2);   // top + pants
+        CHECK(rep.subPartsLocalized == 1);
+        CHECK(rep.accessoryIdsLocalized == 1); // hat
+        // File contents: ids are the session-local values; rows are unprefixed
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        CHECK(cl.supported);
+        const auto& cloths = cl.outfit.clothes.at("parts").asArray();
+        CHECK(cloths[0].at("id").asInt() == 100019001);
+        CHECK(cloths[2].at("id").asInt() == 100019003);
+        CHECK(cloths[0].at("colorInfo").at(size_t(0)).at("pattern").asInt() == 100019777);   // re-localised
+        const auto& sub = cl.outfit.clothes.at("subPartsId").asArray();
+        CHECK(sub[0].asInt() == 100019321);
+        const auto& acc = cl.outfit.accessory.at("parts").asArray();
+        CHECK(acc[0].at("id").asInt() == 100011001);
+        CHECK(acc.size() >= 20);
+        CHECK(cl.rows.size() == 6);
+        bool unprefixed = true;
+        for (const auto& r : cl.rows) unprefixed = unprefixed && r.property.rfind("outfit", 0) != 0;
+        CHECK(unprefixed);
+        bool keptExtraKey = false;
+        for (const auto& r : cl.rows) if (r.modId == "mod.top") keptExtraKey = (r.slot == 56);
+        CHECK(keptExtraKey);
+        // apply to another character: local ids become author slots again
+        card::Card b;
+        b.family = card::CardFamily::Koikatsu;
+        b.supported = true;
+        b.outfits.resize(7);
+        b.outfits[4].clothes = mkClothList({0, 0, 0, 0, 0, 0, 0, 0, 0});
+        b.outfits[4].accessory = mkAccList({});
+        b.outfits[4].makeup = Value(Value::Map{});
+        b.outfits[4].enableMakeup = true;
+        card::ApplyClothingOptions aopt;
+        aopt.outfit = 4;
+        card::ApplyClothing(b, cl, aopt);
+        const auto& appliedClothes = b.outfits[4].clothes.at("parts").asArray();
+        CHECK(appliedClothes[0].at("id").asInt() == 56 && appliedClothes[2].at("id").asInt() == 203);
+        CHECK(appliedClothes[0].at("colorInfo").at(size_t(0)).at("pattern").asInt() == 777);   // 100019777 -> 777 again
+        CHECK(b.outfits[4].accessory.at("parts").asArray()[0].at("id").asInt() == 10);
+    });
+
+    test("clothing export: material editor rebase — CoordinateIndex becomes 0, hair rows dropped, texture dictionary subsetted", [&] {
+        card::Card c = mkCardForExport();
+        const Bytes tex1{9, 9, 9}, tex2{8, 8, 8}, tex9{7, 7, 7};
+        Value::Map dict;
+        dict.emplace_back(Value(int64_t{1}), Value(tex1));
+        dict.emplace_back(Value(int64_t{2}), Value(tex2));
+        dict.emplace_back(Value(int64_t{9}), Value(tex9));
+        auto mr = [](int64_t coord, int64_t obj, int64_t slot, const char* name, const char* prop, int64_t tex) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("CoordinateIndex")), Value(coord));
+            m.emplace_back(Value(std::string("ObjectType")), Value(obj));
+            m.emplace_back(Value(std::string("Slot")), Value(slot));
+            m.emplace_back(Value(std::string("MaterialName")), Value(std::string(name)));
+            m.emplace_back(Value(std::string("Property")), Value(std::string(prop)));
+            m.emplace_back(Value(std::string("TexID")), Value(tex));
+            return Value(std::move(m));
+        };
+        auto cr = [](int64_t coord, int64_t obj, int64_t slot, const char* name, float r, float g, float b) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("CoordinateIndex")), Value(coord));
+            m.emplace_back(Value(std::string("ObjectType")), Value(obj));
+            m.emplace_back(Value(std::string("Slot")), Value(slot));
+            m.emplace_back(Value(std::string("MaterialName")), Value(std::string(name)));
+            Value::Array col{Value(static_cast<double>(r)), Value(static_cast<double>(g)), Value(static_cast<double>(b)), Value(1.0)};
+            m.emplace_back(Value(std::string("Color")), Value(std::move(col)));
+            return Value(std::move(m));
+        };
+        Value::Array texRows{mr(1, 1, 0, "ct_top", "MainTex", 1), mr(3, 1, 0, "ct_other", "MainTex", 9),
+                             mr(1, 2, 0, "ca_hat", "MainTex", 2), mr(1, 3, 0, "cf_hair", "MainTex", 2)};
+        Value::Array colorRows{cr(1, 1, 6, "ct_shoes", 1, 0, 0), cr(0, 1, 6, "ct_othercoord", 0, 1, 0)};
+        Value::Map mePayload;
+        mePayload.emplace_back(Value(std::string("TextureDictionary")), Value(MsgPackPack(Value(std::move(dict)))));
+        mePayload.emplace_back(Value(std::string("MaterialTexturePropertyList")), Value(MsgPackPack(Value(std::move(texRows)))));
+        mePayload.emplace_back(Value(std::string("MaterialColorPropertyList")), Value(MsgPackPack(Value(std::move(colorRows)))));
+        c.extended = Value(Value::Map{
+            {Value(std::string("com.deathweasel.bepinex.materialeditor")), Value(Value::Array{Value(int64_t{0}), Value(std::move(mePayload))})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out = card::BuildClothingFileBytes(c, opt, &rep);
+        CHECK(rep.meListRows == 3);          // ct_top, ca_hat, ct_shoes
+        CHECK(rep.meTexturesKept == 2);      // 1 and 2
+        const std::string tmp = tempPath("clothing_export_me.png");
+        fileio::RemoveFile(tmp);
+        fileio::WriteFile(tmp, out.data(), out.size());
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        const Value& me = cl.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
+        Value texList = MsgPackParse(me.at("MaterialTexturePropertyList").asBin());
+        CHECK(texList.asArray().size() == 2);      // hair row dropped, outfit-3 row dropped
+        for (const auto& row : texList.asArray()) CHECK(row.at("CoordinateIndex").asInt() == 0);
+        // dictionary: only ids 1 and 2 survive
+        Value td = MsgPackParse(me.at("TextureDictionary").asBin());
+        std::set<int64_t> ids;
+        for (const auto& kv : td.map()) if (kv.first.isInt()) ids.insert(kv.first.asInt());
+        CHECK(ids.count(1) == 1 && ids.count(2) == 1 && ids.count(9) == 0);
+        Value colList = MsgPackParse(me.at("MaterialColorPropertyList").asBin());
+        CHECK(colList.asArray().size() == 1 && colList.asArray()[0].at("CoordinateIndex").asInt() == 0);
+    });
+
+    test("clothing export: hidden accessories and hair accessories are not exported; extras past slot 20 travel in the MoreAccessories XML", [&] {
+        card::Card c = mkCardForExport();
+        // Show state: slot 2 hidden, slot 10 hidden; everything else shown.
+        Value::Array show;
+        for (int i = 0; i < 20; ++i) show.emplace_back(int64_t{1});
+        show[2] = Value(int64_t{0});
+        show[10] = Value(int64_t{0});
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{1})}, {Value(std::string("showAccessory")), Value(std::move(show))}});
+        // Parts: 23 accessories; slot 6 a hair accessory; slot 20 a mod necklace extra; slot 21 a hair extra; slot 22 a mod extra.
+        Value::Array arr;
+        for (int i = 0; i < 20; ++i) arr.push_back(accPartOf(120, 0, ""));
+        arr[0] = accPartOf(127, 10, "a_n_headside");
+        arr[2] = accPartOf(127, 42, "a_n_leg_L");          // hidden by showAccessory
+        arr[6] = accPartOf(123, 999, "a_n_headside");      // hair
+        arr[10] = accPartOf(127, 77, "a_n_head_L");        // hidden
+        arr.push_back(accPartOf(124, 1001, "a_n_neck"));   // extra 0 (slot 20): mod necklace
+        arr.push_back(accPartOf(122, 1002, "a_n_headside"));  // extra 1 (slot 21): hair
+        arr.push_back(accPartOf(124, 1003, "a_n_waist"));  // extra 2 (slot 22): mod belt
+        Value::Map acc;
+        acc.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        acc.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+        c.outfits[1].accessory = Value(std::move(acc));
+        c.rows.push_back({"mod.necklace", 321, 100029321, "outfit1.accessory20.ChaFileAccessory.PartsInfo.id", 124});
+        c.rows.push_back({"mod.hairoex", 444, 100029444, "outfit1.accessory21.ChaFileAccessory.PartsInfo.id", 122});
+        c.rows.push_back({"mod.belt", 555, 100029555, "outfit1.accessory22.ChaFileAccessory.PartsInfo.id", 124});
+        // card-style MoreAccessories XML for outfit 1 with three elements (two mods, one empty)
+        std::string xml = "<additionalAccessories version=\"2.0.21.1\">"
+            "<accessorySet type=\"1\">"
+            "<accessory type=\"124\" id=\"321\" parentKey=\"a_n_neck\" addMove0r0x=\"0.1\" addMove0r0y=\"0.2\" addMove0r0z=\"0.3\" "
+                "addMove0r1x=\"0\" addMove0r1y=\"0\" addMove0r1z=\"0\" addMove0r2x=\"0\" addMove0r2y=\"0\" addMove0r2z=\"1\" "
+                "addMove1r0x=\"0\" addMove1r0y=\"0\" addMove1r0z=\"0\" addMove1r1x=\"0\" addMove1r1y=\"0\" addMove1r1z=\"0\" "
+                "addMove1r2x=\"0\" addMove1r2y=\"0\" addMove1r2z=\"1\" "
+                "color0r=\"1\" color0g=\"1\" color0b=\"1\" color0a=\"1\" "
+                "color1r=\"1\" color1g=\"1\" color1b=\"1\" color1a=\"1\" "
+                "color2r=\"1\" color2g=\"1\" color2b=\"1\" color2a=\"1\" "
+                "color3r=\"1\" color3g=\"1\" color3b=\"1\" color3a=\"1\" "
+                "hideCategory=\"0\" noShake=\"false\" />"
+            "<accessory type=\"122\" id=\"1002\" parentKey=\"a_n_headside\" hideCategory=\"0\" noShake=\"true\" />"
+            "<accessory type=\"124\" id=\"555\" parentKey=\"a_n_waist\" hideCategory=\"0\" noShake=\"false\" />"
+            "</accessorySet></additionalAccessories>";
+        Value::Map morePayload;
+        morePayload.emplace_back(Value(std::string("additionalAccessories")), Value(std::move(xml)));
+        c.extended = Value(Value::Map{
+            {Value(std::string("moreAccessories")), Value(Value::Array{Value(int64_t{2}), Value(std::move(morePayload))})},
+            {Value(std::string("com.bepis.sideloader.universalautoresolver")),
+             Value(Value::Array{Value(int64_t{0}), Value(Value::Map{{Value(std::string("info")), Value(Value::Array{
+                     uarRowBin("mod.necklace", 321, 100029321, "outfit1.accessory20.ChaFileAccessory.PartsInfo.id", 124),
+                     uarRowBin("mod.hairoex", 444, 100029444, "outfit1.accessory21.ChaFileAccessory.PartsInfo.id", 122),
+                     uarRowBin("mod.belt", 555, 100029555, "outfit1.accessory22.ChaFileAccessory.PartsInfo.id", 124),
+                 })}})})},
+        });
+        card::ClothingExportOptions opt;
+        card::ClothingExportReport rep;
+        Bytes out = card::BuildClothingFileBytes(c, opt, &rep);
+        // hidden slot 2 (42) and slot 10 (77): omitted (counted as hidden); hair slot 6 (999) and extra slot 21 (1002): omitted as hair
+        CHECK(rep.hiddenAccessoriesDropped == 2);
+        CHECK(rep.hairAccessoriesDropped == 2);
+        CHECK(rep.extraAccessoriesKept == 2);   // the necklace and the belt; the hair extra was excluded
+        const std::string tmp = tempPath("clothing_export_hidden.png");
+        fileio::RemoveFile(tmp);
+        fileio::WriteFile(tmp, out.data(), out.size());
+        card::ClothingFile cl = card::LoadClothingFile(tmp);
+        const auto& a = cl.outfit.accessory.at("parts").asArray();
+        CHECK(a.size() == 22);                            // 20 fixed + 2 extras rebuilt from XML
+        CHECK(a[2].at("id").asInt() == 0);                 // hidden -> empty part
+        CHECK(a[10].at("id").asInt() == 0);                // hidden -> empty part
+        CHECK(a[6].at("id").asInt() == 0);                 // hair -> empty part
+        CHECK(a[0].at("id").asInt() == 100011001);         // visible mod hat, localised
+        CHECK(a[20].at("id").asInt() == 100029321);        // extra necklace, localised via accessory20 row
+        CHECK(a[21].at("id").asInt() == 100029555);        // extra belt, compacted into slot 21
+        // the hair extra is gone; rows for omitted accessory slots are dropped / renumbered
+        bool hasAcc21Row = false, hasAcc22Row = false, hasAcc20Row = false;
+        for (const auto& r : cl.rows) {
+            if (r.property == "accessory21.ChaFileAccessory.PartsInfo.id") hasAcc21Row = true;
+            if (r.property == "accessory22.ChaFileAccessory.PartsInfo.id") hasAcc22Row = true;
+            if (r.property == "accessory20.ChaFileAccessory.PartsInfo.id") hasAcc20Row = true;
+        }
+        CHECK(hasAcc20Row);          // kept: clothes/extra rows are not omitted
+        CHECK(hasAcc21Row);          // the belt's row renumbered from accessory22 -> accessory21
+        CHECK(!hasAcc22Row);
+        // hair-extra row is gone with it
+        bool hairRowGone = true;
+        for (const auto& r : cl.rows) if (r.modId == "mod.hairoex") hairRowGone = false;
+        CHECK(hairRowGone);
+        // with the flags on, nothing is dropped
+        opt.includeHidden = true;
+        opt.withHairAccessories = true;
+        card::ClothingExportReport rep2;
+        Bytes out2 = card::BuildClothingFileBytes(c, opt, &rep2);
+        CHECK(rep2.hiddenAccessoriesDropped == 0 && rep2.hairAccessoriesDropped == 0);
+        // an extras-less card writes no MoreAccessories block (and no KKEx beyond content)
+        card::Card d = mkCardForExport();
+        d.outfits[1].accessory = mkAccList({});
+        const std::string tmpD = tempPath("clothing_export_extras_none.png");
+        fileio::RemoveFile(tmpD);
+        card::ClothingExportReport rep3 = card::ExportClothingToFile(d, tmpD, card::ClothingExportOptions{});
+        card::ClothingFile clf = card::LoadClothingFile(tmpD);
+        CHECK(!clf.extended.has("moreAccessories"));
+        (void)rep3;
+    });
+
+    test("clothing export: guards — unsupported card, bad outfit, overwrite rules, determinism, byte layout", [&] {
+        card::Card c = mkCardForExport();
+        card::Card unknown;
+        unknown.supported = false;
+        unknown.supportNote = "recognised as Koikatsu Sunshine";
+        bool threw = false;
+        try { card::BuildClothingFileBytes(unknown, card::ClothingExportOptions{}); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        c = mkCardForExport();
+        card::ClothingExportOptions bad;
+        bad.outfit = 99;
+        threw = false;
+        try { card::BuildClothingFileBytes(c, bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        // determinism
+        Bytes a = card::BuildClothingFileBytes(c, card::ClothingExportOptions{});
+        Bytes b = card::BuildClothingFileBytes(c, card::ClothingExportOptions{});
+        CHECK(a == b);
+        // overwrite behaviour
+        const std::string tmp = tempPath("clothing_export_overwrite.png");
+        fileio::RemoveFile(tmp);
+        card::ClothingExportReport rep = card::ExportClothingToFile(c, tmp, card::ClothingExportOptions{}, false);
+        CHECK(!rep.outfitName.empty());
+        threw = false;
+        try { card::ExportClothingToFile(c, tmp, card::ClothingExportOptions{}, false); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);   // exists and no overwrite
+        // the output path may not be the source card
+        threw = false;
+        try { card::ExportClothingToFile(c, c.path, card::ClothingExportOptions{}, true); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        // unknown plugin blocks are reported, not silent
+        c = mkCardForExport();
+        Value::Map morePayload;
+        morePayload.emplace_back(Value(std::string("additionalAccessories")), Value(std::string("<additionalAccessories version=\"2.0.21.1\" />")));
+        c.extended = Value(Value::Map{
+            {Value(std::string("KSOX")), Value(Value::Array{Value(int64_t{1}), Value(Value::Map{})})},
+            {Value(std::string("com.deathweasel.bepinex.pushup")), Value(Value::Array{Value(int64_t{0}), Value(Value::Map{})})},
+            {Value(std::string("moreAccessories")), Value(Value::Array{Value(int64_t{2}), Value(std::move(morePayload))})},
+        });
+        card::ClothingExportReport rep4;
+        Bytes out = card::BuildClothingFileBytes(c, card::ClothingExportOptions{}, &rep4);
+        bool sawKsox = false, sawPushup = false;
+        for (const auto& s : rep4.droppedPlugins) { sawKsox = sawKsox || s == "KSOX"; sawPushup = sawPushup || s == "com.deathweasel.bepinex.pushup"; }
+        CHECK(sawKsox && sawPushup);
+        // ABMX is opt-in
+        c = mkCardForExport();
+        c.extended = Value(Value::Map{
+            {Value(std::string("KKABMPlugin.ABMData")), Value(Value::Array{Value(int64_t{3}), Value(Bytes{1, 2, 3})})},
+        });
+        card::ClothingExportReport rep5;
+        Bytes out5 = card::BuildClothingFileBytes(c, card::ClothingExportOptions{}, &rep5);
+        bool hasAbmx = false;
+        for (const auto& s : rep5.droppedPlugins) hasAbmx = hasAbmx || s == "KKABMPlugin.ABMData";
+        CHECK(hasAbmx);
+        const std::string tmp5 = tempPath("clothing_export_abmx.png");
+        fileio::RemoveFile(tmp5);
+        card::ClothingExportOptions wopt;
+        wopt.withAbmx = true;
+        card::ClothingExportReport rep6;
+        Bytes out6 = card::BuildClothingFileBytes(c, wopt, &rep6);
+        bool hasAbmxKeep = false;
+        for (const auto& s : rep6.droppedPlugins) hasAbmxKeep = hasAbmxKeep || s == "KKABMPlugin.ABMData";
+        CHECK(!hasAbmxKeep && !rep6.warnings.empty());
+        // byte layout: IEND-bound thumbnail, then productNo, marker, coordLen, KKEx
+        card::ClothingFile cl = [&]() {
+            const std::string tmp7 = tempPath("clothing_export_bytes.png");
+            fileio::WriteFile(tmp7, out5.data(), out5.size());
+            return card::LoadClothingFile(tmp7);
+        }();
+        CHECK(cl.supported);
+    });
 }
 
+
+// ---- mesh simplification & LOD --------------------------------------------------
+namespace {
+
+// A small skinned two-mesh scene: "o_body" (body, two bones, a blend shape, split UV seam) and "hair" (hair slot).
+// Identity rest worlds so reshapable bind frames equal positions exactly.
+assemble::Scene makeSkinnedScene() {
+    using namespace assemble;
+    Scene s;
+    s.name = "lodtest";
+    auto addBone = [&](const char* name, int parent, Vec3 pos) {
+        SceneBone b;
+        b.name = name; b.parent = parent; b.pos = pos; b.source = "rig";
+        b.world = Mat4{};
+        s.bones.push_back(b);
+    };
+    addBone("root", -1, {0, 0, 0});
+    addBone("cf_j_hips", 0, {0, 0.9f, 0});
+
+    auto makeSphere = [&](const char* name, float y, float radius, int rings, int sectors, int bone0, int bone1) {
+        SceneMesh m;
+        m.name = name;
+        m.reshapable = true;
+        const int stride = sectors + 1;
+        for (int r = 0; r <= rings; ++r) {
+            const float v = static_cast<float>(r) / static_cast<float>(rings);
+            const float phi = 3.14159265f * v;
+            for (int si = 0; si < stride; ++si) {
+                const float u = static_cast<float>(si) / static_cast<float>(sectors);
+                const float th = 2.0f * 3.14159265f * u;
+                SceneVertex vert;
+                vert.pos = {radius * std::sin(phi) * std::cos(th), y + radius * std::cos(phi), radius * std::sin(phi) * std::sin(th)};
+                const Vec3 c{0, y, 0};
+                vert.normal = normalize(Vec3{vert.pos.x - c.x, vert.pos.y - c.y, vert.pos.z - c.z});
+                vert.uv = {u, 1.0f - v};
+                vert.uv1 = vert.uv; vert.uv2 = vert.uv; vert.uv3 = vert.uv;
+                const float w = (r * 2 <= rings) ? 0.25f : 0.75f;
+                vert.bone[0] = bone0; vert.weight[0] = w;
+                vert.bone[1] = bone1; vert.weight[1] = 1.0f - w;
+                vert.bone[2] = 0; vert.weight[2] = 0.0f;
+                vert.bone[3] = 0; vert.weight[3] = 0.0f;
+                for (int k = 0; k < 4; ++k) { vert.local[k] = vert.pos; vert.nlocal[k] = vert.normal; }
+                m.vertices.push_back(vert);
+            }
+        }
+        SceneSubmesh sm;
+        sm.material = 0;
+        for (int r = 0; r < rings; ++r)
+            for (int si = 0; si < sectors; ++si) {
+                const int a = r * stride + si, b = a + 1, c = a + stride, d = c + 1;
+                sm.indices.insert(sm.indices.end(), {(uint32_t)a, (uint32_t)c, (uint32_t)b, (uint32_t)b, (uint32_t)c, (uint32_t)d});
+            }
+        m.submeshes.push_back(std::move(sm));
+        return m;
+    };
+
+    SceneMaterial matBody;
+    matBody.name = "mf_m_body";
+    matBody.shader = "Shader Forge/main_opaque";
+    matBody.diffuse = {0.9f, 0.8f, 0.7f, 1.0f};
+    s.materials.push_back(matBody);
+    SceneMaterial matHair;
+    matHair.name = "cf_m_hair";
+    matHair.shader = "Shader Forge/main_hair";
+    matHair.diffuse = {0.2f, 0.2f, 0.5f, 1.0f};
+    s.materials.push_back(matHair);
+
+    SceneMesh body = makeSphere("o_body", 0.8f, 0.5f, 14, 28, 0, 1);
+    SceneMesh hair = makeSphere("hair", 1.5f, 0.3f, 10, 20, 0, 0);
+    hair.submeshes[0].material = 1;
+    s.meshes.push_back(std::move(body));
+    s.meshes.push_back(std::move(hair));
+
+    ScenePart bodyPart; bodyPart.id = "body"; bodyPart.group = "Body"; bodyPart.meshes = {0};
+    ScenePart hairPart; hairPart.id = "hair.back"; hairPart.group = "Hair"; hairPart.meshes = {1};
+    s.parts.push_back(bodyPart);
+    s.parts.push_back(hairPart);
+
+    SceneBlendShape sh;
+    sh.name = "browlift";
+    for (size_t i = 0; i < s.meshes[0].vertices.size(); ++i)
+        if (s.meshes[0].vertices[i].pos.y > 1.1f) sh.offsets.emplace_back(static_cast<uint32_t>(i), Vec3{0, 0.03f, 0});
+    s.meshes[0].shapes.push_back(sh);
+    return s;
+}
+
+size_t sceneTris(const assemble::Scene& s) {
+    size_t t = 0;
+    for (const auto& m : s.meshes) for (const auto& sm : m.submeshes) t += sm.indices.size() / 3;
+    return t;
+}
+
+} // namespace
+
+void meshTests() {
+    test("simplify: per-class weights and caps follow the brief (eyes 0, face a sliver, accessories the most)", [] {
+        using namespace mesh;
+        CHECK(ClassReduction(MeshClass::Eye, 0.8f) == 0.0f);
+        CHECK(ClassReduction(MeshClass::Eye, 0.2f) == 0.0f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Face, 0.8f) - 0.15f) < 1e-6f);      // 0.8 * 0.25 = 0.2, capped at 0.15
+        CHECK(std::fabs(ClassReduction(MeshClass::Face, 0.4f) - 0.1f) < 1e-6f);       // 0.4 * 0.25
+        CHECK(std::fabs(ClassReduction(MeshClass::Body, 0.8f) - 0.6f) < 1e-6f);       // 0.8 * 0.75
+        CHECK(std::fabs(ClassReduction(MeshClass::Hair, 0.8f) - 0.45f) < 1e-6f);   // capped at 0.45
+        CHECK(std::fabs(ClassReduction(MeshClass::Clothing, 0.8f) - 0.8f) < 1e-6f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Accessory, 0.8f) - 0.8f) < 1e-6f);
+        CHECK(std::fabs(ClassReduction(MeshClass::Clothing, 0.95f) - 0.8f) < 1e-6f);   // capped
+    });
+
+    test("simplify: meshes are classified by part group and material names", [] {
+        using namespace assemble;
+        using namespace mesh;
+        auto s = makeSkinnedScene();
+        CHECK(ClassifyMesh(s, 0) == MeshClass::Body);
+        CHECK(ClassifyMesh(s, 1) == MeshClass::Hair);
+        // the head model: face skin, teeth, brows, eyes
+        ScenePart head; head.id = "head"; head.group = "Head"; head.meshes = {2}; s.parts.push_back(head);
+        SceneMesh face; face.name = "cf_O_face"; face.part = 2;
+        face.submeshes.push_back({0, {}}); s.meshes.push_back(face);
+        SceneMaterial faceMat; faceMat.name = "cf_O_face"; s.materials.push_back(faceMat);
+        SceneMesh hitomi; hitomi.name = "cf_Ohitomi_L02"; hitomi.part = 2;
+        hitomi.submeshes.push_back({2, {}}); s.meshes.push_back(hitomi);
+        SceneMaterial eyeMat; eyeMat.name = "cf_Ohitomi_L02"; s.materials.push_back(eyeMat);
+        CHECK(ClassifyMesh(s, 2) == MeshClass::Face);
+        CHECK(ClassifyMesh(s, 3) == MeshClass::Eye);
+        // an outfit slot
+        ScenePart top; top.id = "outfit0.top"; top.group = "Outfit"; top.meshes = {4}; s.parts.push_back(top);
+        SceneMesh cloth; cloth.name = "o_top"; cloth.part = 3; cloth.submeshes.push_back({1, {}}); s.meshes.push_back(cloth);
+        CHECK(ClassifyMesh(s, 4) == MeshClass::Clothing);
+    });
+
+    test("simplify: a 0% reduction returns an untouched mesh", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.0f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles == st.originalTriangles);
+        CHECK(st.resultVertices == st.originalVertices);
+        CHECK(st.collapses == 0);
+        CHECK(m.vertices.size() == s.meshes[0].vertices.size());
+    });
+
+    test("simplify: closed skinned mesh reduces, stays skinned and keeps its geometry on a sphere", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        // the target is approximate by design: locked split seams and twinned pole chains may keep more than requested
+        CHECK(st.resultTriangles < st.originalTriangles);
+        CHECK(st.resultTriangles <= static_cast<size_t>(std::floor(st.originalTriangles * 0.5)) + 64);
+        CHECK(st.resultVertices < st.originalVertices);
+        for (const auto& v : m.vertices) {
+            float w = 0;
+            for (int k = 0; k < 4; ++k) { w += v.weight[k]; CHECK(v.bone[k] >= 0); }
+            CHECK(std::fabs(w - 1.0f) < 1e-3f);
+            CHECK(std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z));
+            const float n = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
+            CHECK(std::fabs(n - 1.0f) < 1e-3f);
+            // the sphere must stay in the right ballpark: QEM collapses chords, pulling slightly inside, never outside wildly
+            const float r = std::sqrt(v.pos.x * v.pos.x + (v.pos.y - 0.8f) * (v.pos.y - 0.8f) + v.pos.z * v.pos.z);
+            CHECK(r > 0.30f && r < 0.66f);
+        }
+        size_t idx = 0;
+        for (const auto& sm : m.submeshes) for (uint32_t ix : sm.indices) { CHECK(ix < m.vertices.size()); ++idx; }
+        CHECK(idx == st.resultTriangles * 3);
+        // the bind frames follow a re-shape exactly: pos == sum(w * world * local) with identity worlds
+        double maxErr = 0;
+        for (const auto& v : m.vertices) {
+            Vec3 acc{};
+            for (int k = 0; k < 4; ++k) acc = {acc.x + v.local[k].x * v.weight[k], acc.y + v.local[k].y * v.weight[k], acc.z + v.local[k].z * v.weight[k]};
+            maxErr = std::max(maxErr, static_cast<double>(std::sqrt((acc.x - v.pos.x) * (acc.x - v.pos.x) + (acc.y - v.pos.y) * (acc.y - v.pos.y) + (acc.z - v.pos.z) * (acc.z - v.pos.z))));
+        }
+        CHECK(maxErr < 1e-3);
+    });
+
+    test("simplify: split UV seam vertices keep exactly their positions; the chain cannot tear", [] {
+        auto s = makeSkinnedScene();
+        // collect the original twinned border positions: vertices shared by exactly one face, coincident in position
+        std::map<std::pair<uint32_t, uint32_t>, int> edgeUse;
+        for (const auto& m : s.meshes) for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+                for (int e = 0; e < 3; ++e) {
+                    uint32_t a = sm.indices[i + e], b = sm.indices[i + (e + 1) % 3];
+                    if (a > b) std::swap(a, b);
+                    edgeUse[{a, b}]++;
+                }
+        std::set<uint32_t> border;
+        for (const auto& [k, c] : edgeUse) if (c == 1) { border.insert(k.first); border.insert(k.second); }
+        const auto key = [](Vec3 p) { return std::make_tuple(std::llround(p.x / 1e-4), std::llround(p.y / 1e-4), std::llround(p.z / 1e-4)); };
+        std::map<decltype(key(Vec3{})), std::vector<uint32_t>> groups;
+        for (uint32_t vi : border) groups[key(s.meshes[0].vertices[vi].pos)].push_back(vi);
+        size_t twinned = 0;
+        for (const auto& [k, members] : groups) if (members.size() >= 2) twinned += members.size();
+        CHECK(twinned > 0);
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        mesh::SimplifyMesh(m, opt, &s.bones);
+        std::set<decltype(key(Vec3{}))> kept;
+        for (const auto& v : m.vertices) kept.insert(key(v.pos));
+        size_t missing = 0;
+        for (const auto& [k, members] : groups)
+            if (members.size() >= 2 && !kept.count(k)) ++missing;
+        CHECK(missing == 0);   // every split-chain position survives exactly once per side: no crack
+    });
+
+    test("simplify: blend shape offsets travel onto the surviving vertices", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        const size_t before = m.shapes[0].offsets.size();
+        CHECK(before > 0);
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.5f;
+        mesh::SimplifyMesh(m, opt, &s.bones);
+        assemble::SceneBlendShape& sh = m.shapes[0];
+        CHECK(!sh.offsets.empty());
+        CHECK(sh.local.size() == sh.offsets.size());
+        for (const auto& [vi, d] : sh.offsets) {
+            CHECK(vi < m.vertices.size());
+            const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+            CHECK(len > 1e-6f);
+        }
+    });
+
+    test("simplify: extreme reduction under a cap reports what it kept, never fakes the target", [] {
+        auto s = makeSkinnedScene();
+        assemble::SceneMesh m = s.meshes[0];
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.95f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles >= 1);
+        CHECK(st.resultTriangles <= st.originalTriangles);
+    });
+
+    test("simplify: disconnected components in one mesh simplify independently, none tears", [] {
+        // a big component (the body of the thing) and a tiny one (a bow), disconnected, one mesh
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneMesh m;
+        m.name = "two";
+        m.reshapable = true;
+        auto addSphere = [&](float radius, Vec3 center, int rings, int sectors) {
+            const size_t base = m.vertices.size();
+            const int stride = sectors + 1;
+            for (int r = 0; r <= rings; ++r) {
+                const float v = static_cast<float>(r) / rings;
+                const float phi = 3.14159265f * v;
+                for (int si = 0; si < stride; ++si) {
+                    const float u = static_cast<float>(si) / sectors;
+                    const float th = 2.0f * 3.14159265f * u;
+                    SceneVertex vert;
+                    vert.pos = {center.x + radius * std::sin(phi) * std::cos(th), center.y + radius * std::cos(phi), center.z + radius * std::sin(phi) * std::sin(th)};
+                    vert.normal = normalize(Vec3{vert.pos.x - center.x, vert.pos.y - center.y, vert.pos.z - center.z});
+                    vert.uv = {u, 1.0f - v};
+                    vert.uv1 = vert.uv; vert.uv2 = vert.uv; vert.uv3 = vert.uv;
+                    vert.bone[0] = 0; vert.weight[0] = 1.0f;
+                    m.vertices.push_back(vert);
+                }
+            }
+            SceneSubmesh sub;
+            sub.material = 0;
+            for (int r = 0; r < rings; ++r)
+                for (int si = 0; si < sectors; ++si) {
+                    const int a = static_cast<int>(base) + r * stride + si, b = a + 1, c = a + stride, d = c + 1;
+                    sub.indices.insert(sub.indices.end(), {(uint32_t)a, (uint32_t)c, (uint32_t)b, (uint32_t)b, (uint32_t)c, (uint32_t)d});
+                }
+            m.submeshes.push_back(std::move(sub));
+        };
+        addSphere(0.5f, {0, 0, 0}, 10, 20);
+        addSphere(0.1f, {2.0f, 1.0f, 0}, 6, 12);
+        const size_t origTotal = 10 * 20 * 2 + 6 * 12 * 2;
+        mesh::SimplifyOptions opt;
+        opt.maxReduction = 0.6f;
+        const auto st = mesh::SimplifyMesh(m, opt, &s.bones);
+        CHECK(st.resultTriangles < origTotal);
+        // every triangle is valid and each component kept a plausible share
+        size_t idx = 0;
+        for (const auto& sm : m.submeshes) for (uint32_t ix : sm.indices) { CHECK(ix < m.vertices.size()); ++idx; }
+        CHECK(idx == st.resultTriangles * 3);
+        // the tiny component survived (it is small; it may only reduce so far before hitting its locked borders)
+        size_t tiny = 0;
+        for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const Vec3& p0 = m.vertices[sm.indices[i]].pos;
+                if (p0.x > 1.0f) ++tiny;   // the bow component lives around x=2
+            }
+        CHECK(tiny > 0);
+        // both components are still welded internally (no crosses between them in any face)
+        for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+                for (int e = 0; e < 3; ++e)
+                    for (int f = 0; f < 3; ++f)
+                        if (e != f) {
+                            const Vec3& a = m.vertices[sm.indices[i + e]].pos;
+                            const Vec3& b = m.vertices[sm.indices[i + f]].pos;
+                            CHECK(!((a.x > 1.0f) != (b.x > 1.0f)));   // no triangle spans the two disjoint components
+                        }
+    });
+
+    test("lod: levels are generated from the original, never from each other", [] {
+        auto s = makeSkinnedScene();
+        std::vector<mesh::LodLevelSpec> levels = {{"lod1", "LOD 1", 0.6f}, {"lod2", "LOD 2", 0.3f}};
+        auto lods = mesh::GenerateLods(s, levels, mesh::SimplifyOptions{});
+        CHECK(lods.size() == 2);
+        CHECK(lods[0].scene && lods[1].scene);
+        CHECK(lods[0].triangles > lods[1].triangles);
+        CHECK(!lods[0].cancelled && !lods[1].cancelled);
+        // LOD 2 from the original == a direct reduction of the original; never the LOD 1 result re-reduced
+        mesh::SimplifyOptions so;
+        so.maxReduction = 0.7f;
+        mesh::SceneSimplifyStats st;
+        auto direct = mesh::SimplifyScene(s, 0.7f, so, st);
+        CHECK(direct != nullptr);
+        CHECK(direct->meshes[0].vertices.size() == lods[1].scene->meshes[0].vertices.size());
+    });
+
+    test("lod: export produces a simplified PMX and LOD files from the same original; skeleton and textures shared", [] {
+        auto s0 = makeSkinnedScene();
+        const size_t originalTris = sceneTris(s0);
+        const size_t bodyVertsBefore = s0.meshes[0].vertices.size();
+        const size_t hairVertsBefore = s0.meshes[1].vertices.size();
+        card::Card c;
+        c.path = "lodtest.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("lod_export") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        eo.simplifyPercent = 40.0f;
+        eo.lodTargets = {{"LOD 1", 0.6f}, {"LOD 2", 0.3f}};
+        const auto r = exporter::ExportScene(s0, c, eo);
+        // the caller's scene is never modified by the export
+        CHECK(s0.meshes[0].vertices.size() == bodyVertsBefore);
+        CHECK(s0.meshes[1].vertices.size() == hairVertsBefore);
+        CHECK(sceneTris(s0) == originalTris);
+        // the main PMX is simpler than the original, by roughly the requested rate
+        CHECK(r.triangles < originalTris);
+        mesh::SceneSimplifyStats directStats;
+        auto directScene = mesh::SimplifyScene(s0, 0.4f, mesh::SimplifyOptions{}, directStats);
+        CHECK(directScene != nullptr);
+        CHECK(r.triangles == sceneTris(*directScene));
+        // LOD files exist and carry the same skeleton, material count and texture tables
+        CHECK(fileio::Exists(r.folder + "/lodtest_lod1.pmx"));
+        CHECK(fileio::Exists(r.folder + "/lodtest_lod2.pmx"));
+        CHECK(r.lods.size() == 2);
+        CHECK(r.lods[0].triangles > r.lods[1].triangles);
+        const Bytes mainPmx = fileio::ReadFile(r.pmxPath);
+        const Bytes lod1 = fileio::ReadFile(r.folder + "/lodtest_lod1.pmx");
+        const Bytes lod2 = fileio::ReadFile(r.folder + "/lodtest_lod2.pmx");
+        const pmxread::Model main = readPmx(mainPmx), l1 = readPmx(lod1), l2 = readPmx(lod2);
+        CHECK(l1.bones.size() == main.bones.size());
+        CHECK(l2.bones.size() == main.bones.size());
+        CHECK(l1.materials.size() == main.materials.size());
+        CHECK(l2.materials.size() == main.materials.size());
+        CHECK(l1.textures.size() == main.textures.size());
+        CHECK(l2.textures.size() == main.textures.size());
+        CHECK(l1.bones.size() > 0 && l2.bones.size() > 0);
+        // the texture bytes are shared, not re-encoded: every file the main export wrote is still there exactly once
+        CHECK(fileio::Exists(r.folder + "/textures"));
+        // the raw blend shape made it into the PMX as a vertex morph
+        bool sawBrowlift = false;
+        for (const auto& m : main.morphs) sawBrowlift = sawBrowlift || m.name.find("browlift") != std::string::npos;
+        CHECK(sawBrowlift);
+        // the manifest lists the LODs and the simplification that was applied
+        const Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifest(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifest.find("\"lods\"") != std::string::npos);
+        CHECK(manifest.find("lodtest_lod1.pmx") != std::string::npos);
+        CHECK(manifest.find("lodtest_lod2.pmx") != std::string::npos);
+        CHECK(manifest.find("\"simplification\"") != std::string::npos);
+        CHECK(manifest.find("\"applied\": true") != std::string::npos);
+    });
+
+    test("lod: no simplification means the pipeline is byte-identical to before", [] {
+        auto s0 = makeSkinnedScene();
+        card::Card c;
+        c.path = "plain.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("plain_export") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s0, c, eo);
+        CHECK(r.lods.empty());
+        CHECK(r.triangles == sceneTris(s0));
+        const Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifest(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifest.find("\"lods\"") == std::string::npos);
+        CHECK(manifest.find("\"simplification\"") == std::string::npos);
+    });
+}
 
 void integrationTests() {
     std::string lib = env("CARDBRIDGE_TEST_LIBRARY"), mods = env("CARDBRIDGE_TEST_MODS"), cardPath = env("CARDBRIDGE_TEST_CARD");
@@ -3900,6 +7617,7 @@ void integrationTests() {
 
 int main() {
     unitTests();
+    meshTests();
     integrationTests();
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;

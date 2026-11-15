@@ -12,3 +12,6 @@ out/
 /sidecar/out/
 /sidecar/bin/
 __pycache__/
+
+# Compiled one-off diagnostic probes (sources are committed, binaries are not)
+/tools/*.exe

@@ -191,6 +191,36 @@ size_t bundleBytes(const std::shared_ptr<unity::UnityFile>& f) {
     // table) is accounted roughly on top so the cap is not understated.
     return f ? f->serialized().bundle().dataSize() + f->serialized().objects().size() * 32 + 65536 : 0;
 }
+// The decoded-texture cache holds raw RGBA for the character's bundles. 384 MB covers a big
+// card (a 4096 face texture is 64 MB); CARDBRIDGE_TEXTURE_CACHE_MB tunes it, 0 disables.
+constexpr size_t kTextureCacheCapDefault = 384ull * 1024 * 1024;
+size_t textureCacheCap() {
+    static const size_t cap = [] {
+        const char* v = std::getenv("CARDBRIDGE_TEXTURE_CACHE_MB");
+        if (!v || !*v) return kTextureCacheCapDefault;
+        const long long mb = std::atoll(v);
+        return mb <= 0 ? size_t{0} : static_cast<size_t>(mb) * 1024ull * 1024ull;
+    }();
+    return cap;
+}
+// The source's identity for cache keys: its size and last-write ticks (or false when it cannot be statted).
+bool statIdentity(const std::string& statPath, std::string& id) {
+    if (statPath.empty()) return false;
+    try {
+        const uint64_t sz = fileio::FileSize(statPath);
+        const int64_t ticks = fileio::LastWriteTicks(statPath);
+        if (!sz && !ticks) return false;
+        id = std::to_string(sz) + "|" + std::to_string(ticks);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+std::string textureCacheKey(const std::string& source, const std::string& statPath, int64_t pathId) {
+    std::string id;
+    if (!statIdentity(statPath, id)) return {};
+    return source + "|" + id + "#" + std::to_string(pathId);
+}
 } // namespace
 
 std::shared_ptr<unity::UnityFile> Resolver::cacheFind(const std::string& key) {
@@ -243,6 +273,55 @@ size_t Resolver::cacheBytes() const {
     return cacheBytes_;
 }
 
+std::shared_ptr<unity::TextureData> Resolver::cachedDecodedTexture(const std::string& source, const std::string& statPath, int64_t pathId) {
+    const size_t cap = textureCacheCap();
+    if (cap == 0 || source.empty()) return nullptr;
+    const std::string key = textureCacheKey(source, statPath, pathId);
+    if (key.empty()) return nullptr;
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    auto it = textureCacheByKey_.find(key);
+    if (it == textureCacheByKey_.end()) return nullptr;
+    textureCache_.splice(textureCache_.begin(), textureCache_, it->second);
+    return it->second->second;
+}
+
+void Resolver::cacheDecodedTexture(const std::string& source, const std::string& statPath, int64_t pathId, const std::shared_ptr<unity::TextureData>& tex) {
+    const size_t cap = textureCacheCap();
+    if (cap == 0 || source.empty() || !tex) return;
+    const size_t bytes = tex->rgba.size();
+    if (bytes > cap) return;   // a single texture bigger than the cache: keep the old policy of never caching it
+    const std::string key = textureCacheKey(source, statPath, pathId);
+    if (key.empty()) return;
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    auto old = textureCacheByKey_.find(key);
+    if (old != textureCacheByKey_.end()) {
+        textureCacheBytes_ -= old->second->second->rgba.size();
+        textureCache_.erase(old->second);
+        textureCacheByKey_.erase(old);
+    }
+    textureCache_.emplace_front(key, tex);
+    textureCacheByKey_[key] = textureCache_.begin();
+    textureCacheBytes_ += bytes;
+    while (textureCacheBytes_ > cap && textureCache_.size() > 1) {
+        auto& back = textureCache_.back();
+        textureCacheBytes_ -= back.second->rgba.size();
+        textureCacheByKey_.erase(back.first);
+        textureCache_.pop_back();
+    }
+}
+
+size_t Resolver::decodedCacheBytes() const {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    return textureCacheBytes_;
+}
+
+void Resolver::clearDecodedCache() {
+    std::lock_guard<std::mutex> lk(cacheMutex_);
+    textureCache_.clear();
+    textureCacheByKey_.clear();
+    textureCacheBytes_ = 0;
+}
+
 std::shared_ptr<unity::UnityFile> Resolver::openBaseBundle(const std::string& rel, std::string* why) {
     std::string key = "base:" + rel;
     if (auto hit = cacheFind(key)) return hit;
@@ -251,6 +330,38 @@ std::shared_ptr<unity::UnityFile> Resolver::openBaseBundle(const std::string& re
     try {
         auto b = unity::UnityBundle::Open(fileio::ReadFile(path), rel);
         auto uf = std::make_shared<unity::UnityFile>(b);
+        uf->setSource(path, path);
+        cachePut(key, uf);
+        return uf;
+    } catch (const std::exception& e) {
+        if (why) *why = std::string(e.what());
+        return nullptr;
+    }
+}
+
+namespace {
+std::string lowerOf(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; }
+}
+
+std::shared_ptr<unity::UnityFile> Resolver::openShaderBundle(const std::string& name, std::string* why) {
+    std::string bundleRel;
+    const ModEntry* entry = mods_.findShader(name, &bundleRel);
+    if (!entry) { if (why) *why = "no installed mod declares shader '" + name + "' (<MaterialEditor><Shader> in manifest.xml)"; return nullptr; }
+    if (bundleRel.empty()) { if (why) *why = "mod '" + entry->name + "' declares shader '" + name + "' with no AssetBundle"; return nullptr; }
+    std::string key = "shaderbundle:" + entry->path + "|" + bundleRel;
+    if (auto hit = cacheFind(key)) return hit;
+    std::string want = "abdata/" + bundleRel;
+    std::string lowerWant = lowerOf(want);
+    try {
+        ZipArchive z(entry->path);
+        const ZipArchive::Entry* found = z.find(want);
+        if (!found)
+            for (const auto& e : z.entries())
+                if (lowerOf(e.name) == lowerWant) { found = &e; break; }
+        if (!found) { if (why) *why = "bundle '" + want + "' (declared by mod '" + entry->name + "') is not inside " + entry->path; return nullptr; }
+        auto b = unity::UnityBundle::Open(z.read(*found), bundleRel);
+        auto uf = std::make_shared<unity::UnityFile>(b);
+        uf->setSource(entry->path + "|" + bundleRel, entry->path);
         cachePut(key, uf);
         return uf;
     } catch (const std::exception& e) {
@@ -304,10 +415,6 @@ std::shared_ptr<unity::UnityFile> Resolver::openBundle(const ResolvedItem& item,
     return openItemBundle(item, rel, why);
 }
 
-namespace {
-std::string lowerOf(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; }
-}
-
 void Resolver::registerBundleProvider(const ResolvedItem& item) {
     if (item.status != ItemStatus::ResolvedMod || item.modPath.empty()) return;
     std::string rel = item.bundleRel();
@@ -359,6 +466,7 @@ std::shared_ptr<unity::UnityFile> Resolver::openItemBundle(const ResolvedItem& i
         }
         auto b = unity::UnityBundle::Open(z.read(*found), rel);
         auto uf = std::make_shared<unity::UnityFile>(b);
+        uf->setSource(modPath + "|" + rel, modPath);
         cachePut(key, uf);
         return uf;
     } catch (const std::exception& e) {

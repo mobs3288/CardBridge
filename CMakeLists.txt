@@ -64,6 +64,8 @@ add_library(cardbridge_core STATIC
     src/core/MsgPack.cpp
     src/core/ZipArchive.cpp
     src/card/CardFile.cpp
+    src/card/SelectiveImport.cpp
+    src/card/ClothingExport.cpp
     src/card/MaterialEdits.cpp
     src/card/Abmx.cpp
     src/unity/UnityBundle.cpp
@@ -74,6 +76,7 @@ add_library(cardbridge_core STATIC
     src/resolve/ListTable.cpp
     src/resolve/Resolver.cpp
     src/assemble/Assembler.cpp
+    src/assemble/Proportions.cpp
     src/assemble/AutoCloth.cpp
     src/assemble/HeelConfig.cpp
     src/assemble/DynamicBone.cpp
@@ -86,16 +89,24 @@ add_library(cardbridge_core STATIC
     src/export/PmxPhysics.cpp
     src/export/PmxIk.cpp
     src/export/MmdNames.cpp
+    src/export/MorphCatalog.cpp
     src/export/SkeletonOverlay.cpp
     src/export/MoveGizmo.cpp
+    src/export/OutfitIcon.cpp
+    src/export/OutfitTemplate.cpp
     src/export/Preview.cpp
     src/export/SkinShade.cpp
+    src/export/Translucency.cpp
+    src/export/SkinAoBake.cpp
     src/export/GpuView.cpp
     src/export/ViewMode.cpp
     src/export/ShaderLayer.cpp
     src/export/ColourGrade.cpp
     src/library/Library.cpp
     src/shape/Shape.cpp
+    src/measure/BodyMeasure.cpp
+    src/mesh/Simplify.cpp
+    src/mesh/Lod.cpp
     src/material/MaterialWorkbench.cpp
     src/material/UvDiagnostics.cpp
     src/shader/Dxbc.cpp
@@ -138,14 +149,14 @@ if(WIN32)
             OUTPUT ${VIEWER_RES}
             COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc viewer_res.o
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.manifest
             VERBATIM)
     endif()
     add_executable(cardbridge_viewer WIN32 viewer/main.cpp viewer/Ui.cpp ${VIEWER_RES})
     target_link_libraries(cardbridge_viewer PRIVATE cardbridge_core)
     if(NOT MSVC)
         target_link_options(cardbridge_viewer PRIVATE -municode -static)
-        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32 gdiplus)
+        target_link_libraries(cardbridge_viewer PRIVATE comdlg32 shell32 ole32 gdiplus comctl32)
     endif()
 endif()
 
@@ -153,6 +164,14 @@ add_executable(cardbridge_tests tests/cardbridge_tests.cpp)
 target_link_libraries(cardbridge_tests PRIVATE cardbridge_core stb_image)
 if(WIN32 AND NOT MSVC)
     target_link_options(cardbridge_tests PRIVATE -static)
+endif()
+
+# Regression tests for the performance work (the timing recorder, the LZ4 block
+# handling, the decoded-texture cache). Pure core; no game files needed.
+add_executable(cardbridge_perf_tests tests/perf_regression.cpp)
+target_link_libraries(cardbridge_perf_tests PRIVATE cardbridge_core)
+if(WIN32 AND NOT MSVC)
+    target_link_options(cardbridge_perf_tests PRIVATE -static)
 endif()
 
 # Independent PMX read-back with the engine's own loader (shares no code with

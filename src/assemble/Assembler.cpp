@@ -2,6 +2,7 @@
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
+#include "assemble/Proportions.h"
 #include "unity/TextureDecode.h"
 
 #include "core/Bytes.h"
@@ -11,7 +12,9 @@
 #include "material/MaterialWorkbench.h"
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
+#include "core/Timing.h"
 #include "export/Preview.h"
+#include "export/SkinAoBake.h"
 #include "export/SkinShade.h"
 
 #include <algorithm>
@@ -109,6 +112,26 @@ void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, cons
         if (m->hasRotation()) { o.rot = quatMul(baseRot, shape::EulerToQuat(m->rotation)); o.hasRot = true; }
         if (m->hasLength()) o.pos = basePos * m->length + m->position;
         else if (m->hasPosition()) o.pos = basePos + m->position;
+        ov[x->name] = o;
+    }
+}
+
+// Proportion corrections on a pose's bone: a multiplier on the bone's local scale, applied after the shape and after ABMX.
+// Mirrors how ABMX multiplies (never touches rotation / position). Prefab bones that carry a correction but no other
+// override are inserted into the map the same way ABMX does.
+void applyProportionBoneScales(Overrides& ov, UnityFile& uf, const std::string& prefabName, const ProportionLayer& layer) {
+    if (layer.empty()) return;
+    const int64_t root = uf.findPrefabRoot(prefabName);
+    if (!root) return;
+    for (int64_t id : uf.subtree(root)) {
+        const unity::Xform* x = uf.xform(id);
+        if (!x) continue;
+        const CorrectionOp* op = layer.forBone(x->name);
+        if (!op) continue;
+        LocalOverride o;
+        o.pos = x->pos; o.scl = x->scl; o.rot = x->rot; o.hasRot = false;
+        if (auto it = ov.find(x->name); it != ov.end()) o = it->second;
+        o.scl = {o.scl.x * op->scaleMul.x, o.scl.y * op->scaleMul.y, o.scl.z * op->scaleMul.z};
         ov[x->name] = o;
     }
 }
@@ -247,8 +270,9 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     const Value& vals = card.body.at("shapeValueBody");
     std::vector<float> v;
     for (size_t i = 0; i < vals.size(); ++i) v.push_back(static_cast<float>(vals.at(i).asFloat()));
-    // Viewer sliders: a value the user set replaces the card's own.
+    // Viewer sliders: a value the user set replaces the card's own, then the optional proportion-correction layer overrides that.
     for (size_t i = 0; i < v.size() && i < opt.bodyShape.size(); ++i) v[i] = opt.bodyShape[i];
+    for (size_t i = 0; i < v.size(); ++i) v[i] = SliderValueCorrected(v[i], opt.proportionLayer, kBodySlider, static_cast<int>(i));
     if (v.size() > 13) {
         float nip = opt.nippleInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
@@ -362,6 +386,7 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     const bool neutral = std::getenv("CARDBRIDGE_FACE_NEUTRAL") != nullptr;   // debug: every slider at 0.5
     for (size_t i = 0; i < vals.size(); ++i) {
         float fv = i < opt.faceShape.size() ? opt.faceShape[i] : static_cast<float>(vals.at(i).asFloat());
+        fv = SliderValueCorrected(fv, opt.proportionLayer, kFaceSlider, static_cast<int>(i));
         shape::ChangeValue(S, anm, cats, static_cast<int>(i), neutral ? 0.5f : fv);
     }
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) {
@@ -632,7 +657,16 @@ struct Builder {
         auto it = textureCache.find(key);
         if (it != textureCache.end()) return it->second;
         std::string why;
-        auto t = uf.readTexture(p, &why);
+        std::shared_ptr<unity::TextureData> t;
+        if (resolverPtr && !uf.source().empty())
+            if (auto bound = resolverPtr->cachedDecodedTexture(uf.source(), uf.statPath(), p.pathId))
+                t = std::make_shared<unity::TextureData>(*bound);
+        if (!t) {
+            if (auto fresh = uf.readTexture(p, &why)) {
+                t = std::make_shared<unity::TextureData>(std::move(*fresh));
+                if (resolverPtr && !uf.source().empty()) resolverPtr->cacheDecodedTexture(uf.source(), uf.statPath(), p.pathId, t);
+            }
+        }
         int result = -1;
         if (!t) {
             scene.warn(partId, "texture not loaded: " + why);
@@ -690,6 +724,25 @@ struct Builder {
                 std::string n = v.at("m_ParsedForm").at("m_Name").asStr();
                 if (n.empty()) n = v.at("m_Name").asStr();
                 if (n == name) { result = shaderFor(*f, o->pathId, name); break; }
+            }
+        }
+        // Sideloader's shader registration: a mod that ships a shader declares it in manifest.xml
+        // (<MaterialEditor><Shader Name="..." AssetBundle="...">) and the game's Shader.Find binds it there.
+        // An outfit authored against a mod shader (IBL_Shader_alpha) is meant to run with it; without it
+        // the fallback keeps the blending mode but loses the mod's own lighting.
+        if (result < 0 && resolverPtr) {
+            std::string why;
+            auto f = resolverPtr->openShaderBundle(name, &why);
+            if (!f) {
+                if (std::getenv("CARDBRIDGE_DEBUG_MAT")) std::fprintf(stderr, "shader %s: not in the library or any mod's <MaterialEditor> shader table (%s)\n", name.c_str(), why.c_str());
+            } else {
+                for (const auto* o : f->serialized().ofClass(48)) {   // Shader
+                    Value v = f->serialized().read(*o);
+                    std::string n = v.at("m_ParsedForm").at("m_Name").asStr();
+                    if (n.empty()) n = v.at("m_Name").asStr();
+                    if (n == name) { result = shaderFor(*f, o->pathId, name); break; }
+                }
+                if (result < 0 && std::getenv("CARDBRIDGE_DEBUG_MAT")) std::fprintf(stderr, "shader %s: its bundle (%s) holds no shader of that name\n", name.c_str(), f->name().c_str());
             }
         }
         shaderByNameCache[name] = result;
@@ -800,10 +853,23 @@ struct Builder {
             return it->second->tex;
         }
         std::string why;
-        auto t = uf.readTexture(p, &why);
         std::shared_ptr<unity::TextureData> out;
-        if (t) out = std::make_shared<unity::TextureData>(std::move(*t));
-        else scene.warn(partId, "texture not loaded: " + why);
+        // The process-wide decoded-texture cache outlives this assembly (an outfit switch or a
+        // reload in the viewer decodes the same bundles again): copy out of it, because the
+        // caller may consume the shared TextureData.
+        if (resolverPtr && !uf.source().empty()) {
+            if (auto bound = resolverPtr->cachedDecodedTexture(uf.source(), uf.statPath(), p.pathId))
+                out = std::make_shared<unity::TextureData>(*bound);   // private copy: the caller may consume it, the cache object must stay intact
+        }
+        if (!out) {
+            auto t = uf.readTexture(p, &why);
+            if (t) {
+                out = std::make_shared<unity::TextureData>(std::move(*t));
+                if (resolverPtr && !uf.source().empty()) resolverPtr->cacheDecodedTexture(uf.source(), uf.statPath(), p.pathId, out);
+            } else {
+                scene.warn(partId, "texture not loaded: " + why);
+            }
+        }
         if (out) {
             DecodedEntry e;
             e.key = key;
@@ -1103,6 +1169,16 @@ struct Builder {
                 if (e->hasScale) { bind->st.x = e->scale[0]; bind->st.y = e->scale[1]; }
                 if (e->hasOffset) { bind->st.z = e->offset[0]; bind->st.w = e->offset[1]; }
             }
+        }
+        // A material binding no texture at all whose shader default for _MainTex is black renders nothing in the game
+        // (every fragment discarded: the jacket crest's paint of a black default texture with no material binding).
+        // Hide it everywhere too, instead of drawing a flat white plate.
+        if (!sm.translucent && sm.shaderIndex >= 0 && static_cast<size_t>(sm.shaderIndex) < scene.shaders.size()) {
+            bool anyTex = false;
+            for (const auto& tb : sm.texProps) if (tb.texture >= 0) { anyTex = true; break; }
+            if (!anyTex)
+                for (const auto& d : scene.shaders[static_cast<size_t>(sm.shaderIndex)].texDefaults)
+                    if (d.first == "_MainTex" && d.second == "black") sm.hidden = true;
         }
         scene.materials.push_back(std::move(sm));
         return static_cast<int>(scene.materials.size()) - 1;
@@ -1989,6 +2065,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (!materialEdits.empty()) b.edits = &materialEdits;
 
     // --- shared skeleton and body ---------------------------------------
+    cbtime::Scope skeletonTimer("skeleton + head + body");
     log("loading the shared skeleton and body");
     report(0.05, "skeleton and body");
     std::string why;
@@ -2001,6 +2078,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene, opt);
     const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
     applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
+    applyProportionBoneScales(shapeOv, *base, opt.bodyRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) {
         scene.error("", "prefab '" + opt.bodyRigPrefab + "' not found in oo_base.unity3d");
         return scene;
@@ -2090,6 +2168,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.rigDefault = &rigDefault;
     }
     applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
+    applyProportionBoneScales(headOv, *base, opt.headRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scene, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv))
         scene.warn("", "prefab '" + opt.headRigPrefab + "' not found in oo_base.unity3d");
 
@@ -2097,7 +2176,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         return Vec4{static_cast<float>(v.at(size_t(0)).asFloat()), static_cast<float>(v.at(size_t(1)).asFloat()),
                     static_cast<float>(v.at(size_t(2)).asFloat()), static_cast<float>(v.size() > 3 ? v.at(size_t(3)).asFloat() : 1.0)};
     };
-    // The texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
+    // A texture a list row names for a card id (base or mod), decoded; null for "none" or when missing.
     auto rowTextureFor = [&](const std::string& partId, int category, int64_t id, const std::string& property, const char* texKey, const std::string& what,
                           std::string* keyOut = nullptr, const char* abKey = "MainAB") -> std::shared_ptr<unity::TextureData> {
         resolve::ItemRef fr;
@@ -2107,7 +2186,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         fr.category = category;
         fr.id = id;
         resolve::ResolvedItem fi = resolver.resolve(card, fr);
-        if (fi.status == resolve::ItemStatus::Empty) return nullptr;
+        if (fi.status == resolve::ItemStatus::Empty) {
+            if (category >= 406 && category <= 414)
+                scene.warn(partId, what + ": face item id " + std::to_string(id) + " has no row in the lists (library missing or a mod row that no longer exists); the item is left out");
+            return nullptr;
+        }
+        // The pupil is the one face item whose colour lives entirely in a texture: flag the mods that ship a blank one
+        // (a white eyeball, an empty png), so the issues tab says why the eyes render like that instead of looking broken.
+        auto blankPupil = [&](const std::shared_ptr<unity::TextureData>& t, const std::string& texName) {
+            if (!t || category != 408 || t->rgba.empty()) return;
+            const unity::FillSummary fs = unity::AnalyzeFill(t->rgba.data(), t->width, t->height);
+            const std::string where = fi.modName.empty() ? ("the base lists (" + fi.listItem.get("Name") + ", row " + std::to_string(id) + ")")
+                                                         : ("mod " + fi.modName + (fi.modGuid.empty() ? "" : " (" + fi.modGuid + ")") + ", row " + std::to_string(id) + " '" + fi.listItem.get("Name") + "'");
+            if (fs.opaqueFraction == 0.0f) {
+                scene.warn(partId, what + ": iris texture '" + texName + "' from " + where + " is fully transparent — the eyes render with no pupil at all");
+                return;
+            }
+            if (fs.achromatic >= 0.55f && fs.value >= 0.59f) {   // base game's flat-white skin (0.66 achromatic); every shipped hitomi <= 0.31
+                scene.warn(partId, what + ": iris texture '" + texName + "' from " + where + " is achromatic (a white/grey fill with no iris colour) — the eyes render washed out (the card's picture likely used a coloured iris; pick another in the maker or restore a coloured mod)");
+            }
+        };
         if (!fi.ok()) {
             scene.warn(partId, what + ": " + (fi.detail.empty() ? "no texture item for this id" : fi.detail));
             return nullptr;
@@ -2119,19 +2217,21 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         std::string w;
         auto tb = resolver.openItemBundle(fi, ab, &w);
         if (!tb) {   // a mod can ship the texture as a loose image instead of a bundle (Sideloader)
-            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; blankPupil(loose, texName); return loose; }
             scene.warn(partId, what + ": texture bundle not loaded: " + w);
             return nullptr;
         }
         PPtr tp = tb->findAsset(texName);
         if (tp.isNull()) tp = tb->findTexture(texName);
         if (tp.isNull()) {   // not in the bundle of that name: a mod may ship the image loose next to where the bundle would be
-            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; return loose; }
+            if (auto loose = resolver.openLooseTexture(fi, ab, texName, nullptr)) { if (keyOut) *keyOut = "loose:" + ab + "/" + texName; blankPupil(loose, texName); return loose; }
             scene.warn(partId, what + ": texture '" + texName + "' not found in " + ab);
             return nullptr;
         }
         if (keyOut) *keyOut = tb->name() + "#" + std::to_string(tp.pathId);
-        return b.decode(*tb, tp, partId);
+        auto tex = b.decode(*tb, tp, partId);
+        blankPupil(tex, texName);
+        return tex;
     };
 
     // A texture the game builds by drawing a quad through a "create" material of mm_base (CustomTextureCreate): queues the job
@@ -2353,6 +2453,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     }
 
     // --- card items ------------------------------------------------------
+    skeletonTimer.Stop();
+    cbtime::Scope itemsTimer("items");
     std::vector<resolve::ItemRef> work = resolve::ItemsFromCard(card, outfit);
     log("assembling " + std::to_string(work.size()) + " card item(s)");
     auto itemWhere = [](const resolve::ItemRef& ref, const resolve::ResolvedItem& item) {
@@ -2390,6 +2492,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
     std::vector<MaskSource> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
+        cbtime::Scope itemTimer("item " + work[wi].partId);
         checkCancel();
         const resolve::ItemRef ref = work[wi];
         resolve::ResolvedItem item = resolver.resolve(card, ref);
@@ -3397,6 +3500,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         report(0.15 + 0.6 * (static_cast<double>(wi + 1) / static_cast<double>(work.size())),
                "item " + std::to_string(wi + 1) + " / " + std::to_string(work.size()) + ": " + logId);
     }
+    itemsTimer.Stop();
     LogMemory("assemble after items");
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
@@ -3413,6 +3517,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // (one part per set of garments covering them) so the nude body can be shown again, in the viewer and through PMX morphs.
     log("applying clothing masks");
     report(0.78, "clothing masks");
+    cbtime::Scope masksTimer("clothing masks");
     // A garment whose materials are all authored translucency does not mask what is behind it: the
     // skin underneath shows through the fabric (that is the point of it), so its triangles stay.
     std::map<std::string, bool> allTranslucentByPart;   // part id -> true when every material on it blends
@@ -3597,16 +3702,74 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             auto cl = [&](int c) { return std::sqrt(m.m[c] * m.m[c] + m.m[4 + c] * m.m[4 + c] + m.m[8 + c] * m.m[8 + c]); };
             std::fprintf(stderr, "rig %s pos %.3f %.3f %.3f scale %.3f %.3f %.3f\n", nm, m.m[3], m.m[7], m.m[11], cl(0), cl(1), cl(2));
         }
+    masksTimer.Stop();
+    // Koikatsu's own body skin look: the base body normal map (always bound by the game as _NormalMap) and the
+    // card's detailId detail normal / line mask pair (bound as _NormalMapDetail / _LineMask, category 420).
+    // Decoded here, once, so the bake below - and the viewer's later re-applications - can use them without
+    // re-opening the bundles. When the card is unmodified, the line mask is cf_body_00_line (its G channel carries
+    // the clavicle/knee ink lines; the breast region stays clean, exactly as in the game).
+    if (!scene.skinShade.meshes.empty() && scene.aoBake.baseNormal.empty()) {
+        std::string w;
+        if (auto mm = resolver.openBaseBundle("chara/mm_base.unity3d", &w)) {
+            const PPtr p = mm->findTexture("cf_body_00_base_n");
+            if (!p.isNull()) {
+                std::string why;
+                if (auto t = mm->readTexture(p, &why)) {
+                    scene.aoBake.baseNormal = t->rgba;
+                    scene.aoBake.baseNormalWidth = t->width;
+                    scene.aoBake.baseNormalHeight = t->height;
+                }
+            }
+            const PPtr pl = mm->findTexture("cf_body_00_line");
+            if (!pl.isNull()) {
+                std::string why;
+                if (auto t = mm->readTexture(pl, &why)) {
+                    scene.aoBake.lineMask = t->rgba;
+                    scene.aoBake.lineMaskWidth = t->width;
+                    scene.aoBake.lineMaskHeight = t->height;
+                }
+            }
+        } else {
+            scene.warn("body", "mm_base.unity3d not loaded: " + w + " (the Koikatsu skin look bake is skipped)");
+        }
+        try {
+            const int64_t detailId = card.body.at("detailId").asInt();
+            if (auto t = rowTextureFor("body", 420, detailId, "ChaFileBody.detailId", "NormallMapDetail", "body detail normal")) {
+                scene.aoBake.detailNormal = t->rgba;
+                scene.aoBake.detailNormalWidth = t->width;
+                scene.aoBake.detailNormalHeight = t->height;
+            }
+            if (auto t = rowTextureFor("body", 420, detailId, "ChaFileBody.detailId", "LineMask", "body detail lines")) {
+                scene.aoBake.lineMask = t->rgba;
+                scene.aoBake.lineMaskWidth = t->width;
+                scene.aoBake.lineMaskHeight = t->height;
+            }
+        } catch (const std::exception& e) {
+            scene.warn("body", std::string("body detailId: ") + e.what());
+        }
+    }
     log("running " + std::to_string(scene.createJobs.size()) + " game create material(s)");
     report(0.88, "create materials");
     checkCancel();
     LogMemory("assemble before create jobs");
-    exporter::RunCreateJobs(scene);
+    {
+        cbtime::Scope _("create materials");
+        exporter::RunCreateJobs(scene);
+    }
     log("create materials done");
-    exporter::ApplyNippleTint(scene, opt.nippleColour);
-    if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
-        exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
-        log("automatic skin shading baked from the body mesh");
+    {
+        cbtime::Scope _("nipple tint + skin shade + ao");
+        exporter::ApplyNippleTint(scene, opt.nippleColour);
+        if (!scene.skinShade.meshes.empty() && (opt.skinShade > 0.0f || opt.skinShadeUnder > 0.0f)) {
+            exporter::ApplySkinShade(scene, opt.skinShade, opt.skinShadeUnder, opt.skinShadeTop, opt.skinShadeWidth, true);
+            log("automatic skin shading baked from the body mesh");
+        }
+        // The Koikatsu skin look goes on top of the create result x the cleavage shading (it yields to SkinShade's own
+        // darkening, never stacks); both are multiplied into the texture the PMX references.
+        if (!scene.skinShade.meshes.empty() && (opt.skinAo > 0.0f || scene.aoBake.applied >= 0.0f)) {
+            exporter::ApplySkinAoBake(scene, opt.skinAo, true);
+            log("Koikatsu skin look baked (base body normal map + detailId line mask)");
+        }
     }
     report(0.96, "finishing");
     LogMemory("assemble after create jobs");
@@ -3641,6 +3804,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "\n");
         }
     settleHeels(scene);
+    {   // proportion diagnostics: informational findings about this card's sliders and ABMX table ([proportions] in the issues panel)
+        for (const auto& f : AnalyzeCard(card))
+            scene.warn("proportions", f.property + " — " + f.reason + (f.safety >= kSafetyManual ? " (manual review)" : "; suggested: " + f.suggestion));
+        if (!opt.proportionLayer.empty() && opt.proportionLayer.enabled)
+            scene.warn("proportions", "proportion corrections are active (" + std::to_string(opt.proportionLayer.ops.size()) + " op(s)); faithful export = reset them (Proportions tab)");
+    }
     if (opt.autoCloth && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH")) SynthesizeAutoCloth(scene, log);
     report(1.0, "done");
     return scene;
@@ -3663,6 +3832,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
     if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scratch, opt);
     const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
     applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
+    applyProportionBoneScales(shapeOv, *base, opt.bodyRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scratch, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) return false;
     Mat4 headBase;
     if (auto hw = rig.world.find(opt.headAttachBone); hw != rig.world.end()) headBase = hw->second;
@@ -3692,6 +3862,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
         }
     }
     applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
+    applyProportionBoneScales(headOv, *base, opt.headRigPrefab, opt.proportionLayer);
     addRigPrefab(scratch, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv);
 
     // New world of every scene bone: the rig's own, and a bone an item added keeps its place relative to its parent.

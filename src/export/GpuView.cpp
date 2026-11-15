@@ -12,6 +12,7 @@
 #include <dxgi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -74,6 +75,20 @@ struct GpuTex { ID3D11ShaderResourceView* srv = nullptr; ID3D11Texture2D* tex = 
 
 UINT Round16(UINT n) { return (n + 15u) & ~15u; }
 
+// The viewer's live blend shapes (the Morphs tab): offsets in model space at rest, accumulated at the current weights.
+// Added to the rest vertices before skinning - exactly how the game applies blend shapes to the rendered mesh and how
+// MikuMikuDance applies PMX vertex morphs - never stored back into the Scene, which keeps the rest shape for re-skinning.
+void FoldMorphDelta(const std::vector<std::vector<Vec3>>& delta, size_t mi, std::vector<GVert>& verts) {
+    if (mi >= delta.size()) return;
+    const std::vector<Vec3>& d = delta[mi];
+    if (d.empty() || d.size() != verts.size()) return;   // untouched mesh (or a scene that changed under the delta): draw it as it is
+    for (size_t v = 0; v < d.size(); ++v) {
+        verts[v].pos[0] += d[v].x;
+        verts[v].pos[1] += d[v].y;
+        verts[v].pos[2] += d[v].z;
+    }
+}
+
 } // namespace
 
 struct GpuView::Impl {
@@ -104,6 +119,7 @@ struct GpuView::Impl {
     mutable LARGE_INTEGER benchStartQpc{};
     const assemble::Scene* scene = nullptr;
     std::vector<GpuMesh> meshes;
+    std::vector<std::vector<Vec3>> morphDelta;   // per scene mesh, the accumulated live-morph offsets (empty = no morphs; see SetMorphDelta)
     std::vector<GpuShader> shaders;
     std::vector<GpuTex> textures;                // by scene texture
     GpuTex defaults[4];                          // white, black, gray, bump
@@ -112,7 +128,8 @@ struct GpuView::Impl {
     ID3D11RasterizerState* raster = nullptr;
     ID3D11RasterizerState* rasterCull = nullptr;   // back faces culled: what the game and MikuMikuDance do for a single-sided material
     ID3D11DepthStencilState* depth = nullptr;
-    ID3D11DepthStencilState* depthOverlay = nullptr;   // depth test without write, for the highlight tint
+    ID3D11DepthStencilState* depthOverlay = nullptr;          // depth test without write, for the highlight tint
+    ID3D11DepthStencilState* depthOverlayWrite = nullptr;     // depth test+write with the overlay's LEqual, for the game's ZWrite-on transparent materials
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendOverlay = nullptr;          // ordinary src-alpha blending, for the highlight
     // Per-frame constant buffers, by (material, stage, slot).
@@ -131,6 +148,12 @@ struct GpuView::Impl {
     std::vector<char> cutout;                    // per scene material: cut to a shape by its texture (HasCutout), so no outline ring
     std::map<std::string, GpuTex> spheres;       // plain mode: the looks' sphere maps, by MmdSphereImage name
     std::vector<ID3D11ShaderResourceView*> lookSphere;   // per look: its sphere map's view (owned by `spheres`), null for none
+    // Per-material normal map for the simple shader: the material's own tangent-space normal (Unity DXT5nm: X in alpha, Y in green,
+    // Z reconstructed - the layout skinAoBake and the game's shaders read), so a material the game's shader cannot draw still shows
+    // the card's normal-mapped shading (cloth folds, hair strands, face gradients). Filled in Load; never written back.
+    std::vector<const GpuTex*> fbNormals;        // by scene material index; null = the flat default
+    std::vector<char> fbNormalClamp;             // by scene material index: 1 = clamp, 0 = wrap
+    size_t fallbackMats = 0;                     // materials the game shader cannot draw (the simple shader shades them)
     // Plain mode's self-shadow map, made on first use.
     static constexpr int kShadowSize = 2048;
     ID3D11Texture2D* smTex = nullptr;
@@ -245,26 +268,34 @@ cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
 Texture2D<float> sm : register(t1); SamplerComparisonState sc : register(s1);
 Texture2D t2 : register(t2);
-struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
-struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float2 uv : TEXCOORD0; float3 w : TEXCOORD2; float2 vn : TEXCOORD3; };
+Texture2D t3 : register(t3); SamplerState s2 : register(s2);   // the material's normal map (flat default when it has none)
+struct VI { float3 p : POSITION; float3 n : NORMAL; float4 tan : TANGENT0; float2 uv : TEXCOORD0; };
+struct VO { float4 pos : SV_POSITION; float3 n : TEXCOORD1; float4 tan : TEXCOORD2; float2 uv : TEXCOORD0; float3 w : TEXCOORD3; };
 VO vs(VI i) {
     VO o; float4 p = float4(i.p, 1);
     if (mmd.y > 0.5) p.xyz -= light.xyz * ((p.y - mmd.z) / max(light.y, 0.05));
-    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.uv = i.uv; o.w = p.xyz;
-    o.vn = float2(dot(normalize(r0.xyz), i.n), dot(normalize(r1.xyz), i.n));
+    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p)); o.n = i.n; o.tan = i.tan; o.uv = i.uv; o.w = p.xyz;
     return o;
 }
 float4 ps(VO i) : SV_Target {
     if (mmd.y > 0.5) return diffuse;
     float4 c = t0.Sample(s0, i.uv) * diffuse;
+    // The normal map's tangent-space normal, folded into the vertex frame. Unity DXT5nm: X in alpha, Y in green, Z reconstructed
+    // (a flat default normal map has alpha = green = 0.5, which yields (0, 0, 1)). Shading by the perturbed normal is what the
+    // game's own shaders do, and what keeps the card's cloth folds, hair strands and face gradient in the simple shader.
+    const float2 nm = t3.Sample(s2, i.uv).ga * 2.0 - 1.0;
+    const float3 tn = float3(nm, sqrt(max(0.0, 1.0 - dot(nm, nm))));
+    const float3 T = normalize(i.tan.xyz);
+    const float3 N = normalize(i.n);
+    const float3 wn = normalize(T * tn.x + cross(N, T) * tn.y + N * tn.z);
+    float d = dot(wn, light.xyz);
     if (sph.x > 0.5) {
-        float2 vn = i.vn / max(length(i.vn), 1.0);
-        float3 s = t2.Sample(s0, float2(vn.x * 0.5 + 0.5, 0.5 - vn.y * 0.5)).rgb;
-        c.rgb = sph.x > 1.5 ? c.rgb + s : c.rgb * s;
+        const float2 vn = float2(dot(normalize(r0.xyz), wn), dot(normalize(r1.xyz), wn));
+        const float3 sp = t2.Sample(s0, float2(vn.x * 0.5 + 0.5, 0.5 - vn.y * 0.5)).rgb;
+        c.rgb = sph.x > 1.5 ? c.rgb + sp : c.rgb * sp;
     }
-    float d = dot(normalize(i.n), light.xyz);
     if (shadow.w > 1.5 && mmd.x > 0.5) {   // MMD's self-shadow shading: the lit colour, or it times the ramp's bottom row, by N.L * 3 and the shadow map
-        float4 w = float4(i.w + normalize(i.n) * 0.006 * mmd.w, 1);
+        float4 w = float4(i.w + wn * 0.006 * mmd.w, 1);
         float3 lp = float3(dot(l0, w), dot(l1, w), dot(l2, w));
         float vis = sm.SampleCmpLevelZero(sc, float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5), lp.z - 0.0015);
         c.rgb *= lerp(ramp[31].rgb, float3(1, 1, 1), min(saturate(d * 3.0), vis));
@@ -286,11 +317,12 @@ float4 ps(VO i) : SV_Target {
         if (FAILED(compile(src, sizeof(src) - 1, "fallback", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &pb, &err)) || !pb) { Rel(vb); Rel(err); return false; }
         bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &fbVs)) &&
                   SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &fbPs));
-        const D3D11_INPUT_ELEMENT_DESC el[3] = {
+        const D3D11_INPUT_ELEMENT_DESC el[4] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GVert, nrm), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(GVert, tan), D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
-        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 3, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
+        ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 4, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = (7 + 32 + 5) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
@@ -557,7 +589,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Clear();
         Rel(samplerWrap); Rel(samplerClamp);
         Rel(raster); Rel(rasterCull);
-        Rel(depth); Rel(depthOverlay);
+        Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite);
         Rel(blend); Rel(blendOverlay);
         for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); }
         ReleaseTargets();
@@ -595,6 +627,9 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         for (auto& s : spheres) { Rel(s.second.srv); Rel(s.second.tex); }
         spheres.clear();
         lookSphere.clear();
+        fbNormals.clear();
+        fbNormalClamp.clear();
+        fallbackMats = 0;
         skipped = 0;
     }
 
@@ -799,6 +834,7 @@ bool GpuView::ReadbackPosed(std::vector<std::array<float, 3>>& outPos, std::vect
     return !outPos.empty();
 }
 int GpuView::skippedMaterials() const { return impl_->skipped; }
+size_t GpuView::fallbackMaterials() const { return impl_->fallbackMats; }
 int GpuView::DiagnosticMode() const { return impl_->diagMode; }
 std::string GpuView::DiagnosticError() const { return impl_->diagError; }
 void GpuView::SetPlain(bool on) { impl_->plain = on; }
@@ -887,6 +923,12 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
     }
 }
 
+void GpuView::SetMorphDelta(const std::vector<std::vector<Vec3>>* delta) {
+    Impl& I = *impl_;
+    // Copy (the caller reuses its buffer per slider tick). Stale deltas from another scene are dropped by size check in Refresh,
+    // but a new scene clears them in Load as well.
+    I.morphDelta = delta ? *delta : std::vector<std::vector<Vec3>>{};
+}
 void GpuView::Refresh(bool tangents) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene) return;
@@ -902,6 +944,7 @@ void GpuView::Refresh(bool tangents) {
             g.rest[v].nrm[0] = sv.normal.x; g.rest[v].nrm[1] = sv.normal.y; g.rest[v].nrm[2] = sv.normal.z;
             if (tangents) { g.rest[v].tan[0] = tan[v].x; g.rest[v].tan[1] = tan[v].y; g.rest[v].tan[2] = tan[v].z; }
         }
+        FoldMorphDelta(I.morphDelta, mi, g.rest);   // re-add the live morphs' offsets on top of the fresh rest
         if (g.restBuf) I.ctx->UpdateSubresource(g.restBuf, 0, nullptr, g.rest.data(), 0, 0);
         if (g.skinInBuf) I.ctx->UpdateSubresource(g.skinInBuf, 0, nullptr, g.rest.data(), 0, 0);
     }
@@ -1121,6 +1164,9 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     D3D11_DEPTH_STENCIL_DESC od = dd;
     od.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; od.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     I.dev->CreateDepthStencilState(&od, &I.depthOverlay);
+    D3D11_DEPTH_STENCIL_DESC wd = dd;
+    wd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; wd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    I.dev->CreateDepthStencilState(&wd, &I.depthOverlayWrite);
     D3D11_BLEND_DESC bd{};
     bd.AlphaToCoverageEnable = TRUE;   // the shaders' alpha cut-out (eyelines, lashes, hair tips) without sorting
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
@@ -1194,15 +1240,18 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
     if (!I.dev) return fail("no device");
     if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     I.Clear();
+    I.morphDelta.clear();   // a new scene: whatever deltas the previous one carried mean nothing now (the viewer re-applies its weights on load)
     I.scene = &scene;
 
     // Shaders: the forward pass of each, straight from the bundle's DXBC.
     I.shaders.resize(scene.shaders.size());
+    const bool noGameShaders = std::getenv("CARDBRIDGE_NO_GAME_SHADERS") != nullptr;   // test aid: force every material onto the simple shader
     for (size_t i = 0; i < scene.shaders.size(); ++i) {
         if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
         report(0.05 + 0.15 * (scene.shaders.empty() ? 1.0 : static_cast<double>(i + 1) / static_cast<double>(scene.shaders.size())),
                "shaders " + std::to_string(i + 1) + " / " + std::to_string(scene.shaders.size()));
         auto& g = I.shaders[i];
+        if (noGameShaders) continue;   // g.ok stays false: the fallback shader draws the material, with its normal map
         Bytes blob(scene.shaders[i].blob.begin(), scene.shaders[i].blob.end());
         g.progs = shader::ParseUnityShaderBlob(blob, nullptr);
         if (!shader::PickForwardPass(g.progs, g.pi, g.vi)) continue;
@@ -1255,6 +1304,34 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
     I.cutout.assign(scene.materials.size(), 0);
     for (size_t m = 0; m < scene.materials.size(); ++m) I.cutout[m] = HasCutout(scene, scene.materials[m]) ? 1 : 0;
 
+    // The simple shader's normal map per material: the material's own binding whose name says normal / bump.
+    // A binding that says mask is not a tangent-space normal map (_NormalMask is a mask, not a normal);
+    // the base _NormalMap is preferred, then an ordinary normal map, then the "bump" spelling; an authored
+    // detail normal is the last resort. No binding at all: the flat default (identical to no normal map).
+    I.fbNormals.assign(scene.materials.size(), nullptr);
+    I.fbNormalClamp.assign(scene.materials.size(), 1);
+    I.fallbackMats = 0;
+    for (size_t m = 0; m < scene.materials.size(); ++m) {
+        const assemble::SceneMaterial& mat = scene.materials[m];
+        const bool gameOk = !noGameShaders && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size() && I.shaders[static_cast<size_t>(mat.shaderIndex)].ok;
+        if (!gameOk) ++I.fallbackMats;
+        int best = -1, bestScore = 99;
+        for (const auto& tb : mat.texProps) {
+            std::string n = tb.name;
+            for (auto& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (n.find("mask") != std::string::npos) continue;
+            const bool isNormal = n.find("normal") != std::string::npos || n.find("nmap") != std::string::npos || n.find("bump") != std::string::npos;
+            if (!isNormal) continue;
+            int score = 1;
+            if (n == "_normalmap") score = 0;
+            else if (n.find("detail") != std::string::npos) score = 3;
+            else if (n.find("bump") != std::string::npos) score = 2;
+            if (score >= bestScore) continue;
+            if (tb.texture >= 0 && static_cast<size_t>(tb.texture) < I.textures.size() && I.textures[static_cast<size_t>(tb.texture)].srv) { bestScore = score; best = tb.texture; }
+        }
+        if (best >= 0) { I.fbNormals[m] = &I.textures[static_cast<size_t>(best)]; I.fbNormalClamp[m] = scene.textures[static_cast<size_t>(best)].clamp ? 1 : 0; }
+    }
+
     // Geometry, with the tangents the shaders build their normal-map frame from. When the skinning compute shader is
     // available, each mesh gets a rest buffer (read by the skinning shader and drawn when there is no pose) and a posed
     // buffer (written by it). Without it, there is only the old single vertex buffer that SetSkin rewrites on the CPU.
@@ -1274,6 +1351,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
             const auto& s = m.vertices[v];
             vb[v] = {{s.pos.x, s.pos.y, s.pos.z}, {s.normal.x, s.normal.y, s.normal.z}, {tan[v].x, tan[v].y, tan[v].z, 1.0f}, {s.uv.x, s.uv.y}, {1, 1, 1, 1}, {s.uv1.x, s.uv1.y}, {s.uv2.x, s.uv2.y}, {s.uv3.x, s.uv3.y}, {s.bone[0], s.bone[1], s.bone[2], s.bone[3]}, {s.weight[0], s.weight[1], s.weight[2], s.weight[3]}};
         }
+        FoldMorphDelta(I.morphDelta, mi, vb);   // the live morphs' offsets, when the caller set them before the load
         const UINT bytes = static_cast<UINT>(vb.size() * sizeof(GVert));
         if (dual) {
             // A structured buffer cannot also be a vertex buffer, so the rest vertices live twice: once in a plain vertex
@@ -1336,6 +1414,16 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
 
 bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                      int highlightPart) {
+    std::vector<HighlightPart> hs;
+    if (highlightPart >= 0) hs.push_back(HighlightPart{highlightPart});   // the defaults are the legacy warm tint + ring
+    return RenderImpl(cam, W, H, hiddenParts, bgra, hs);
+}
+bool GpuView::RenderHighlighted(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                                const std::vector<HighlightPart>& highlights) {
+    return RenderImpl(cam, W, H, hiddenParts, bgra, highlights);
+}
+bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                         const std::vector<HighlightPart>& highlights) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene || W < 8 || H < 8) return false;
     const assemble::Scene& scene = *I.scene;
@@ -1521,10 +1609,20 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 if (!gm.vb) continue;
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
-                    const int bucket = mat.alpha ? 2 : (!I.plain && detail::IsOverlayMaterial(scene, mat) ? 1 : 0);
+                    if (mat.hidden) continue;
+                    // The plain (as exported / MMD) view blends every alpha-flagged material, like MikuMikuDance's transparent pass:
+                    // the stockings/tights diffuse alpha is 0.99, and blindly alpha-testing them (bucket 2) drew them as solid
+                    // black shapes. MikuMikuDance blends them instead, so we do too.
+                    const int bucket = I.plain ? (mat.alpha ? 1 : 0)
+                                       : (mat.translucent || (mat.alpha && detail::RenderQueueOf(scene, mat) >= 2500)) ? 1
+                                       : (mat.alpha ? 2 : (detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
                     if (bucket != pass) continue;
-                    if (bucket == 1) {   // the game's transparent compositing: tested, not written, alpha-blended
-                        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+                    // The game's forward pass writes depth for materials whose shader says ZWrite On (Shader Forge/main_alpha):
+                    // layered garments then resolve by depth, not draw order. ZWrite-off compositing keeps the tint state.
+                    // The plain (as exported / MMD) view keeps the no-write tint: MikuMikuDance does not write depth for blended materials.
+                    const bool zWrite = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) ? scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite : (!I.plain);
+                    if (bucket == 1) {   // the game's transparent compositing: depth per the shader's ZWrite, alpha-blended
+                        ctx->OMSetDepthStencilState(zWrite ? I.depthOverlayWrite : I.depthOverlay, 0);
                         ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
                     } else {
                         ctx->OMSetDepthStencilState(I.depth, 0);
@@ -1615,6 +1713,12 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                         const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
                         ID3D11SamplerState* fs = ftClamp ? I.samplerClamp : I.samplerWrap;
                         ctx->PSSetSamplers(0, 1, &fs);
+                        const int nm = gs.material >= 0 && static_cast<size_t>(gs.material) < I.fbNormals.size() ? gs.material : -1;
+                        const GpuTex* nt = nm >= 0 && I.fbNormals[static_cast<size_t>(nm)] ? I.fbNormals[static_cast<size_t>(nm)] : &I.defaults[3];
+                        const bool ntClamp = nm >= 0 && I.fbNormalClamp[static_cast<size_t>(nm)] != 0;
+                        ctx->PSSetShaderResources(3, 1, &nt->srv);
+                        ID3D11SamplerState* const ns = ntClamp ? I.samplerClamp : I.samplerWrap;
+                        ctx->PSSetSamplers(2, 1, &ns);
                         ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                         ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
                         ctx->DrawIndexed(gs.count, 0, 0);
@@ -1715,11 +1819,9 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         }
     }
 
-    // Hovered component: tint its visible surface, then draw the same silhouette ring the game's outlines use in a warm
-    // colour so the part pops out of the model. Depth-tested against the finished frame, never written.
-    if (highlightPart >= 0 && static_cast<size_t>(highlightPart) < scene.parts.size() && visible(static_cast<size_t>(highlightPart)) &&
-        I.olVs && I.olPs && I.olIl && I.olCb && I.depthOverlay && I.blendOverlay) {
-        const auto& part = scene.parts[static_cast<size_t>(highlightPart)];
+    // Highlighted components: each part gets a translucent tint over its visible surface, then a silhouette ring in
+    // its colour so the matches stand out of the model. Depth-tested against the finished frame, never written.
+    if (!highlights.empty() && I.olVs && I.olPs && I.olIl && I.olCb && I.depthOverlay && I.blendOverlay) {
         ctx->OMSetDepthStencilState(I.depthOverlay, 0);
         ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
         ctx->IASetInputLayout(I.olIl);
@@ -1727,24 +1829,31 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         ctx->PSSetShader(I.olPs, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &I.olCb);
         ctx->PSSetConstantBuffers(0, 1, &I.olCb);
-        for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
-            float cbv[24];
-            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-            const float colr[4] = {1.0f, LinearLight() ? ToLinear(0.62f) : 0.62f, LinearLight() ? ToLinear(0.16f) : 0.16f, pass == 0 ? 0.38f : 0.95f};
-            const float px = 2.2f * H / 800.0f;
-            const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
-                                  pass == 0 ? 0.0f : 0.004f, 0.0f};
-            std::memcpy(cbv + 16, colr, 16);
-            std::memcpy(cbv + 20, prm, 16);
-            ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
-            for (int mi : part.meshes) {
-                const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
-                if (!gm.vb) continue;
-                ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
-                for (const auto& gs : gm.subs) {
-                    if (!gs.ib || !gs.count) continue;
-                    ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
-                    ctx->DrawIndexed(gs.count, 0, 0);
+        for (const auto& hl : highlights) {
+            if (hl.part < 0 || static_cast<size_t>(hl.part) >= scene.parts.size()) continue;
+            if (!visible(static_cast<size_t>(hl.part))) continue;
+            const auto& part = scene.parts[static_cast<size_t>(hl.part)];
+            for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
+                float cbv[24];
+                for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                const float colr[4] = {hl.tint[0], LinearLight() ? ToLinear(hl.tint[1]) : hl.tint[1], LinearLight() ? ToLinear(hl.tint[2]) : hl.tint[2], pass == 0 ? hl.tint[3] : hl.ring[3]};
+                const float ringCol[4] = {hl.ring[0], LinearLight() ? ToLinear(hl.ring[1]) : hl.ring[1], LinearLight() ? ToLinear(hl.ring[2]) : hl.ring[2], hl.ring[3]};
+                const float* useCol = pass == 0 ? colr : ringCol;
+                const float px = hl.ringWidth * H / 800.0f;
+                const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
+                                      pass == 0 ? 0.0f : 0.004f, 0.0f};
+                std::memcpy(cbv + 16, useCol, 16);
+                std::memcpy(cbv + 20, prm, 16);
+                ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
+                for (int mi : part.meshes) {
+                    const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
+                    if (!gm.vb) continue;
+                    ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+                    for (const auto& gs : gm.subs) {
+                        if (!gs.ib || !gs.count) continue;
+                        ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                        ctx->DrawIndexed(gs.count, 0, 0);
+                    }
                 }
             }
         }

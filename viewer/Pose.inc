@@ -54,6 +54,7 @@ void ApplyPoseLive(int simSteps = 0) {
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
+    SelectivePoseChanged();   // the static previews in the Selective Import window follow the same pose
     g.dirty = true;
     InvalidateView();
 }
@@ -314,6 +315,13 @@ void ApplySkinLook(bool rebuildMap) {
                 Log("the skin shading changed: press X to bake the as-exported view again");
             }
         }
+        if (!L->scene.aoBake.baseNormal.empty() && (g.tw.skinAo > 0.0f || L->scene.aoBake.applied >= 0.0f)) {
+            if (exporter::ApplySkinAoBake(L->scene, g.tw.skinAo, rebuild)) {
+                const int ti = ss.texture;
+                if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+                if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+            }
+        }
     }
     g.dirty = true;
     InvalidateView();
@@ -323,9 +331,24 @@ void ApplySkinLook(bool rebuildMap) {
 // A body or face slider, the nipple switch or offset: re-shapes the assembled scene in place (a few milliseconds, no loading) and re-skins the
 // views. `final` (the slider was let go) also rebuilds the normal map frames, which are left alone while dragging. False when it cannot
 // be done and the character has to be assembled again.
+// Re-measure the body's bust / waist / hip for the "Body measurements" group (slider rows show cm, typed entry solves
+// against the skin). Cheap enough to run on every reshape; the scene holds the rest pose, so pose edits don't skew it.
+void UpdateBodyMeasurements() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || L->scene.bones.empty()) return;
+    g.bwhMeasure = measure::Measure(L->scene);
+    if (!g.bwhCardDefSet) {
+        if (g.bwhMeasure.valid) {
+            g.bwhCardDef[0] = g.bwhMeasure.bust; g.bwhCardDef[1] = g.bwhMeasure.waist; g.bwhCardDef[2] = g.bwhMeasure.hip;
+            g.bwhCardDefSet = true;
+        }
+    }
+}
+
 bool ReshapeNow(bool final) {
     std::shared_ptr<Loaded> L = Current();
     if (!L || g.busy || !g.resolver || L->scene.bones.empty()) return false;
+    const bool solving = g.bwhSolving;      // the typed cm entry re-shapes many times in a row: keep the screen still
     assemble::AssembleOptions ao;
     ao.outfit = L->outfit;
     {
@@ -339,22 +362,32 @@ bool ReshapeNow(bool final) {
         ao.skinShadeUnder = g.tw.skinShadeUnder;
         ao.skinShadeTop = g.tw.skinShadeTop;
         ao.skinShadeWidth = g.tw.skinShadeWidth;
+        ao.skinAo = g.tw.skinAo;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
+        ao.proportionLayer = ProportionLayerNow();
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
+    if (!solving) RebuildMorphDelta();   // the shape offsets moved with the bones (and the rest pose); the accumulated morph offsets move with them
+    UpdateBodyMeasurements();            // the scene holds the new rest pose; cheap enough for every reshape
     const double t1 = NowMs();
-    if (g.gpuOk) g.gpu.Refresh(final);
-    if (final && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
+    if (!solving && g.gpuOk) g.gpu.Refresh(final);
+    if (final && !solving && L->scene.skinShade.ready()) {   // the body moved: re-shade the texture from the new creases
         const int ti = L->scene.skinShade.texture;
         if (exporter::ApplySkinShade(L->scene, g.tw.skinShade, g.tw.skinShadeUnder, g.tw.skinShadeTop, g.tw.skinShadeWidth, true)) {
             if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
             if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
         }
+        if (!L->scene.aoBake.baseNormal.empty() && (g.tw.skinAo > 0.0f || L->scene.aoBake.applied >= 0.0f)) {
+            if (exporter::ApplySkinAoBake(L->scene, g.tw.skinAo, true)) {
+                if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+                if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+            }
+        }
     }
     g.prof.reshape += t1 - t0;
     g.prof.refresh += NowMs() - t1;
-    if (g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
+    if (!solving && g.expOk && g.expScene && g.expFor == L) {   // the baked "as exported" copy keeps its textures; only its shape follows
         assemble::Reshape(*g.expScene, L->card, *g.resolver, ao);
         g.gpuExp.Refresh(final);
     }
@@ -363,12 +396,12 @@ bool ReshapeNow(bool final) {
     g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;
     const float bustSize = g.tw.body.size() > 4 ? g.tw.body[4] : 0.5f;
     g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);  // reset target follows the new shape; the slider itself stays put
-    if (g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
-    ApplyPoseLive();
+    if (!solving && g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    if (!solving) ApplyPoseLive();
     return true;
 }
 
-bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola || id == kNippleIn; }
+bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola || id == kNippleIn || IsBodyMeasureId(id); }
 
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
@@ -392,17 +425,25 @@ void TweakEdited(int id, bool released) {
         InvalidatePanel();
         return;
     }
+    if (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())) { MorphSlideEdited(); return; }   // a live blend shape (live, like a pose bone)
+    if (id == kTransStrength) {   // the translucency slider re-bakes the painted alpha at the new strength, like the skin shading
+        TransApplyNow();
+        InvalidatePanel();
+        return;
+    }
+    if (id == kTransSize) { InvalidatePanel(); return; }   // the radius applies to the next stroke; nothing to rebuild
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
-    if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth ||
+    if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
         id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
         // Body shading re-applies at the new strength at once; the occlusion map is rebuilt only when a shape drag ended
         // (ReshapeNow) or from this release when the body had moved, or when the width changed (the band depends on it).
         // The nipple tint is a material property and is live.
-        if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth) {   // persisted default for new cards — save it with the other settings
+        if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo) {   // persisted default for new cards — save it with the other settings
             if (id == kSkinShade) g.settings.skinShade = g.tw.skinShade;
             else if (id == kSkinShadeUnder) g.settings.skinShadeUnder = g.tw.skinShadeUnder;
             else if (id == kSkinShadeTop) g.settings.skinShadeTop = g.tw.skinShadeTop;
             else if (id == kSkinShadeWidth) g.settings.skinShadeWidth = g.tw.skinShadeWidth;
+            else if (id == kSkinAo) g.settings.skinAo = g.tw.skinAo;
             SaveSettings(g.settings);
         }
         ApplySkinLook(id == kSkinShadeWidth || (released && Current() && Current()->scene.skinShade.geometryDirty));
@@ -474,7 +515,7 @@ bool EnsureResolver(std::string& err) {
     Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile", LogKind::Good);
     g.lists = resolve::ListTable();
     g.lists.loadBaseGame(library::AbdataRoot(g.settings.library), &issues);
-    g.resolver = std::make_unique<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
+    g.resolver = std::make_shared<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
     if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
     g.resolverKey = key;
     return true;
@@ -486,10 +527,16 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     g.cardPath = path;
     std::string clothingPath;
     int clothingOutfit = -1;
+    int clothingMode = 0;
+    int clothingSrcOutfit = -1;
+    std::map<std::string, card::SelectiveAction> selectiveDecisions;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         clothingPath = g.clothingPath;
         clothingOutfit = g.clothingOutfit;
+        clothingMode = g.clothingMode;
+        clothingSrcOutfit = g.clothingSrcOutfit;
+        selectiveDecisions = g.selectiveDecisions;
     }
     g.applyKeep = keepTweaks;
     g.keepHidden.clear();
@@ -503,7 +550,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, prevCardPath]() {
+    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, clothingMode, clothingSrcOutfit, selectiveDecisions, prevCardPath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -534,29 +581,84 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
                                        clothingOutfit < static_cast<int>(c.outfits.size());
             if (applyClothing) {
-                ProgSet(0.20, "applying outfit file (cloth)");
+                ProgSet(0.20, clothingMode == 2 ? "applying selective import" : clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
                 try {
-                    card::ClothingFile cl = card::LoadClothingFile(clothingPath);
-                    if (!cl.supported) throw std::runtime_error(cl.supportNote);
-                    card::ApplyClothingOptions opt;
-                    opt.outfit = shown;
-                    auto rep = card::ApplyClothing(c, cl, opt);
-                    {
-                        std::lock_guard<std::recursive_mutex> lk(g.mu);
-                        g.clothingOutfit = rep.outfit;
-                        g.clothingName = cl.displayName();   // --clothes arrives without one; the drop path already set it
+                    const card::ImageSourceKind srcKind = card::DetectImageSource(clothingPath);
+                    if (clothingMode == 2) {
+                        // The selective import: only the components the user chose in the Selective
+                        // Import window are merged. Same pin as the other imports (an outfit file on
+                        // disk is never written; the card itself is only ever this in-memory copy).
+                        card::SelectiveDecisions sd;
+                        sd.actions = selectiveDecisions;
+                        card::ApplyClothingOptions sopt;
+                        sopt.outfit = shown;
+                        sopt.srcOutfit = clothingSrcOutfit;
+                        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(c, clothingPath, sopt, sd);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.apply.outfit;
+                            g.clothingName = rep.sourceName + " (selective)";
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                        }
+                        out->clothing = g.clothingName;
+                        Log("selective: " + std::to_string(rep.plan.replaced) + " replaced, " + std::to_string(rep.plan.added) +
+                            " added, " + std::to_string(rep.plan.kept) + " kept, " + std::to_string(rep.plan.skipped) + " skipped" +
+                            (rep.fromCoordinate ? " (outfit source: the coordinate it was pinned to)" : "") +
+                            " -> outfit " + std::to_string(rep.apply.outfit) + "; in memory only, card not saved", LogKind::Good);
+                        for (const std::string& note : rep.apply.notes) Log("  " + note);
+                    } else if (clothingMode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
+                        // A character card used as a source: the whole-coordinate semantics (Status copies included).
+                        card::Card src = card::LoadCard(clothingPath);
+                        if (!src.supported) throw std::runtime_error(src.supportNote);
+                        card::ApplyCoordinateOptions copt;
+                        copt.srcOutfit = clothingSrcOutfit;
+                        copt.dstOutfit = shown;
+                        const card::ApplyCoordinateReport rep = card::ApplyCoordinate(c, src, copt);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.dstOutfit;
+                            g.clothingName = rep.sourceName + " - " + src.outfitName(rep.srcOutfit) + " (coordinate)";
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                            out->clothing = g.clothingName;
+                        }
+                        for (const std::string& note : rep.notes) Log("  coordinate: " + note, LogKind::Warn);
+                        Log("coordinate: " + rep.sourceName + " (" + src.outfitName(rep.srcOutfit) + ") -> outfit " + std::to_string(rep.dstOutfit) +
+                            " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " + std::to_string(rep.accessoriesReplaced) +
+                            " accessory slot(s) replaced; the whole coordinate was imported; in memory only, card not saved)");
+                    } else {
+                        // A Coordinate (outfit) file: as clothing (the merge) or as a coordinate (wholesale).
+                        card::ApplyClothingOptions opt;
+                        opt.outfit = shown;
+                        opt.srcOutfit = clothingSrcOutfit;   // -1 for plain files
+                        if (clothingMode == 1) opt.coordinateImport = true;
+                        const card::OutfitSourceReport rep = card::ApplyOutfitSource(c, clothingPath, opt);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.apply.outfit;
+                            g.clothingName = rep.sourceName + (clothingMode == 1 ? std::string(" (coordinate)") : std::string());
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                        }
+                        out->clothing = g.clothingName;
+                        if (clothingMode == 1) {
+                            Log("coordinate import: " + rep.sourceName + " -> outfit " + std::to_string(rep.apply.outfit) +
+                                " (the whole coordinate replaced verbatim, including accessories; " + std::to_string(rep.apply.clothesReplaced) +
+                                " clothes slot(s) replaced; in memory only, card not saved)");
+                        } else {
+                            Log(std::string(rep.fromCoordinate ? "coordinate (as clothing): " : "clothing: ") + rep.sourceName +
+                                " -> outfit " + std::to_string(rep.apply.outfit) +
+                                " (" + std::to_string(rep.apply.clothesReplaced) + " clothes slot(s) replaced, " +
+                                std::to_string(rep.apply.accessoriesAdded) + " accessory(ies) added" +
+                                (rep.apply.accessoriesRelocated ? ", " + std::to_string(rep.apply.accessoriesRelocated) + " moved to keep hair" : "") +
+                                ", " + std::to_string(rep.apply.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
+                        }
                     }
-                    out->clothing = cl.displayName();
-                    Log("clothing: " + cl.displayName() + " -> outfit " + std::to_string(rep.outfit) +
-                        " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " +
-                        std::to_string(rep.accessoriesAdded) + " accessory(ies) added" +
-                        (rep.accessoriesRelocated ? ", " + std::to_string(rep.accessoriesRelocated) + " moved to keep hair" : "") +
-                        ", " + std::to_string(rep.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
                 } catch (const std::exception& e) {
                     out->notes.push_back(e.what());
-                    Log(std::string("clothing failed: ") + e.what(), LogKind::Error);
+                    Log(std::string(clothingMode == 1 ? "coordinate import failed: " : "clothing failed: ") + e.what(), LogKind::Error);
                 }
             }
+            if (card::ClearOutfitCoordinateSlot(c, shown, static_cast<int>(c.outfits.size()), nullptr))
+                Log("ABMX: this outfit's coordinate-specific bone mods cleared (default outfit load; the export uses the same table)");
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;
@@ -564,10 +666,12 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
                     g.tw = Tweaks();
+                    g.bwhCardDefSet = false;   // the measurement baseline is re-captured from the freshly assembled card
                     g.tw.skinShade = g.settings.skinShade;          // persisted default from the Setup tab (and the Look slider); share value with the settings file
                     g.tw.skinShadeUnder = g.settings.skinShadeUnder;
                     g.tw.skinShadeTop = g.settings.skinShadeTop;
                     g.tw.skinShadeWidth = g.settings.skinShadeWidth;
+                    g.tw.skinAo = g.settings.skinAo;
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));
@@ -582,8 +686,13 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.nippleOffset = g.tw.nippleMm / 1000.0f;
                 ao.nippleColour = NippleTintOption();
                 ao.skinShade = g.tw.skinShade;
+                ao.skinShadeUnder = g.tw.skinShadeUnder;
+                ao.skinShadeTop = g.tw.skinShadeTop;
+                ao.skinShadeWidth = g.tw.skinShadeWidth;
+                ao.skinAo = g.tw.skinAo;
                 ao.autoCloth = g.autoCloth;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
+                ao.proportionLayer = ProportionLayerNow();
             }
             ao.log = [](const std::string& m) { Log("  " + m); };
             ao.progress = [](double f, const std::string& stage) {

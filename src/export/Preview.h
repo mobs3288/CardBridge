@@ -51,6 +51,21 @@ struct ViewStateDeleter { void operator()(ViewState*) const; };
 using ViewStatePtr = std::unique_ptr<ViewState, ViewStateDeleter>;
 ViewStatePtr NewViewState();
 
+// The orthographic framing the interactive view draws with, factored out so the translucency brush can unproject the
+// pointer exactly the way the picture does. Same formula as the renderers (the Direct3D view and RenderView).
+struct ViewFraming {
+    float cx = 0, cy = 0, cz = 0;      // bounds centre of everything drawable
+    float extent = 1;                  // the largest bounds dimension (drives the zoom fit)
+    float scale = 1;                   // pixels per metre at zoom 1 (the overlay's px-per-metre)
+    float toCam[3] = {0, 0, 1};        // unit vector from the bounds centre toward the camera
+};
+namespace detail {
+// Computes the framing for a picture that will show `hiddenParts`. False when nothing is visible.
+bool ComputeViewFraming(const assemble::Scene& scene, const std::vector<char>* hiddenParts, float W, float H, const ViewCamera& cam, ViewFraming& out);
+// The world-space ray through pixel (px, py) of a picture drawn with this framing (orthographic: one direction, a shifting origin).
+bool ViewRayAt(const ViewFraming& f, float W, float H, const ViewCamera& cam, float px, float py, Vec3& origin, Vec3& dir);
+} // namespace detail
+
 // Marks one scene texture's cached mip chain stale after its pixels changed in
 // place (the Material Workbench rewrites its tint copy). The next RenderView
 // rebuilds that chain; out-of-range indices are ignored (a new texture is
@@ -73,6 +88,9 @@ struct ViewOptions {
     // Per-material interpreted parameters (Material Workbench EffectiveMaterial), indexed by scene.materials index.
     // Used by Roughness / Metallic / Transmission. When nullptr those modes render as their neutral defaults.
     const std::vector<DiagnosticMaterial>* diagnostics = nullptr;
+    // The viewer's live blend shapes: per scene mesh, the accumulated offsets at the current weights (parallel to Scene::meshes,
+    // missing entries or wrong counts are ignored). Applied to the copied mesh before any pose, like the game; nullptr = no morphs.
+    const std::vector<std::vector<Vec3>>* morphDelta = nullptr;
 };
 
 // Runs each material's compiled shader over its own UV layout (lit from the front, no cast shadow) and replaces the material's

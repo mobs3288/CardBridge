@@ -54,6 +54,16 @@ struct SkinMemoryStats {
 // real GPU instead of the integrated one wherever it is. WARP (Direct3D running on the CPU) is the fallback when there
 // is no usable hardware device, and when that is gone too the callers keep the software interpreter renderer. That CPU
 // fallback is the supported path on a machine without a GPU; it is not a degraded second implementation.
+// One highlighted part in a picture, for RenderHighlighted. The two passes are the same overlay
+// the single hovered-component highlight uses (a translucent surface tint, then a bright ring),
+// coloured per part so several components can be colour-coded at once.
+struct HighlightPart {
+    int part = -1;                            // scene part index
+    float tint[4] = {1.0f, 0.62f, 0.16f, 0.38f};   // surface tint (rgba)
+    float ring[4] = {1.0f, 0.62f, 0.16f, 0.95f};   // ring colour (rgba)
+    float ringWidth = 2.2f;                    // ring width in pixels at 800px picture height (scaled by the height)
+};
+
 class GpuView {
 public:
     GpuView();
@@ -117,6 +127,10 @@ public:
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                 int highlightPart = -1);
+    // Like Render, but highlights every part in `highlights` at once, each with its own colours (the selective
+    // import colour-codes components this way). An empty vector is the same as highlightPart = -1.
+    bool RenderHighlighted(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                           const std::vector<HighlightPart>& highlights);
 
     // Selects a viewport diagnostic mode for the *next* Render call (0 = Lit = the game's shaders, the
     // default; anything else draws the scene with the runtime-compiled diagnostic fallback shader, so the
@@ -126,6 +140,9 @@ public:
     void SetDiagnosticMode(int mode, const std::vector<DiagnosticMaterial>* interpreted);
 
     int skippedMaterials() const;
+    // Materials whose game shader did not upload and are drawn by the simple shader, with their normal map:
+    // the view is never silently flat - check this (and the log) when a character looks washed out.
+    size_t fallbackMaterials() const;
 
     // The diagnostic mode and the reason the diagnostic shader failed, as read by the layout dump.
     int DiagnosticMode() const;
@@ -134,6 +151,12 @@ public:
     // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
     void SetSkin(const std::vector<Mat4>* skin);
+
+    // The viewer's live blend shapes (the Morphs tab): per scene mesh, the accumulated offsets at the current weights (parallel to
+    // Scene::meshes; empty vectors for the meshes no active morph touches). Copied, so the caller may reuse its own buffer. Storage only:
+    // call Refresh(false) after setting it - Refresh folds the stored offsets into the rest vertices, re-uploads and re-skins like Reshape does.
+    // The Scene itself is never modified, so a re-shape rebuilds cleanly. nullptr or empty goes back to the rest shape.
+    void SetMorphDelta(const std::vector<std::vector<Vec3>>* delta);
 
     // The scene's vertices changed in place (a re-shape): uploads the new positions and normals, keeping the current skin. Tangents (the normal
     // map frame) are recomputed only when asked; leave them while a slider is being dragged and ask once it is released.
@@ -160,6 +183,8 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    bool RenderImpl(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                    const std::vector<HighlightPart>& highlights);
 };
 
 } // namespace cardbridge::exporter

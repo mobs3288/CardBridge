@@ -96,12 +96,14 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         const bool canNext = hasClothing && L && clothingOutfit + 1 < L->outfits;
         Button(s, l.clothingPrev, "<", g.hoverButton == 8, false, canPrev && !g.busy);
         Button(s, l.clothingNext, ">", g.hoverButton == 9, false, canNext && !g.busy);
+        Button(s, l.clothingExport, "Export clothes", g.hoverButton == 21, false, L != nullptr && !g.busy && !g.exporting);
         Button(s, l.clothingReset, "Reset clothing", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
     }
 
     lap(2);
     // tabs ----------------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.tabs[0].top - 2, l.tabs[0].bottom + 2)) {
+        if (l.tabScrollable) s.Begin(l.tabStrip);
         for (int i = 0; i < TabCount; ++i) {
             const RECT& t = l.tabs[i];
             const bool act = !g.showIssues && g.tab == i, hot = g.hoverButton == 10 + i;
@@ -111,20 +113,18 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             } else if (hot && L) {
                 s.FillRound(t, 7, ui::kCard);
             }
-            s.TextCentered(act ? g.fontBold : g.fontUi, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
+            s.TextCentered(act ? g.fontBold : g.fontSmall, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
         }
-        if (L) {
-            std::string right;
-            if (g.showIssues) right = std::to_string(L->scene.issues.size()) + " issues";
-            else if (g.busy && g.tab != TabParts) right = "shaping";
-            else if (g.tweakPending) right = "applying";
-            else if (g.tab == TabBones) right = std::to_string(L->scene.bones.size()) + " bones";
-            else if (g.tab == TabMaterials) right = std::to_string(g.mat.OverrideCount()) + " edited";
-            else if (g.tab == TabParts) right = std::to_string(L->scene.parts.size()) + " parts";
-            else if (g.tab == TabSettings) right = "saved";
-            else right = AnyTweak() ? "tweaked" : "as card";
-            const bool ed = AnyTweak();
-            s.TextRight(g.fontSmall, g.busy || g.tweakPending ? ui::kAccent : ed && g.tab != TabParts && g.tab != TabBones && g.tab != TabSettings ? ui::kAmber : ui::kDim, kPanel - 10, l.partsHeadingTop, ClipText(right, 14));
+        if (l.tabScrollable) s.Begin(clip);   // restore the outer clip
+        if (l.tabScrollable) {   // the < > scroll arrows; dim at the ends
+            const bool fullLeft = g.tabPos > 0.0f, fullRight = g.tabPos < static_cast<float>(l.tabMaxScroll) - 0.5f;
+            const int arrowsY = 216, arrowsH = 240 - 216;
+            const auto drawArrow = [&](const RECT& r, bool enabled, bool hot, bool left) {
+                s.FillRound(r, 4, hot && enabled ? ui::kLineHi : ui::kCard);
+                s.TextCentered(g.fontSmall, enabled ? (hot ? ui::kText : ui::kSub) : ui::kFaint, r, left ? "<" : ">");
+            };
+            drawArrow(l.tabLeft, fullLeft, g.hoverButton == 30, true);
+            drawArrow(l.tabRight, fullRight, g.hoverButton == 31, false);
         }
     }
 
@@ -190,6 +190,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             DrawBonesTab(s, clip, l, *L);
         } else if (g.tab == TabMaterials) {
             DrawMaterialsTab(s, clip, l, *L);
+        } else if (g.tab == TabOptimize) {
+            DrawOptimizeTab(s, clip, l, *L);
         } else if (g.tab != TabParts) {
             const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
             const int visible = VisibleRows(l);
@@ -208,12 +210,22 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     if (row.kind == 0) {
                         std::string name = row.label;
                         for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                        // Header and its right-aligned "reset" share the row:
-                        // clip the title so it can never run under "reset".
-                        const RECT headClip{14, y, kPanel - 58, y + kRowH};
-                        s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
+                        const bool morph = g.tab == TabMorphs && row.group.find('/') != std::string::npos;   // a side sub-group under a section
+                        if (g.tab == TabMorphs && row.id >= 0) {   // brows / eyes / mouth / other, or a side sub-group: the fold arrow folds it
+                            const bool collapsed = g.collapsedMorphs.count(row.group) != 0;
+                            const int tx = morph ? 26 : 14;
+                            Expander(s, tx, y + kRowH / 2, !collapsed, ui::kAccent);
+                            const RECT headClip{tx + 14, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAccent, tx + 14, y + 3, ClipText(name, 42), &headClip);
+                        } else {
+                            // Header and its right-aligned "reset" share the row:
+                            // clip the title so it can never run under "reset".
+                            const RECT headClip{14, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
+                        }
                         bool any = false;
-                        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) any = any || TweakChanged(rows[k].id);
+                        for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
+                            if (rows[k].kind == 1 || rows[k].kind == 2 || rows[k].kind == 6) any = any || TweakChanged(rows[k].id);
                         if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
                     } else if (row.kind == 4) {
                         const RECT infoClip{14, y, kPanel - 16, y + kRowH};
@@ -229,6 +241,17 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAmber);
                         const RECT swClip{36, y, kPanel - 18, y + kRowH};
                         s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
+                    } else if (row.kind == 6) {
+                        DrawPresetChips(s, row.id, row.label, y);
+                    } else if (g.morphEdit >= 0 && row.id == kMorphBase + g.morphEdit) {
+                        // the rename box: the typed text with a caret, Enter commits (Esc restores)
+                        std::string typed = g.morphEditBuf + "_";
+                        const RECT box{12, y + 1, kPanel - 44, y + kRowH - 1};
+                        s.FillRound(box, 5, ui::kLineHi);
+                        s.StrokeRound(box, 5, ui::kAccent);
+                        const RECT boxClip{20, y, kPanel - 52, y + kRowH};
+                        s.Text(g.fontMono, ui::kText, 20, y + 3, ClipText(typed, 30), &boxClip);
+                        s.TextRight(g.fontSmall, ui::kFaint, kPanel - 16, y + 4, "Enter");
                     } else {
                         DrawSliderRow(s, row.id, row.label, y);
                     }
@@ -597,17 +620,22 @@ void OpenCard() {
             g.clothingPath.clear();
             g.clothingName.clear();
             g.clothingOutfit = -1;
+            g.clothingMode = 0;
+            g.clothingSrcOutfit = -1;
         }
         StartLoad(c, -1);
     }
 }
 
-// An outfit file dropped on a loaded character: it overwrites the outfit on
-// screen in memory only (never saved) and stays pinned to that slot (see
-// StartLoad). Hair worn as accessories stays.
-void ApplyClothingFile(const std::string& path) {
+// A Koikatsu Coordinate (outfit) file dropped on a loaded character: in-memory
+// overwrite of the outfit on screen (the card on disk is never saved), pinned
+// to that slot (see StartLoad). mode: 0 = import as clothing (the clothing
+// merge; hair worn as accessories is kept), 1 = import as coordinate (the
+// file's coordinate replaces the slot wholesale, verbatim, including hair and
+// other accessories).
+void PinOutfitFile(const std::string& path, int mode) {
     std::shared_ptr<Loaded> L = Current();
-    if (!L || g.cardPath.empty()) { Log("open a character first, then drop the outfit file", LogKind::Warn); return; }
+    if (!L || g.cardPath.empty()) { Log("open a character first, then drop the coordinate file", LogKind::Warn); return; }
     if (g.busy) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     card::ClothingFile cl;
     try {
@@ -617,14 +645,122 @@ void ApplyClothingFile(const std::string& path) {
         Log(std::string("not a valid outfit file: ") + e.what(), LogKind::Error);
         return;
     }
+    const std::string name = cl.displayName().empty() ? fileio::FileName(path) : cl.displayName();
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.clothingPath = path;
-        g.clothingName = cl.displayName();
+        g.clothingName = name + (mode == 1 ? std::string(" (coordinate)") : std::string());
+        g.clothingSrcOutfit = -1;
+        g.clothingMode = mode;
         g.clothingOutfit = L->outfit;   // the outfit on screen
     }
     g.cam = {};
+    if (mode == 1)
+        Log("coordinate import: whole coordinate from " + name + " (replaces the outfit on screen, including accessories; in memory only)", LogKind::Info);
+    else
+        Log("coordinate import (as clothing): outfit contents of " + name + " (your character's identity, other outfits and hair accessories stay untouched; in memory only)", LogKind::Info);
     StartLoad(g.cardPath, L->outfit, true);
+}
+
+// The drop-time question for a Koikatsu Coordinate (outfit) file: clothing
+// import or coordinate import. CARDBRIDGE_COORDINATE_MODE=clothing|coordinate|cancel
+// skips the dialog in scripted runs (an unknown value shows the dialog).
+// Whether a dropped Coordinate (outfit) file may merge onto the outfit on screen right now.
+// Without a loaded, idle character there is no recipient, so the import buttons are not offered.
+static bool CanImportCoordinateNow() {
+    if (g.cardPath.empty()) return false;   // no target character on screen
+    if (g.busy.load()) return false;        // its load is still running
+    return Current() != nullptr;
+}
+
+void ShowCoordinateImportDialog(const std::string& path) {
+    const char* envMode = std::getenv("CARDBRIDGE_COORDINATE_MODE");
+    if (envMode && *envMode) {
+        const std::string m = envMode;
+        if (m == "clothing") { PinOutfitFile(path, 0); return; }
+        if (m == "coordinate") { PinOutfitFile(path, 1); return; }
+        if (m == "selective") { SelectiveOpen(path); return; }   // the per-component preview window
+        // "cancel" (or anything else, e.g. "open", which makes no sense for an outfit file): nothing changes.
+        Log("coordinate import cancelled", LogKind::Info);
+        return;
+    }
+    // Name the source in the dialog when it parses; fall back to the file name when it does not.
+    std::string who;
+    try {
+        card::ClothingFile cl = card::LoadClothingFile(path);
+        who = cl.displayName().empty() ? fileio::FileName(path) : cl.displayName();
+    } catch (const std::exception&) {
+        who = fileio::FileName(path);
+    }
+    const std::wstring wWho = Utf8ToWide(who), wFile = Utf8ToWide(fileio::FileName(path));
+    const bool canImport = CanImportCoordinateNow();
+    const bool busy = g.busy.load();
+    std::wstring instruction, content;
+    if (canImport) {
+        instruction = L"How should \"" + wFile + L"\" be imported?";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from the maker (an outfit file named \"" + wWho + L"\").\n"
+            L"The import goes to the outfit on screen. None of the choices writes the card to disk.\n"
+            L"\n"
+            L"Import as Clothing (Replace All):\n"
+            L"   Extracts this coordinate's outfit - clothes, accessories and makeup - and merges them\n"
+            L"   onto the outfit on screen with the outfit import. Your character keeps their identity, face, body,\n"
+            L"   personality, every other outfit and the hair worn as accessories.\n"
+            L"\n"
+            L"Import as Coordinate:\n"
+            L"   Replaces the outfit on screen with the whole coordinate, exactly as saved - clothes, accessories,\n"
+            L"   makeup and their settings. Accessories are replaced too (including hair worn as accessories).\n"
+            L"   Your character's identity is not imported either way.\n"
+            L"\n"
+            L"Selective Import...:\n"
+            L"   Opens a window with three live 3D views (your character, the imported source, and the proposed\n"
+            L"   result) plus a per-component picker: add or replace individual clothes and accessories, keep your\n"
+            L"   own, or skip the source's. Nothing is applied until you press Apply.";
+    } else if (busy) {
+        instruction = L"\"" + wFile + L"\" cannot be imported yet";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from the maker (an outfit file named \"" + wWho + L"\").\n"
+            L"The character on screen is still loading; wait for it to finish and drop the file again to import.\n"
+            L"\n"
+            L"The card is not written to disk either way.";
+    } else {
+        instruction = L"\"" + wFile + L"\" cannot be imported yet";
+        content =
+            L"This looks like a Koikatsu Coordinate saved from the maker (an outfit file named \"" + wWho + L"\").\n"
+            L"No character is on screen to import onto. Open one first (the Open button or Ctrl+O),\n"
+            L"then drop this file again - the import choices will be offered then.\n"
+            L"\n"
+            L"The card is not written to disk either way.";
+    }
+    enum { kImportClothing = 101, kImportCoordinate = 102, kSelectiveImport = 103 };
+    TASKDIALOG_BUTTON importBtns[3] = {
+        {kImportClothing, L"Import as Clothing (Replace All)"},
+        {kImportCoordinate, L"Import as Coordinate"},
+        {kSelectiveImport, L"Selective Import..."},
+    };
+    const TASKDIALOG_BUTTON* btns = importBtns;
+    const UINT btnCount = canImport ? 3u : 0u;
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize = sizeof(cfg);
+    cfg.hwndParent = g.hwnd;
+    cfg.pszWindowTitle = L"CardBridge";
+    cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    cfg.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    cfg.pszMainInstruction = instruction.c_str();
+    cfg.pszContent = content.c_str();
+    cfg.nDefaultButton = kImportClothing;
+    cfg.cButtons = btnCount;
+    cfg.pButtons = canImport ? btns : nullptr;
+    int pressed = 0;
+    if (TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr) != S_OK) pressed = 0;
+    switch (pressed) {
+    case kImportClothing: PinOutfitFile(path, 0); return;
+    case kImportCoordinate: PinOutfitFile(path, 1); return;
+    case kSelectiveImport: SelectiveOpen(path); return;
+    default:
+        Log("coordinate import cancelled; the current character is unchanged", LogKind::Info);
+        return;
+    }
 }
 
 // Picking a slot is the same reload Left/Right does, just aimed. The reload
@@ -652,6 +788,8 @@ void ResetClothing() {
         g.clothingPath.clear();
         g.clothingName.clear();
         g.clothingOutfit = -1;
+        g.clothingMode = 0;
+        g.clothingSrcOutfit = -1;
     }
     Log("clothing reset to the card's own outfit" + (name.empty() ? std::string() : " (dropped " + name + ")"), LogKind::Good);
     g.cam = {};

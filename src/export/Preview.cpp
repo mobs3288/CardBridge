@@ -1,16 +1,19 @@
 #include "export/Preview.h"
 #include "material/MaterialWorkbench.h"
+#include "export/Translucency.h"
 
 #include "assemble/Pose.h"
 
 #include <stb_image_write.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <cstring>
+#include <list>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -24,6 +27,8 @@
 #include <vector>
 
 namespace cardbridge::exporter {
+
+struct Pt { float x, y, z; };   // used by the framing helpers (detail) and the software raster below
 
 namespace detail {   // shared with GpuView.cpp
 // The game runs in linear light: sRGB textures are decoded when sampled, colour properties reach the shader as linear values and
@@ -67,20 +72,70 @@ float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
     return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
 
-// A material the game composites in its transparent queue with depth write off (the face's paint layers: eye white, iris,
-// brow, eyelines, nose line — their closeness is meaningless, the queue order is what keeps the iris over the white).
-// An authored translucency shader (a cloth worn see-through) composites the same way: blended, in queue order.
-// The software renderers draw these after the depth-writing materials, alpha-blended and without writing depth, like the game.
+// The forward pass writes depth when the material's shader says ZWrite On (Shader Forge/main_alpha declares it in its
+// FORWARDBASE pass). The transparent compositing then resolves layered garments by depth - the way the game draws a
+// corset over pantyhose regardless of draw order. Unknown shaders (not in any bundle) keep the game's convention:
+// Shader Forge's mod shader fallbacks write depth, so an unindexed material layers correctly too.
+bool ShaderWritesDepth(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) return scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite;
+    return true;
+}
+
+// A material the game composites in its transparent queue (queue >= 2500): the face's paint layers (eye white, iris, brow, eyelines,
+// nose line — their closeness is meaningless, the queue order is what keeps the iris over the white), an authored translucency shader
+// or an alpha-blend shader like Shader Forge/main_alpha (Transparent+40): the material blends over what is behind it, in queue order.
+// The software renderers and the GPU view draw these after the depth-writing materials, alpha-blended.
 bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     if (mat.translucent) return true;
-    if (mat.alpha || mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
-    return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && RenderQueueOf(scene, mat) >= 2500;
+    const int q = RenderQueueOf(scene, mat);
+    if (mat.alpha && q >= 2500) return true;
+    if (mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
+    return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && q >= 2500;
+}
+
+// The orthographic framing, shared by the renderers and the translucency brush (see Preview.h).
+bool ComputeViewFraming(const assemble::Scene& scene, const std::vector<char>* hiddenParts, float W, float H, const ViewCamera& cam, ViewFraming& out) {
+    Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        const auto& part = scene.parts[pi];
+        const char flag = hiddenParts && pi < hiddenParts->size() ? (*hiddenParts)[pi] : 0;
+        if (!part.includeInExport) continue;
+        if (flag != 2 && (flag || !part.visibleInPreview)) continue;
+        for (int mi : part.meshes)
+            for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                any = true;
+                mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
+                mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
+            }
+    }
+    if (!any) return false;
+    out.cx = (mn.x + mx.x) * 0.5f; out.cy = (mn.y + mx.y) * 0.5f; out.cz = (mn.z + mx.z) * 0.5f;
+    out.extent = std::max({mx.x - mn.x, mx.y - mn.y, mx.z - mn.z});
+    out.scale = H * 0.9f / out.extent * cam.zoom;
+    const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
+    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
+    out.toCam[0] = -sn * cp; out.toCam[1] = sp; out.toCam[2] = cs * cp;
+    return true;
+}
+
+bool ViewRayAt(const ViewFraming& f, float W, float H, const ViewCamera& cam, float px, float py, Vec3& origin, Vec3& dir) {
+    const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
+    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
+    // The camera-space axes in world space (the transpose of the rotation project() uses).
+    const float right[3] = {cs, 0.0f, sn};
+    const float up[3] = {sp * sn, cp, -sp * cs};
+    const float rx = (W * 0.5f + cam.panX * H - px) / f.scale;
+    const float ry = (H * 0.5f + cam.panY * H - py) / f.scale;
+    origin = {f.cx + right[0] * rx + up[0] * ry + f.toCam[0] * 5.0f,
+              f.cy + right[1] * rx + up[1] * ry + f.toCam[1] * 5.0f,
+              f.cz + right[2] * rx + up[2] * ry + f.toCam[2] * 5.0f};
+    dir = {-f.toCam[0], -f.toCam[1], -f.toCam[2]};
+    return true;
 }
 } // namespace detail
 
 namespace {
-
-struct Pt { float x, y, z; };
 
 // Box-filtered mip levels, so a 4096 atlas drawn a few hundred pixels tall does not alias into speckle.
 // Level 0 is NOT copied: `base` points into the SceneTexture's own pixels (the
@@ -118,8 +173,11 @@ Mips BuildMips(const assemble::SceneTexture& t) {
 
 // Bilinear, wrapping.
 void SampleBilinear(const Mips& m, int lvl, float u, float v, float out[4], bool clamp = false) {
+    if (m.w.empty()) { out[0] = out[1] = out[2] = out[3] = 1.0f; return; }   // never built (or built from a zero-sized texture): fail soft
+    lvl = std::max(0, std::min(lvl, static_cast<int>(m.w.size()) - 1));
     int w = m.w[lvl], h = m.h[lvl];
     const uint8_t* px = lvl == 0 ? m.base : m.rgba[static_cast<size_t>(lvl)].data();
+    if (!px) { out[0] = out[1] = out[2] = out[3] = 1.0f; return; }
     float fx = u * w - 0.5f, fy = (1.0f - v) * h - 0.5f;
     int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
     float tx = fx - x0, ty = fy - y0;
@@ -219,6 +277,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                 const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
                 for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                    if (mat.hidden) continue;
                     items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
@@ -273,7 +332,8 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * opt.viewWidth + x;
-                        if (z <= zbuf[zi]) continue;
+                        const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
+                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         if (tex) {
                             const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
@@ -291,7 +351,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         r *= (mat.shadow.x + (1.0f - mat.shadow.x) * lit);
                         g *= (mat.shadow.y + (1.0f - mat.shadow.y) * lit);
                         bl *= (mat.shadow.z + (1.0f - mat.shadow.z) * lit);
-                        if (!blend) zbuf[zi] = z;
+                        if (writeZ) zbuf[zi] = z;
                         uint8_t* o = &img[(static_cast<size_t>(y) * W + ox + x) * 4];
                         if (blend) {
                             const float a = std::min(1.0f, std::max(0.0f, al));
@@ -405,6 +465,18 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
             }
             if (pm.name == "_WorldSpaceLightPos0") { f[0] = lightDir[0]; f[1] = lightDir[1]; f[2] = lightDir[2]; f[3] = 0.0f; continue; }
             if (pm.name == "_WorldSpaceCameraPos") { f[0] = camPos[0]; f[1] = camPos[1]; f[2] = camPos[2]; continue; }
+            // The IBL (image-based-lighting) family samples unity_SHAr..unity_OcclusionMaskSelector for its ambient
+            // and its occlusion. Unity fills them from the scene's lighting; here there is one headlight, so a strong,
+            // neutral hemisphere is synthesised - without it the IBL shaders see a black environment and render black.
+            // unity_SHBr/g/b stay 0 (no directional asymmetry); unity_SHC stays 0 (no opposite-lobe).
+            if (pm.name == "unity_SHAr" || pm.name == "unity_SHAg" || pm.name == "unity_SHAb") { f[0] = f[1] = f[2] = f[3] = 0.45f; continue; }
+            if (pm.name == "unity_SHC" || pm.name == "unity_SHBr" || pm.name == "unity_SHBg" || pm.name == "unity_SHBb") { f[0] = f[1] = f[2] = f[3] = 0.0f; continue; }
+            if (pm.name == "unity_OcclusionMaskSelector") { f[0] = 1.0f; f[1] = 1.0f; f[2] = 0.0f; f[3] = 1.0f; continue; }   // Unity's built-in: RGB occlusion, full pass
+            // Unity's unity_SpecCube*_HDR carries the decode scale/bias of the reflection probes; zero kills the IBL
+            // reflection term entirely (the env light is then 0 and the garment renders black). A partial scale keeps
+            // the maker's sheen without washing the garment out (the fallback sample is plain white).
+            if (pm.name == "unity_SpecCube0_HDR" || pm.name == "unity_SpecCube1_HDR") { f[0] = 0.55f; f[1] = 0.55f; f[2] = 0.55f; f[3] = 0.55f; continue; }
+            if (pm.name == "unity_SpecCube0_ProbePosition" || pm.name == "unity_SpecCube1_ProbePosition") { f[0] = 0.0f; f[1] = 0.0f; f[2] = 0.0f; f[3] = 1.0f; continue; }
             bool found = false;
             for (const auto& pr : mat.props) if (pr.first == pm.name) { f[0] = pr.second.x; f[1] = pr.second.y; f[2] = pr.second.z; f[3] = pr.second.w; found = true; }
             if (!found && globals)
@@ -428,6 +500,15 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
     for (size_t i = 0; i < 8; ++i) if (!out.data[i].empty()) out.ptr[i] = out.data[i].data();
 }
 
+// One resolved texture binding per texture register: computed on the first sample of that register and reused for the rest of this
+// MatTextures' life (one material's bake pass). Without it every sample re-ran a linear scan of the program's texture table and of the
+// material's and scene's texture bindings, with a string compare each — millions of compares per 1024x1024 bake.
+struct Binding {
+    const std::string* name = nullptr;   // points into the (stable) program table
+    int sceneTex = -1;                   // index into Scene::textures; -1 = no binding (shader default)
+    bool clamp = false;                  // resolved wrap clamp of Scene::textures[sceneTex]
+    bool globalTex = false;              // bound via the scene's global textures (sampled at level 0, like before)
+};
 struct MatTextures : shader::ISm4Textures {
     const assemble::Scene* scene = nullptr;
     ViewState* st = nullptr;
@@ -436,6 +517,9 @@ struct MatTextures : shader::ISm4Textures {
     float lod = 0;
     bool trace = false;
     bool decodeSrgb = false;   // sRGB-flagged textures give linear values (a create job run in linear light)
+    mutable Binding bind_[128];
+    mutable bool bindValid_[128] = {};
+    mutable Binding scratch_;   // resolve result for out-of-range registers
     void Sample(int t, int, const float coord[4], float lodIn, float out[4]) override {
         SampleImpl(t, coord, lodIn, out);
         if (trace) {
@@ -444,46 +528,78 @@ struct MatTextures : shader::ISm4Textures {
             std::fprintf(stderr, "  sample t%d %s uv(%.3f %.3f) -> %.3f %.3f %.3f %.3f\n", t, nm ? nm->c_str() : "?", coord[0], coord[1], out[0], out[1], out[2], out[3]);
         }
     }
+    const Binding& Resolve(int t) const {
+        if (t < 0 || t >= 128) {
+            // Out-of-range register (SM4 t0..t127 is the spec's range, but be safe): resolve on the fly, never cached.
+            const std::string* name = nullptr;
+            for (const auto& tb : prog->textures)
+                if (static_cast<int>(tb.reg) == t) { name = &tb.name; break; }
+            scratch_.name = name;
+            scratch_.sceneTex = -1;
+            scratch_.clamp = false;
+            scratch_.globalTex = false;
+            if (name) {
+                for (const auto& tb : mat->texProps)
+                    if (tb.name == *name && tb.texture >= 0) { scratch_.sceneTex = tb.texture; break; }
+                if (scratch_.sceneTex < 0)
+                    for (const auto& tb : scene->globalTextures)
+                        if (tb.name == *name && tb.texture >= 0) { scratch_.sceneTex = tb.texture; scratch_.globalTex = true; break; }
+                if (scratch_.sceneTex >= 0) scratch_.clamp = scene->textures[static_cast<size_t>(scratch_.sceneTex)].clamp;
+            }
+            return scratch_;
+        }
+        const int reg = t;
+        Binding& b = bind_[reg];
+        if (bindValid_[reg]) return b;
+        const std::string* name = nullptr;
+        for (const auto& tb : prog->textures)
+            if (static_cast<int>(tb.reg) == t) { name = &tb.name; break; }
+        b.name = name;
+        if (name) {
+            for (const auto& tb : mat->texProps)
+                if (tb.name == *name && tb.texture >= 0) { b.sceneTex = tb.texture; break; }
+            if (b.sceneTex < 0)
+                for (const auto& tb : scene->globalTextures)
+                    if (tb.name == *name && tb.texture >= 0) { b.sceneTex = tb.texture; b.globalTex = true; break; }
+            if (b.sceneTex >= 0) b.clamp = scene->textures[static_cast<size_t>(b.sceneTex)].clamp;
+        }
+        bindValid_[reg] = true;
+        return b;
+    }
     void SampleImpl(int t, const float coord[4], float lodIn, float out[4]) {
         out[0] = out[1] = out[2] = out[3] = 1.0f;
-        const std::string* name = nullptr;
-        for (const auto& b : prog->textures) if (static_cast<int>(b.reg) == t) name = &b.name;
-        if (!name) return;
+        const Binding& b = Resolve(t);
+        if (!b.name) return;
         static const char* const drop = std::getenv("CARDBRIDGE_DROP_TEX");
-        if (drop && *name == drop) return;   // debug: treat this texture as missing (white)
-        for (const auto& tb : mat->texProps)
-            if (tb.name == *name && tb.texture >= 0) {
-                size_t ti = static_cast<size_t>(tb.texture);
+        if (drop && *b.name == drop) return;   // debug: treat this texture as missing (white)
+        const int sceneIdx = b.sceneTex;
+        if (sceneIdx >= 0) {
+                size_t ti = static_cast<size_t>(sceneIdx);
                 if (ti >= st->built.size() || !st->built[ti]) {   // lazy build (a texture the caller did not pre-build): build under lock so two workers cannot build/read the same chain at once
                     std::lock_guard<std::mutex> lk(st->mipMutex);
                     if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
                     if (ti >= st->built.size() || !st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
                 }
                 const Mips& m = st->mips[ti];
+                if (b.globalTex) {   // the scene's global textures: always level 0, stored pixels, no sRGB decode
+                    const bool cl = b.clamp;
+                    const float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
+                    SampleBilinear(m, 0, u, v, out, cl);
+                    return;
+                }
                 int l = std::min(static_cast<int>(m.w.size()) - 1, std::max(0, static_cast<int>(lodIn >= 0 ? lodIn : lod)));
-                bool cl = scene->textures[ti].clamp || std::getenv("CARDBRIDGE_CLAMP_ALL");
-                float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
+                static const bool clampAll = std::getenv("CARDBRIDGE_CLAMP_ALL") != nullptr;   // cached: this runs per sampled texel
+                const bool cl = b.clamp || clampAll;
+                const float u = cl ? coord[0] : coord[0] - std::floor(coord[0]), v = cl ? coord[1] : coord[1] - std::floor(coord[1]);
                 SampleBilinear(m, l, u, v, out, cl);
                 if (decodeSrgb && scene->textures[ti].srgb)
                     for (int c = 0; c < 3; ++c) out[c] = out[c] <= 0.04045f ? out[c] / 12.92f : std::pow((out[c] + 0.055f) / 1.055f, 2.4f);
                 return;
-            }
-        for (const auto& tb : scene->globalTextures)
-            if (tb.name == *name && tb.texture >= 0) {
-                size_t ti = static_cast<size_t>(tb.texture);
-                if (ti >= st->built.size() || !st->built[ti]) {
-                    std::lock_guard<std::mutex> lk(st->mipMutex);
-                    if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
-                    if (ti >= st->built.size() || !st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
-                }
-                bool cl = scene->textures[ti].clamp;
-                SampleBilinear(st->mips[ti], 0, cl ? coord[0] : coord[0] - std::floor(coord[0]), cl ? coord[1] : coord[1] - std::floor(coord[1]), out, cl);
-                return;
-            }
+        }
         // A texture the material leaves empty: the shader's declared default (Unity's built-in white / black / gray / bump).
         std::string def = "white";
         if (mat->shaderIndex >= 0 && static_cast<size_t>(mat->shaderIndex) < scene->shaders.size())
-            for (const auto& d : scene->shaders[static_cast<size_t>(mat->shaderIndex)].texDefaults) if (d.first == *name) def = d.second;
+            for (const auto& d : scene->shaders[static_cast<size_t>(mat->shaderIndex)].texDefaults) if (d.first == *b.name) def = d.second;
         if (def == "black") { out[0] = out[1] = out[2] = out[3] = 0.0f; }
         else if (def == "gray" || def == "grey") { out[0] = out[1] = out[2] = out[3] = 0.5f; }
         else if (def == "bump") { out[0] = 0.5f; out[1] = 0.5f; out[2] = 1.0f; out[3] = 0.5f; }   // flat normal in Unity's packed form (x in alpha)
@@ -504,6 +620,8 @@ namespace {
 
 struct PsIn { float r[8][4]; };
 
+// Index into Scene::textures of the material's normal map binding — any texProp whose name contains "normal"
+// (the game uses _NormalMap and friends) — or -1. Used by the fallback lighting to shade from the map.
 // Per-vertex tangents from the UV layout (the shaders build their normal-map frame from them).
 std::vector<Vec3> ComputeTangents(const assemble::SceneMesh& m) {
     std::vector<Vec3> tan(m.vertices.size(), Vec3{0, 0, 0});
@@ -566,8 +684,12 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 std::vector<uint32_t>& bgra) {
     bgra.assign(static_cast<size_t>(W) * H, 0xFFE2E4E8u);
     if (st.mips.size() != scene.textures.size()) { st.mips.assign(scene.textures.size(), Mips{}); st.built.assign(scene.textures.size(), false); }
+    ViewFraming vf;
     // Bounds of everything drawable, once per frame (cheap next to the raster).
-    Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+    if (!detail::ComputeViewFraming(scene, opt.hiddenParts, static_cast<float>(W), static_cast<float>(H), cam, vf)) return;
+    const float cx = vf.cx, cy = vf.cy, cz = vf.cz, scale = vf.scale;
+    const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
+    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     auto visible = [&](size_t pi) {
         const auto& part = scene.parts[pi];
         const char flag = opt.hiddenParts && pi < opt.hiddenParts->size() ? (*opt.hiddenParts)[pi] : 0;
@@ -575,20 +697,6 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
         if (flag == 2) return true;   // forced on, even for a part that is hidden by default (a nude under piece)
         return part.visibleInPreview && !flag;
     };
-    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
-        if (!visible(pi)) continue;
-        for (int mi : scene.parts[pi].meshes)
-            for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
-                mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
-                mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
-            }
-    }
-    if (mn.x > mx.x) return;
-    const float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f, cz = (mn.z + mx.z) * 0.5f;
-    const float extent = std::max({mx.x - mn.x, mx.y - mn.y, mx.z - mn.z});
-    const float scale = H * 0.9f / extent * cam.zoom;
-    const float yaw = cam.yawDeg * 3.14159265f / 180.0f, pit = cam.pitchDeg * 3.14159265f / 180.0f;
-    const float cs = std::cos(yaw), sn = std::sin(yaw), cp = std::cos(pit), sp = std::sin(pit);
     std::vector<float> zbuf(static_cast<size_t>(W) * H, -1e30f);
     // Scene lighting for the game's shaders: a directional light just above the camera axis (the camera looks at the model
     // from toCamera; the scene is in metres, the orthographic camera is placed a few metres away).
@@ -624,30 +732,45 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                 const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                if (mat.hidden) continue;
                 jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
             }
         }
     }
+    // Has a live-morph delta for this mesh (and vm.posed therefore holds the morphed copy)?
+    auto morphedMesh = [&](int mi) {
+        if (!opt.morphDelta || static_cast<size_t>(mi) >= opt.morphDelta->size()) return false;
+        const auto& d = (*opt.morphDelta)[static_cast<size_t>(mi)];
+        return !d.empty() && d.size() == scene.meshes[static_cast<size_t>(mi)].vertices.size();
+    };
     auto meshOf = [&](int mi) -> const assemble::SceneMesh& {
         VM& vm = vms[static_cast<size_t>(mi)];
         if (!vm.done) {
             vm.done = true;
             const auto& restMesh = scene.meshes[static_cast<size_t>(mi)];
             const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-            if (posed) {
+            // The live morphs' offsets ride on the copied mesh, before the pose (bind-space, like the game)
+            const std::vector<Vec3>* md = morphedMesh(mi) ? &(*opt.morphDelta)[static_cast<size_t>(mi)] : nullptr;
+            if (posed || md) {
                 vm.posed = restMesh;
-                for (auto& v : vm.posed.vertices) {
-                    v.pos = assemble::SkinPoint(v, *opt.skin);
-                    v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
-                }
+                if (md)
+                    for (size_t i = 0; i < vm.posed.vertices.size(); ++i) {
+                        Vec3& p = vm.posed.vertices[i].pos;
+                        p.x += (*md)[i].x; p.y += (*md)[i].y; p.z += (*md)[i].z;
+                    }
+                if (posed)
+                    for (auto& v : vm.posed.vertices) {
+                        v.pos = assemble::SkinPoint(v, *opt.skin);
+                        v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
+                    }
             }
-            const auto& mesh = posed ? vm.posed : restMesh;
+            const auto& mesh = (posed || md) ? vm.posed : restMesh;
             vm.P.resize(mesh.vertices.size());
             vm.NZ.resize(mesh.vertices.size());
             for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], vm.P[i], vm.NZ[i]);
         }
         const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-        return posed ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
+        return (posed || morphedMesh(mi)) ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
     };
     auto drawSub = [&](int mi, int subIdx, bool blend, bool highlight) {
             const auto& mesh = meshOf(mi);
@@ -663,6 +786,9 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             MatTextures mt;
             const bool linear = detail::LinearLight();
             const assemble::SceneMaterial linearMat = (sr && linear) ? detail::LinearColours(mat) : assemble::SceneMaterial{};
+            shader::Sm4Io io;   // reused per pixel (zeroed there); a fresh Sm4Io per pixel cost a heap allocation and 1 KB of member init each
+            io.constantBuffers.reserve(16);
+            io.textures = &mt;
             if (sr && opt.mode == ViewMode::Lit) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
@@ -671,6 +797,34 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                     mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat;
                     mt.decodeSrgb = linear;
                 }
+            }
+            // The normal map for the simple path (the game's shader is not in the bundle or did not run): resolved once
+            // per submesh, mips built like the main texture's. Unity DXT5nm (X in alpha, Y in green).
+            int nIdx = -1;
+            if (opt.mode == ViewMode::Lit && !sr) {
+                int best = -1, bestScore = 99;
+                for (const auto& tb : mat.texProps) {
+                    std::string n = tb.name;
+                    for (auto& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    if (n.find("mask") != std::string::npos) continue;   // _NormalMask is a mask, not a tangent-space normal map
+                    const bool isN = n.find("normal") != std::string::npos || n.find("nmap") != std::string::npos || n.find("bump") != std::string::npos;
+                    if (!isN) continue;
+                    int score = 1;
+                    if (n == "_normalmap") score = 0;                     // the base normal map (the strongest shading cue)
+                    else if (n.find("detail") != std::string::npos) score = 3;
+                    else if (n.find("bump") != std::string::npos) score = 2;
+                    if (score >= bestScore) continue;
+                    if (tb.texture >= 0) { bestScore = score; best = tb.texture; }
+                }
+                nIdx = best;
+            }
+            const Mips* nmp = nullptr;
+            if (nIdx >= 0 && static_cast<size_t>(nIdx) < scene.textures.size()) {
+                const size_t ni = static_cast<size_t>(nIdx);
+                if (st.mips.size() != scene.textures.size()) { st.mips.assign(scene.textures.size(), Mips{}); st.built.assign(scene.textures.size(), false); }
+                if (!st.built[ni]) { st.mips[ni] = BuildMips(scene.textures[ni]); st.built[ni] = true; }
+                nmp = &st.mips[ni];
+                if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
             }
             for (size_t t = 0; t + 2 < sub.indices.size(); t += 3) {
                 uint32_t i0 = sub.indices[t], i1 = sub.indices[t + 1], i2 = sub.indices[t + 2];
@@ -704,7 +858,8 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * W + x;
-                        if (z <= zbuf[zi]) continue;
+                        const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
+                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         // Diagnostic view modes (spec S13): per-pixel substitution of the shading, never touching
                         // the game's shader path. They fall through to the same write-out below. Lit is unchanged.
@@ -774,7 +929,9 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             }
                         }
                         if (sr && opt.mode == ViewMode::Lit) {
-                            shader::Sm4Io io;
+                            io.discarded = false; io.trace = false; io.frontFace = true;
+                            std::memset(io.input, 0, sizeof(io.input));
+                            std::memset(io.output, 0, sizeof(io.output));
                             io.constantBuffers = psCb.ptr;
                             io.textures = &mt;
                             mt.lod = static_cast<float>(lod);
@@ -816,7 +973,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
                             if (al < detail::DiscardBelow(mat, blend)) continue;
                             if (highlight) highlightTint(r, g, bl);
-                            if (!blend) zbuf[zi] = z;
+                            if (writeZ) zbuf[zi] = z;
                             auto q2f = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return f; };
                             const float a = std::min(1.0f, std::max(0.0f, al));
                             const float sr2 = q2f(r), sg2 = q2f(g), sb2 = q2f(bl);
@@ -833,7 +990,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                         bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f + 0.5f) << 16) | (static_cast<uint32_t>(cg * 255.0f + 0.5f) << 8) | static_cast<uint32_t>(cb * 255.0f + 0.5f);
                                     } else {
                                         bgra[zj] = shadedPx;
-                                        zbuf[zj] = z;
+                                        if (writeZ) zbuf[zj] = z;
                                     }
                                 }
                             continue;
@@ -847,21 +1004,40 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
                         }
                         if (al < detail::DiscardBelow(mat, blend)) continue;
-                        float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        // The lighting normal: the vertex one, perturbed by the material's tangent-space normal map when the
+                        // game's shader did not run (the simple path) - the same DXT5nm decode the game shaders and the bake read.
+                        float nlm = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
+                        if (opt.mode == ViewMode::Lit && nmp) {
+                            const Vec3 na = mesh.vertices[i0].normal, nb = mesh.vertices[i1].normal, nc = mesh.vertices[i2].normal;
+                            const Vec3 N = normalize(Vec3{l0 * na.x + l1 * nb.x + l2 * nc.x, l0 * na.y + l1 * nb.y + l2 * nc.y, l0 * na.z + l1 * nb.z + l2 * nc.z});
+                            const Vec3 ta = vm.tangents[i0], tb = vm.tangents[i1], tc3 = vm.tangents[i2];
+                            Vec3 T = normalize(Vec3{l0 * ta.x + l1 * tb.x + l2 * tc3.x, l0 * ta.y + l1 * tb.y + l2 * tc3.y, l0 * ta.z + l1 * tb.z + l2 * tc3.z});
+                            const Vec3 B = {N.y * T.z - N.z * T.y, N.z * T.x - N.x * T.z, N.x * T.y - N.y * T.x};
+                            const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
+                            float un = l0 * u0.x + l1 * u1.x + l2 * u2.x, vn = l0 * u0.y + l1 * u1.y + l2 * u2.y;
+                            const bool nClamp = nIdx >= 0 && static_cast<size_t>(nIdx) < scene.textures.size() && scene.textures[static_cast<size_t>(nIdx)].clamp;
+                            if (!nClamp) { un -= std::floor(un); vn -= std::floor(vn); }
+                            float tc[4];
+                            SampleBilinear(*nmp, lod, un, vn, tc, nClamp);
+                            const float nx = tc[3] * 2.0f - 1.0f, ny = tc[1] * 2.0f - 1.0f;
+                            const float nz2 = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+                            const Vec3 wn = normalize(Vec3{T.x * nx + B.x * ny + N.x * nz2, T.y * nx + B.y * ny + N.y * nz2, T.z * nx + B.z * ny + N.z * nz2});
+                            nlm = std::max(0.0f, wn.x * L[0] + wn.y * L[1] + wn.z * L[2]);
+                        }
                         // Toon / shadow shading happens only in Lit; diagnostic modes pass their own colour through.
                         if (opt.mode == ViewMode::Lit) {
                             if (mat.toon.size() == static_cast<size_t>(assemble::kToonRows) && !mat.bakedLit) {   // N.L taken as the facing of the surface
-                                const Vec3& rr = mat.toon[static_cast<size_t>(std::min(assemble::kToonRows - 1, static_cast<int>((1.0f - nz) * 0.5f * assemble::kToonRows)))];
+                                const Vec3& rr = mat.toon[static_cast<size_t>(std::clamp(static_cast<int>((1.0f - nlm) * 0.5f * assemble::kToonRows), 0, assemble::kToonRows - 1))];   // nlm can exceed 1: clamp the row, or this reads out of bounds
                                 r *= rr.x; g *= rr.y; bl *= rr.z;
                             } else {
-                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
+                                float lit = mat.bakedLit ? 1.0f : std::min(1.0f, std::max(0.0f, (nlm - 0.35f) / 0.2f));
                                 r *= mat.shadow.x + (1.0f - mat.shadow.x) * lit;
                                 g *= mat.shadow.y + (1.0f - mat.shadow.y) * lit;
                                 bl *= mat.shadow.z + (1.0f - mat.shadow.z) * lit;
                             }
                         }
                         if (highlight) highlightTint(r, g, bl);
-                        if (!blend) zbuf[zi] = z;
+                        if (writeZ) zbuf[zi] = z;
                         auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
                         uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
                         const float a2 = std::min(1.0f, std::max(0.0f, al));
@@ -876,7 +1052,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                     bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f) << 16) | (static_cast<uint32_t>(cg * 255.0f) << 8) | static_cast<uint32_t>(cb * 255.0f);
                                 } else {
                                     bgra[zj] = px32;
-                                    zbuf[zj] = z;
+                                    if (writeZ) zbuf[zj] = z;
                                 }
                             }
                     }
@@ -925,7 +1101,13 @@ std::vector<char> EffectiveHiddenParts(const assemble::Scene& scene, const std::
         if (show && !nude)
             for (const auto& id : p.coveredBy) {
                 auto g = byId.find(id);
-                if (id.empty() || (g != byId.end() && shown(g->second))) { show = false; break; }
+                if (id.empty() || (g != byId.end() && shown(g->second))) {
+                    // A garment whose translucency is brushed in shows what is under it: the piece must be drawn,
+                    // or the see-through area would cut a hole to the background (and in the export, to nothing).
+                    if (g != byId.end() && TranslucencyActive(scene, static_cast<int>(g->second))) continue;
+                    show = false;
+                    break;
+                }
             }
         eff[i] = show ? 2 : 1;
     }
@@ -1161,24 +1343,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
     }
     const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
-    int baked = 0;
+    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
-        // A material on the alpha-coverage shader with NO _AlphaMask texture bound: our SM4
-        // evaluation can't see a missing texture's implicit default, so every fragment would
-        // discard (alpha=0) and the bake would come out black. Keep the plain texture as it is.
-        const auto alphaMaskMissing = [&mat]() {
-            if (mat.shader.find("alpha") == std::string::npos) return false;
-            for (const auto& tb : mat.texProps)
-                if (tb.name == "_AlphaMask" && tb.texture >= 0) return false;
-            return true;
-        }();
-        if (mat.translucent) continue;  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
-        if (alphaMaskMissing) continue;  // alpha-coverage shader with no mask: the bake would be black; keep the plain texture
+        if (mat.translucent) { ++skipTranslucent; continue; }  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
-        if (!sr) continue;
+        if (!sr) { ++skipNoShader; continue; }
         // A clamped main texture is edge-clamped in the game, not repeated: its triangles must stay at their UVs (the
         // shader's sampler clamps the border) instead of being shifted into their integer UV tile.
         const bool clampMain = mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
@@ -1204,6 +1376,10 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures) { W = scene.textures[static_cast<size_t>(mat.texture)].width; H = scene.textures[static_cast<size_t>(mat.texture)].height; }
         while (std::max(W, H) > maxSize) { W = std::max(1, W / 2); H = std::max(1, H / 2); }
         W = std::max(W, 64); H = std::max(H, 64);
+        // Tangents depend only on the flat's positions and UVs: compute once, reuse across the front-light render, the toon-ramp renders and the reference render.
+        std::vector<std::vector<Vec3>> flatTangents;
+        flatTangents.reserve(flats.size());
+        for (const auto& fm : flats) flatTangents.push_back(ComputeTangents(fm));
 
         // The textures the shader reads are built before the worker threads start (they only read from here on).
         for (const auto& tb : mat.texProps) BuildTexMips(scene, st, tb.texture);
@@ -1221,7 +1397,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         FillConstants(sr->programs[sr->pi], mat, Lv, camPos, psCb, &scene.globalProps);
         std::vector<std::vector<PsIn>> vsOut(flats.size());
         bool ok = true;
-        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], ComputeTangents(flats[f]), scene.globalProps, Lv, camPos, vsOut[f]);
+        for (size_t f = 0; f < flats.size() && ok; ++f) ok = RunVertexStage(*sr, mat, flats[f], flatTangents[f], scene.globalProps, Lv, camPos, vsOut[f]);
         if (!ok) return false;
 
         img.assign(static_cast<size_t>(W) * H * 4, 0.0f);
@@ -1289,6 +1465,9 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         auto worker = [&](unsigned wi) {
             MatTextures mt;
             mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0;
+            shader::Sm4Io io;   // reused per pixel (zeroed there); a fresh Sm4Io per pixel cost a heap allocation and 1 KB of member init each
+            io.constantBuffers.reserve(16);
+            io.textures = &mt;
             for (int y = static_cast<int>(wi); y < H; y += static_cast<int>(hw))
                 for (int x = 0; x < W; ++x) {
                     size_t ti = static_cast<size_t>(y) * W + x;
@@ -1304,9 +1483,10 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                         l1 = ((tr.cy - tr.ay) * (px - tr.cx) + (tr.ax - tr.cx) * (py - tr.cy)) / tr.den;
                         l2 = 1.0f - l0 - l1;
                     }
-                    shader::Sm4Io io;
+                    io.discarded = false; io.trace = false; io.frontFace = true;
+                    std::memset(io.input, 0, sizeof(io.input));
+                    std::memset(io.output, 0, sizeof(io.output));
                     io.constantBuffers = psCb.ptr;
-                    io.textures = &mt;
                     for (const auto& l : sr->links)
                         for (int ch = 0; ch < 4; ++ch)
                             io.input[l.psReg][ch] = l0 * vo[tr.i0].r[l.psReg][ch] + l1 * vo[tr.i1].r[l.psReg][ch] + l2 * vo[tr.i2].r[l.psReg][ch];
@@ -1332,6 +1512,24 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         std::vector<float> img;
         std::vector<uint8_t> cov;
         if (!render(W, H, L, img, cov)) continue;
+        // A shader that discarded every covered fragment would bake a transparent sheet -
+        // in MikuMikuDance the garment simply vanishes. Never bake that: keep the card's
+        // own texture and record the skip, loudly.
+        {
+            size_t solid = 0;
+            for (size_t ti = 0; ti < cov.size(); ++ti)
+                if (cov[ti] && img[ti * 4 + 3] >= 0.5f) {
+                    if (++solid >= 16) break;
+                }
+            if (solid < 16) {
+                // The game's shader discards every fragment here (a crest drawn with a black fallback texture and no binding of its own):
+                // the game shows nothing for it, so we skip it in the views and in the export too - drawing a flat white plate is wrong.
+                scene.materials[mi].hidden = true;
+                scene.warn("", "material '" + mat.name + "' draws nothing (every fragment discarded) and is skipped everywhere");
+                ++skipEmptyBake;
+                continue;
+            }
+        }
 
         if (toon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
@@ -1423,8 +1621,97 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
-    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders";
+    if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders" +
+                          ((skipTranslucent || skipEmptyBake || skipNoShader)
+                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader)"
+                               : "");
 }
+
+// The create-job cache: (shader + inputs) -> the placeholder's pixels. The jobs are deterministic (same card, same result),
+// so an outfit switch or a reload in the viewer re-uses the previous run instead of running the game's shaders again.
+// The key carries the shader blob hash, the job's size and linear flag, every property, every bound texture by its content
+// hash, the globals, and the overlay's hash � everything the SM4 can read. Bounded at 512 MB (LRU).
+namespace {
+using CreateCacheEntry = std::pair<std::string, std::shared_ptr<const std::vector<uint8_t>>>;
+std::mutex createCacheMu;
+std::list<CreateCacheEntry> createCache_;
+std::map<std::string, std::list<CreateCacheEntry>::iterator> createCacheByKey_;
+size_t createCacheBytes_ = 0;
+constexpr size_t kCreateCacheCap = 512ull * 1024 * 1024;
+
+void createJobCachePut(std::string key, std::vector<uint8_t> rgba) {
+    std::lock_guard<std::mutex> lk(createCacheMu);
+    auto old = createCacheByKey_.find(key);
+    if (old != createCacheByKey_.end()) {
+        createCacheBytes_ -= old->second->second->size();
+        createCache_.erase(old->second);
+        createCacheByKey_.erase(old);
+    }
+    auto p = std::make_shared<const std::vector<uint8_t>>(std::move(rgba));
+    createCacheBytes_ += p->size();
+    createCache_.emplace_front(std::move(key), std::move(p));
+    createCacheByKey_[createCache_.front().first] = createCache_.begin();
+    while (createCacheBytes_ > kCreateCacheCap && createCache_.size() > 1) {
+        auto& back = createCache_.back();
+        createCacheBytes_ -= back.second->size();
+        createCacheByKey_.erase(back.first);
+        createCache_.pop_back();
+    }
+}
+std::shared_ptr<const std::vector<uint8_t>> createJobCacheGet(const std::string& key) {
+    std::lock_guard<std::mutex> lk(createCacheMu);
+    auto it = createCacheByKey_.find(key);
+    if (it == createCacheByKey_.end()) return nullptr;
+    createCache_.splice(createCache_.begin(), createCache_, it->second);
+    return it->second->second;
+}
+
+std::string createJobKey(const assemble::Scene& scene, const assemble::SceneCreateJob& job) {
+    std::string key;
+    key.reserve(512);
+    char buf[192];
+    auto app = [&](const char* s) { key += s; key += '|'; };
+    const int si = job.material.shaderIndex;
+    if (si >= 0 && static_cast<size_t>(si) < scene.shaders.size()) {
+        const auto& sh = scene.shaders[static_cast<size_t>(si)];
+        std::snprintf(buf, sizeof buf, "%s@%llu", sh.name.c_str(), static_cast<unsigned long long>(Fnv1a64(sh.blob.data(), sh.blob.size())));
+        app(buf);
+    } else {
+        app("no-shader");
+    }
+    std::snprintf(buf, sizeof buf, "%dx%d|%s", job.width, job.height, job.linear ? "lin" : "stored");
+    app(buf);
+    for (const auto& pr : job.material.props) {
+        std::snprintf(buf, sizeof buf, "%s=%.9g,%.9g,%.9g,%.9g", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
+        app(buf);
+    }
+    for (const auto& tb : job.material.texProps) {
+        const uint64_t h = tb.texture >= 0 && static_cast<size_t>(tb.texture) < scene.textures.size()
+                               ? scene.textures[static_cast<size_t>(tb.texture)].pixelHash
+                               : 0;
+        std::snprintf(buf, sizeof buf, "%s@%llu", tb.name.c_str(), static_cast<unsigned long long>(h));
+        app(buf);
+    }
+    for (const auto& g : scene.globalProps) {
+        std::snprintf(buf, sizeof buf, "%s=%.9g,%.9g,%.9g,%.9g", g.first.c_str(), g.second.x, g.second.y, g.second.z, g.second.w);
+        app(buf);
+    }
+    for (const auto& tb : scene.globalTextures) {
+        const uint64_t h = tb.texture >= 0 && static_cast<size_t>(tb.texture) < scene.textures.size()
+                               ? scene.textures[static_cast<size_t>(tb.texture)].pixelHash
+                               : 0;
+        std::snprintf(buf, sizeof buf, "%s@%llu", tb.name.c_str(), static_cast<unsigned long long>(h));
+        app(buf);
+    }
+    if (!job.overlay.empty() && job.overlayWidth > 0 && job.overlayHeight > 0)
+        std::snprintf(buf, sizeof buf, "overlay%dx%d|%s|%llu", job.overlayWidth, job.overlayHeight, job.overlayReplaces ? "repl" : "over",
+                      static_cast<unsigned long long>(Fnv1a64(job.overlay.data(), job.overlay.size())));
+    else
+        std::snprintf(buf, sizeof buf, "nooverlay");
+    app(buf);
+    return key;
+}
+} // namespace
 
 void RunCreateJobs(assemble::Scene& scene) {
     if (scene.createJobs.empty()) return;
@@ -1437,6 +1724,17 @@ void RunCreateJobs(assemble::Scene& scene) {
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     for (auto& job : scene.createJobs) {
         auto& mat = job.material;
+        const std::string cacheKey = createJobKey(scene, job);
+        if (auto cached = createJobCacheGet(cacheKey)) {
+            auto& tex = scene.textures[static_cast<size_t>(job.texture)];
+            tex.width = job.width;
+            tex.height = job.height;
+            tex.rgba = *cached;
+            tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
+            st.mips[static_cast<size_t>(job.texture)] = Mips{};
+            st.built[static_cast<size_t>(job.texture)] = false;
+            continue;
+        }
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
         if (!sr) { scene.warn("", "create material '" + mat.name + "': its shader could not be run; the texture keeps its plain input"); continue; }
         // Graphics.Blit: one quad over the whole target, UV 0..1.
@@ -1467,6 +1765,9 @@ void RunCreateJobs(assemble::Scene& scene) {
         auto worker = [&](unsigned wi) {
             MatTextures mt;
             mt.scene = &scene; mt.st = &st; mt.prog = &sr->programs[sr->pi]; mt.mat = &mat; mt.lod = 0; mt.decodeSrgb = job.linear;
+            shader::Sm4Io io;   // reused per pixel (zeroed there)
+            io.constantBuffers.reserve(16);
+            io.textures = &mt;
             for (int y = static_cast<int>(wi); y < H; y += static_cast<int>(hw))
                 for (int x = 0; x < W; ++x) {
                     const float u = (x + 0.5f) / W, v = 1.0f - (y + 0.5f) / H;
@@ -1474,9 +1775,10 @@ void RunCreateJobs(assemble::Scene& scene) {
                     const bool lower = v <= u;
                     const size_t i0 = 0, i1 = lower ? 1 : 2, i2 = lower ? 2 : 3;
                     const float l0 = lower ? 1.0f - u : 1.0f - v, l1 = lower ? u - v : u, l2 = lower ? v : v - u;
-                    shader::Sm4Io io;
+                    io.discarded = false; io.trace = false; io.frontFace = true;
+                    std::memset(io.input, 0, sizeof(io.input));
+                    std::memset(io.output, 0, sizeof(io.output));
                     io.constantBuffers = psCb.ptr;
-                    io.textures = &mt;
                     for (const auto& l : sr->links)
                         for (int ch = 0; ch < 4; ++ch)
                             io.input[l.psReg][ch] = l0 * vo[i0].r[l.psReg][ch] + l1 * vo[i1].r[l.psReg][ch] + l2 * vo[i2].r[l.psReg][ch];
@@ -1516,6 +1818,8 @@ void RunCreateJobs(assemble::Scene& scene) {
         auto& tex = scene.textures[static_cast<size_t>(job.texture)];
         tex.width = W;
         tex.height = H;
+        tex.pixelHash = Fnv1a64(rgba.data(), rgba.size());
+        createJobCachePut(std::move(cacheKey), rgba);
         tex.rgba = std::move(rgba);
         tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
         st.mips[static_cast<size_t>(job.texture)] = Mips{};

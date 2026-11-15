@@ -641,12 +641,13 @@ bool WbClick(int x, int y, bool right) {
             SliderRef r;
             if (!SliderFor(id, r)) return true;
             if (right) { ResetTweak(id); TweakEdited(id, true); return true; }
+            if (g.shiftDown) { BeginSliderEdit(id); return true; }   // type the value with the keyboard
             if (x < l.trackL - 8) return true;
             if (g.sliderDrag != id) material::PushUndo(g.mat);
             g.sliderDrag = id;
             g.dragTrackL = l.trackL;   // ApplyPending reads the track the drag started on
             g.dragTrackR = l.trackR;
-            *r.v = SliderValueAt(r, x, l.trackL, l.trackR);
+            r.Set(SliderValueAt(r, x, l.trackL, l.trackR));
             MaterialSliderEdited(id, false);
             SetCapture(g.matHwnd);
             return true;
@@ -786,10 +787,12 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     case WM_LBUTTONDOWN: {
+        if (g.sliderEdit >= 0) EndSliderEdit(true);   // any click commits the typed value (Shift+click a slider to type)
         WbClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), false);
         return 0;
     }
     case WM_RBUTTONDOWN:
+        if (g.sliderEdit >= 0) { EndSliderEdit(false); return 0; }   // right-click puts the typed value back and is swallowed
         WbClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), true);
         return 0;
     case WM_MOUSEMOVE: {
@@ -876,7 +879,7 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const bool live = IsLiveId(g.sliderDrag);
             if (!live && SliderFor(g.sliderDrag, r)) {
                 char msg[96];
-                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
+                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, r.Value(), r.def);
                 Log(msg);
             }
             const int released = g.sliderDrag;
@@ -927,6 +930,7 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_KEYDOWN: {
+        if (g.sliderEdit >= 0) { SliderEditKey(wp); return 0; }   // the typed box owns the keyboard while it is open
         if (g.matHexEditing) {
             if (wp == VK_ESCAPE) { g.matHexEditing = false; g.matHexUndoPushed = false; g.matHexBuf.clear(); InvalidateMat(); return 0; }
             if (wp == VK_RETURN) { g.matHexEditing = false; g.matHexUndoPushed = false; InvalidateMat(); return 0; }
@@ -959,8 +963,8 @@ LRESULT CALLBACK MatWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateMat();
             return 0;
         }
-        if (GetKeyState(VK_CONTROL) & 0x8000) {   // the material shortcuts, wherever focus is
-            if (wp == 'Z') MaterialUndo((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        if (g.ctrlDown) {   // the material shortcuts, wherever focus is
+            if (wp == 'Z') MaterialUndo(g.shiftDown);
             else if (wp == 'Y') MaterialUndo(true);
             else if (wp == 'S') SaveMatFile();
             else if (wp == 'O') { LoadMatFile(); RevealSelectedMaterial(); }

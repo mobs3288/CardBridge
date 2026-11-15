@@ -36,4 +36,24 @@ void AddMmdStandardBones(pmx::Model& model);
 // まばたき from its plain open mouth and closed eyes ("Mouth 0 open", "Eyes 0 closed"). Run after the expression morphs exist.
 std::vector<int> AddMmdMorphs(pmx::Model& model, const std::map<std::string, std::string>& shapes = {});
 
+// The standard-morph tables AddMmdMorphs plays from — exposed (read-only) so the live morph preview (MorphCatalog.cpp) can
+// build the same standard morphs by recipe instead of re-listing the table here.
+struct MmdStandardMorph {
+    const char* mmd;
+    const char* en;
+    int panel;
+    const char* keys;      // pattern names tried in order (comma separated)
+    const char* fallback;  // a plain-shape morph name to copy at `gain`, when no pattern matches
+    float gain;
+};
+const std::vector<MmdStandardMorph>& MmdStandardMorphs();
+struct MmdWinkMorph {
+    const char* from;
+    const char* left;
+    const char* leftEn;
+    const char* right;
+    const char* rightEn;
+};
+const std::vector<MmdWinkMorph>& MmdWinkMorphs();
+
 } // namespace cardbridge::exporter

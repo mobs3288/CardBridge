@@ -37,16 +37,104 @@ void InvalidateSliderRow(int id) {
 
 // Mouse movement during a drag is only noted by the window procedure (dragPending); this applies it, once per picture, so a fast mouse
 // cannot queue up work faster than it can be drawn.
+// Rows in the current tab's list (Parts or a slider tab; the Bones / Mats tabs have their own lists).
+int ListRowCount() {
+    if (g.tab == TabParts) {
+        std::shared_ptr<Loaded> L = Current();
+        return L ? static_cast<int>(BuildRows(*L).size()) : 0;
+    }
+    return static_cast<int>(BuildTweakRows(g.tab).size());
+}
+
+// A release in the list with no drag: the row under the press does its thing (what the mouse-down used to do; deferred so a
+// drag that scrolls the list can cancel the click).
+void PanelListClick(int x, int y, const PanelLayout& l) {
+    std::shared_ptr<Loaded> L = Current();
+    if (g.tab == TabParts) {
+        if (!L || g.showIssues) return;
+        const std::vector<PartRow> rows = BuildRows(*L);
+        const int idx = RowAt(rows, l, x, y);
+        if (idx < 0) return;
+        const PartRow& row = rows[static_cast<size_t>(idx)];
+        if (row.part < 0) {
+            if (row.replaced) { /* nothing to expand: the base outfit has no parts left */ }
+            else if (x < 30) {   // master checkbox: all parts of this group at once
+                ToggleGroup(row.group, L->scene);
+            } else {             // elsewhere on the row: collapse / expand
+                if (g.collapsedGroups.count(row.group)) g.collapsedGroups.erase(row.group);
+                else g.collapsedGroups.insert(row.group);
+                g.hoverRow = -1;
+                g.hoverPart = -1;
+                InvalidatePanel();
+            }
+            return;
+        }
+        if (static_cast<size_t>(row.part) >= g.hidden.size()) return;
+        {
+            const auto& pp = L->scene.parts[static_cast<size_t>(row.part)];
+            if (pp.group == "Accessories") {
+                const int ry = l.partsTop + idx * kRowH - ScrollPx(g.partPos);
+                const POINT cp{x, y};
+                const RECT chip = AccessoryChipRect(ry);
+                if (PtInRect(&chip, cp)) {   // the gizmo chip, not the hide/show toggle
+                    const bool sel = AccessorySelected() == row.part;
+                    g.selAccessory = sel ? -1 : row.part;
+                    if (sel) Log("gizmo off (" + pp.id + ")");
+                    else {
+                        Log("gizmo: " + pp.id + "  (drag an axis in the view, X/Y/Z; right-click the chip to reset)");
+                        // the Bones tab shows the same move (the first root bone's three numbers)
+                        const std::vector<int> roots = AccessoryRootBones(L->scene, pp.id);
+                        if (!roots.empty()) g.selBoneName = L->scene.bones[static_cast<size_t>(roots[0])].name;
+                        if (!g.gpuOk && !(g.showExp && g.expOk)) Log("the gizmo needs the Direct3D view", LogKind::Warn);
+                    }
+                    g.dirty = true;
+                    InvalidateRect(g.hwnd, nullptr, FALSE);
+                    InvalidatePanel();
+                    InvalidateFooter();
+                    return;
+                }
+            }
+        }
+        g.hidden[static_cast<size_t>(row.part)] ^= 1;
+        g.soloPart = -1;
+        Log(std::string(g.hidden[static_cast<size_t>(row.part)] ? "hide " : "show ") + L->scene.parts[static_cast<size_t>(row.part)].id);
+        // Heels: hiding/showing a shoe re-drives the foot pitch at once (settleHeels
+        // reads visibleInPreview), otherwise a hidden heeled shoe leaves the foot
+        // pitched over a flat shoe. ReshapeNow re-skins from the flat locals and
+        // re-poses, so the change is live on the click.
+        {
+            const std::string& pid = L->scene.parts[static_cast<size_t>(row.part)].id;
+            if (pid.find(".shoes") != std::string::npos) {
+                for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
+                    if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
+                        L->scene.parts[i].visibleInPreview = !g.hidden[i];
+                ReshapeNow(true);
+            }
+        }
+        g.dirty = true;
+        InvalidateRect(g.hwnd, nullptr, FALSE);
+        return;
+    }
+    if (L || g.tab == TabSettings) TweakClick(x, y, l, false);
+}
+
 void ApplyPending() {
     if (!g.dragPending) return;
     g.dragPending = false;
     if (g.sliderDrag >= 0) {
-        SliderRef r;
-        if (SliderFor(g.sliderDrag, r)) {
-            std::lock_guard<std::recursive_mutex> lk(g.mu);
-            // The drag may be on the panel's track or on the workbench's wider one:
-            // both record which one they started on.
-            *r.v = SliderValueAt(r, g.dragX, g.dragTrackL > 0 ? g.dragTrackL : kTrackL, g.dragTrackR > 0 ? g.dragTrackR : kTrackR);
+        const int trackL = g.dragTrackL > 0 ? g.dragTrackL : kTrackL;
+        const int trackR = g.dragTrackR > 0 ? g.dragTrackR : kTrackR;
+        if (IsBodyMeasureId(g.sliderDrag)) {   // a measurement row: the coupled sliders move by the delta this drag position maps to
+            const float frac = std::clamp(static_cast<float>(g.dragX - trackL) / static_cast<float>(std::max(1, trackR - trackL)), 0.0f, 1.0f);
+            BwhDragAt(g.sliderDrag, frac);
+        } else {
+            SliderRef r;
+            if (SliderFor(g.sliderDrag, r)) {
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
+                // The drag may be on the panel's track or on the workbench's wider one:
+                // both record which one they started on.
+                r.Set(SliderValueAt(r, g.dragX, trackL, trackR));
+            }
         }
         TweakEdited(g.sliderDrag, false);
         InvalidateSliderRow(g.sliderDrag);
@@ -54,6 +142,10 @@ void ApplyPending() {
         const float dx = g.boneDragDx, dy = g.boneDragDy;
         g.boneDragDx = g.boneDragDy = 0.0f;
         DragBone(g.dragBone, dx, dy, g.dragMove);
+        InvalidateList();
+    } else if (g.drag == 6 && g.transPaintPending) {
+        g.transPaintPending = false;
+        TransStrokeTo(g.transPaintX, g.transPaintY);
         InvalidateList();
     } else if (g.drag == 4 && (g.gizmoDragDx != 0.0f || g.gizmoDragDy != 0.0f)) {
         const float dx = g.gizmoDragDx, dy = g.gizmoDragDy;
@@ -86,8 +178,10 @@ void Frame() {
     const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
     const bool c = EaseScroll(g.matPos, g.matScroll, dt);
     const bool wbList = EaseScroll(g.wbMatPos, g.wbMatScroll, dt);   // the workbench's own list
-    g.animating = a || b || c || wbList;
+    const bool tabMove = EaseScroll(g.tabPos, g.tabScroll, dt);     // the tab strip's horizontal scroll
+    g.animating = a || b || c || wbList || tabMove;
     if (g.animating) InvalidateList();
+    if (tabMove) InvalidatePanelBand(214, 242);
     if (wbList) InvalidateWbList();
     // While a job runs, Frame is the single painter for the bar (~30/s): it
     // repaints the overlay card, the strip and the footer hint, so worker
@@ -119,11 +213,30 @@ void DumpTestLayout() {
     j["rowH"] = kRowH;
     j["tab"] = g.tab;
     j["tabs"] = nlohmann::json::array();
-    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2});
-    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}};
+    j["tabScrollable"] = l.tabScrollable;
+    j["tabStrip"] = {l.tabStrip.left, l.tabStrip.top, l.tabStrip.right, l.tabStrip.bottom};
+    j["tabMaxScroll"] = l.tabMaxScroll;
+    j["tabScroll"] = g.tabScroll;
+    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, l.tabs[i].left >= l.tabStrip.left - 2 && l.tabs[i].right <= l.tabStrip.right + 2});
+    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
+    // The Optimize tab's controls (centre of each hit area), for scripted runs and the smoke test.
+    if (L && g.tab == TabOptimize) {
+        const OptLayout oo = OptLayoutFor(l.partsTop, g.optScroll);
+        auto mid = [](const RECT& r) { return std::vector<int>{(r.left + r.right) / 2, (r.top + r.bottom) / 2}; };
+        nlohmann::json chips = nlohmann::json::array(), lodRows = nlohmann::json::array(), preview = nlohmann::json::array();
+        for (int i = 0; i < 6; ++i) chips.push_back(mid(oo.chips[static_cast<size_t>(i)]));
+        for (int i = 0; i < 4; ++i) lodRows.push_back(mid(oo.lodRows[static_cast<size_t>(i)]));
+        for (int i = 0; i < 6; ++i) preview.push_back(mid(oo.preview[static_cast<size_t>(i)]));
+        j["optimize"] = {{"presetChips", chips}, {"slider", mid(oo.slider)}, {"lodRows", lodRows}, {"generate", mid(oo.generate)},
+                         {"preview", preview}, {"apply", mid(oo.apply)}, {"reset", mid(oo.reset)},
+                         {"reduction", static_cast<int>(std::lround(g.opt.reduction * 100))}, {"applied", g.opt.applied.set},
+                         {"previewLod", g.opt.previewLod}, {"simplifiedTris", g.opt.simplifiedTris}};
+    } else {
+        j["optimize"] = nullptr;
+    }
     j["rows"] = nlohmann::json::array();
-    if (L && g.tab != TabParts && g.tab != TabBones && g.tab != TabMaterials) {
+    if (L && g.tab != TabParts && g.tab != TabBones && g.tab != TabMaterials && g.tab != TabOptimize) {
         const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
         for (size_t i = 0; i < rows.size(); ++i) {
             const int y = l.partsTop + static_cast<int>(i) * kRowH - static_cast<int>(std::lround(g.partPos * kRowH)) + kRowH / 2;
@@ -216,6 +329,8 @@ void DumpTestLayout() {
         j["clothingPath"] = g.clothingPath;
         j["clothingName"] = g.clothingName;
         j["clothingOutfit"] = g.clothingOutfit;
+        j["clothingMode"] = g.clothingMode;
+        j["selectiveDecisions"] = g.selectiveDecisions.size();
     }
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
@@ -232,6 +347,10 @@ void DumpTestLayout() {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_KILLFOCUS:
+        g.shiftDown = false;   // the window cannot see the release: pretend the keys are up
+        g.ctrlDown = false;
+        return 0;
     case WM_TIMER:
         if (wp == kTimerApplyTweaks) {
             KillTimer(hwnd, kTimerApplyTweaks);
@@ -268,6 +387,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 15) SaveMatFile();
         else if (wp == 16) LoadMatFile();
         else if (wp == 12) ResetClothing();   // reset the imported outfit to the card default
+        else if (wp == 20) {   // open the Selective Import window for the file in CARDBRIDGE_SELECTIVE_SRC
+            const char* src = std::getenv("CARDBRIDGE_SELECTIVE_SRC");
+            if (src && *src) SelectiveOpen(Slashes(src));
+        }
+        else if (wp == 21) SelApply();   // apply (only reached through the validation guard)
+        else if (wp == 22) SelectiveClose();   // close the selective import window
+        else if (wp == 24) {   // show the drop-time import dialog for the file in CARDBRIDGE_SELECTIVE_SRC (the modal harness must Dismiss it)
+            const char* src = std::getenv("CARDBRIDGE_SELECTIVE_SRC");
+            if (src && *src) ShowCoordinateImportDialog(Slashes(src));
+        }
         else if (wp == 10) DumpTestLayout();
         else if (wp == 11) {   // the nude body on, and the camera close on the chest (lp = pan up, in thousandths of the window height)
             if (std::shared_ptr<Loaded> L = Current())
@@ -293,6 +422,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_EXPORT_DONE: ProgEnd(); InvalidatePanel(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+    case WM_OPT_READY: {
+        if (wp == 1) Log("simplification cancelled", LogKind::Warn);
+        else if (wp == 2) Log("simplification failed; the character is untouched", LogKind::Error);
+        OptAdoptPending(static_cast<int>(wp));   // adopts g.optPending (published with the message)
+        g.opt.busy = false;
+        g.busy = false;
+        ProgEnd();
+        InvalidatePanel();
+        InvalidateView();
+        return 0;
+    }
     case WM_EXP_READY: {
         const bool wasCancelled = (wp == 1);
         std::shared_ptr<assemble::Scene> sc;
@@ -326,7 +466,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
         if (sc && (g.gpuExp.ready() || g.gpuExp.Init(go, &why))) {
             g.gpuExp.SetPlain(true);
-            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); Log("as exported: on (X switches back)", LogKind::Good); }
+            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); const size_t fb = g.gpuExp.fallbackMaterials(); Log(std::string("as exported: on (X switches back)") + (fb ? "; " + std::to_string(fb) + " material(s) shade via their normal map - the game's shader did not upload" : ""), LogKind::Good); }
             else Log("export preview upload failed: " + why, LogKind::Warn);
         } else if (sc) Log("export preview: no Direct3D 11 device (" + why + ")", LogKind::Warn);
         ProgEnd();
@@ -349,6 +489,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const float bustSize = g.tw.bodyCard.size() > 4 ? g.tw.bodyCard[4] : 0.5f;
             g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);
             g.sag = g.sagDefault;   // follow the card: each card starts at its own hang
+            UpdateBodyMeasurements();   // the measurements exist from the first frame, not only after an edit
         }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
         if (L && g.applyKeep)
@@ -360,8 +501,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (size_t i = 0; i < L->scene.parts.size(); ++i)
                 if (L->scene.parts[i].nudeSwitch && !(g.applyKeep && g.keepHidden.count(L->scene.parts[i].id))) g.hidden[i] = 1;   // starts unticked
         g.keepHidden.clear();
+        // Proportion correction state: a different card starts faithful with fresh diagnostics; a same-card reload (an outfit switch or a re-apply) keeps the user's corrections.
+        if (L && L->card.path != g.propCardKey) {
+            g.propCardKey = L->card.path;
+            g.propSugs.clear();
+            g.propFindings = assemble::AnalyzeCard(L->card);
+        } else if (!L) {
+            g.propCardKey.clear();
+            g.propSugs.clear();
+            g.propFindings.clear();
+        }
         g.partScroll = 0;
         g.partPos = 0;
+        g.optScroll = 0;   // a new character starts at the top of the Optimize tab
         g.hoverRow = g.hoverPart = g.hoverOutfit = -1;
         g.loadingOutfit = -1;
         g.soloPart = -1;
@@ -394,7 +546,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
                 g.gpuScene = L;
                 g.gpuOk = true;
-                Log("game shaders uploaded to Direct3D 11", LogKind::Good);
+                const size_t fb = g.gpu.fallbackMaterials();
+                Log(std::string("game shaders uploaded to Direct3D 11") + (fb ? "; " + std::to_string(fb) + " material(s) use the simple shader (their game shader did not upload) - normal-mapped, but the game's own look is unavailable" : ""), fb ? LogKind::Warn : LogKind::Good);
             } else if (gpuWhy == "cancelled by user") {
                 Log("GPU upload cancelled; showing the software renderer", LogKind::Warn);
             } else {
@@ -403,6 +556,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
+        // The exported PMX's morphs, for the Morphs tab (all weights at 0 on a fresh character)
+        {   // a new character: the cached optimized scenes and the applied export setting belonged to the previous one; the preset stays as a preference
+            g.opt.applied = OptApplied{};
+            g.opt.simplified.reset();
+            g.opt.simplifiedFor = -1.0f;
+            g.opt.simplifiedTris = g.opt.simplifiedVerts = 0;
+            g.opt.simplifiedSeconds = 0.0;
+            for (int i = 0; i < 4; ++i) g.opt.lods[static_cast<size_t>(i)] = OptLod{};
+            g.opt.previewLod = 0;
+            g.opt.stale = true;
+        }
+        if (L) LoadMorphCatalog();
+        else { g.morphCatalog = {}; g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); }
         ProgEnd();
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
@@ -452,25 +618,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t buf[1024];
         if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) {
             const std::string dropped = Slashes(WideToUtf8(buf));
-            bool isClothing = false;
-            try {
-                card::ClothingFile probe = card::LoadClothingFile(dropped);
-                (void)probe;
-                isClothing = true;
-            } catch (const card::CardError& e) {
-                isClothing = e.kind == card::CardErrorKind::ClothesFile;
-            } catch (const std::exception&) {
-                isClothing = false;
-            }
-            if (isClothing) {
-                ApplyClothingFile(dropped);
+            const card::ImageSourceKind sourceKind = card::DetectImageSource(dropped);
+            if (sourceKind == card::ImageSourceKind::RegularClothing) {
+                // A Koikatsu Coordinate (outfit) file: always ask how it goes onto the outfit on screen.
+                ShowCoordinateImportDialog(dropped);
             } else {
+                // Nothing on screen (open the card, as always), or a source we do not import:
+                // fall back to the plain drop behavior (open as character), never to clothing import.
                 g.cam = {};
                 {
                     std::lock_guard<std::recursive_mutex> lk(g.mu);
                     g.clothingPath.clear();
                     g.clothingName.clear();
                     g.clothingOutfit = -1;
+                    g.clothingMode = 0;
+                    g.clothingSrcOutfit = -1;
                 }
                 StartLoad(dropped, -1);
             }
@@ -479,6 +641,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONDOWN: {
+        if (g.morphEdit >= 0) EndMorphEdit(true);   // any click commits the rename box
+        if (g.sliderEdit >= 0) EndSliderEdit(true);   // any click commits the typed value (Shift+click a slider to type)
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -495,6 +659,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             int button = ButtonAt(l, x, y);
+            if (l.tabScrollable && y >= 214 && y < 242) {   // the tab strip scrolls horizontally: arrows nudge, a drag moves it, a tap switches the tab
+                if (button == 30) { g.tabScroll = std::max(0, g.tabScroll - 88); InvalidatePanelBand(214, 242); return 0; }
+                if (button == 31) { g.tabScroll = std::min(l.tabMaxScroll, g.tabScroll + 88); InvalidatePanelBand(214, 242); return 0; }
+                g.tabDragging = true;
+                g.tabDragMoved = false;
+                g.tabDragAnchor = x;
+                g.tabDragStart = g.tabPos;
+                SetCapture(hwnd);
+                return 0;
+            }
             if (button == 1) { OpenCard(); return 0; }
             if (button == 2) { ExportFolderIfNeeded(); return 0; }
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
@@ -504,6 +678,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 7) { ResetClothing(); return 0; }
             if (button == 8) { MoveClothing(-1); return 0; }
             if (button == 9) { MoveClothing(1); return 0; }
+            if (button == 21) { StartExportClothing(); return 0; }
             if (button == 20 && !g.matFilterDropOpen) { OpenWorkbench(); return 0; }   // the Materials tab's launcher
             if (button >= 10 && button != 20) {
                 g.showIssues = false;
@@ -521,68 +696,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, false); return 0; }
             if (L && !g.showIssues && g.tab == TabMaterials) { MaterialsTabClick(x, y, l, false); return 0; }
-            if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
-            if (L && !g.showIssues) {
-                std::vector<PartRow> rows = BuildRows(*L);
-                int idx = RowAt(rows, l, x, y);
-                if (idx >= 0) {
-                    const PartRow& row = rows[static_cast<size_t>(idx)];
-                    if (row.part < 0) {
-                        if (row.replaced) { /* nothing to expand: the base outfit has no parts left */ }
-                        else if (x < 30) {   // master checkbox: all parts of this group at once
-                            ToggleGroup(row.group, L->scene);
-                        } else {             // elsewhere on the row: collapse / expand
-                            if (g.collapsedGroups.count(row.group)) g.collapsedGroups.erase(row.group);
-                            else g.collapsedGroups.insert(row.group);
-                            g.hoverRow = -1;
-                            g.hoverPart = -1;
-                            InvalidatePanel();
-                        }
-                    } else if (static_cast<size_t>(row.part) < g.hidden.size()) {
-                        const auto& pp = L->scene.parts[static_cast<size_t>(row.part)];
-                        if (pp.group == "Accessories") {
-                            const int ry = l.partsTop + idx * kRowH - ScrollPx(g.partPos);
-                            const POINT cp{x, y};
-                            const RECT chip = AccessoryChipRect(ry);
-                            if (PtInRect(&chip, cp)) {   // the gizmo chip, not the hide/show toggle
-                                const bool sel = AccessorySelected() == row.part;
-                                g.selAccessory = sel ? -1 : row.part;
-                                if (sel) Log("gizmo off (" + pp.id + ")");
-                                else {
-                                    Log("gizmo: " + pp.id + "  (drag an axis in the view, X/Y/Z; right-click the chip to reset)");
-                                    // the Bones tab shows the same move (the first root bone's three numbers)
-                                    const std::vector<int> roots = AccessoryRootBones(L->scene, pp.id);
-                                    if (!roots.empty()) g.selBoneName = L->scene.bones[static_cast<size_t>(roots[0])].name;
-                                    if (!g.gpuOk && !(g.showExp && g.expOk)) Log("the gizmo needs the Direct3D view", LogKind::Warn);
-                                }
-                                g.dirty = true;
-                                InvalidateRect(hwnd, nullptr, FALSE);
-                                InvalidatePanel();
-                                InvalidateFooter();
-                                return 0;
-                            }
-                        }
-                        g.hidden[static_cast<size_t>(row.part)] ^= 1;
-                        g.soloPart = -1;
-                        Log(std::string(g.hidden[static_cast<size_t>(row.part)] ? "hide " : "show ") + L->scene.parts[static_cast<size_t>(row.part)].id);
-                        // Heels: hiding/showing a shoe re-drives the foot pitch at once (settleHeels
-                        // reads visibleInPreview), otherwise a hidden heeled shoe leaves the foot
-                        // pitched over a flat shoe. ReshapeNow re-skins from the flat locals and
-                        // re-poses, so the change is live on the click.
-                        {
-                            const std::string& pid = L->scene.parts[static_cast<size_t>(row.part)].id;
-                            if (pid.find(".shoes") != std::string::npos) {
-                                for (size_t i = 0; i < L->scene.parts.size() && i < g.hidden.size(); ++i)
-                                    if (L->scene.parts[i].id.find(".shoes") != std::string::npos)
-                                        L->scene.parts[i].visibleInPreview = !g.hidden[i];
-                                ReshapeNow(true);
-                            }
-                        }
-                        g.dirty = true;
-                        InvalidateRect(hwnd, nullptr, FALSE);
+            if (L && !g.showIssues && g.tab == TabOptimize) { OptTabClick(x, y, false); return 0; }
+            const bool inList = y >= l.partsTop && y < l.partsBottom;
+            if (inList) {   // Parts and the slider tabs: a press in the list, not a completed click yet
+                if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
+                    const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+                    const int idx = RowIndexAt(rows.size(), l, x, y);
+                    if (idx >= 0 && rows[static_cast<size_t>(idx)].kind == 1) {   // a slider row: the press drags the slider (mousedown applies the value)
+                        TweakClick(x, y, l, false);
+                        // the press is captured: a drag sideways drags the slider, a vertical drag scrolls the list
+                        g.listPressX = x; g.listPressY = y; g.listPressPos = g.partPos; g.listScroll = false;
+                        g.hoverRow = -1;
+                        SetCapture(hwnd);
+                        return 0;
                     }
+                    g.listPressX = x; g.listPressY = y; g.listPressPos = g.partPos; g.listScroll = false;   // a plain row: release or drag decides
+                    g.hoverRow = -1;
+                    SetCapture(hwnd);
+                    return 0;
+                }
+                if (L && !g.showIssues && g.tab == TabParts) {
+                    g.listPressX = x; g.listPressY = y; g.listPressPos = g.partPos; g.listScroll = false;
+                    g.hoverRow = -1;
+                    g.hoverPart = -1;
+                    SetCapture(hwnd);
+                    return 0;
                 }
             }
+            if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, false); return 0; }
             return 0;
         }
         if (x >= kPanel) {   // the navigation widget in the top-right corner wins over the camera (a click there snaps the view, a drag orbits it)
@@ -600,6 +741,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const int W = std::max(0, static_cast<int>(rc.right) - kPanel), H = rc.bottom;
             if (ModeStripClick(x, y, kPanel, W, H)) return 0;
         }
+        if (g.transBrush && x >= kPanel) {   // the paint mode wins over the camera, the gizmo and the bones
+            TransPaintPress(x - kPanel, y, false);
+            return 0;
+        }
         if (g.selAccessory >= 0 && g.gizmoState.ox >= 0) {   // the gizmo's axis wins over the camera and the bones
             const int axis = exporter::PickMoveGizmoAxis(g.gizmoState, float(x - kPanel), float(y), 12.0f);
             if (axis >= 0) {
@@ -616,7 +761,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (std::shared_ptr<Loaded> L = Current(); L && hit >= 0) {
                 g.selBoneName = L->scene.bones[static_cast<size_t>(hit)].name;
                 g.dragBone = hit;
-                g.dragMove = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                g.dragMove = g.ctrlDown;
                 g.drag = 3; g.last = {x, y}; g.interacting = true; SetCapture(hwnd);
                 InvalidatePanel();
                 return 0;
@@ -626,6 +771,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_RBUTTONDOWN: {
+        if (g.morphEdit >= 0) { EndMorphEdit(false); return 0; }   // right-click puts the typed name back and is swallowed
+        if (g.sliderEdit >= 0) { EndSliderEdit(false); return 0; }   // right-click puts the typed value back and is swallowed
         g.undoBase = CapturePose();
         g.undoBaseValid = true;
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
@@ -636,6 +783,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::shared_ptr<Loaded> L = Current();
             if (L && !g.showIssues && g.tab == TabBones) { BonesTabClick(x, y, l, true); return 0; }
             if (L && !g.showIssues && g.tab == TabMaterials) { MaterialsTabClick(x, y, l, true); return 0; }
+            if (L && !g.showIssues && g.tab == TabOptimize) { OptTabClick(x, y, true); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
             if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(*L);
@@ -669,6 +817,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (g.transBrush) {   // right-drag paints the eraser (middle-mouse still pans)
+            TransPaintPress(x - kPanel, y, true);
+            return 0;
+        }
         g.drag = 2; g.last = {x, y}; g.interacting = true; SetCapture(hwnd);
         return 0;
     }
@@ -677,6 +829,45 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (g.tabDragging) {   // a press on the tab strip: a horizontal drag scrolls it
+            const int dx = x - g.tabDragAnchor;
+            if (!g.tabDragMoved && std::abs(dx) > 4) g.tabDragMoved = true;
+            if (g.tabDragMoved) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                const PanelLayout l = Lay(rc.bottom);
+                const float want = std::clamp(g.tabDragStart - static_cast<float>(dx), 0.0f, static_cast<float>(l.tabMaxScroll));
+                g.tabScroll = static_cast<int>(std::lround(want));
+                g.tabPos = static_cast<float>(g.tabScroll);
+                InvalidatePanelBand(214, 242);
+            }
+            return 0;
+        }
+        if (g.listPressY >= 0) {   // a press in the list: a vertical drag scrolls it (the row's click is swallowed by the drag)
+            const int dy = y - g.listPressY, dx = x - g.listPressX;
+            if (!g.listScroll && std::abs(dy) > 4 && std::abs(dy) >= std::abs(dx)) {
+                g.listScroll = true;
+                g.sliderDrag = -1;   // a slider's press that became a vertical gesture turns into a list scroll
+                g.dragTrackL = g.dragTrackR = 0;
+            }
+            if (g.listScroll) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                const PanelLayout l = Lay(rc.bottom);
+                const int rows = ListRowCount();
+                const int visible = VisibleRows(l);
+                const float maxScroll = static_cast<float>(std::max(0, rows - visible));
+                g.partScroll = static_cast<int>(std::clamp(g.listPressPos - dy / static_cast<float>(kRowH), 0.0f, maxScroll));
+                g.partPos = static_cast<float>(g.partScroll);
+                g.hoverRow = -1;
+                InvalidateList();
+                return 0;
+            }
+            if (g.opt.dragging) { OptSliderMouseMove(x); return 0; }
+            if (g.sliderDrag >= 0) { g.dragX = x; g.dragPending = true; return 0; }
+            return 0;   // pressed, no motion yet
+        }
+        if (g.opt.dragging) { OptSliderMouseMove(x); return 0; }   // the wide reduction slider: live value
         if (g.sliderDrag >= 0) { g.dragX = x; g.dragPending = true; return 0; }   // applied by Frame, once per picture
         // The filter dropdown is the only popup this window owns; the class dropdown,
         // the colour picker and the UV canvas live in the Material Workbench window.
@@ -697,6 +888,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.boneDragDy += static_cast<float>(y - g.last.y);
             g.last = {x, y};
             g.dragPending = true;
+            return 0;
+        }
+        if (g.drag == 6) {   // the paint stroke: the position, applied once per picture
+            g.transPaintX = x - kPanel; g.transPaintY = y;
+            g.transPaintPending = true;
+            g.dragPending = true;
+            g.lastInput = GetTickCount64();
+            {   // the ring follows the pointer even mid-stroke
+                RECT rc2;
+                GetClientRect(hwnd, &rc2);
+                const int newX = (g.transBrush && x >= kPanel && x < rc2.right && y >= 0 && y < rc2.bottom) ? x - kPanel : -1;
+                if (newX != g.transHoverX || y != g.transHoverY) {
+                    g.transHoverX = newX;
+                    g.transHoverY = (newX >= 0) ? y : -1;
+                    g.dirty = true;
+                    InvalidateView();
+                }
+            }
             return 0;
         }
         if (g.drag == 5) {   // the navigation widget: a click candidate until the pointer moves; then it is simply an orbit
@@ -723,6 +932,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme);
+        {   // the brush ring follows the pointer (its own little invalidation; the view repaints as usual otherwise)
+            RECT rc3;
+            GetClientRect(hwnd, &rc3);
+            const int newX = (g.transBrush && x >= kPanel && x < rc3.right && y >= 0 && y < rc3.bottom) ? x - kPanel : -1;
+            const int newY = (newX >= 0) ? y : -1;
+            if (newX != g.transHoverX || newY != g.transHoverY) {
+                g.transHoverX = newX;
+                g.transHoverY = newY;
+                g.dirty = true;
+                InvalidateView();
+            }
+        }
         RECT rc;
         GetClientRect(hwnd, &rc);
         PanelLayout l = Lay(rc.bottom);
@@ -792,7 +1013,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (y >= l.boneListTop && y < l.boneListBottom) g.hoverRow = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
             } else if (L && !g.showIssues && g.tab == TabMaterials) {
                 if (y >= l.matListTop && y < l.matListBottom) g.hoverRow = (y - l.matListTop + ScrollPx(g.matPos)) / kRowH;
-            } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
+            } else if (L && !g.showIssues && g.tab == TabOptimize) {
+                OptTabHover(x, y);
+            } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts && g.tab != TabOptimize) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(*L);
@@ -835,6 +1058,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
+        if (g.transHoverX >= 0) { g.transHoverX = -1; g.transHoverY = -1; g.dirty = true; InvalidateView(); }
         if (g.selAccessory >= 0) { g.gizmoHoverAxis = -1; g.dirty = true; InvalidateView(); }
         if (g.hoverAccChip >= 0) { g.hoverAccChip = -1; InvalidatePanel(); }
         if (g.viewHoverBall >= 0) { g.viewHoverBall = -1; g.dirty = true; InvalidateView(); }
@@ -849,14 +1073,60 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        if (g.tabDragging) {   // a press on the scrollable tab strip: a drag scrolls it, a tap switches the tab
+            const bool tap = !g.tabDragMoved;
+            g.tabDragging = false;
+            g.tabDragMoved = false;
+            ReleaseCapture();
+            if (tap) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                const PanelLayout l = Lay(rc.bottom);
+                const int button = ButtonAt(l, x, y);
+                if (button >= 10 && button != 20 && button != 30 && button != 31) {
+                    g.showIssues = false;
+                    g.tab = button - 10;
+                    g.partScroll = 0;
+                    g.partPos = 0;
+                    g.hoverRow = g.hoverPart = -1;
+                    InvalidatePanel();
+                }
+            }
+            return 0;
+        }
+        if (g.listScroll) {   // the list was dragged: the row's click is swallowed by the drag
+            g.listScroll = false;
+            g.listPressY = -1;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const PanelLayout l = Lay(rc.bottom);
+            g.partScroll = std::clamp(g.partScroll, 0, std::max(0, ListRowCount() - VisibleRows(l)));
+            g.partPos = static_cast<float>(g.partScroll);
+            ReleaseCapture();
+            InvalidateList();
+            return 0;
+        }
+        if (g.listPressY >= 0 && g.sliderDrag >= 0) {   // a slider's press: keep it a slider drag here
+            g.listPressY = -1;
+        } else if (g.listPressY >= 0) {   // a release in the list without a drag: the row does its thing (what the mouse-down used to do)
+            const int px = g.listPressX, py = g.listPressY;
+            g.listPressY = -1;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            PanelListClick(px, py, Lay(rc.bottom));
+            ReleaseCapture();
+            return 0;
+        }
         ApplyPending();   // the last movement of the drag counts
         CommitPoseEdit();
+        if (g.opt.dragging) { OptSliderRelease(); return 0; }
         if (g.sliderDrag >= 0) {
             SliderRef r;
             const bool live = IsLiveId(g.sliderDrag);
             if (!live && SliderFor(g.sliderDrag, r)) {
                 char msg[96];
-                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, *r.v, r.def);
+                std::snprintf(msg, sizeof msg, "slider %d set to %.3f (card %.3f)", g.sliderDrag, r.Value(), r.def);
                 Log(msg);
             }
             const int released = g.sliderDrag;
@@ -898,6 +1168,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.dirty = true; InvalidateView();
             return 0;
         }
+        if (g.drag == 6) {   // the paint stroke ends with the button
+            TransEndStroke();
+            g.drag = 0; g.interacting = false; g.lastInput = GetTickCount64(); ReleaseCapture();
+            g.dirty = true; InvalidateView(); InvalidatePanel();
+            return 0;
+        }
         if (g.drag == 0) return 0;   // a click on the panel: nothing to finish, the picture stays as it is
         if (msg == WM_LBUTTONUP && g.drag == 1 && g.showBones && std::abs(GET_X_LPARAM(lp) - g.downAt.x) < 4 && std::abs(GET_Y_LPARAM(lp) - g.downAt.y) < 4)
             PickBoneAt(GET_X_LPARAM(lp) - kPanel, GET_Y_LPARAM(lp));   // a click, not a drag
@@ -913,6 +1189,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
+            if (l.tabScrollable && pt.y >= 214 && pt.y < 242) {   // over the tab strip: the wheel scrolls it horizontally
+                g.tabScroll = std::clamp(g.tabScroll - (d > 0 ? 48 : -48), 0, l.tabMaxScroll);
+                InvalidatePanelBand(214, 242);
+                return 0;
+            }
             if (pt.y >= l.logTop) {
                 std::lock_guard<std::mutex> lk(g.logMu);   // Log() touches logScroll from worker threads
                 int visible = std::max(1, (l.logBottom - (l.logTop + 24)) / 15);
@@ -920,7 +1201,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.logScroll = std::max(0, std::min(maxScroll, g.logScroll + (d > 0 ? 3 : -3)));
                 InvalidateLog();
             } else if (L || g.tab == TabSettings) {
-                if (g.showIssues) {
+                if (g.tab == TabOptimize) {
+                    const int maxScroll = std::max(0, OptLayoutFor(l.partsTop, 0).totalH - (l.partsBottom - l.partsTop));
+                    g.optScroll = std::clamp(g.optScroll - (d > 0 ? 48 : -48), 0, maxScroll);
+                    InvalidatePanel();
+                } else if (g.showIssues) {
                     g.partScroll = std::max(0, g.partScroll - (d > 0 ? 3 : -3));
                 } else if (g.tab == TabMaterials) {
                     const int visible = std::max(1, (l.matListBottom - l.matListTop) / kRowH);
@@ -931,9 +1216,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         const int row = (pt.y - l.boneEditTop) / kRowH;
                         SliderRef r;
                         if (row >= 1 && row <= kBoneEditCount && SliderFor(kBoneEdit + row - 1, r)) {
-                            const float step = r.step * ((GetKeyState(VK_SHIFT) & 0x8000) ? 10.0f : 1.0f);
+                            const float step = r.step * (g.shiftDown ? 10.0f : 1.0f);
                             const PoseState before = CapturePose();
-                            *r.v = std::clamp(*r.v + (d > 0 ? step : -step), r.lo, r.hi);
+                            r.Set(std::clamp(r.Value() + (d > 0 ? step : -step), r.lo, r.hi));
                             ApplyPoseLive();
                             PoseChanged(before, true);
                             InvalidateList();
@@ -943,7 +1228,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         const int maxScroll = std::max(0, static_cast<int>(BuildBoneRows(L->scene).size()) - visible);
                         g.boneScroll = std::max(0, std::min(maxScroll, g.boneScroll - (d > 0 ? 3 : -3)));   // Frame eases the list there
                     }
-                } else if (g.tab != TabParts) {
+                } else if (g.tab != TabParts && g.tab != TabOptimize && g.tab != TabBones && g.tab != TabMaterials) {
                     int maxScroll = std::max(0, static_cast<int>(BuildTweakRows(g.tab).size()) - VisibleRows(l));
                     g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
                 } else {
@@ -984,7 +1269,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 std::shared_ptr<Loaded> L = Current();
                 if (L && !g.showIssues && g.tab == TabMaterials) {
                     hand = (p.y >= l.matListTop && p.y < l.matListBottom) || PtInRect(&l.matFilter, p) != 0;
-                } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) {
+                } else if (L && !g.showIssues && g.tab == TabOptimize) {
+                    hand = g.opt.hover != -1;
+                } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts && g.tab != TabOptimize) {
                     hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
                 } else if (L && !g.showIssues) {
                     std::vector<PartRow> rows = BuildRows(*L);
@@ -999,8 +1286,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+    case WM_CHAR:
+        if (g.morphEdit >= 0) { MorphEditChar(static_cast<wchar_t>(wp)); return 0; }   // the rename box takes printable characters
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    case WM_KEYUP:
+        if (wp == VK_SHIFT || wp == VK_LSHIFT || wp == VK_RSHIFT) g.shiftDown = false;
+        else if (wp == VK_CONTROL || wp == VK_LCONTROL || wp == VK_RCONTROL) g.ctrlDown = false;
+        return 0;
     case WM_KEYDOWN: {
+        if (wp == VK_SHIFT || wp == VK_LSHIFT || wp == VK_RSHIFT) g.shiftDown = true;
+        else if (wp == VK_CONTROL || wp == VK_LCONTROL || wp == VK_RCONTROL) g.ctrlDown = true;
         std::shared_ptr<Loaded> L = Current();
+        if (g.morphEdit >= 0) { MorphEditKey(wp); return 0; }   // the rename box is open: the keyboard goes to it
+        if (g.sliderEdit >= 0) { SliderEditKey(wp); return 0; }   // Shift+Left-click opened the keyboard box: the row owns the keys now
         if (g.matHexEditing) {
             if (wp == VK_ESCAPE) { g.matHexEditing = false; g.matHexUndoPushed = false; g.matHexBuf.clear(); InvalidateMat(); return 0; }
             if (wp == VK_RETURN) { g.matHexEditing = false; g.matHexUndoPushed = false; InvalidateMat(); return 0; }
@@ -1043,14 +1341,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateFooter();
             return 0;
         }
-        if (GetKeyState(VK_CONTROL) & 0x8000) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save, Ctrl+O load (pose or materials by tab)
+        if (g.ctrlDown) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save, Ctrl+O load (pose or materials by tab)
             if (g.tab == TabMaterials) {
-                if (wp == 'Z') MaterialUndo((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                if (wp == 'Z') MaterialUndo(g.shiftDown);
                 else if (wp == 'Y') MaterialUndo(true);
                 else if (wp == 'S') SaveMatFile();
                 else if (wp == 'O') LoadMatFile();
             } else {
-                if (wp == 'Z') UndoPose((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                if (wp == 'Z') UndoPose(g.shiftDown);
                 else if (wp == 'Y') UndoPose(true);
                 else if (wp == 'S') SavePoseFile();
                 else if (wp == 'O') LoadPoseFile();
@@ -1081,7 +1379,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'I') { if (L) ToggleIssues(); }
         else if (wp == 'A') { if (L) ShowAll(); }
         else if (wp == 'C') ClearLog();
-        else if (wp == 'E') ExportFolderIfNeeded();
+        else if (wp == 'E') { if (g.shiftDown) StartExportClothing(); else ExportFolderIfNeeded(); }
         else if (wp == 'O') OpenCard();
         else if (wp == 'M') ChooseMods();
         else if (wp == 'L') ChooseLibrary();
@@ -1094,6 +1392,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        // The Selective Import window is this window's owned window: close it first too (it does not quit the process).
+        if (g.sel.hwnd) SelectiveClose();
         // The Material Workbench is this window's owned window: close it first (it
         // does not quit the process, this window does).
         if (g.matHwnd) {

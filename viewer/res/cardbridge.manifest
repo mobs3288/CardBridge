@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="CardBridge" version="0.2.1.0"
+                    processorArchitecture="*" language="neutral" />
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        processorArchitecture="*" version="6.0.0.0" language="*"
+                        publicKeyToken="6595b64144ccf1df" />
+    </dependentAssembly>
+  </dependency>
+</assembly>

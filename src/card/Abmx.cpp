@@ -3,7 +3,14 @@
 #include "core/Lz4.h"
 #include "core/MsgPack.h"
 
+#include <cstdlib>
+
 namespace cardbridge::card {
+
+// Rollback for the ABMX import fix: when CARDBRIDGE_ABMX_LEGACY_MERGE=1 is set, only the list
+// format is read and the outfit-import merge performs no coordinate-slot clear — the exact table
+// produced before the fix. Used to bisect regressions and to reproduce pre-fix output byte for byte.
+static bool abmxLegacyMerge() { return std::getenv("CARDBRIDGE_ABMX_LEGACY_MERGE") != nullptr; }
 
 const AbmxMod* AbmxTable::find(const std::string& bone, int coordinate) const {
     auto it = bones.find(bone);
@@ -71,6 +78,24 @@ AbmxTable LoadAbmx(const Value& extended) {
             list = MsgPackParse(bd);
         }
     } catch (const std::exception&) {
+        return t;
+    }
+    if (!abmxLegacyMerge() && list.isMap()) {
+        // ABMX v2 coordinate data: Dictionary<string, BoneModifierData> with the class serialised as an
+        // array of 4 ([Key] attributes) and Vector3 as an array of 3. The game reads the same format
+        // through ReadCoordModifiers and stores each entry as a single modifier for every coordinate,
+        // so that is what we produce here as well.
+        for (const auto& kv : list.asMap()) {
+            if (!kv.first.isStr()) continue;
+            const Value& m = kv.second;
+            if (!m.isArray() || m.size() < 2 || !m.at(size_t(0)).isArray()) continue;
+            AbmxMod a;
+            a.scale = vec3Of(m.at(size_t(0)), a.scale);
+            a.length = static_cast<float>(m.at(size_t(1)).asFloat(1.0));
+            if (m.size() > 2) a.position = vec3Of(m.at(size_t(2)), a.position);
+            if (m.size() > 3) a.rotation = vec3Of(m.at(size_t(3)), a.rotation);
+            t.bones[kv.first.asStr()] = std::vector<AbmxMod>{a};
+        }
         return t;
     }
     for (const auto& e : list.asArray()) {

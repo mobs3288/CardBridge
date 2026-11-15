@@ -67,7 +67,9 @@ constexpr int kTrackL = 168, kTrackR = 300;
 float SliderValueAt(const SliderRef& r, int x, int trackL = kTrackL, int trackR = kTrackR) {
     float t = std::clamp(static_cast<float>(x - trackL) / std::max(1, trackR - trackL), 0.0f, 1.0f);
     float v = r.lo + t * (r.hi - r.lo);
-    return std::clamp(std::round(v / r.step) * r.step, r.lo, r.hi);
+    if (!std::isfinite(v)) return r.lo;
+    if (r.step > 0) v = std::round(v / r.step) * r.step;   // step 0: the typed value is kept exactly, no snap
+    return std::clamp(v, r.lo, r.hi);
 }
 
 int ButtonAt(const PanelLayout& l, int x, int y) {
@@ -81,10 +83,18 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.clothingReset, p)) return 7;   // reset the imported outfit to the card default
     if (PtInRect(&l.clothingPrev, p)) return 8;    // move the imported outfit to the previous outfit slot
     if (PtInRect(&l.clothingNext, p)) return 9;    // move the imported outfit to the next outfit slot
+    if (PtInRect(&l.clothingExport, p)) return 21; // export the shown outfit as an outfit file (【KoiKatuClothes】 png)
     // The Materials tab's launcher button opens the Material Workbench window. Its rect
     // exists in every layout (one LayoutFor), so it only counts on that tab, and before
     // the tab branch below (20 would otherwise mean "tab 10").
     if (g.tab == TabMaterials && PtInRect(&l.matOpen, p)) return 20;
+    if (l.tabScrollable && PtInRect(&l.tabLeft, p)) return 30;
+    if (l.tabScrollable && PtInRect(&l.tabRight, p)) return 31;
+    if (l.tabScrollable) {   // offscreen tabs are not clickable
+        if (!PtInRect(&l.tabStrip, p)) return 0;
+        for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
+        return 0;
+    }
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }

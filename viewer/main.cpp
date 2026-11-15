@@ -4,9 +4,14 @@
 //   cardbridge-viewer [card.png] [--library <dir>] [--mods <dir>] [--outfit N] [--clothes <outfit.png>]
 //
 // Library and mods folders are remembered in %LOCALAPPDATA%\CardBridge\viewer.json. Drop a card on the window to open it.
-// Dropping an outfit file (KKCLOTHING .png) while a character is open applies it to the outfit on screen in memory only
-// (hair worn as accessories is kept; the card on disk is never saved). It stays pinned to that one outfit slot: switching
-// to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// Dropping an outfit file (KKCLOTHING .png) onto a loaded character asks how to import it (see below);
+// import is always in memory only (the card on disk is never saved), and it stays pinned to that one outfit
+// slot: switching to another slot shows that slot's own clothing again, and switching back to the slot shows the imported file again.
+// A Koikatsu Coordinate (outfit) file (【KoiKatuClothes】, what Koikatsu itself saves as a coordinate file) dropped
+// onto the viewer always asks how to import it: Import as Clothing (outfit contents only, merged as the clothing
+// import does - hair is kept) or Import as Coordinate (the whole coordinate replaces the slot, accessories included,
+// including hair-type). With no character on screen (or while the current load is still running) the dialog explains
+// there is nothing to import onto yet and offers only Cancel. A dropped character card opens as a character, as usual.
 // In the Parts list the import is its own "Added outfit" group, apart from the base model's Body/Head/Hair/Outfit/
 // Accessories: its header checkbox toggles every added part at once, each item keeps its own checkbox, the slot
 // marked * is the base outfit it replaced (shown as OUTFIT (REPLACED)), and < > move it to another slot.
@@ -25,6 +30,7 @@
 //          R reset view, D reset clothing to the card default, F/S/B front/side/back,
 //          I issues, A show every part, E export the current scene to PMX, C clear the log, O open a card,
 //          M mods folder, L asset library folder
+//          Shift+Left-click any slider to type its value with the keyboard (Enter commits, Esc restores)
 
 #include "assemble/Assembler.h"
 #include "material/MaterialWorkbench.h"
@@ -32,21 +38,31 @@
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
 #include "export/BoneLabels.h"
+#include "export/MorphCatalog.h"
 #include "export/SkeletonOverlay.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"
 #include "card/CardFile.h"
+#include "card/SelectiveImport.h"
+#include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
+#include "export/OutfitIcon.h"
 #include "core/FileIo.h"
+#include "core/Timing.h"
 #include "export/Preview.h"
+#include "export/Translucency.h"
 #include "export/SkinShade.h"
+#include "export/SkinAoBake.h"
+#include "mesh/Simplify.h"
 #include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "resolve/Resolver.h"
 #include "shape/Shape.h"
+#include "shape/BodyMeasurements.h"
+#include "measure/BodyMeasure.h"
 #include "Ui.h"
 #include "core/Version.h"
 
@@ -57,20 +73,24 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commdlg.h>
+#include <commctrl.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <functional>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
+#include <condition_variable>
 #include <thread>
 #include <vector>
 
@@ -81,22 +101,28 @@ namespace {
 #include "Util.inc"
 #include "State.inc"
 #include "Progress.inc"
+#include "Proportions.inc"
 #include "Tweaks.inc"
+#include "Morphs.inc"
 #include "MaterialsHelpers.inc"
 #include "Pose.inc"
+#include "SliderEdit.inc"
 #include "Export.inc"
 #include "Parts.inc"
 #include "Gizmo.inc"
+#include "Paint.inc"
 #include "ModeStrip.inc"
 #include "AxisWidget.inc"
 #include "View.inc"
 #include "Widgets.inc"
+#include "Optimize.inc"
 #include "MaterialsDraw.inc"
 #include "Workbench.inc"
 #include "BonesDraw.inc"
 #include "Panel.inc"
 #include "Clicks.inc"
 #include "Window.inc"
+#include "Selective.inc"
 #include "Bench.inc"
 } // namespace
 
@@ -142,6 +168,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         wcm.hIcon = wc.hIcon;
         wcm.lpszClassName = kWbClassName;
         RegisterClassW(&wcm);
+    }
+    {   // the Selective Import window's class; the window itself opens on first drop of an outfit file
+        WNDCLASSW wcs{};
+        wcs.lpfnWndProc = SelWndProc;
+        wcs.hInstance = inst;
+        wcs.hCursor = wc.hCursor;
+        wcs.hIcon = wc.hIcon;
+        wcs.lpszClassName = kSelClassName;
+        RegisterClassW(&wcs);
     }
     g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES | (testQuiet ? WS_EX_NOACTIVATE : 0), wc.lpszClassName, L"CardBridge " L"viewer",
                              WS_OVERLAPPEDWINDOW | (testQuiet ? 0 : WS_VISIBLE), testQuiet ? -32000 : CW_USEDEFAULT, testQuiet ? -32000 : CW_USEDEFAULT,
@@ -207,6 +242,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
     g.wb.Reset();
+    cbtime::Report();
     for (HFONT* f : {&g.fontTitle, &g.fontUi, &g.fontBold, &g.fontMono, &g.fontLog, &g.fontSmall})
         if (*f) DeleteObject(*f);
     ui::Shutdown();

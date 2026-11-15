@@ -2,7 +2,10 @@
 
 #include "core/Lz4.h"
 
+#include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 namespace cardbridge::unity {
 
@@ -88,12 +91,43 @@ std::shared_ptr<UnityBundle> UnityBundle::Open(Bytes file, const std::string& de
     uint64_t total = 0;
     for (const auto& bl : blocks) total += bl.usize;
     b->data_.resize(static_cast<size_t>(total));
-    size_t written = 0;
-    for (const auto& bl : blocks) {
-        if (bl.csize > r.remaining()) throw FormatError(debugName + ": truncated block data");
-        decompressBlockTo(r.ptr(), bl.csize, b->data_.data() + written, bl.usize, bl.flags, debugName);
-        r.skip(bl.csize);
-        written += bl.usize;
+    // Per-block offsets, so the blocks can be decompressed concurrently: every block writes its own
+    // destination range (and LZ4 is a pure function), which makes this one of the few perfectly parallel steps.
+    std::vector<uint64_t> dstOff(blocks.size()), srcOff(blocks.size());
+    {
+        uint64_t w = 0, s = 0;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            dstOff[i] = w; srcOff[i] = s; w += blocks[i].usize; s += blocks[i].csize;
+        }
+    }
+    const size_t dataStart = static_cast<size_t>(r.ptr() - file.data());
+    std::exception_ptr blockErr;
+    std::mutex blockErrMu;
+    auto blockTask = [&](size_t wi, unsigned hw) {
+        try {
+            for (size_t i = wi; i < blocks.size(); i += hw) {
+                const Block& bl = blocks[i];
+                if (blocks[i].csize > file.size() - (dataStart + srcOff[i])) throw FormatError(debugName + ": truncated block data");
+                const uint8_t* srcp = file.data() + dataStart + srcOff[i];
+                decompressBlockTo(srcp, bl.csize, b->data_.data() + dstOff[i], bl.usize, bl.flags, debugName);
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(blockErrMu);
+            if (!blockErr) blockErr = std::current_exception();
+        }
+    };
+    const unsigned parallelThreads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned>(blocks.size())));
+    const bool parallel = blocks.size() > 1 && total >= 8ull * 1024 * 1024;
+    if (parallel) {
+        std::vector<std::thread> pool;
+        pool.reserve(parallelThreads - 1);
+        for (unsigned w = 1; w < parallelThreads; ++w) pool.emplace_back(blockTask, static_cast<size_t>(w), parallelThreads);
+        blockTask(0, parallelThreads);
+        for (auto& th : pool) th.join();
+        if (blockErr) std::rethrow_exception(blockErr);
+    } else {
+        blockTask(0, 1);
+        if (blockErr) std::rethrow_exception(blockErr);
     }
     for (const auto& n : b->nodes_)
         if (n.offset + n.size > b->data_.size()) throw FormatError(debugName + ": node " + n.path + " outside the data");

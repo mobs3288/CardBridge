@@ -138,7 +138,6 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<Core> chainCore;   // per moving chain body
     std::vector<int> chainBody;
     std::vector<char> chainJiggle;   // the same, per body: the body's own jiggle (skin, not a strand: it meets no collider)
-    std::vector<char> chainOutfit;   // per body: whether the chain is an outfit garment (capes, panels, kimonos, skirts - they always meet the body colliders)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -266,11 +265,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             rb.mode = jiggle > 0.0f ? 2 : (k == 0 ? 0 : 1);
             if (k == 0 && jiggle <= 0.0f) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
-            const bool garmentBody2 = ch.part.rfind("outfit", 0) == 0;
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
                 chainJiggle.push_back(jiggle > 0.0f ? 1 : 0);
-                chainOutfit.push_back(garmentBody2 ? 1 : 0);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
@@ -375,13 +372,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
     // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
     // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
+    // A garment chain gets the same rule, not an exemption: an export's cloth can only start at its authored pose (the viewer does not
+    // drape it), and a skirt authored over the thighs starts buried. Keeping the colliders it overlaps launches the whole skirt outward
+    // at load — the hips come out bigger than the authored mesh, which no amount of tuning in the viewer's preview shows. The cloth still
+    // meets every collider it does not overlap at rest; the colliders it is buried in are passed through instead, which is what the
+    // authored rest pose means. The garment settle can place the cloth touching the body at export; until it runs in every export path,
+    // the rest-overlap exclusion is the only spawn-safe start for cloth authored over the body.
     const float margin = 0.02f * scale;
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
-    // The outfit's garments (capes, kimono panels, skirt hems) are settled to drape ON the body at export, so they start out touching
-    // the body colliders, never buried in them. They keep every collider (the rest-avoid exclusion only exists to stop a garment launched
-    // out of a buried rest pose); with the colliders kept, cloth slides over the body instead of ghosting through it. Leaving them enabled
-    // also keeps their contact stable (the skip version passed through the torso at the first pose change).
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
         std::vector<int> sig;
         for (size_t bi = 0; bi < chainCore.size(); ++bi)
@@ -398,15 +397,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
     }
-    // The chain collider groups (assigned above for the rest-overlap exclusion) all must be met by the outfit chains.
+    // The chain collider groups (assigned above for the rest-overlap exclusion).
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
         if (chainJiggle[bi]) continue;   // jiggle masks are set with the arm colliders below (arm only, never the bust spheres)
         uint16_t mask = 0;
-        const bool outfit = chainOutfit[bi] != 0;
         for (int g : usedGroups)
-            if (outfit || !overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
+            if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
     // Generated limb colliders, so cloth slides off arms/hands/shins instead of

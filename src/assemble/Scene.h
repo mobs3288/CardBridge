@@ -78,6 +78,9 @@ struct SceneMaterial {
     // -1 (bottom), each the colour factor the shader gives that light angle relative to the baked front light. Empty = none.
     std::vector<Vec3> toon;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
+    // The game's shader discards every fragment it draws (e.g. a crest painted with a black fallback texture and no binding of its
+    // own): the game shows nothing for it, so the views and the exported model skip it too instead of drawing a flat white plate.
+    bool hidden = false;
     bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
     bool cardSkin = false;                   // the body's skin material (cf_m_body): _overcolor1 tints the nipple / areola overlay
     Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)
@@ -152,6 +155,59 @@ struct SceneSkinShade {
     std::vector<uint8_t> shadeU;     // underboob factors at strength 1 (255 = lit, lower = creased); width * height
     std::vector<uint8_t> covered;    // 1 where a body triangle reached the texel, parallel to `shade`
     bool ready() const { return texture >= 0 && !meshes.empty(); }
+};
+
+// Koikatsu's own skin look, baked into the body's skin texture the way the game's Shader Forge/main_skin does it:
+// the always-bound base body normal map (cf_body_00_base_n) - a local curvature (cavity) factor is lifted from its
+// neighbourhood contrast, and the card's body normal map blended through _DetailNormalMapScale in the game shader -
+// plus the ink-line channel of the line mask the game binds to _LineMask (the card's body detailId row, category 420;
+// cf_body_00_line for the default).
+// Held here so the bake can be re-applied at a new strength without re-opening the bundles it came from; the maps
+// are per-texel factors at strength 1 and are multiplied in after ApplySkinShade's cleavage/underboob factors,
+// yielding to SkinShade's own darkening - never stacking with it.
+struct SceneSkinAoBake {
+    std::vector<uint8_t> baseNormal;   // decoded base body normal map (cf_body_00_base_n), RGBA32; empty when unavailable
+    int baseNormalWidth = 0, baseNormalHeight = 0;
+    std::vector<uint8_t> lineMask;     // decoded _LineMask for the card's body detailId (cf_body_00_line at default), RGBA32
+    int lineMaskWidth = 0, lineMaskHeight = 0;
+    float collarLo = -1.0f, collarHi = -1.0f;   // the row band the clavicle arcs occupy in the line mask (found from the mask itself, no fixed atlas coords); < 0 = no band
+    float collarDamp = 0.35f;                    // factor applied to the ink-line multiplier inside the band
+    std::vector<uint8_t> detailNormal; // decoded detailId NormallMapDetail; empty when none (e.g. the 8x8 blank at default)
+    int detailNormalWidth = 0, detailNormalHeight = 0;
+    std::vector<float> aoShade;        // per-texel normal-lighting factor at strength 1 (1 = lit); width * height
+    std::vector<float> aoLine;         // per-texel ink-line factor at strength 1 (1 = fully line-covered); width * height
+    std::vector<float> aoDamp;         // per-texel limb damp factor (1 = full AO, ~0.25 = fully limb-bound arm/leg); parallel to aoShade
+    std::vector<uint8_t> covered;      // 1 where a body triangle reached the texel, parallel to aoShade
+    float applied = -1.0f;             // the strength currently baked into the texture (-1 = never applied)
+    bool built = false;                // aoShade / aoLine are current for the body geometry
+};
+
+// A hand-painted translucency mask on a garment part, brushed on by the user in the viewer (ray-cast onto the part's mesh,
+// stamped into the garment's own texture in UV space). The bake writes the painted alpha into that texture, so the body - or
+// a bra - shows through the garment in the viewer and in every PMX viewer after export. One layer per (part, material texture):
+// the material of the submesh under the brush is the one that goes to the transparent pass while the bake holds it.
+// The mask is session-only (never saved or serialized, like the Morphs tab's live weights): reloading the card drops it.
+struct SceneTranslucency {
+    struct Layer {
+        int part = -1;            // Scene::parts index the layer belongs to
+        int mesh = -1;            // Scene::meshes index whose UVs the mask is painted on
+        int material = -1;        // Scene::materials index whose texture carries the paint
+        int texture = -1;         // Scene::textures index the alpha is written into
+        std::vector<uint8_t> base;     // the texture's pixels before the bake (RGBA); re-captured when the texture changes outside the bake
+        std::vector<uint8_t> mask;     // per texel 0 = opaque .. 255 = fully translucent; parallel to the texture
+        std::vector<uint8_t> covered;  // per texel 1 where any triangle of the part binding this texture covers it (UV space, wrap-matched to the texture); the brush's gate
+        bool coveredBuilt = false;     // `covered` has been rasterized for the part
+        uint64_t afterHash = 0;        // FNV-1a of the texture right after our last write (the external-change detector)
+        bool passHeld = false;   // the bake currently holds the material in the transparent pass (alpha + translucent)
+        bool hadAlpha = false;   // the material's flags before the bake held it (restored on revert)
+        bool hadTranslucent = false;
+        int cutoffProp = -1;           // index into Scene::materials[].props of the _Cutoff property, while the bake holds the material over it
+        Vec4 cutoffPrior{};            // its value before the bake (restored on revert)
+        bool cutoffTouched = false;    // the _Cutoff was rewritten by the bake (and must be put back)
+        int shaderIndexHad = -1;       // the material's shader index before the bake swapped it to the alpha-capable twin (-1 = not swapped)
+        bool shaderSwapped = false;    // the bake swapped the material's shader for the sheer-cloth one
+    };
+    std::vector<Layer> layers;
 };
 
 // An expression the game's FaceBlendShape component plays: eyebrow, eye or mouth pattern in its closed or open state, as the
@@ -254,6 +310,8 @@ struct Scene {
     std::vector<std::pair<std::string, Vec4>> globalProps;
     std::vector<SceneMesh> meshes;
     SceneSkinShade skinShade;
+    SceneSkinAoBake aoBake;
+    SceneTranslucency translucency;
     std::vector<ScenePart> parts;
     std::vector<SceneExpression> expressions;
     std::vector<SceneChain> chains;

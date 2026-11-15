@@ -16,6 +16,11 @@ struct ModEntry {
     int64_t mtime = 0;
     // The (category, id) of every row in the mod's character lists, flattened: category, id, category, id ...
     std::vector<int64_t> listIds;
+    // MaterialEditor shader registrations from the manifest (<MaterialEditor><Shader Name="..." AssetBundle="...">):
+    // name -> bundle (relative to abdata/). The game's Shader.Find resolves these; CardBridge does too, so an
+    // outfit authored against a mod shader (IBL_Shader_alpha & friends) renders with the shader it was made for
+    // instead of a fallback with the same blending mode.
+    std::vector<std::pair<std::string, std::string>> shaders;
 };
 
 // Index of the Sideloader mods under a folder: GUID -> .zipmod/.zip files.
@@ -37,12 +42,16 @@ public:
     const std::vector<ModEntry>* find(const std::string& guid) const;
     // The mods whose lists define (category, id). A card saved without Sideloader's resolve info names its mod items by this raw id.
     std::vector<const ModEntry*> findByListId(int category, int64_t id) const;
+    // The mod (path + its entry) that declares a shader of this exact Unity name in its manifest's
+    // <MaterialEditor><Shader> table, or null. Exact name match; a shader without a declaration is not found.
+    const ModEntry* findShader(const std::string& name, std::string* bundle /* abdata-relative, when found */) const;
     size_t guidCount() const { return byGuid_.size(); }
     size_t zipCount() const { return count_; }
 
 private:
     std::map<std::string, std::vector<ModEntry>> byGuid_;
     std::map<std::pair<int, int64_t>, std::vector<std::pair<std::string, size_t>>> byListId_;   // -> (guid, index in byGuid_[guid])
+    std::map<std::string, std::pair<std::string, size_t>> byShaderName_;                        // shader name -> (guid, index in byGuid_[guid])
     size_t count_ = 0;
 };
 

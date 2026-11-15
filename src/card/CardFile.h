@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <map>
 
 namespace cardbridge::card {
 
@@ -115,6 +116,30 @@ struct ClothingFile {
     Value extended;              // KKEx map: plugin id -> [version, payload]
     std::vector<ResolveRow> rows;
 
+    // The coordinate inside the payload this file represents. A real outfit
+    // file always carries exactly one coordinate, so this is 0. When a file is
+    // synthesised in memory from a coordinate of a character card (see
+    // ExtractClothingFromCard), this records which coordinate of the source
+    // card it holds, so the coordinate-scoped readers of the merge path
+    // (ABMX/ME/KCOX/MoreAccessories) aim at that coordinate instead of 0.
+    // Author-slot ids are still used as-is (card coordinates carry no
+    // "local" ids); rows are rebased to the unprefixed shape a file stores.
+    int srcCoordinate = 0;
+    // How many outfits the source had (1 for a real file; the card's outfit
+    // count for a synthesised source). The coordinate-scoped payload rebase
+    // uses it to size per-coordinate arrays.
+    int srcOutfitCount = 1;
+    // True when this file is a real outfit file rather than a coordinate
+    // extracted from a character card. A real outfit file IS its one
+    // coordinate: every coordinate-indexed payload in it (MaterialEditor rows,
+    // DynamicBoneEditor rows, KCOX overlays, HairAccessoryCustomizer / pushup
+    // payloads, Additional_Card_Info) belongs to that one coordinate, whatever
+    // index the author saved it under. The merge reads those payloads
+    // tolerant-shape in that case (see the singleCoordinate parameter);
+    // `srcCoordinate` still records the author's index when it can be detected
+    // for the payloads that need one (ABMX per-coordinate lists).
+    bool singleCoordinateSource = false;
+
     // Additional_Card_Info (CoordinateInfo): which slots the file asks to keep.
     // Empty (the sample) means no explicit preference; the merge below keeps
     // hair regardless (see ApplyClothingOptions).
@@ -128,12 +153,60 @@ struct ClothingFile {
 // reported unsupported (supported == false), never thrown.
 ClothingFile LoadClothingFile(const std::string& path);
 
+// What a PNG dropped on the importer actually is, decided from the bytes
+// alone (never the file name): the Koikatsu PNG families all carry a marker
+// string appended after the PNG's IEND chunk, and that marker is what this
+// reports. Sunshine/EmotionCreators character markers are deliberately not
+// reported as Coordinate: their payload layouts differ and neither is
+// converted yet, so they travel the character path exactly as they do today.
+enum class ImageSourceKind {
+    Invalid,            // unreadable PNG, or bytes/marker we do not know
+    PlainPng,           // a PNG with no card data after it (a plain picture)
+    RegularClothing,    // a Koikatsu outfit file (【KoiKatuClothes】): the clothing import path
+    Coordinate,         // a Koikatsu character card (【KoiKatuChara】 family) used as a coordinate source
+};
+const char* ImageSourceKindName(ImageSourceKind k);
+
+// Detects the source kind by parsing the PNG signature, the IEND chunk and
+// the marker after it. Never throws: anything unreadable or unrecognised is
+// reported as Invalid (callers fall back to their previous behaviour).
+ImageSourceKind DetectImageSource(const std::string& path);
+
+// True when `marker` is one of the Koikatsu character-card markers this
+// build converts (Koikatsu / Party / PartySP). Used by DetectImageSource.
+bool IsKoikatsuCharacterMarker(const std::string& marker);
+bool IsKoikatsuClothesMarker(const std::string& marker);
+
+// Builds an in-memory ClothingFile from one coordinate of a character card:
+// the coordinate payload (clothes, accessories, makeup) is copied verbatim,
+// the card's resolver rows for that coordinate are rebased to the prefix-free
+// shape a file stores ("outfitN." stripped, LocalSlot cleared so the merge's
+// local->slot translation is a no-op - card coordinates already store author
+// slot ids), and the coordinate's KKEx payloads (ABMX/ME/KCOX/moreAccessories)
+// are kept with srcCoordinate recorded so the merge aims at that coordinate.
+// Nothing of the source's identity (Custom/Parameter/Status, hair, other
+// coordinates) is copied. Throws FormatError when the source is not a
+// supported Koikatsu card or the coordinate index is out of range.
+ClothingFile ExtractClothingFromCard(const Card& src, int coordinate);
+
 // What applying a clothing file does to a character. The clothing file is
 // only a source of outfit data: ApplyClothing changes the in-memory Card and
 // never writes a card file back.
 struct ApplyClothingOptions {
     int outfit = -1;                  // -1: the card's current outfit (Status.coordinateType)
     bool keepHairAccessories = true;  // hair worn as accessories is never deleted (see below)
+    int srcOutfit = -1;               // Coordinate sources only: which coordinate of the source card to extract
+                                      // (-1: the source's own current outfit). Ignored for plain outfit files.
+    // Coordinate import of an outfit file: the file's coordinate is applied
+    // wholesale - accessories replace verbatim (slots the file leaves empty
+    // clear the target's, hair-type included), every resolver row and
+    // extended-plugin row scoped to the target outfit is dropped rather than
+    // re-indexed, matching a whole-coordinate replacement; the target's stale
+    // MoreAccessories XML block for the outfit is removed, and ABMX is
+    // rebased per coordinate. Additional_Card_Info travels in its coordinate
+    // sense (the full entry, not just keep flags). Regular clothing imports
+    // keep hair preservation, the merge, and the slot-local row re-indexing.
+    bool coordinateImport = false;
 };
 
 struct ApplyClothingReport {
@@ -143,6 +216,10 @@ struct ApplyClothingReport {
     int accessoriesRelocated = 0;     // placed elsewhere to keep hair
     int hairPreserved = 0;            // character hair accessories kept in place
     int hairSlotsPreserved = 0;       // character hair slots (back/front/side/extension) kept
+    // The selective import: where each chosen source accessory was placed ("acc.<source slot>" -> the merged
+    // slot). Empty for the whole-outfit merge except where it also relocated; the viewer uses it to light the
+    // right part in the 3D previews (an Add can land around the character's own accessories).
+    std::map<std::string, int> placedAccessorySlots;
     std::vector<std::string> notes;
 };
 
@@ -156,5 +233,63 @@ bool IsHairAccessoryPart(const Value& part, const std::vector<ResolveRow>& rows,
 // merge so hair is never deleted. Throws FormatError when the outfit index is
 // out of range.
 ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const ApplyClothingOptions& opt);
+
+// The outfit-import path generalized over both source kinds: Applies `path`
+// (a regular outfit file, or a Koikatsu Coordinate PNG - a character card
+// used as an outfit source) to `card` in memory, as an outfit (clothes +
+// accessories) import. The source is detected from its bytes, never from the
+// file name. A Coordinate source is extracted (identity, face, body,
+// personality and every other coordinate are left behind) and then run
+// through the same ApplyClothing merge a regular outfit file takes - so
+// replacement, hair keeping, accessory placement, KCOX/ABMX/MaterialEditor
+// merging and resolver-row handling behave identically. With
+// `opt.coordinateImport` set, a regular outfit file is applied wholesale
+// (the whole coordinate replaces the slot, accessories replaced including
+// hair-type) like a Coordinate import; a Coordinate file gets the same
+// semantics through the ApplyClothing path (its identity data still never
+// travels). Throws CardError when the source is unreadable; never silently
+// falls back to a different source type.
+struct OutfitSourceReport {
+    bool fromCoordinate = false;    // the source was a character card (Koikatsu Coordinate PNG)
+    int srcOutfit = -1;             // which coordinate of the source was imported (Coordinate sources)
+    std::string sourceName;         // the source's own display name (outfit name or character name)
+    ApplyClothingReport apply;      // the underlying merge report
+};
+OutfitSourceReport ApplyOutfitSource(Card& card, const std::string& path, const ApplyClothingOptions& opt);
+
+// Imports a whole coordinate from another card: the target outfit is
+// replaced wholesale with the source coordinate (clothes, accessories and
+// makeup - positioned, rotated, scaled and parented exactly as the source
+// stores them), and the coordinate-scoped KKEx payloads (MaterialEditor rows,
+// KCOX garment paint, ABMX bone mods) are rebased from the source coordinate
+// to the target outfit. Unlike ApplyClothing this does not merge accessories
+// around hair: the source coordinate is imported as stored, including its
+// accessories. Nothing outside the coordinate is imported: the source's
+// identity (Custom/Parameter/Status beyond the accessory visibility flags),
+// hair, body, other coordinates and unrelated KKEx plugins are never copied.
+// Throws FormatError when either index is out of range or the source card is
+// not supported.
+struct ApplyCoordinateOptions {
+    int srcOutfit = -1;               // -1: the source card's current outfit (Status.coordinateType)
+    int dstOutfit = -1;               // -1: the target's current outfit (Status.coordinateType)
+};
+struct ApplyCoordinateReport {
+    int srcOutfit = -1;
+    int dstOutfit = -1;
+    int clothesReplaced = 0;          // clothing slots whose id changed
+    int accessoriesReplaced = 0;      // target accessory slots dropped/replaced (all non-empty source slots)
+    bool makeupApplied = false;       // the source coordinate had makeup enabled
+    std::string sourceName;           // the source card's own display name
+    std::vector<std::string> notes;   // one line per plugin merged, for the log
+};
+ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCoordinateOptions& opt);
+
+// The viewer's default-outfit load applies the same treatment an outfit import does: the slot of the
+// displayed outfit is cleared of every coordinate-specific bone modifier on the target's in-memory ABMX
+// table (BoneModifierData.Clear(), i.e. scale 1, rotation 0, position 0, length 1). Other coordinates
+// keep their entries. Idempotent; a no-op when nothing needs clearing. Returns true when a slot was reset.
+// The card file itself is never written. Skipped entirely when CARDBRIDGE_ABMX_LEGACY_MERGE=1 is set
+// (pre-fix behaviour). The plain CLI export never calls this.
+bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::vector<std::string>* notes);
 
 } // namespace cardbridge::card
