@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assemble/Scene.h"
+#include "assemble/Proportions.h"
 #include "card/CardFile.h"
 
 #include <nlohmann/json.hpp>
@@ -38,6 +39,9 @@ struct ExportOptions {
         float remaining = 1.0f;
     };
     std::vector<LodTarget> lodTargets;
+    // Optional, non-destructive proportion correction layer active for this export (the viewer passes the same layer the
+    // previewed scene was re-shaped with). Written into the manifest as "proportions": {"active": bool, "ops": [...]}.
+    assemble::ProportionLayer correctionLayer;
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative

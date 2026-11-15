@@ -22,12 +22,15 @@ void StartExport() {
     const float jiggleIntensity = g.jiggleIntensity;
     const float sag = g.sag;
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
+    const assemble::ProportionLayer correctionLayer = ProportionLayerNow();   // the layer the scene on screen was re-shaped with
+    if (!correctionLayer.empty() && correctionLayer.enabled)
+        Log("proportion corrections active for the export (" + std::to_string(correctionLayer.ops.size()) + " op(s)); faithful export = reset the layer in the Proportions tab", LogKind::Info);
     material::WorkbenchState matCopy = g.mat;   // materials: snapshot for the manifest (the scene copy already carries the edits)
     const std::string matSha = L->card.sha256;
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, matCopy, matSha, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggleIntensity, sag, pose, matCopy, matSha, correctionLayer, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -57,6 +60,7 @@ void StartExport() {
             eo.outDir = outDir;
             eo.baseName = stem;
             eo.outfit = L->outfit;
+            eo.correctionLayer = correctionLayer;
             if (g.opt.applied.set) {   // the Optimize tab's Apply commits to the export (the PMX and the LODs carry it)
                 eo.simplifyPercent = std::clamp(g.opt.applied.reduction, 0.0f, 0.9f) * 100.0f;
                 eo.lodTargets = g.opt.applied.lods;

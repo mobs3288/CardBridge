@@ -369,6 +369,28 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     j["game_adapter"] = "koikatsu";
     if (card.hasClothing)
         j["added_outfit"] = {{"name", card.clothingName}, {"file", fileio::FileName(card.clothingPath)}, {"outfit", card.clothingOutfit}};
+    // The proportion-correction layer (optional). Recorded even when empty, so a reader can always tell faithful from corrected.
+    {
+        const assemble::ProportionLayer& layer = opt.correctionLayer;
+        json corrections = json::array();
+        for (const assemble::CorrectionOp& o : layer.ops) {
+            json entry;
+            entry["kind"] = o.kind;
+            if (o.kind == assemble::kBoneScale) {
+                entry["bone"] = o.bone;
+                entry["scale"] = {o.scaleMul.x, o.scaleMul.y, o.scaleMul.z};
+            } else {
+                entry["index"] = o.index;
+                entry["value"] = o.value;
+            }
+            entry["label"] = o.label;
+            entry["why"] = o.why;
+            entry["safety"] = o.safety;
+            entry["scope"] = o.scope;
+            corrections.push_back(std::move(entry));
+        }
+        j["proportions"] = {{"active", layer.enabled && !layer.ops.empty()}, {"enabled", layer.enabled}, {"ops", std::move(corrections)}};
+    }
     if (opt.materialWorkbench.is_object()) {
         nlohmann::json wb = opt.materialWorkbench;
         if (!wb.contains("file") && !opt.materialFile.empty()) wb["file"] = fileio::FileName(opt.materialFile);

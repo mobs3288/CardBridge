@@ -109,8 +109,8 @@ struct Tweaks {
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabOptimize, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Optimize", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Proportions", "Optimize", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
@@ -148,7 +148,10 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
               kTransBrush = 307, kTransErase = 308,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
-              kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
+              kPropMaster = 23100, kPropSugs0 = 23101, kPropSugsMax = 23199,   // Proportions tab: master switch, then one switch per suggested correction
+               kPropActSuggest = 23200, kPropActApply = 23201, kPropActReset = 23202,
+               kPropPresetHead = 23210, kPropPresetBody = 23211, kPropPresetFace = 23212, kPropPresetOverall = 23213,
+               kBustBand = 21000, kBustCup = 21001, kNippleSize = 21002,   // preset rows (chips), not sliders: 21000+ keeps them clear of every slider and action id
               kMorphBase = 30000, kMorphResetAll = 23000,   // the Morphs tab: one slider per morph of the exported PMX (30000..), the reset-all button
               kBwhBust = 22100, kBwhWaist = 22101, kBwhHip = 22102;   // the Body measurements macro rows: one number per measurement, not a card index
 constexpr int kBodyBust = 4;   // the Bust > Size slider in shape::BodySliders() (body slider ids are the shape's index, 0..43)
@@ -197,7 +200,7 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
     l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
     // The tab strip fits its labels (Segoe UI 11px, measured literal widths): uniform padding, small gaps, centered as a strip.
-    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 46, 30};
+    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 55, 46, 30};
     constexpr int kTabPad = 8;
     int tabsTotal = 0;
     for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
@@ -235,6 +238,12 @@ PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows)
     l.matListBottom = l.partsBottom;
     return l;
 }
+
+// One entry of the Proportions tab's suggestion list: the op plus whether the user wants it applied.
+struct PropSugItem {
+    assemble::CorrectionOp op;
+    bool applied = false;
+};
 
 struct App {
     HWND hwnd = nullptr;
@@ -313,6 +322,12 @@ struct App {
     std::set<std::string> collapsedGroups;
     std::set<std::string> collapsedMorphs;   // morph groups folded in the Morphs tab (Brows / Eyes / Mouth / Other)
     Tweaks tw;
+    // Proportion correction (optional; faithful when empty). The card is never modified: corrections live in a
+    // separate layer applied in the assemble/reshape pipeline. Per-card state; suggestions are recomputed on demand.
+    bool propEnabled = true;                               // master layer switch; no applied ops => faithful regardless
+    std::string propCardKey;                               // the card the layer currently belongs to (a different card clears it)
+    std::vector<PropSugItem> propSugs;                     // the current suggestion list, with applied flags
+    std::vector<assemble::ProportionFinding> propFindings;   // diagnostics, computed once per load (or on demand)
     // The Body tab's "Body measurements" group reads the skin. Re-measured on every reshape (the scene holds the rest
     // pose, so bone pose edits don't skew it); the baseline is the card's own measurement, captured on load.
     measure::Result bwhMeasure;

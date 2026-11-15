@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assemble/Scene.h"
+#include "assemble/Proportions.h"
 #include "card/CardFile.h"
 #include "resolve/Resolver.h"
 
@@ -53,6 +54,8 @@ struct AssembleOptions {
     bool autoCloth = false;                // DISABLED by default (revert to last good look): synthesised chains were rebinding hanging cloth
                                            // onto new bones and collapsing it toward the body. Opt-in with --auto-cloth / CARDBRIDGE_AUTO_CLOTH=1;
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables
+    // Optional, non-destructive proportion correction (see Proportions.h). Empty or disabled = faithful pipeline, bit-identical.
+    ProportionLayer proportionLayer;
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative

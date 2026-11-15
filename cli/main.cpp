@@ -16,6 +16,7 @@
 #include <cstring>
 #include "assemble/Assembler.h"
 #include "assemble/Pose.h"
+#include "assemble/Proportions.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/ClothingExport.h"
@@ -129,6 +130,14 @@ void usage() {
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
         "             [--materials <file.json>]      a material workbench file (cardbridge-materials v1), applied to the export\n"
         "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
+        "             [--proportions <file.json>]     apply an optional corrective layer (cardbridge-proportions v1:\n"
+        "                                             {\"enabled\": true, \"ops\": [{\"kind\": 0|1|2, \"index\": N, \"value\": F, \"bone\": \"name\", \"scale\": [x,y,z], \"label\": \"...\", \"why\": \"...\", \"safety\": 0|1|2, \"scope\": \"body|face|head\"}]}).\n"
+        "                                             kind 0 = body slider (0..43), 1 = face slider (0..51), 2 = bone scale.\n"
+        "             [--normalize-head-proportions] [--normalize-body-proportions] [--normalize-face-proportions] [--normalize-overall]\n"
+        "                                             generate and apply the corresponding proportion suggestions (optional;\n"
+        "                                             a starting point, not a recommendation - review with the viewer). Without\n"
+        "                                             these flags the export is faithful to the card. Tracked in the manifest.\n"
+        "             [--print-diagnostics]          print the proportion diagnostics for this card (head/body/face sliders and ABMX)\n"
         "             [--no-mmd-names]                keep the rig's own bone names; by default the body bones get MMD's\n"
         "                                             standard (Japanese) names so a motion (VMD) finds them\n"
         "             [--no-physics]                  no rigid bodies or joints: hair and skirt stay rigid, nothing can shiver\n"
@@ -702,6 +711,41 @@ int cmdConvert(const Args& a) {
             if (idx < vals.size()) vals[idx] = static_cast<float>(std::atof(item.c_str() + eq + 1));
         }
     }
+    if (a.has("normalize-head-proportions") || a.has("normalize-body-proportions") || a.has("normalize-face-proportions") ||
+        a.has("normalize-overall") || !a.get("proportions").empty()) {
+        assemble::ProportionLayer layer;
+        if (!a.get("proportions").empty()) {
+            std::string err;
+            std::vector<uint8_t> bytes;
+            try {
+                bytes = fileio::ReadFile(a.get("proportions"));
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "error: cannot read proportions file %s: %s\n", a.get("proportions").c_str(), e.what());
+                return 3;
+            }
+            const std::string text(bytes.begin(), bytes.end());
+            if (!assemble::ProportionLayerFromJson(text, layer, &err)) {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                return 3;
+            }
+            std::fprintf(stderr, "proportions: layer loaded (%zu op(s), enabled=%d)\n", layer.ops.size(), layer.enabled ? 1 : 0);
+        }
+        if (a.has("normalize-head-proportions")) layer.ops = assemble::PresetNormalizeHead(c);
+        if (a.has("normalize-body-proportions")) layer.ops = assemble::PresetNormalizeBody(c);
+        if (a.has("normalize-face-proportions")) layer.ops = assemble::PresetNormalizeFace(c);
+        if (a.has("normalize-overall")) layer.ops = assemble::PresetNormalizeOverall(c);
+        ao.proportionLayer = std::move(layer);
+    }
+    if (a.has("print-diagnostics")) {
+        const auto findings = assemble::AnalyzeCard(c);
+        std::printf("proportion diagnostics for %s (informational):\n", c.displayName().c_str());
+        if (findings.empty()) std::printf("  none — this card's sliders and ABMX table look proportionate.\n");
+        for (const auto& f : findings) {
+            const char* tag = f.safety == assemble::kSafetySafe ? "safe" : f.safety == assemble::kSafetyApproximate ? "approx" : "manual";
+            std::printf("  [%s] %s: %s (current %s)%s\n", tag, f.property.c_str(), f.reason.c_str(), f.current.c_str(),
+                        f.suggestion.empty() ? "" : ("; suggestion: " + f.suggestion).c_str());
+        }
+    }
     ao.nippleInside = a.has("nipple-inside");
     if (a.opt.count("nipple-offset")) ao.nippleOffset = static_cast<float>(std::atof(a.get("nipple-offset").c_str()));
     if (a.opt.count("skin-shade")) ao.skinShade = std::clamp(static_cast<float>(std::atof(a.get("skin-shade").c_str())), 0.0f, 2.0f);
@@ -972,6 +1016,7 @@ int cmdConvert(const Args& a) {
     eo.outDir = out;
     eo.overwrite = a.has("overwrite");
     eo.faceMinusZ = !a.has("unity-facing");
+    eo.correctionLayer = ao.proportionLayer;   // faithful when empty; corrected when --proportions/--normalize-* were given
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
     eo.jiggleButt = !a.has("no-jiggle-butt");          // default on
@@ -1109,7 +1154,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

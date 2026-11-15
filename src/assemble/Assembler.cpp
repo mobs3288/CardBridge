@@ -2,6 +2,7 @@
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/HeelConfig.h"
+#include "assemble/Proportions.h"
 #include "unity/TextureDecode.h"
 
 #include "core/Bytes.h"
@@ -111,6 +112,26 @@ void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, cons
         if (m->hasRotation()) { o.rot = quatMul(baseRot, shape::EulerToQuat(m->rotation)); o.hasRot = true; }
         if (m->hasLength()) o.pos = basePos * m->length + m->position;
         else if (m->hasPosition()) o.pos = basePos + m->position;
+        ov[x->name] = o;
+    }
+}
+
+// Proportion corrections on a pose's bone: a multiplier on the bone's local scale, applied after the shape and after ABMX.
+// Mirrors how ABMX multiplies (never touches rotation / position). Prefab bones that carry a correction but no other
+// override are inserted into the map the same way ABMX does.
+void applyProportionBoneScales(Overrides& ov, UnityFile& uf, const std::string& prefabName, const ProportionLayer& layer) {
+    if (layer.empty()) return;
+    const int64_t root = uf.findPrefabRoot(prefabName);
+    if (!root) return;
+    for (int64_t id : uf.subtree(root)) {
+        const unity::Xform* x = uf.xform(id);
+        if (!x) continue;
+        const CorrectionOp* op = layer.forBone(x->name);
+        if (!op) continue;
+        LocalOverride o;
+        o.pos = x->pos; o.scl = x->scl; o.rot = x->rot; o.hasRot = false;
+        if (auto it = ov.find(x->name); it != ov.end()) o = it->second;
+        o.scl = {o.scl.x * op->scaleMul.x, o.scl.y * op->scaleMul.y, o.scl.z * op->scaleMul.z};
         ov[x->name] = o;
     }
 }
@@ -249,8 +270,9 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     const Value& vals = card.body.at("shapeValueBody");
     std::vector<float> v;
     for (size_t i = 0; i < vals.size(); ++i) v.push_back(static_cast<float>(vals.at(i).asFloat()));
-    // Viewer sliders: a value the user set replaces the card's own.
+    // Viewer sliders: a value the user set replaces the card's own, then the optional proportion-correction layer overrides that.
     for (size_t i = 0; i < v.size() && i < opt.bodyShape.size(); ++i) v[i] = opt.bodyShape[i];
+    for (size_t i = 0; i < v.size(); ++i) v[i] = SliderValueCorrected(v[i], opt.proportionLayer, kBodySlider, static_cast<int>(i));
     if (v.size() > 13) {
         float nip = opt.nippleInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
@@ -364,6 +386,7 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     const bool neutral = std::getenv("CARDBRIDGE_FACE_NEUTRAL") != nullptr;   // debug: every slider at 0.5
     for (size_t i = 0; i < vals.size(); ++i) {
         float fv = i < opt.faceShape.size() ? opt.faceShape[i] : static_cast<float>(vals.at(i).asFloat());
+        fv = SliderValueCorrected(fv, opt.proportionLayer, kFaceSlider, static_cast<int>(i));
         shape::ChangeValue(S, anm, cats, static_cast<int>(i), neutral ? 0.5f : fv);
     }
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE")) {
@@ -2055,6 +2078,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scene, opt);
     const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
     applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
+    applyProportionBoneScales(shapeOv, *base, opt.bodyRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scene, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) {
         scene.error("", "prefab '" + opt.bodyRigPrefab + "' not found in oo_base.unity3d");
         return scene;
@@ -2144,6 +2168,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.rigDefault = &rigDefault;
     }
     applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
+    applyProportionBoneScales(headOv, *base, opt.headRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scene, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv))
         scene.warn("", "prefab '" + opt.headRigPrefab + "' not found in oo_base.unity3d");
 
@@ -3779,6 +3804,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             std::fprintf(stderr, "\n");
         }
     settleHeels(scene);
+    {   // proportion diagnostics: informational findings about this card's sliders and ABMX table ([proportions] in the issues panel)
+        for (const auto& f : AnalyzeCard(card))
+            scene.warn("proportions", f.property + " — " + f.reason + (f.safety >= kSafetyManual ? " (manual review)" : "; suggested: " + f.suggestion));
+        if (!opt.proportionLayer.empty() && opt.proportionLayer.enabled)
+            scene.warn("proportions", "proportion corrections are active (" + std::to_string(opt.proportionLayer.ops.size()) + " op(s)); faithful export = reset them (Proportions tab)");
+    }
     if (opt.autoCloth && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH")) SynthesizeAutoCloth(scene, log);
     report(1.0, "done");
     return scene;
@@ -3801,6 +3832,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
     if (opt.applyShape) shapeOv = bodyShapeOverrides(card, resolver, *base, *base, opt.bodyRigPrefab, scratch, opt);
     const card::AbmxTable abmx = std::getenv("CARDBRIDGE_NO_ABMX") ? card::AbmxTable{} : card::LoadAbmx(card.extended);
     applyAbmx(shapeOv, *base, opt.bodyRigPrefab, abmx, outfit);
+    applyProportionBoneScales(shapeOv, *base, opt.bodyRigPrefab, opt.proportionLayer);
     if (!addRigPrefab(scratch, rig, *base, opt.bodyRigPrefab, Mat4{}, -1, "rig", shapeOv.empty() ? nullptr : &shapeOv)) return false;
     Mat4 headBase;
     if (auto hw = rig.world.find(opt.headAttachBone); hw != rig.world.end()) headBase = hw->second;
@@ -3830,6 +3862,7 @@ bool Reshape(Scene& scene, const card::Card& card, resolve::Resolver& resolver, 
         }
     }
     applyAbmx(headOv, *base, opt.headRigPrefab, abmx, outfit);
+    applyProportionBoneScales(headOv, *base, opt.headRigPrefab, opt.proportionLayer);
     addRigPrefab(scratch, rig, *base, opt.headRigPrefab, headBase, headAttach, "rig", headOv.empty() ? nullptr : &headOv);
 
     // New world of every scene bone: the rig's own, and a bone an item added keeps its place relative to its parent.

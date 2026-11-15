@@ -396,6 +396,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
             rows.insert(rows.begin() + at, TweakRow{6, kBustBand, "Band:", "Bust"});
         }
     }
+    if (tab == TabProportions) return BuildProportionRows();
     else if (tab == TabFace) addSliders(shape::FaceSliders(), kFaceBase, g.tw.face.size());
     else if (tab == TabLook) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
@@ -527,6 +528,9 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
 
 bool TweakChanged(int id) {
     SliderRef r;
+    if (id == kPropMaster) return g.propEnabled;
+    if (id >= kPropSugs0 && id < kPropSugsMax)
+        return static_cast<size_t>(id - kPropSugs0) < g.propSugs.size() && g.propSugs[static_cast<size_t>(id - kPropSugs0)].applied;
     if (id >= kLayerBase && id < kBoneEdit) return g.gpu.layerEnabled(static_cast<size_t>(id - kLayerBase));
     if (id == kNippleIn) return g.tw.nippleInside;
     if (id == kAPose) return g.aPose;
@@ -557,6 +561,8 @@ bool AnyTweak() {
 
 void ResetTweak(int id) {
     SliderRef r;
+    if (id == kPropMaster) g.propEnabled = true;
+    else if (id >= kPropSugs0 && id < kPropSugsMax && static_cast<size_t>(id - kPropSugs0) < g.propSugs.size()) { g.propSugs[static_cast<size_t>(id - kPropSugs0)].applied = false; SyncProportionSliders(); }
     if (IsMatId(id)) {
         std::shared_ptr<Loaded> L = Current();
         if (!L || g.selMaterial < 0) return;
@@ -595,7 +601,13 @@ void ResetTweak(int id) {
         for (int i = 0; i < 2 && sliders[static_cast<size_t>(i)] >= 0; ++i)
             g.tw.body[static_cast<size_t>(sliders[static_cast<size_t>(i)])] = g.tw.bodyCard[static_cast<size_t>(sliders[static_cast<size_t>(i)])];
     }
-    else if (SliderFor(id, r)) r.Set(r.def);
+    else if (SliderFor(id, r)) {
+        r.Set(r.def);
+        // a correction targeting this slider is undone too (the layer no longer overrides it)
+        for (auto& s : g.propSugs)
+            if ((s.op.kind == assemble::kBodySlider && s.op.index == id) || (s.op.kind == assemble::kFaceSlider && s.op.index == id - kFaceBase))
+                s.applied = false;
+    }
 }
 
 void ScheduleApplyTweaks() {

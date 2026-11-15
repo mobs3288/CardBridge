@@ -363,6 +363,7 @@ bool ReshapeNow(bool final) {
         ao.skinShadeWidth = g.tw.skinShadeWidth;
         ao.skinAo = g.tw.skinAo;
         if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
+        ao.proportionLayer = ProportionLayerNow();
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
@@ -666,6 +667,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.skinAo = g.tw.skinAo;
                 ao.autoCloth = g.autoCloth;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
+                ao.proportionLayer = ProportionLayerNow();
             }
             ao.log = [](const std::string& m) { Log("  " + m); };
             ao.progress = [](double f, const std::string& stage) {

@@ -2803,6 +2803,341 @@ void unitTests() {
         (void)bonesBefore;
     });
 
+    // ---- proportion correction tests (no game bundles needed) ----
+    auto makePropCard = [&]() {
+        card::Card c;
+        c.path = "proptest.png";
+        c.family = card::CardFamily::Koikatsu;
+        c.supported = true;
+        Value::Array bodyArr;
+        const double bv[44] = {0.3, 1.25, 0.2, 0.28, 0.65, 0.1, 0.88, 0.0707, 0.45, 0.397,
+                               0.62, 0.385, 0.62, 0.6899, 0.3, 0.13, 0.0, 0.37, 0.3, 0.25,
+                               0.637, 0.093, 0.15, 0.69, 0.25, 0.374, 0.6806, 0.6805, 0.5, 0.5,
+                               0.5, 0.3, 0.3, 0.3499, 0.2, 0.4, 0.3499, 0.3956, 0.3472, 0.2424,
+                               0.2524, 0.2864, 0.0, -0.0238};
+        for (double v : bv) bodyArr.emplace_back(v);
+        Value bodyMap(Value::Map{{Value(std::string("shapeValueBody")), Value(std::move(bodyArr))},
+                                 {Value(std::string("typeBone")), Value(int64_t(0))}});
+        Value::Array faceArr;
+        const double fv[52] = {0.0, 0.09, -0.34, -1.0, 0.0, 0.04, 0.36, 0.33,
+                              0.12, -0.25, 0.936, 0.27, 0.34, 0.0, 0.0, 0.0,
+                              -0.2, -0.05, 0.37, -0.697, 0.0, 0.952, 0.284, 0.706,
+                              -0.5, -0.3, 0.269, 0.352, -0.25, 0.8, 0.35, 0.1,
+                              0.29, 0.2, 0.15, 0.146, 0.6, 0.0, 0.896, 0.398,
+                              0.187, 0.1, -0.15, 0.22, 0.058, 0.281, 0.0, 0.15,
+                              0.5, 0.5, 0.0, 0.0};
+        for (double v : fv) faceArr.emplace_back(v);
+        Value faceMap(Value::Map{{Value(std::string("shapeValueFace")), Value(std::move(faceArr))}});
+        c.body = std::move(bodyMap);
+        c.face = std::move(faceMap);
+        Value::Map statusMap;
+        statusMap.emplace_back(Value(std::string("coordinateType")), Value(int64_t(0)));
+        c.status = Value(std::move(statusMap));
+        return c;
+    };
+    auto floats42 = [](const Value& map) {
+        std::vector<float> out;
+        for (const auto& e : map.at("shapeValueBody").asArray()) out.push_back(static_cast<float>(e.asFloat()));
+        return out;
+    };
+    auto floatsFace = [](const Value& map) {
+        std::vector<float> out;
+        for (const auto& e : map.at("shapeValueFace").asArray()) out.push_back(static_cast<float>(e.asFloat()));
+        return out;
+    };
+    auto attachAbmx = [&](card::Card c, const std::vector<std::pair<std::string, card::AbmxMod>>& bones) {
+        card::AbmxTable table;
+        for (const auto& [bone, mod] : bones) table.bones[bone] = std::vector<card::AbmxMod>{mod};
+        Value::Array entry;
+        entry.emplace_back(Value(int64_t(2)));
+        entry.emplace_back(Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(table))}}));
+        c.extended = Value(Value::Map{{Value(std::string("KKABMPlugin.ABMData")), Value(std::move(entry))}});
+        return c;
+    };
+
+    test("proportions: a proportionate card flags nothing", [&] {
+        card::Card c = makePropCard();
+        for (auto& v : c.body.map()) if (v.first.isStr() && v.first.asStr() == "shapeValueBody") for (auto& e : v.second.array()) e = Value(0.5);
+        for (auto& v : c.face.map()) if (v.first.isStr() && v.first.asStr() == "shapeValueFace") for (auto& e : v.second.array()) e = Value(0.5);
+        const auto findings = assemble::AnalyzeCard(c);
+        CHECK(findings.empty());
+    });
+
+    test("proportions: extreme sliders and SliderUnlocker values are flagged with half-way-back suggestions", [&] {
+        card::Card c = makePropCard();
+        const auto findings = assemble::AnalyzeCard(c);
+        CHECK(!findings.empty());
+        // head size 1.25 is flagged; the suggested target is exactly half-way toward 0.5 = 0.875
+        bool sawHeadSize = false, sawHeight = false, sawChest = false, sawFaceHigh = false;
+        for (const auto& f : findings) {
+            if (f.property.find("Head size") != std::string::npos) { sawHeadSize = true; CHECK(f.suggestion.find("0.88") != std::string::npos); }
+            if (f.property.find("Height") != std::string::npos) sawHeight = true;
+            if (f.property.find("Chest width") != std::string::npos) sawChest = true;
+            if (f.property.find("Forehead height") != std::string::npos) sawFaceHigh = true;
+        }
+        CHECK(sawHeadSize && sawHeight && sawChest && sawFaceHigh);
+        // every suggestion target lands strictly between the card value and neutral (half the deviation)
+        const auto ops = assemble::SuggestCorrections(c);
+        const auto bodyVals = floats42(c.body);
+        const auto faceVals = floatsFace(c.face);
+        for (const auto& op : ops) {
+            if (op.kind == assemble::kBoneScale) continue;
+            const double cardV = op.kind == assemble::kBodySlider ? bodyVals[static_cast<size_t>(op.index)] : faceVals[static_cast<size_t>(op.index)];
+            const double want = 0.5 + (cardV - 0.5) * 0.5;
+            CHECK(std::fabs(static_cast<double>(op.value) - want) < 1e-4);
+        }
+    });
+
+    test("proportions: ABMX scale deviations are reported and get a partial-neutralisation op", [&] {
+        auto mod = [](float sx, float sy, float sz, float len) {
+            card::AbmxMod m;
+            m.scale = {sx, sy, sz};
+            m.length = len;
+            return m;
+        };
+        card::Card c = makePropCard();
+        c = attachAbmx(std::move(c), {{"cf_s_head", mod(0.7f, 0.93f, 0.93f, 1.0f)}, {"cf_J_FaceBase", mod(1.45f, 1.12f, 0.99f, 0.8f)}});
+        const auto findings = assemble::AnalyzeCard(c);
+        bool sawHead = false, sawFaceBase = false;
+        for (const auto& f : findings) {
+            if (f.property.find("cf_s_head") != std::string::npos) sawHead = true;
+            if (f.property.find("cf_J_FaceBase") != std::string::npos) sawFaceBase = true;
+        }
+        CHECK(sawHead && sawFaceBase);
+        const auto ops = assemble::SuggestCorrections(c);
+        const assemble::CorrectionOp* head = nullptr;
+        const assemble::CorrectionOp* faceBase = nullptr;
+        for (const auto& op : ops) {
+            if (op.kind == assemble::kBoneScale && op.bone == "cf_s_head") head = &op;
+            if (op.kind == assemble::kBoneScale && op.bone == "cf_J_FaceBase") faceBase = &op;
+        }
+        CHECK(head != nullptr && faceBase != nullptr);
+        if (head) {   // 0.7 -> multiplier 1 + (1 - 0.7) * 0.5 = 1.15 (half-way back to 1.0)
+            CHECK(std::fabs(head->scaleMul.x - 1.15f) < 1e-4f);
+            CHECK(head->scope == "head");
+        }
+        if (faceBase) {   // 1.45 -> 1 + (1 - 1.45) * 0.5 = 0.775
+            CHECK(std::fabs(faceBase->scaleMul.x - 0.775f) < 1e-4f);
+            CHECK(faceBase->scope == "head");
+        }
+        // partial undo, never a snap: 0.7 * 1.15 = 0.805 (half-way between the ABMX value and 1.0)
+        if (head) CHECK(std::fabs(0.7f * head->scaleMul.x - 0.805f) < 1e-4f);
+    });
+
+    test("proportions: parent-child ABMX compounding is reported as manual review, with no op", [&] {
+        auto mod = [](float sx, float sy, float sz) {
+            card::AbmxMod m;
+            m.scale = {sx, sy, sz};
+            return m;
+        };
+        card::Card c = makePropCard();
+        c = attachAbmx(std::move(c), {{"cf_s_head", mod(0.7f, 0.93f, 0.93f)}, {"cf_J_FaceBase", mod(1.45f, 1.12f, 0.99f)}});
+        const auto findings = assemble::AnalyzeCard(c);
+        bool sawCompound = false;
+        for (const auto& f : findings)
+            if (f.property.find("compound") != std::string::npos || (f.property.find("cf_s_head") != std::string::npos && f.safety == assemble::kSafetyManual)) sawCompound = true;
+        CHECK(sawCompound);
+        // no suggestion op is generated for the compounding note
+        const auto ops = assemble::SuggestCorrections(c);
+        for (const auto& op : ops)
+            if (op.kind == assemble::kBoneScale) CHECK(op.bone != "cf_j_neck");   // nothing beyond the per-bone ops we already suggest
+    });
+
+    test("proportions: a correction layer overrides slider values; bone corrections multiply after ABMX", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        auto addSliderOp = [&](int kind, int index, float value) {
+            assemble::CorrectionOp op;
+            op.kind = kind;
+            op.index = index;
+            op.value = value;
+            layer.ops.push_back(op);
+        };
+        addSliderOp(assemble::kBodySlider, 1, 0.875f);    // head size
+        addSliderOp(assemble::kFaceSlider, 3, -0.25f);    // forehead height
+        const auto body = floats42(c.body);
+        const auto face = floatsFace(c.face);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - 0.875f) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(face[3], layer, assemble::kFaceSlider, 3) - (-0.25f)) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[0], layer, assemble::kBodySlider, 0) - body[0]) < 1e-6f);   // untouched slider unchanged
+        layer.ops.push_back([] { assemble::CorrectionOp op; op.kind = assemble::kBoneScale; op.bone = "cf_s_head"; op.scaleMul = {1.15f, 1.0f, 1.0f}; return op; }());
+        bool changed = false;
+        const Vec3 got = assemble::BoneScaleCorrected({0.794f, 1.055f, 1.055f}, layer, "cf_s_head", &changed);
+        CHECK(changed);
+        CHECK(std::fabs(got.x - 0.794f * 1.15f) < 1e-4f && std::fabs(got.y - 1.055f) < 1e-4f && std::fabs(got.z - 1.055f) < 1e-4f);
+        // an unrelated bone is untouched
+        changed = false;
+        const Vec3 still = assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_j_head", &changed);
+        CHECK(!changed && still.x == 1 && still.y == 1 && still.z == 1);
+    });
+
+    test("proportions: empty and disabled layers are no-ops (bit-identical faithful behaviour)", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        const auto body = floats42(c.body);
+        const auto face = floatsFace(c.face);
+        for (size_t i = 0; i < body.size(); ++i) CHECK(assemble::SliderValueCorrected(body[i], layer, assemble::kBodySlider, (int)i) == body[i]);
+        for (size_t i = 0; i < face.size(); ++i) CHECK(assemble::SliderValueCorrected(face[i], layer, assemble::kFaceSlider, (int)i) == face[i]);
+        bool changed = true;
+        CHECK(assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_s_head", &changed).x == 1.0f && !changed);
+        // enabled=false with ops still does not apply anything
+        assemble::CorrectionOp op;
+        op.kind = assemble::kBodySlider;
+        op.index = 1;
+        op.value = 0.5f;
+        layer.ops.push_back(op);
+        layer.enabled = false;
+        CHECK(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) == body[1]);
+        changed = true;
+        assemble::CorrectionOp b;
+        b.kind = assemble::kBoneScale;
+        b.bone = "cf_s_head";
+        b.scaleMul = {2.0f, 2.0f, 2.0f};
+        layer.ops.push_back(b);
+        CHECK(assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_s_head", &changed).x == 1.0f && !changed);
+    });
+
+    test("proportions: layer tags presets to their scope; overall covers everything", [&] {
+        card::Card c = makePropCard();
+        const auto head = assemble::PresetNormalizeHead(c);
+        const auto body = assemble::PresetNormalizeBody(c);
+        const auto face = assemble::PresetNormalizeFace(c);
+        const auto overall = assemble::PresetNormalizeOverall(c);
+        CHECK(!head.empty() && !body.empty() && !face.empty() && !overall.empty());
+        for (const auto& op : head) CHECK(op.scope == "head");
+        for (const auto& op : body) CHECK(op.scope == "body");
+        for (const auto& op : face) CHECK(op.scope == "face");
+        for (const auto& op : overall) CHECK(op.scope == "body" || op.scope == "face" || op.scope == "head");
+        CHECK(overall.size() == head.size() + body.size() + face.size());
+    });
+
+    test("proportions: JSON round-trip of a layer", [&] {
+        card::Card c = makePropCard();
+        const auto ops = assemble::PresetNormalizeOverall(c);
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        layer.ops = ops;
+        const std::string text = assemble::ProportionLayerToJson(layer);
+        assemble::ProportionLayer back;
+        std::string err;
+        CHECK(assemble::ProportionLayerFromJson(text, back, &err));
+        CHECK(back.ops.size() == layer.ops.size());
+        for (size_t i = 0; i < back.ops.size(); ++i) {
+            CHECK(back.ops[i].kind == layer.ops[i].kind);
+            CHECK(back.ops[i].index == layer.ops[i].index);
+            CHECK(back.ops[i].bone == layer.ops[i].bone);
+            CHECK(std::fabs(back.ops[i].value - layer.ops[i].value) < 1e-6f);
+            CHECK(std::fabs(back.ops[i].scaleMul.x - layer.ops[i].scaleMul.x) < 1e-6f);
+        }
+        // junk is rejected, never partially applied
+        assemble::ProportionLayer junk;
+        CHECK(!assemble::ProportionLayerFromJson("{\"ops\": [{\"kind\": 7}]}", junk, &err));
+        CHECK(!assemble::ProportionLayerFromJson("not json", junk, &err));
+        CHECK(!assemble::ProportionLayerFromJson("{}", junk, &err));
+    });
+
+    test("proportions: reverting a layer op restores that op only", [&] {
+        card::Card c = makePropCard();
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        assemble::CorrectionOp a, b;
+        a.kind = assemble::kBodySlider; a.index = 1; a.value = 0.875f; a.label = "head";
+        b.kind = assemble::kBodySlider; b.index = 16; b.value = 0.25f; b.label = "chest";
+        layer.ops = {a, b};
+        const auto body = floats42(c.body);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - 0.875f) < 1e-6f);
+        layer.ops.erase(layer.ops.begin());   // revert the head-size correction only
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[1], layer, assemble::kBodySlider, 1) - body[1]) < 1e-6f);
+        CHECK(std::fabs(assemble::SliderValueCorrected(body[16], layer, assemble::kBodySlider, 16) - 0.25f) < 1e-6f);
+    });
+
+    test("proportions: SliderUnlocker extreme out-of-range values do not clamp to 0", [&] {
+        card::Card c = makePropCard();
+        const auto ops = assemble::SuggestCorrections(c);
+        assemble::CorrectionOp faceHighOp;
+        bool found = false;
+        for (const auto& op : ops)
+            if (op.kind == assemble::kFaceSlider && op.index == 3) { faceHighOp = op; found = true; break; }
+        CHECK(found);
+        if (found) {
+            CHECK(faceHighOp.value == -0.25f);   // half-way back: -1.0 -> -0.25, not clamped to 0
+            CHECK(faceHighOp.safety == assemble::kSafetyApproximate);
+        }
+    });
+
+    test("proportions: manifest records faithful vs corrected exports (opt-in layer appears in .cardbridge.json)", [&] {
+        assemble::Scene s;
+        s.name = "proportions_manifest";
+        {
+            assemble::SceneBone b;
+            b.name = "root";
+            b.parent = -1;
+            b.pos = {0, 0, 0};
+            b.source = "rig";
+            b.world = Mat4{};
+            s.bones.push_back(b);
+        }
+        {
+            assemble::ScenePart part;
+            part.id = "body";
+            part.label = "Body";
+            part.group = "Body";
+            part.category = 10;
+            part.status = "resolved-base";
+            part.includeInExport = true;
+            s.parts.push_back(part);
+            assemble::SceneMesh mesh;
+            mesh.name = "o_body_a";
+            mesh.part = 0;
+            mesh.reshapable = false;
+            assemble::SceneVertex v;
+            v.pos = {0, 0, 0};
+            v.bone[0] = 0;
+            v.weight[0] = 1.0f;
+            mesh.vertices.push_back(v);
+            s.meshes.push_back(mesh);
+            s.parts[0].meshes.push_back(0);
+        }
+        {
+            assemble::SceneMaterial mat;
+            mat.name = "cf_m_body";
+            mat.shader = "Shader Forge/main_opaque";
+            s.materials.push_back(mat);
+        }
+        card::Card c;
+        c.path = "proportions_manifest.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("proportions_manifest") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        // faithful first
+        const auto faithful = exporter::ExportScene(s, c, eo);
+        {
+            const Bytes mb = fileio::ReadFile(faithful.manifestPath);
+            const std::string manifest(mb.begin(), mb.end());
+            CHECK(manifest.find("\"proportions\"") != std::string::npos);
+            CHECK(manifest.find("\"active\": false") != std::string::npos);
+        }
+        // corrected second
+        assemble::ProportionLayer layer;
+        layer.enabled = true;
+        assemble::CorrectionOp op;
+        op.kind = assemble::kBodySlider;
+        op.index = 1;
+        op.value = 0.875f;
+        op.label = "Overall - Head size 1.25 -> 0.88";
+        op.why = "test correction";
+        layer.ops.push_back(op);
+        eo.correctionLayer = layer;
+        const auto corrected = exporter::ExportScene(s, c, eo);
+        {
+            const Bytes mb = fileio::ReadFile(corrected.manifestPath);
+            const std::string manifest(mb.begin(), mb.end());
+            CHECK(manifest.find("\"active\": true") != std::string::npos);
+            CHECK(manifest.find("0.875") != std::string::npos);
+        }
+    });
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
         assemble::Scene s;
         assemble::SceneMesh mesh;

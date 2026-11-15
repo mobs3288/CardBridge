@@ -99,6 +99,7 @@ namespace {
 #include "Util.inc"
 #include "State.inc"
 #include "Progress.inc"
+#include "Proportions.inc"
 #include "Tweaks.inc"
 #include "Morphs.inc"
 #include "MaterialsHelpers.inc"

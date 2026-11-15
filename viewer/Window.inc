@@ -483,6 +483,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (size_t i = 0; i < L->scene.parts.size(); ++i)
                 if (L->scene.parts[i].nudeSwitch && !(g.applyKeep && g.keepHidden.count(L->scene.parts[i].id))) g.hidden[i] = 1;   // starts unticked
         g.keepHidden.clear();
+        // Proportion correction state: a different card starts faithful with fresh diagnostics; a same-card reload (an outfit switch or a re-apply) keeps the user's corrections.
+        if (L && L->card.path != g.propCardKey) {
+            g.propCardKey = L->card.path;
+            g.propSugs.clear();
+            g.propFindings = assemble::AnalyzeCard(L->card);
+        } else if (!L) {
+            g.propCardKey.clear();
+            g.propSugs.clear();
+            g.propFindings.clear();
+        }
         g.partScroll = 0;
         g.partPos = 0;
         g.optScroll = 0;   // a new character starts at the top of the Optimize tab

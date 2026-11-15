@@ -256,10 +256,20 @@ try {
         $sliders = @($lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
         Check "$($t[0]): sliders are listed" ($sliders -gt 0) "$sliders visible"
     }
+    if (Want 'proportions') {
+        Write-Host 'proportions tab'
+        $lay = GoTab 7
+        Check 'proportions: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 7)
+        $s = Shot 'proportions'
+        $switches = @($lay.rows | Where-Object { $_.kind -eq 2 -and $_.y -ge 0 }).Count
+        Check 'proportions: the correction layer switch is listed' ($switches -ge 1) "$switches switch rows"
+        $actions = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
+        Check 'proportions: the action buttons are listed' ($actions -ge 5) "$actions action rows"
+    }
     if (Want 'setup') {
         Write-Host 'setup tab'
-        $lay = GoTab 7
-        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 7)
+        $lay = GoTab 9
+        Check 'setup: the tab opens and the window answers' ($null -ne $lay -and $lay.tab -eq 9)
         $s = Shot 'setup'
         $actions = @($lay.rows | Where-Object { $_.kind -eq 5 -and $_.y -ge 0 }).Count
         Check 'setup: the settings actions are listed' ($actions -gt 3) "$actions visible"

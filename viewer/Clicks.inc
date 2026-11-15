@@ -3,6 +3,12 @@
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
 void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (g.tab == TabOptimize) return;   // the Optimize tab routes its own clicks (OptTabClick)
+    if (g.tab == TabProportions) {
+        const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+        const int pidx = RowIndexAt(rows.size(), l, x, y);
+        if (pidx >= 0) ProportionsClick(pidx, rows[static_cast<size_t>(pidx)], right);
+        return;
+    }
     std::vector<TweakRow> rows = BuildTweakRows(g.tab);
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;
