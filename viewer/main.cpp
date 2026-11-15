@@ -33,6 +33,7 @@
 //          Shift+Left-click any slider to type its value with the keyboard (Enter commits, Esc restores)
 
 #include "assemble/Assembler.h"
+#include "assemble/JiggleSettings.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
 #include "assemble/Pose.h"
@@ -151,6 +152,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     LocalFree(argvw);
     // --clothes pins to --outfit when given, otherwise to the card's current slot on load (StartLoad pins it there).
     if (!g.clothingPins.empty() && g.wantOutfit >= 0) g.clothingPins.back().dstOutfit = g.wantOutfit;
+    g.jiggle = g.settings.jiggle;   // the live settings start from the persisted ones (the Look tab edits them)
     SaveSettings(g.settings);
 
     ui::Startup();
@@ -242,9 +244,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         }
         if (quit) break;
         Frame();
-        const bool again = g.physics || g.animating || g.dragPending || g.progActive.load();
+        const bool physicsLive = g.physics && (g.physicsMoving || g.physicsKick);   // the jiggle is still moving: repaint like a game loop
+        const bool again = g.animating || g.dragPending || g.progActive.load() || physicsLive;
         if (!again) MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        else MsgWaitForMultipleObjectsEx(0, nullptr, 33, QS_ALLINPUT, 0);
+        else MsgWaitForMultipleObjectsEx(0, nullptr, physicsLive ? 8 : 33, QS_ALLINPUT, 0);
     }
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
     g.wb.Reset();

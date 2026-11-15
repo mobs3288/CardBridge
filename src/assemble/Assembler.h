@@ -4,9 +4,11 @@
 #include "assemble/Proportions.h"
 #include "card/CardFile.h"
 #include "resolve/Resolver.h"
+#include "unity/UnityScene.h"
 
 #include <functional>
 #include <string>
+#include <memory>
 
 namespace cardbridge::assemble {
 
@@ -76,6 +78,40 @@ bool CreateRunsInLinearLight(const std::string& materialName);
 // so the root keeps its own local position, rotation and scale under the parent. `parent` is the attach or hair node's world
 // matrix; the prefab root's local transform comes from the bundle.
 Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale);
+
+// Resolves a garment's body/underwear mask texture by name (the list row's OverBodyMask/OverBraMask + *AB fields). The game performs
+// a typed lookup (LoadAsset<Texture2D>(name)): a same-named GameObject or prefab does NOT count as the mask, and an asset that decodes
+// to something else is not a mask either. A mask is a full-screen body texture in body UV space (red channel 255 = keep the skin).
+// `decode` is the caller's asset decoder (nullptr when the caller has none); it must decode the candidate as a texture or return
+// nullptr. whyOut names what was tried when nothing decodes, so a missing mask is never silent. Returns nullptr when no mask can be
+// produced; callers then keep the covered geometry visible instead of silently hiding nothing.
+struct MaskLookup {
+    virtual ~MaskLookup() = default;
+    virtual unity::PPtr findTexture(const std::string& name) const = 0;
+    virtual unity::PPtr findAsset(const std::string& name) const = 0;
+};
+using MaskDecode = std::function<std::shared_ptr<unity::TextureData>(const unity::PPtr&)>;
+std::shared_ptr<unity::TextureData> ResolveBodyMask(const MaskLookup& lookup, const std::string& maskName,
+                                                    const MaskDecode& decode, std::string* whyOut);
+
+struct GarmentFixStats {
+    size_t verticesMoved = 0;   // total vertices pushed off the body's surface
+    size_t partsFixed = 0;      // parts with at least one vertex moved
+    size_t skipped = 0;         // vertices that needed more than the displacement cap were left alone
+    float maxMove = 0.0f;       // largest push, in the scene's units (the scene is in metres; x1000 = millimetres)
+};
+// Optional, non-destructive clipping correction for outfit garments that cross into the body. Koikatsu outfit pieces are
+// modelled a hair apart from the body; a card whose body sliders move the body a millimetre too far for the garment's
+// authored surface buries garment vertices in the skin (the skin shows through the cloth). This pass moves ONLY the
+// vertices that pierce the body's surface or lie within `clearance` of it; they are pushed out along the body's own
+// surface by (penetration depth + clearance), or by (clearance - distance) for the ones merely touching. Everything else
+// - bone weights, UVs, topology, blend shapes, every vertex further than the clearance from the skin - is bit-identical.
+// The silhouette is preserved up to the penetration depth itself; it is the minimal correction possible. Exclusions,
+// documented: the body itself, the hidden "under pieces" (skin kept for the nude morphs), footwear (a shoe encloses the
+// foot by design), and anything in the Head or Hair groups. The pass is opt-in; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0
+// keeps it off. Diagnostics: one issue per part that had vertices moved (count + largest move), one summary issue, and
+// the counts in the return value for the caller's manifest. A scene without a body part is left untouched (stats all zero).
+GarmentFixStats FixGarmentIntersections(Scene& scene, float clearance = 0.002f);
 
 // Bakes the heeled-footwear rest pose (Stiletto: foot pitched about cf_j_foot,
 // toes about cf_j_toes, lift onto y=0) for the heeled shoe(s) in the scene.

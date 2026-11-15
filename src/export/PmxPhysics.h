@@ -1,5 +1,6 @@
 #pragma once
 
+#include "assemble/JiggleSettings.h"
 #include "assemble/Scene.h"
 #include "pmx/PmxWriter.h"
 
@@ -25,10 +26,13 @@ constexpr uint8_t kPmxGroupChain = 1;
 // decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2, never more than
 // 15 rad/s for the one link it acts on), stiffness the rotation limits (at most 35 degrees a link) and the least spring that keeps a strand
 // standing out sideways from drooping; gravity and force are not carried (the PMX world has its own gravity, 9.8 m/s^2 is assumed for
-// the spring). The body's own jiggle is built like the hand-made MMD models' breast jiggle (mode-2 bodies, fixed 0.9 damping, fat
-// capsules with weight tapering toward the tip, no collider - see the mask note above) plus a joint spring, which the reference models lack
-// but which pulls the part back to its rest pose instead of letting it hang displaced like jelly.
-void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = true, float jiggleIntensity = 1.0f);
+// the spring). The body's own jiggle is built as a physical mass-spring-damper mapping of assemble::JiggleSettings: mode-2
+// bodies whose mass follows the setting and tapers toward the tip, damping derived from the damper (1 - exp(-c / 2m)), and a
+// three-axis joint whose limits follow the amplitudes (X the forward / back flop, Z the sideways sway, Y a small twist), with
+// springs derived from the same stiffness and mass as the preview. This keeps what the viewer simulates and what
+// MikuMikuDance plays from the same numbers.
+void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = true,
+                const assemble::JiggleSettings& jiggle = {});
 
 // Skirts and coat tails turn with the legs (called by AddPhysics). Most links of a garment chain are locked to hold its rest shape, so a
 // thigh swung forward cannot push them aside and passes through the cloth. Instead a chain tied around the hips and hanging over the legs

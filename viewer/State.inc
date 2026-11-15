@@ -225,7 +225,10 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
                kTransStrength = 214, kTransSize = 215,
-              kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kJiggleIntensity = 305, kAutoCloth = 306,
+              kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kAutoCloth = 306,
+              kJiggleMass = 320, kJiggleStiffness = 321, kJiggleDamping = 322, kJiggleGravity = 323,
+              kJiggleAmpVertical = 324, kJiggleAmpHorizontal = 325, kJiggleAmpDepth = 326,
+              kJiggleRotation = 327, kJiggleStrength = 328, kJiggleSimHz = 329, kJigglePreset = 330,
               kTransBrush = 307, kTransErase = 308,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
               kPropMaster = 23100, kPropSugs0 = 23101, kPropSugsMax = 23199,   // Proportions tab: master switch, then one switch per suggested correction
@@ -350,7 +353,7 @@ struct App {
     bool dragPending = false;
     int dragX = 0;                            // slider drag: the pointer's x
     float boneDragDx = 0, boneDragDy = 0;     // bone drag: movement since the last picture
-    ULONGLONG lastFrameTick = 0;
+    double lastFrameTick = 0.0;              // NowMs() of the previous picture
     bool animating = false;                   // a list is still easing towards its scroll target
     int hoverRow = -1, hoverPart = -1, hoverButton = 0;   // button: 0 none, 1 open, 2 export, 3 issues, 4 reset, 5 all, 6 MMD, 7 reset clothing, 10+ tabs, 21 export clothing
     int hoverOutfit = -1;                 // slot the cursor is over, for the name line
@@ -493,13 +496,12 @@ struct App {
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
-    float jiggleIntensity = 0.5f;                 // how wide it jiggles (0.5 = gentle; 1 = the game's own)
+    assemble::JiggleSettings jiggle;   // the physical settings the preview and the export share (Strength replaces the old jiggle intensity)
     bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size
-    ULONGLONG physicsLast = 0;
-    double physicsAccum = 0.0;
+    double physicsLast = 0.0;                         // NowMs() of the last physics tick
     std::vector<Mat4> poseWorld;
 
     // Frame timing (CARDBRIDGE_BENCH): milliseconds spent in the three parts of a paint, summed, and how many paints ran.

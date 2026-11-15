@@ -80,11 +80,14 @@ add_library(cardbridge_core STATIC
     src/assemble/AutoCloth.cpp
     src/assemble/HeelConfig.cpp
     src/assemble/DynamicBone.cpp
+    src/assemble/CustomHairDiag.cpp
+    src/assemble/GarmentFix.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp
     src/export/SkinBench.cpp
     src/assemble/Pose.cpp
     src/assemble/PhysicsSim.cpp
+    src/assemble/JiggleSettings.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
     src/export/PmxIk.cpp

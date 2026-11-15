@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assemble/Scene.h"
+#include "assemble/JiggleSettings.h"
 
 #include <string>
 #include <vector>
@@ -61,10 +62,9 @@ float SceneHeightMeters(const Scene& scene);
 float CardSagDefault(const Scene& scene, float bustSize = 0.5f);
 
 // Cosmetically finishes a posed (or rest) scene exactly as the character is seen: the body's own jiggle (bust and, when on, hips) is
-// simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The exported PMX starts
-// with the breast as it hangs in the game instead of pulled straight out of the chest. `intensity` is the same jiggle-intensity
-// the export writes as the joint swing limits; `sag` scales the static hang (1 = the card's own, 0 = none, 2 = double).
-void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag = 1.0f);
+// simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The physics comes from the same
+// `jiggle` the export writes as the joint swing limits; `sag` scales the static hang (1 = the card's own, 0 = none, 2 = double).
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag = 1.0f);
 // Dangles the outfit's own DynamicBone chains (the garments' cascades - capes, jacket panels, kimonos, waist cloth, skirts) into their
 // resting drape, the way the game settles them at load, so the exported PMX starts at equilibrium instead of at the authored pose with
 // gravity fighting the joints from the first frame. The mesh hangs on the bones (BakeSkin), colliders keep it out of the body.
@@ -73,8 +73,8 @@ void BakeGarmentSettle(Scene& scene);
 
 // How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
 // respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,
-// perky rig hangs almost not at all while a loose one hangs ~25-30 degrees at the default intensity. `jiggleIntensity`
-// scales how wide it swings, as the PMX joints do.
+// perky rig hangs almost not at all while a loose one hangs ~25-30 degrees at the default strength. `strength` scales
+// how wide it swings, as the PMX joints do (the old jiggle intensity; strength * 0.5 keeps the default hang).
 float SagTiltRad(bool bust, float jiggleIntensity);
 float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale);
 // Adds that hang to a pose (the viewer calls this so the static preview already sags; the bake above uses the same pose).
@@ -82,7 +82,7 @@ float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasti
 // side is tilted, so the whole breast hangs as one piece. A side with no body jiggle chain, or with a stiff chain, gets
 // no (or barely any) tilt: the card is left as it is. `sag` scales the hang (1 = the card's own). A bone the user
 // already edited keeps its own edit.
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag = 1.0f);
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag = 1.0f);
 
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
 // (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit

@@ -67,6 +67,8 @@ struct Settings {
     float skinShadeTop = 1.2f;       // cleavage extent: 0 = none, 1 = the full breast line, 2 = toward the base of the neck
     float skinShadeWidth = 0.6f;     // cleavage width: 0.1 = hairline, 1 = the default, 2 = a broad gradient
     float skinAo = 0.85f;              // Koikatsu's own look baked into the skin (base body normal lighting + the detailId line mask); 0 = off
+    // The physical breast / hip jiggle settings, persisted here for new cards and the export (the Look tab edits the live set).
+    assemble::JiggleSettings jiggle;   // defaults: the Natural preset
     // Display names for morphs in the Morphs tab (display only: the PMX still carries the original names, MMD motions key morphs by name).
     std::map<std::string, std::string> morphAliases;   // original morph name -> the display name the user typed
 };
@@ -87,6 +89,26 @@ Settings LoadSettings() {
         s.skinShadeTop = static_cast<float>(j.value("skinShadeTop", 1.2));
         s.skinShadeWidth = static_cast<float>(j.value("skinShadeWidth", 0.6));
         s.skinAo = static_cast<float>(j.value("skinAo", 0.85));
+        if (j.value("jiggle", nlohmann::json::object()).is_object()) {
+            const auto& jj = j["jiggle"];
+            auto num = [&jj](const char* key, float def) {
+                const auto it = jj.find(key);
+                return (it != jj.end() && it->is_number()) ? static_cast<float>(it->get<double>()) : def;
+            };
+            assemble::JiggleSettings js;
+            js.mass = num("mass", js.mass);
+            js.stiffness = num("stiffness", js.stiffness);
+            js.damping = num("damping", js.damping);
+            js.gravity = num("gravity", js.gravity);
+            js.amplitudeVertical = num("amplitude_vertical", js.amplitudeVertical);
+            js.amplitudeHorizontal = num("amplitude_horizontal", js.amplitudeHorizontal);
+            js.amplitudeDepth = num("amplitude_depth", js.amplitudeDepth);
+            js.rotationStrength = num("rotation_strength", js.rotationStrength);
+            js.strength = num("strength", js.strength);
+            js.simulationHz = num("simulation_hz", js.simulationHz);
+            js = assemble::SanitizeJiggleSettings(js);
+            s.jiggle = js;
+        }
         if (const auto it = j.find("morphAliases"); it != j.end() && it->is_object())
             for (const auto& [k, v] : it->items())
                 if (v.is_string() && !v.get_ref<const std::string&>().empty()) s.morphAliases[k] = v.get<std::string>();
@@ -110,6 +132,10 @@ void SaveSettings(const Settings& s) {
         j["skinShadeTop"] = s.skinShadeTop;
         j["skinShadeWidth"] = s.skinShadeWidth;
         j["skinAo"] = s.skinAo;
+        j["jiggle"] = {{"mass", s.jiggle.mass}, {"stiffness", s.jiggle.stiffness}, {"damping", s.jiggle.damping}, {"gravity", s.jiggle.gravity},
+                       {"amplitude_vertical", s.jiggle.amplitudeVertical}, {"amplitude_horizontal", s.jiggle.amplitudeHorizontal},
+                       {"amplitude_depth", s.jiggle.amplitudeDepth}, {"rotation_strength", s.jiggle.rotationStrength},
+                       {"strength", s.jiggle.strength}, {"simulation_hz", s.jiggle.simulationHz}};
         if (!s.morphAliases.empty()) j["morphAliases"] = s.morphAliases;
         fileio::WriteTextFile(SettingsPath(), j.dump(2));
     } catch (...) {}

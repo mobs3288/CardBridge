@@ -4,6 +4,7 @@
 
 #include "core/FileIo.h"
 #include "core/Version.h"
+#include "assemble/JiggleSettings.h"
 #include "export/BoneLabels.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
@@ -390,6 +391,25 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
             corrections.push_back(std::move(entry));
         }
         j["proportions"] = {{"active", layer.enabled && !layer.ops.empty()}, {"enabled", layer.enabled}, {"ops", std::move(corrections)}};
+    }
+    // The jiggle settings this export used, with the numbers they derive: what the viewer previews and what MikuMikuDance plays.
+    {
+        const assemble::JiggleSettings s = assemble::SanitizeJiggleSettings(opt.jiggle);
+        json deriv;
+        deriv["angular_frequency_rad_s"] = assemble::JiggleAngularFrequency(s);
+        deriv["damping_ratio"] = assemble::JiggleDampingRatio(s);
+        deriv["static_sag_m"] = assemble::JiggleStaticSagMeters(s);
+        deriv["pmx_damping_root"] = assemble::JigglePmxDamping(s, s.mass);
+        deriv["max_displacement_m"] = {{"x", assemble::JiggleMaxDisplacement(s, 0)}, {"y", assemble::JiggleMaxDisplacement(s, 1)}, {"z", assemble::JiggleMaxDisplacement(s, 2)}};
+        deriv["joint_range_bust_rad"] = {{"x", assemble::JiggleJointRange(s, true, 0)}, {"y", assemble::JiggleJointRange(s, true, 1)}, {"z", assemble::JiggleJointRange(s, true, 2)}};
+        deriv["joint_range_butt_rad"] = {{"x", assemble::JiggleJointRange(s, false, 0)}, {"y", assemble::JiggleJointRange(s, false, 1)}, {"z", assemble::JiggleJointRange(s, false, 2)}};
+        j["jiggle"] = {{"preset", assemble::JigglePresetName(assemble::MatchJigglePreset(s))},
+                       {"bust", opt.jiggleBust}, {"butt", opt.jiggleButt},
+                       {"settings", {{"mass", s.mass}, {"stiffness", s.stiffness}, {"damping", s.damping}, {"gravity", s.gravity},
+                                     {"amplitude_vertical", s.amplitudeVertical}, {"amplitude_horizontal", s.amplitudeHorizontal},
+                                     {"amplitude_depth", s.amplitudeDepth}, {"rotation_strength", s.rotationStrength},
+                                     {"strength", s.strength}, {"simulation_hz", s.simulationHz}}},
+                       {"derived", std::move(deriv)}};
     }
     if (opt.materialWorkbench.is_object()) {
         nlohmann::json wb = opt.materialWorkbench;
@@ -787,7 +807,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& [n, sh] : expressionShapes) std::fprintf(stderr, "expression %s = %s\n", n.c_str(), sh.c_str());
     const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model, expressionShapes) : std::vector<int>();
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
-    if (opt.physics) AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggleIntensity);
+    if (opt.physics) AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggle);
     std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys
     std::vector<int> mmdExtraBones;
     if (opt.mmdNames) {

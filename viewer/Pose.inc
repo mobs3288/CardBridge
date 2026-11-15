@@ -14,7 +14,7 @@ assemble::Pose BuildPose(const Loaded& L, bool includeSag = true) {
     if (g.aPose) assemble::MakeAPose(L.scene, g.aPoseDeg, p.base);
     // The static preview sags the same way the export does, so the viewer shows the hang even with physics off.
     // A bone the user drags herself keeps its own edit (AddSagPose skips those).
-    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggleIntensity, g.sag);
+    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggle, g.sag);
     // Height: scale everything uniformly about the roots (feet) so the model's standing height is heightCm.
     // A root the user scaled herself keeps that scale multiplied by this factor.
     if (g.baseHeightCm > 1e-4f && g.heightCm > 1e-4f) {
@@ -31,8 +31,9 @@ assemble::Pose BuildPose(const Loaded& L, bool includeSag = true) {
 }
 
 // Re-skins every Direct3D view with the current pose (and the physics, when it is on) without a re-assembly, and refreshes the bone
-// positions the overlay draws. `simSteps` physics updates run first (0 only makes the chains follow the pose).
-void ApplyPoseLive(int simSteps = 0) {
+// positions the overlay draws. `seconds` is the wall time the physics preview advances by (0 only makes the chains follow the pose).
+// The jiggle honours JiggleSettings::simulationHz with its own fixed substeps and is drawn interpolated, so it is stable at any frame rate.
+void ApplyPoseLive(double seconds = 0.0) {
     std::shared_ptr<Loaded> L = Current();
     g.skin.clear();
     g.boneWorld.clear();
@@ -45,8 +46,8 @@ void ApplyPoseLive(int simSteps = 0) {
         g.skin.resize(n);
         for (size_t i = 0; i < n; ++i) g.skin[i] = g.poseWorld[i] * Mat4::TRS(scene.bones[i].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
         if (g.physics && !g.sim.empty()) {
-            g.physicsMoving = g.sim.Step(scene, g.poseWorld, simSteps, g.skin);
-            if (simSteps == 0) g.physicsKick = true;   // the anchors moved: let the chains catch up
+            g.physicsMoving = g.sim.Advance(scene, g.poseWorld, seconds, g.skin);
+            if (seconds == 0.0) g.physicsKick = true;   // the anchors moved: let the chains catch up
         }
     }
     g.boneWorld.resize(n);
@@ -175,16 +176,31 @@ void LoadPoseFile(const std::string& given = std::string()) {
     Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s)" + (unknown ? ", " + std::to_string(unknown) + " bone(s) this rig does not have skipped" : std::string()), unknown ? LogKind::Warn : LogKind::Good);
 }
 
-// The physics switch: on starts every chain at rest under the current pose and a 60 Hz timer; the chains then swing and settle as bones,
-// sliders or the A-pose move what they hang from (N gives them a shove).
+// The physical jiggle settings changed (a Look-tab slider, a preset chip or a reset): persist them as the default for new cards, re-arm the
+// sim with them (the preview shows what the export does) and re-pose.
+void JiggleSettingsChanged() {
+    g.settings.jiggle = g.jiggle;
+    SaveSettings(g.settings);
+    if (std::shared_ptr<Loaded> L = Current()) {
+        if (g.physics) {
+            g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggle);
+            g.physicsKick = g.physicsMoving = true;
+        }
+    }
+    ApplyPoseLive();   // the sag pose and the chains follow the new settings at once
+    InvalidatePanel();
+}
+
+// The physics switch: on starts every chain at rest under the current pose and the chains then swing and settle as bones,
+// sliders or the A-pose move what they hang from (N gives them a shove). The sim runs as many fixed substeps per picture
+// as the wall time asks for, at any frame rate.
 void SetPhysics(bool on) {
     std::shared_ptr<Loaded> L = Current();
     if (on && (!L || L->scene.chains.empty())) { Log("no physics chains in this character", LogKind::Warn); on = false; }
     g.physics = on;
     if (on) {
-        g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
-        g.physicsLast = GetTickCount64();
-        g.physicsAccum = 0.0;
+        g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggle);
+        g.physicsLast = NowMs();
         g.physicsKick = g.physicsMoving = true;
         Log("physics: on (" + std::to_string(L->scene.chains.size()) + " chains; move a bone or press N)", LogKind::Good);
     } else {
@@ -209,19 +225,16 @@ void ShakePhysics() {
     Log("physics: shake (bust + butt)");
 }
 
-// One step of the physics preview (Frame calls it every picture while the switch is on): as many 1/60 s updates as the time asks for
-// (at most four), drawn once.
+// One step of the physics preview (Frame calls it every picture while the switch is on): advances by the wall time since the last tick
+// and draws once. The jiggle is simulated at JiggleSettings::simulationHz with interpolation, so it stays smooth at any frame rate.
 void PhysicsTick() {
     if (!g.physics) return;
-    const ULONGLONG now = GetTickCount64();
-    g.physicsAccum = std::min(0.1, g.physicsAccum + static_cast<double>(now - g.physicsLast) / 1000.0);
+    const double now = NowMs();
+    const double dt = std::min(0.25, g.physicsLast > 0.0 ? (now - g.physicsLast) / 1000.0 : 0.0);
     g.physicsLast = now;
-    const int steps = std::min(4, static_cast<int>(g.physicsAccum * 60.0));
-    if (steps <= 0) return;
-    g.physicsAccum -= steps / 60.0;
     if (!g.physicsMoving && !g.physicsKick) return;   // everything has settled: nothing to draw
     g.physicsKick = false;
-    ApplyPoseLive(steps);
+    ApplyPoseLive(dt);
 }
 
 // The bone tree as list rows. Driven, shape and attach nodes are left out unless asked for (their children move up to the
@@ -396,7 +409,7 @@ bool ReshapeNow(bool final) {
     g.baseHeightCm = assemble::SceneHeightMeters(L->scene) * 100.0f;
     const float bustSize = g.tw.body.size() > 4 ? g.tw.body[4] : 0.5f;
     g.sagDefault = assemble::CardSagDefault(L->scene, bustSize);  // reset target follows the new shape; the slider itself stays put
-    if (!solving && g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+    if (!solving && g.physics) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggle);
     if (!solving) ApplyPoseLive();
     return true;
 }
@@ -407,18 +420,24 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
     if (IsMatId(id)) { MaterialSliderEdited(id, released); return; }
-    if (id == kJiggleBust || id == kJiggleButt || id == kJiggleIntensity) {
-        if (g.physics) {   // the preview shows what the export will do: prime the sim again with the new switches
-            if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
-            g.physicsKick = g.physicsMoving = true;
+    if (id == kJiggleBust || id == kJiggleButt || (id >= kJiggleMass && id <= kJiggleSimHz)) {
+        if (id == kJiggleBust || id == kJiggleButt) {
+            if (g.physics) {   // the preview shows what the export will do: prime the sim again with the new switches
+                if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggle);
+                g.physicsKick = g.physicsMoving = true;
+            }
             Log(std::string("jiggle preview: boobs ") + (g.jiggleBust ? "on" : "off") + ", butt " + (g.jiggleButt ? "on" : "off"));
+            InvalidatePanel();
+            return;
         }
-        InvalidatePanel();
+        // A physical slider (mass, stiffness, damping, gravity, amplitudes, rotation, strength, Hz): persist it and re-arm the preview.
+        JiggleSettingsChanged();
+        if (g.physics) Log("jiggle: " + std::string(assemble::JigglePresetName(assemble::MatchJigglePreset(g.jiggle))));
         return;
     }
     if (id == kSag) {   // static hang: change the pose at once (also re-prime the sim if it is running)
         if (g.physics) {
-            if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggleIntensity);
+            if (std::shared_ptr<Loaded> L = Current()) g.sim.Reset(L->scene, assemble::BoneWorlds(L->scene, BuildPose(*L)), g.jiggleBust, g.jiggleButt, g.jiggle);
             g.physicsKick = g.physicsMoving = true;
         }
         ApplyPoseLive();

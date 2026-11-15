@@ -235,6 +235,19 @@ struct SceneChain {
     Vec3 gravity, force;
 };
 
+// The side a bone belongs to, from the game's suffix convention (cf_s_bnip02_L, cf_s_siri_R2): +1 left, -1 right, 0 neither.
+// Shared by the preview's jiggle and the PMX export so the two sides can breathe independently but stay coordinated.
+inline int BoneSideSign(const std::string& name) {
+    for (const char* suffix : {"_L", "_R"}) {
+        size_t p = name.rfind(suffix);
+        if (p == std::string::npos) continue;
+        size_t q = p + 2;
+        while (q < name.size() && name[q] >= '0' && name[q] <= '9') ++q;
+        if (q == name.size()) return suffix[1] == 'L' ? 1 : -1;
+    }
+    return 0;
+}
+
 // Which of a character's own (characterOwn) jiggle chains this is: see IsBustJiggleChain below (after Scene).
 
 // A DynamicBoneCollider the chains collide with: a sphere or capsule fixed to a body bone.
@@ -328,6 +341,7 @@ struct Scene {
     }
     void warn(const std::string& part, const std::string& msg) { issues.push_back({"warning", part, msg}); }
     void error(const std::string& part, const std::string& msg) { issues.push_back({"error", part, msg}); }
+    void note(const std::string& part, const std::string& msg) { issues.push_back({"info", part, msg}); }
 };
 
 // Which of a character's own (characterOwn) jiggle chains this is: the breast chains carry the bnip / bust bones, the hip (butt) chains

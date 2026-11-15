@@ -90,7 +90,9 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
     for (int b : bones) {
         const int p = scene.bones[static_cast<size_t>(b)].parent;
         const int gp = p >= 0 ? scene.bones[static_cast<size_t>(p)].parent : -1;
-        if (!hasChild.count(b) && inChain.count(p) && gp >= 0) {
+        // The body's own Ver02 chains (breast, hip) are the game's authored simulation bones, not strands with stray stubs:
+        // skip the backtrack test for them (it was written for skirts whose leaf points back up the chain).
+        if (!chain.characterOwn && !hasChild.count(b) && inChain.count(p) && gp >= 0) {
             const Vec3 out = sub(scene.bones[static_cast<size_t>(b)].pos, scene.bones[static_cast<size_t>(p)].pos);
             const Vec3 in = sub(scene.bones[static_cast<size_t>(p)].pos, scene.bones[static_cast<size_t>(gp)].pos);
             if (out.x * in.x + out.y * in.y + out.z * in.z < 0.0f) continue;
@@ -100,7 +102,10 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
     return kept;
 }
 
-void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust, bool jiggleButt, float jiggleIntensity) {
+void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust, bool jiggleButt,
+                const assemble::JiggleSettings& jiggleSettings) {
+    const assemble::JiggleSettings jiggleSet = assemble::SanitizeJiggleSettings(jiggleSettings);
+    const bool jiggleOn = jiggleSet.strength > 0.0f;
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
     std::vector<Core> colliderCore;       // per collider body, in the order they were added
@@ -141,18 +146,19 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
-        // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on, built
-        // like the hand-made MMD models' breast jiggle (mode-2 bodies, fat capsules with weight tapering to the tip, heavy damping, no
-        // collider), plus our own joint spring: the reference models' bare pendulum hangs displaced under gravity and wobbles like jelly,
-        // the spring pulls the part back to the rest pose so it bounces like skin instead.
-        float jiggle = 0.0f;   // > 0: this chain is enabled jiggle, the intensity to swing at
+        // The body's own jiggle chains (breast, hip): skin on the body, not cloth. They are jiggle physics when their switch is on,
+        // built as a physical 3D spring-damper: mode-2 bodies follow their bones with physics on top, the mass and damping come from
+        // the same settings the viewer previews, and the joint's three axes carry the flop, the sway and a little twist.
+        bool jigBody = false;
         bool jigBust = false;  // which jiggle: the bust gets a wider envelope than the butt
+        int jigSide = 0;
         if (ch.characterOwn) {
             const bool bust = assemble::IsBustJiggleChain(scene, ch);
-            if (bust && jiggleBust) jiggle = jiggleIntensity;
-            else if (!bust && jiggleButt) jiggle = jiggleIntensity;
-            if (jiggle <= 0.0f) continue;   // switch off: the part stays rigid, following its bone
+            if (bust && jiggleBust) jigBody = jiggleOn;
+            else if (!bust && jiggleButt) jigBody = jiggleOn;
+            if (!jigBody) continue;   // switch off, or global strength 0: the part stays rigid, following its bone
             jigBust = bust;
+            jigSide = assemble::BoneSideSign(scene.bones[static_cast<size_t>(ch.bones[0])].name);
         }
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
@@ -194,7 +200,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
-            if (jiggle > 0.0f) l.mass = std::pow(0.5f, static_cast<float>(links.size()));   // the reference models' taper: 1, 1/2, 1/4... toward the tip
+            if (jigBody) {
+                // The reference models' taper: the root carries the setting's mass, each link below it half. The two sides differ by
+                // a couple of percent so they never move as one rigid pair.
+                l.mass = std::max(0.01f, jiggleSet.mass * std::pow(0.5f, static_cast<float>(links.size())) *
+                                             (1.0f - 0.02f * static_cast<float>(jigSide)));
+            }
             links[b] = l;
         }
 
@@ -211,7 +222,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         Vec3 jigAnchorPos;   // the anchor body's authored position (its bone's), the anchor joint's place
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
-            if (jiggle > 0.0f && k == 0) {
+            if (jigBody && k == 0) {
                 const int parent = scene.bones[static_cast<size_t>(l.bone)].parent;
                 if (parent >= 0) {
                     // The anchor is authored at its OWN bone's position, like the reference models' torso body. Authored at the root
@@ -243,35 +254,38 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // The jiggle bodies are the reference models' breast bodies: fat capsules (about as wide as a link is long), weight tapering
             // toward the tip, so the swing is a smooth body sway rather than a thin strand snapping.
             const float jigRadius = std::max(l.radius, 0.6f * l.cylinder);
-            rb.size = {jiggle > 0.0f ? jigRadius : l.radius, l.cylinder, 0};
+            rb.size = {jigBody ? jigRadius : l.radius, l.cylinder, 0};
             rb.position = l.centre;
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(l.unit);
-            rb.mass = jiggle > 0.0f ? std::pow(0.5f, static_cast<float>(k)) : l.mass;   // 1, 1/2, 1/4, ... toward the tip
+            rb.mass = l.mass;   // the strand's mass, or the jiggle setting's taper (1, 1/2, 1/4, ... toward the tip)
             // The component's damping is a fraction of the velocity kept each update; Bullet applies v *= (1 - d)^dt per substep,
             // so per frame that is (1 - d)^(1/60): the matching export value for the component's per-update retention (1 - c) is
             // d = 1 - (1 - c)^60 (what 1 - exp(-60*c) approximated - the earlier decay-to-seconds detour was not the same thing).
             float c = std::min(1.0f, std::max(0.0f, along(ch.boneDamping, ch.damping, l.bone)));
-            float damp = jiggle > 0.0f ? 0.9f : std::min(0.9999f, 1.0f - std::pow(1.0f - c, 60.0f));
+            // A jiggle body's damping comes from the same damper the preview uses: Bullet keeps v *= (1 - d)^dt a second, so the
+            // continuous decay exp(-c / 2m) maps to d = 1 - exp(-c / 2m).
+            float damp = jigBody ? assemble::JigglePmxDamping(jiggleSet, l.mass)
+                                 : std::min(0.9999f, 1.0f - std::pow(1.0f - c, 60.0f));
             // The outfit's cloth does not use the game's frozen-still damping (the strict mapping leaves it nearly immobile - the
             // paper cape); clamp it to a working MMD cloth range so the panel actually sways like fabric.
-            const bool garmentBody = jiggle <= 0.0f && ch.part.rfind("outfit", 0) == 0;
+            const bool garmentBody = !jigBody && ch.part.rfind("outfit", 0) == 0;
             if (garmentBody) damp = std::min(damp, 0.75f);
             rb.moveDamping = damp;
             rb.rotDamping = damp;
-            rb.friction = jiggle > 0.0f ? 0.0f : 0.5f;
+            rb.friction = jigBody ? 0.0f : 0.5f;
             // The root follows its bone and collides with nothing: it is what the chain hangs from. (A moving root on a HAIR chain, in
             // MMD's "physics with the bone aligned" mode, fed back into the bone below it and shook the whole model.) The jiggle bodies
             // are the reference models' breast bodies instead: every one is that mode, the body following its bone with physics on top.
-            rb.mode = jiggle > 0.0f ? 2 : (k == 0 ? 0 : 1);
-            if (k == 0 && jiggle <= 0.0f) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
+            rb.mode = jigBody ? 2 : (k == 0 ? 0 : 1);
+            if (k == 0 && !jigBody) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
-                chainJiggle.push_back(jiggle > 0.0f ? 1 : 0);
+                chainJiggle.push_back(jigBody ? 1 : 0);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
-            if (jiggle > 0.0f && k == 0 && jigAnchor >= 0) {
+            if (jigBody && k == 0 && jigAnchor >= 0) {
                 // The rigid anchor joint: every limit and spring zero, like the reference models' torso-to-breast joint. Without it the
                 // mode-2 chain has nothing holding it to the model and stays where the model spawned.
                 const pmx::RigidBody& rootBody = model.rigidBodies[static_cast<size_t>(bodyOf[l.bone])];
@@ -292,6 +306,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             auto nx = next.find(b);
             if (nx != next.end()) for (int c : nx->second) below(c, out);
         };
+        // A jiggle joint's three ranges come from the physical settings, the same numbers the viewer's solver clamps to: X carries
+        // the flop (the vertical and forward / back travel), Z the sideways sway and Y a small twist. The old export gave the twist
+        // more room than the sway, which is why the lateral motion was barely visible in MikuMikuDance.
+        float jigRange[3] = {0.0f, 0.0f, 0.0f};
+        if (jigBody)
+            for (int axis = 0; axis < 3; ++axis) jigRange[axis] = assemble::JiggleJointRange(jiggleSet, jigBust, axis);
         for (size_t k = 1; k < bones.size(); ++k) {
             const int b = bones[k];
             const Link& self = links[b];
@@ -299,14 +319,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float omega = std::min(25.0f, 60.0f * std::sqrt(std::max(0.005f, std::min(1.0f, along(ch.boneElasticity, ch.elasticity, b)))));
             // The component keeps a particle within 2 * (1 - stiffness) of a bone length of its rest place: that is a turn of 2 asin(1 - stiffness).
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
-            // chain gets a wider envelope so the part can hang: the bust ~34 degrees a link, the butt less.
+            // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
-            const float bendCap = jiggle > 0.0f ? (jigBust ? 0.60f : 0.30f) : 0.6f;
-            const float bend = std::min(bendCap, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+            const float bend = jigBody ? std::max(0.01f, jigRange[0])
+                                       : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
-            // A jiggle chain droops more: the hanging breast is allowed to lean well past halfway, so gravity shows.
             const float baseDroop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
-            const float droop = jiggle > 0.0f ? std::min(bend * 0.85f, baseDroop * 2.0f) : baseDroop;
+            const float droop = jigBody ? std::min(bend * 0.85f, baseDroop * 2.0f) : baseDroop;
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
             auto pb = bodyOf.find(parentBone);
             const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
@@ -325,16 +344,14 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             }
             // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
             // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
-            // A jiggle link is light and short, so that cap strangles its spring far below what gravity needs: the part then rests on its
-            // joint limit and twitches there. A jiggle spring is allowed to reach the droop stiffness instead (its heavier body and the
-            // fixed 0.9 damping keep the swing slow), so it holds its rest pose instead of hanging on the stop.
-            const float own = self.mass * length(sub(self.centre, self.head)) * length(sub(self.centre, self.head)) + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
-            const float capK = jiggle > 0.0f ? std::numeric_limits<float>::max() : own * kMaxBodySwing * kMaxBodySwing;
+            const float arm = length(sub(self.centre, self.head));
+            const float own = self.mass * arm * arm + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
+            const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
-            // A jiggle spring is softer than the droop calc alone gives: it has to let the part hang and swing, not pin it
-            // to the rest pose. The baked rest itself already hangs (AddSagPose), so a weaker spring still settles there,
-            // and the fixed 0.9 damping keeps the swing slow instead of shivering on the joint limit.
-            if (jiggle > 0.0f) stiffnessK *= 0.5f;
+            // A jiggle joint's rotational spring is the preview's linear spring about the joint: torque = k r^2 theta, i.e. the
+            // body's own inertia times (stiffness / mass). It lets the part hang and swing instead of pinning it to the rest pose.
+            float jigSpring = 0.0f;
+            if (jigBody) jigSpring = own * (jiggleSet.stiffness / std::max(0.01f, self.mass));
             pmx::Joint j;
             j.name = ch.name + " " + std::to_string(k);
             j.bodyA = bodyA;
@@ -343,25 +360,27 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
             // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
             // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
-            const bool holds = sideways * gravity / stiffnessK < 0.6f * bend;
-            // The intensity opens a jiggle joint's envelope. The spring below stays: with the limits alone, a pendulum hangs displaced
-            // under gravity and wobbles like jelly; the spring pulls it back to the rest pose, so it bounces like skin instead. And a jiggle
-            // joint is never droop-locked: locked means no jiggle at all, which is worse than a soft hang.
-            float range = (holds || jiggle > 0.0f) ? bend : 0.0f;
-            if (jiggle > 0.0f) range = std::min(0.9f, range * jiggle);
+            const bool holds = sideways * gravity / std::max(1e-6f, stiffnessK) < 0.6f * bend;
+            float range = holds ? bend : 0.0f;
             // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: a zero-range joint
             // carries a zero spring, and on its own gravity folds the panel into a stiff paper slab pinned to the shoulders. Cloth
             // behaves as a plain hinge inside its bend range with a small centring tug - like the loose-cloth preset - and Bullet
             // manages the draping by itself. A stop spring on top of a stop limit rail is what reads as tweaking and shivering.
-            const bool garmentChain = ch.part.rfind("outfit", 0) == 0 && jiggle <= 0.0f;
+            const bool garmentChain = !jigBody && ch.part.rfind("outfit", 0) == 0;
             if (garmentChain) range = std::max(range, bend);
-            // The reference models' breast joints are wide on the flop axis, moderate on the sway, narrow on the twist (about 0.44 / 0.26 /
-            // 0.18 rad). A strand keeps the old shape: the twist nearly locked, the two bends wide.
-            const bool jigBody = jiggle > 0.0f;
-            const float yF = jigBody ? 0.6f : 0.1f, zF = jigBody ? 0.4f : 1.0f;
-            j.rotLower = {-range, -yF * range, -zF * range};
-            j.rotUpper = {range, yF * range, zF * range};
-            j.springRot = garmentChain ? Vec3{5.0f, 5.0f, 5.0f} : Vec3{stiffnessK, stiffnessK, stiffnessK};
+            if (jigBody) {
+                // The reference models' breast joints: wide on the flop, moderate on the sway, narrow on the twist, all from the
+                // amplitude and strength settings. A jiggle joint is never droop-locked - locked would mean no jiggle at all, which
+                // is worse than a soft hang - and its spring pulls it back to the rest pose so it bounces like skin.
+                j.rotLower = {-jigRange[0], -jigRange[1], -jigRange[2]};
+                j.rotUpper = {jigRange[0], jigRange[1], jigRange[2]};
+                j.springRot = {jigSpring, jigSpring, jigSpring};
+            } else {
+                // A strand keeps the old shape: the twist nearly locked, the two bends wide.
+                j.rotLower = {-range, -0.1f * range, -range};
+                j.rotUpper = {range, 0.1f * range, range};
+                j.springRot = garmentChain ? Vec3{5.0f, 5.0f, 5.0f} : Vec3{stiffnessK, stiffnessK, stiffnessK};
+            }
             model.joints.push_back(std::move(j));
         }
     }

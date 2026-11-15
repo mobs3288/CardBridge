@@ -348,12 +348,13 @@ float CardSagDefault(const Scene& scene, float bustSize) {
     return std::min(1.3f, std::max(0.0f, loose * size * 0.66f));
 }
 
-void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
+void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag) {
     if (scene.bones.empty() || (!jiggleBust && !jiggleButt)) return;
+    const JiggleSettings clean = SanitizeJiggleSettings(jiggle);
     const Pose rest;
     const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
     PhysicsSim sim;
-    sim.Reset(scene, poseWorld, jiggleBust, jiggleButt, jiggleIntensity, true);
+    sim.Reset(scene, poseWorld, jiggleBust, jiggleButt, clean, true);
     // Empty sim means no jiggle chains were found (Reset left nothing): nothing to settle.
     // PhysicsSim exposes its emptiness through Step's contract: a fresh sim with no chains writes nothing.
     std::vector<Mat4> skin = SkinMatrices(scene, rest);
@@ -398,7 +399,7 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, float ji
     // baked the same way as the settle above (both previews and the exported PMX).
     if (!std::getenv("CARDBRIDGE_NO_SAG")) {
         Pose droop;
-        AddSagPose(scene, droop, jiggleBust, jiggleButt, jiggleIntensity, sag);
+        AddSagPose(scene, droop, jiggleBust, jiggleButt, clean, sag);
         if (!droop.empty()) BakeSkin(scene, SkinMatrices(scene, droop));
     }
 }
@@ -413,7 +414,7 @@ void BakeGarmentSettle(Scene& scene) {
     const Pose rest;
     const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
     PhysicsSim sim;
-    sim.Reset(scene, poseWorld, false, false, 0.5f, false, true);   // outfit chains only; the jiggle switches do not apply to cloth
+    sim.Reset(scene, poseWorld, false, false, JiggleSettings{}, false, true);   // outfit chains only; the jiggle switches do not apply to cloth
     if (sim.empty()) return;
     std::vector<Mat4> skin = SkinMatrices(scene, rest);
     if (std::getenv("CARDBRIDGE_DEBUG_GARMENT_SETTLE")) {
@@ -442,7 +443,10 @@ float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasti
     return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale * (0.5f + jiggleIntensity));
 }
 
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, float jiggleIntensity, float sag) {
+void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag) {
+    // The hang scale follows the master strength: 1.0 strength = the old 0.5 intensity, which was the default (strength * 0.5 keeps the
+    // same hang whatever the user dials the strength to).
+    const float jiggleIntensity = SanitizeJiggleSettings(jiggle).strength * 0.5f;
     auto isBust = [](const std::string& n) {
         return n.find("bust") != std::string::npos || n.find("bnip") != std::string::npos;
     };
@@ -473,7 +477,6 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
     bool hasBust = false, hasButt = false;
     sideParams(true, bustStiff, bustElast, bustGrav, hasBust);
     sideParams(false, buttStiff, buttElast, buttGrav, hasButt);
-    auto clamp01f = [](float v) { return std::min(1.0f, std::max(0.0f, v)); };
     // Any downward force counts; the residual games use is small but never exactly zero. A flat zero means the card
     // intends no hang at all.
     const float bustGravScale = bustGrav < 1e-4f ? 0.0f : 1.0f;
@@ -498,8 +501,7 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
         float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
                           : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
         tilt = std::min(bust ? 0.30f : 0.22f, tilt * std::max(0.0f, sag));
-        if (tilt < 0.01f) continue;   // stiff / perky card (or slider at 0): leave it as it is
-        (void)clamp01f;
+        if (tilt < 0.01f) continue;   // stiff / perky card (or strength at 0 / slider at 0): leave it as it is
         // Forward for the bust, backward for the butt, both tipped toward straight down.
         const Vec3 from = bust ? Vec3{0, 0, 1} : Vec3{0, 0, -1};
         const Vec3 to = bust ? normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)})

@@ -15,6 +15,7 @@
 #include "shader/Sm4.h"
 #include <cstring>
 #include "assemble/Assembler.h"
+#include "assemble/JiggleSettings.h"
 #include "assemble/Pose.h"
 #include "assemble/Proportions.h"
 #include "card/Abmx.h"
@@ -144,9 +145,24 @@ void usage() {
         "             [--auto-cloth]                  opt-in: synthesize loose chains for hanging cloth missing authored physics\n"
         "                                            (disabled by default: synthesised chains were collapsing cloth onto the body;\n"
         "                                            --no-auto-cloth / CARDBRIDGE_NO_AUTO_CLOTH=1 keep it off)\n"
-        "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-intensity F] [--sag F]\n"
-        "                                             breast and butt jiggle are on by default (both bounce); intensity scales the swing (1 = the game),\n"
-        "                                             sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
+        "             [--fix-garment-intersections]  opt-in: push any garment vertex that pierces the body back out along the body's\n"
+        "                                            own surface by its own penetration depth (plus a small clearance); the silhouette\n"
+        "                                            is preserved. Body, head, hair, the nude-morph skin pieces and footwear are never\n"
+        "                                            touched; the corrected count is written to the manifest as issues. Off by default\n"
+        "                                            (existing exports stay byte-identical); CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1 forces\n"
+        "                                            it on, =0 force-disables it)\n"
+        "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
+        "                                             [--jiggle-mass F] [--jiggle-stiffness F] [--jiggle-damping F]\n"
+        "                                             [--jiggle-gravity F] [--jiggle-amplitude-vertical F]\n"
+        "                                             [--jiggle-amplitude-horizontal F] [--jiggle-amplitude-depth F]\n"
+        "                                             [--jiggle-rotation-strength F] [--jiggle-strength F] [--jiggle-sim-hz F]\n"
+        "                                             breast and butt jiggle are on by default (both bounce). The jiggle is a real\n"
+        "                                             mass-spring-damper, one set of physical numbers driving both the preview and\n"
+        "                                             the PMX. The preset picks a tuned set (default: natural); the --jiggle-* values\n"
+        "                                             override it one by one; 0 amplitude locks that axis and strength scales the\n"
+        "                                             whole effect (--jiggle-intensity is the old name for --jiggle-strength);\n"
+        "                                             units: mass kg, stiffness N/m, damping N s/m, gravity x9.81 m/s^2, simulation_hz\n"
+        "                                             is the fixed preview rate; sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
         "             [--simplify N]               reduce the written PMX's triangles by N percent (0-80; off by default). The face and\n"
         "                                             eyes are kept nearly as-is, the hair and body a little, the clothes and accessories\n"
@@ -201,6 +217,37 @@ std::string defaultCache() {
 std::string normalizeSlashes(std::string s) {
     for (char& c : s) if (c == '\\') c = '/';
     return s;
+}
+
+// The breast / hip jiggle settings: --jiggle-preset (subtle|natural|dynamic) picks a tuned set of real physical parameters, and
+// the --jiggle-* values override it one by one. --jiggle-intensity is the old name for --jiggle-strength. Everything is clamped
+// to ranges the fixed-step solver and the PMX exporter can handle. False with `error` when the preset name is wrong.
+bool JiggleFromArgs(const Args& a, assemble::JiggleSettings& out, std::string& error) {
+    assemble::JiggleSettings s;
+    if (a.opt.count("jiggle-preset")) {
+        const std::string preset = a.get("jiggle-preset");
+        if (preset == "subtle") s = assemble::JigglePresetSettings(assemble::JigglePreset::Subtle);
+        else if (preset == "natural") s = assemble::JigglePresetSettings(assemble::JigglePreset::Natural);
+        else if (preset == "dynamic") s = assemble::JigglePresetSettings(assemble::JigglePreset::Dynamic);
+        else { error = "unknown --jiggle-preset '" + preset + "' (subtle|natural|dynamic)"; return false; }
+    }
+    auto num = [&a, &s](const char* key, float assemble::JiggleSettings::*member) {
+        const auto it = a.opt.find(key);
+        if (it != a.opt.end()) s.*member = static_cast<float>(std::atof(it->second.c_str()));
+    };
+    num("jiggle-mass", &assemble::JiggleSettings::mass);
+    num("jiggle-stiffness", &assemble::JiggleSettings::stiffness);
+    num("jiggle-damping", &assemble::JiggleSettings::damping);
+    num("jiggle-gravity", &assemble::JiggleSettings::gravity);
+    num("jiggle-amplitude-vertical", &assemble::JiggleSettings::amplitudeVertical);
+    num("jiggle-amplitude-horizontal", &assemble::JiggleSettings::amplitudeHorizontal);
+    num("jiggle-amplitude-depth", &assemble::JiggleSettings::amplitudeDepth);
+    num("jiggle-rotation-strength", &assemble::JiggleSettings::rotationStrength);
+    num("jiggle-strength", &assemble::JiggleSettings::strength);
+    num("jiggle-intensity", &assemble::JiggleSettings::strength);   // the old name
+    num("jiggle-sim-hz", &assemble::JiggleSettings::simulationHz);
+    out = assemble::SanitizeJiggleSettings(s);
+    return true;
 }
 
 void printIssues(const std::vector<std::string>& v, const char* prefix) {
@@ -854,6 +901,13 @@ int cmdConvert(const Args& a) {
         if (!pose.base.empty()) std::fprintf(stderr, "  a-pose: arms down %.0f degrees\n", poseFile.aPoseDegrees);
         if (!poseFile.bones.empty()) std::fprintf(stderr, "  pose: %zu bone edit(s) from %s\n", poseFile.bones.size() - unknown.size(), a.get("pose").c_str());
     }
+    // The physical jiggle settings, shared by the settle below, the preview and the PMX export. Parsed up front so a bad flag
+    // stops the run before any work is done.
+    assemble::JiggleSettings jiggle;
+    {
+        std::string error;
+        if (!JiggleFromArgs(a, jiggle, error)) { std::fprintf(stderr, "error: %s\n", error.c_str()); return 1; }
+    }
     if (!std::getenv("CARDBRIDGE_GPU_SKIN_TEST")) {
         if (a.opt.count("height-cm")) {
             const float targetCm = static_cast<float>(std::atof(a.get("height-cm").c_str()));
@@ -876,15 +930,18 @@ int cmdConvert(const Args& a) {
         // bust as it hangs in the game instead of pulled straight out of the chest; the game draw's live sim settles again
         // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.
         const bool settleBust = !a.has("no-jiggle-bust"), settleButt = !a.has("no-jiggle-butt");
-        const float settleInt = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
         const float bustSize = ao.bodyShape.size() > 4 ? ao.bodyShape[4] : 0.5f;
         const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
                                                      : assemble::CardSagDefault(scene, bustSize);
-        assemble::BakeSettledPhysics(scene, settleBust, settleButt, settleInt, settleSag);
+        assemble::BakeSettledPhysics(scene, settleBust, settleButt, jiggle, settleSag);
         // Drape the outfit's own cloth (capes, kimono sleeves, jacket panels, skirt hems): hangs it the way the game's DynamicBone
         // settles it at load. Without it the exported PMX starts at the authored pose and every joint locks fighting gravity -
         // stiff paper cloth, not fabric.
         assemble::BakeGarmentSettle(scene);
+        // Optional, non-destructive clipping correction: a garment vertex buried in the skin gets pushed back out along the body's
+        // own surface (opt-in with --fix-garment-intersections; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 force-disables it).
+        if (a.has("fix-garment-intersections") || std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS") && std::string(std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS")) != "0")
+            assemble::FixGarmentIntersections(scene);
     }
     poseTimer.Stop();
 
@@ -1020,7 +1077,7 @@ int cmdConvert(const Args& a) {
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
     eo.jiggleButt = !a.has("no-jiggle-butt");          // default on
-    eo.jiggleIntensity = a.opt.count("jiggle-intensity") ? static_cast<float>(std::atof(a.get("jiggle-intensity").c_str())) : 0.5f;
+    eo.jiggle = jiggle;
     eo.mmdNames = !a.has("no-mmd-names");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;
     eo.outfit = ao.outfit >= 0 ? ao.outfit : static_cast<int>(c.status.at("coordinateType").asInt());
@@ -1154,7 +1211,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

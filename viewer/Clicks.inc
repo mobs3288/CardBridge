@@ -1,5 +1,8 @@
 // viewer fragment: clicks, library, settings (included in order by main.cpp)
 
+// The physical jiggle rows (everything under the Jiggle group header): a right-click / group reset needs to persist the settings and re-arm the preview, not re-assemble.
+bool IsJiggleId(int id) { return (id >= kJiggleMass && id <= kJiggleSimHz) || id == kJigglePreset || id == kJiggleBust || id == kJiggleButt; }
+
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
 void TweakClick(int x, int y, const PanelLayout& l, bool right) {
     if (g.tab == TabOptimize) return;   // the Optimize tab routes its own clicks (OptTabClick)
@@ -47,15 +50,17 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         return;
     }
     if (row.kind == 0) {
-        bool any = false;
+        bool any = false, anyJiggle = false;
         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k) {
-            if (rows[k].kind == 4 || rows[k].kind == 5) continue;   // text / action rows are not sliders to reset
+            if (rows[k].kind == 4 || rows[k].kind == 5 || rows[k].kind == 6) continue;   // text / action / chips rows are not sliders to reset
             any = any || TweakChanged(rows[k].id);
+            if (IsJiggleId(rows[k].id)) anyJiggle = true;
             ResetTweak(rows[k].id);
         }
         if (any) {
             Log("reset " + row.label);
-            if (!ReshapeNow(true)) ScheduleApplyTweaks();
+            if (anyJiggle) JiggleSettingsChanged();   // the jiggle rows persist + re-arm the preview; a re-assembly is not needed
+            else if (!ReshapeNow(true)) ScheduleApplyTweaks();
         }
         return;
     }

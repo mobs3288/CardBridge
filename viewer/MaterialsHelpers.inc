@@ -431,7 +431,17 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, kJiggleBust, "Jiggle (the exported PMX, and the physics preview)", "Jiggle"});
         rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
-        rows.push_back({1, kJiggleIntensity, "Jiggle intensity", "Jiggle"});
+        rows.push_back({6, kJigglePreset, "Preset:", "Jiggle"});
+        rows.push_back({1, kJiggleMass, "Mass (kg)", "Jiggle"});
+        rows.push_back({1, kJiggleStiffness, "Stiffness (N/m)", "Jiggle"});
+        rows.push_back({1, kJiggleDamping, "Damping (N s/m)", "Jiggle"});
+        rows.push_back({1, kJiggleGravity, "Gravity (x 9.81)", "Jiggle"});
+        rows.push_back({1, kJiggleAmpVertical, "Vertical amplitude", "Jiggle"});
+        rows.push_back({1, kJiggleAmpHorizontal, "Horizontal amplitude", "Jiggle"});
+        rows.push_back({1, kJiggleAmpDepth, "Depth amplitude", "Jiggle"});
+        rows.push_back({1, kJiggleRotation, "Rotation strength", "Jiggle"});
+        rows.push_back({1, kJiggleStrength, "Strength (master)", "Jiggle"});
+        rows.push_back({1, kJiggleSimHz, "Simulation (Hz)", "Jiggle"});
         rows.push_back({1, kSag, "Sag", "Jiggle"});
         rows.push_back({0, kAutoCloth, "Auto cloth (added bones + physics where parts have none; reloads the card)", "Auto cloth"});
         rows.push_back({2, kAutoCloth, "Auto cloth: sleeves / wings / tails", "Auto cloth"});

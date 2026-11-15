@@ -169,8 +169,8 @@ bool EaseScroll(float& pos, int target, float dt) {
 
 // Everything one picture needs: the drag movement, the physics, the scrolling, then the paint of whatever was invalidated.
 void Frame() {
-    const ULONGLONG now = GetTickCount64();
-    const float dt = g.lastFrameTick ? std::min(1.0f / 30.0f, static_cast<float>(now - g.lastFrameTick) / 1000.0f) : 1.0f / 60.0f;
+    const double now = NowMs();
+    const float dt = g.lastFrameTick > 0.0 ? std::min(1.0f / 30.0f, static_cast<float>(now - g.lastFrameTick) / 1000.0f) : 1.0f / 60.0f;
     g.lastFrameTick = now;
     ApplyPending();
     PhysicsTick();

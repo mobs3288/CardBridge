@@ -12,6 +12,7 @@
 #include "assemble/Assembler.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
+#include "assemble/CustomHairDiag.h"
 #include "assemble/HeelConfig.h"
 #include "assemble/Pose.h"
 #include "assemble/PhysicsSim.h"
@@ -2068,8 +2069,8 @@ void unitTests() {
             assemble::Scene s;
             s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
             s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
-            s.bones.push_back({bustOwn ? "cf_s_bnip02_L" : "hair_a", 1, {0, 1.05f, 0.1f}, "rig"});
-            s.bones.push_back({bustOwn ? "cf_s_bnip02_L2" : "hair_b", 2, {0, 0.95f, 0.12f}, "rig"});
+            s.bones.push_back({bustOwn ? "cf_s_bnip02" : "hair_a", 1, {0, 1.05f, 0.1f}, "rig"});
+            s.bones.push_back({bustOwn ? "cf_s_bnip02b" : "hair_b", 2, {0, 0.95f, 0.12f}, "rig"});
             assemble::SceneChain ch;
             ch.name = bustOwn ? "bust" : "hair";
             ch.bones = {2, 3};
@@ -2078,34 +2079,41 @@ void unitTests() {
             s.chains.push_back(ch);
             return s;
         };
-        auto count = [](const assemble::Scene& s, bool bust, bool butt, float intensity) {
+        auto count = [](const assemble::Scene& s, bool bust, bool butt, const assemble::JiggleSettings& jiggle) {
             pmx::Model m;
             for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
-            exporter::AddPhysics(s, m, 10.0f, bust, butt, intensity);
+            exporter::AddPhysics(s, m, 10.0f, bust, butt, jiggle);
             return m;
         };
+        const assemble::JiggleSettings natural;   // the Natural preset (default): mass 1 kg, stiffness 220 N/m, damping 4 N s/m, amplitudes 1
         {   // the default export: breast jiggle on, the butt off (explicit args; both defaults are on)
-            pmx::Model m = count(make(true), true, false, 1.0f);
+            pmx::Model m = count(make(true), true, false, natural);
             CHECK(m.rigidBodies.size() == 3 && m.joints.size() == 2);   // anchor body + the jiggle chain, and the anchor joint + the link joint
             CHECK(m.rigidBodies[0].mode == 0 && m.rigidBodies[0].bone == 1);   // the anchor: kinematic, on the parent (chest) bone
             CHECK(m.joints[0].bodyA == 0 && m.joints[0].bodyB == 1 && m.joints[0].rotUpper.x == 0.0f && m.joints[0].springRot.x == 0.0f);   // rigid
-            pmx::Model off = count(make(true), false, false, 1.0f);
+            pmx::Model off = count(make(true), false, false, natural);
             CHECK(off.rigidBodies.empty() && off.joints.empty());      // boobs off: the part stays rigid
-            pmx::Model hair = count(make(false), false, false, 1.0f);
+            pmx::Model hair = count(make(false), false, false, natural);
             CHECK(hair.rigidBodies.size() == 2);                       // hair is not the body's own: always simulated
-            pmx::Model jig = count(make(true), true, false, 1.0f);
-            pmx::Model plain = count(make(false), true, false, 1.0f);
-            // the reference models' breast bodies: mode 2 (the body follows its bone with physics on top), heavy fixed damping, no
-            // friction, no collider, no joint spring (the rotation limits are the jiggle), weight tapering toward the tip
+            pmx::Model jig = count(make(true), true, false, natural);
+            pmx::Model plain = count(make(false), true, false, natural);
+            // the reference models' breast bodies: mode 2 (the body follows its bone with physics on top), damping derived from the
+            // damper (1 - exp(-c / 2m)), no friction, no collider, a derived joint spring, weight tapering toward the tip
             CHECK(jig.rigidBodies[1].mode == 2 && jig.rigidBodies[2].mode == 2);
-            CHECK(jig.rigidBodies[2].moveDamping == 0.9f && jig.rigidBodies[2].rotDamping == 0.9f && jig.rigidBodies[2].friction == 0.0f);
+            CHECK(std::fabs(jig.rigidBodies[1].moveDamping - (1.0f - std::exp(-2.0f))) < 1e-4f);   // root, mass 1: 1 - exp(-4 / (2*1)) = 1 - e^-2
+            CHECK(std::fabs(jig.rigidBodies[2].moveDamping - (1.0f - std::exp(-4.0f))) < 1e-4f);   // mass 1/2: 1 - exp(-4 / (2*0.5)) = 1 - e^-4
+            CHECK(jig.rigidBodies[2].rotDamping == jig.rigidBodies[2].moveDamping);
+            CHECK(jig.rigidBodies[2].friction == 0.0f);
             CHECK(jig.rigidBodies[2].mask == 0);
             CHECK(jig.rigidBodies[1].mass == 1.0f && jig.rigidBodies[2].mass == 0.5f);   // 1, 1/2, ...
             CHECK(jig.joints.size() == 2 && jig.joints[1].springRot.x > 0.0f && jig.joints[1].rotUpper.x > 0.0f && jig.joints[1].rotUpper.x <= 0.60f);
-            CHECK(jig.joints[1].rotUpper.y == 0.6f * jig.joints[1].rotUpper.x);   // the reference models' narrow axes: sway 0.6, twist 0.4
-            CHECK(jig.joints[1].rotUpper.z == 0.4f * jig.joints[1].rotUpper.x);
-            pmx::Model loud = count(make(true), true, false, 2.0f);
-            CHECK(loud.joints[1].rotUpper.x > jig.joints[1].rotUpper.x);   // the intensity opens the envelope
+            CHECK(std::fabs(jig.joints[1].rotUpper.y - 0.2f * jig.joints[1].rotUpper.x) < 1e-6f);   // the twist: small, 0.2 of the flop
+            CHECK(std::fabs(jig.joints[1].rotUpper.z - 0.9f * jig.joints[1].rotUpper.x) < 1e-6f);   // the sway: wide, 0.9 of the flop (MMD shows lateral motion)
+            CHECK(jig.joints[1].rotUpper.z > jig.joints[1].rotUpper.y);
+            assemble::JiggleSettings loud;
+            loud.strength = 2.0f;
+            pmx::Model big = count(make(true), true, false, loud);
+            CHECK(big.joints[1].rotUpper.x > jig.joints[1].rotUpper.x);   // the strength opens the envelope
             CHECK(plain.rigidBodies[1].mode == 1 && plain.rigidBodies[1].friction == 0.5f);   // hair keeps the strand conversion
             CHECK((plain.rigidBodies[1].mask & 0x0001) != 0);   // a hair strand still meets the colliders (group 0 here: this scene has none)
         }
@@ -2119,11 +2127,11 @@ void unitTests() {
             ch.bones = {1, 2};
             ch.characterOwn = true;
             s.chains.push_back(ch);
-            CHECK(count(s, true, false, 1.0f).rigidBodies.empty());   // default off
-            CHECK(count(s, true, true, 1.0f).rigidBodies.size() == 3); // on: anchor + chain bodies
-            CHECK(count(s, false, true, 1.0f).rigidBodies.size() == 3); // independent of the boobs switch
-            const pmx::Model butt = count(s, true, true, 1.0f);
-            CHECK(butt.joints[1].rotUpper.x > 0.0f && butt.joints[1].rotUpper.x <= 0.30f);   // the butt's envelope is smaller than the bust's
+            CHECK(count(s, true, false, natural).rigidBodies.empty());   // default off
+            CHECK(count(s, true, true, natural).rigidBodies.size() == 3); // on: anchor + chain bodies
+            CHECK(count(s, false, true, natural).rigidBodies.size() == 3); // independent of the boobs switch
+            const pmx::Model butt = count(s, true, true, natural);
+            CHECK(butt.joints[1].rotUpper.x > 0.0f && butt.joints[1].rotUpper.x <= 0.34f);   // the butt's envelope is smaller than the bust's
         }
     });
 
@@ -2690,19 +2698,370 @@ void unitTests() {
         std::vector<Mat4> pw = BoneWorlds(s, rest);
         {   // the default (boobs on): the chain is simulated
             PhysicsSim sim;
-            sim.Reset(s, pw, true, false, 1.0f);   // at full intensity, so the tip lags behind the jump
+            sim.Reset(s, pw, true, false, JiggleSettings{});   // the Natural preset
             CHECK(sim.particleCount() == 2);
             std::vector<Mat4> skin(s.bones.size());
             rest.edit(0).pos = {0.3f, 0, 0};
             pw = BoneWorlds(s, rest);
             sim.Step(s, pw, 1, skin);
-            CHECK(std::fabs(0.3f - skin[3].point(s.bones[3].pos).x) > 0.05f);   // the tip lags behind the jump
+            // The root link jumps with the chest (the rod to the chest bone is inextensible), so the tip must follow the jump, not stay at the old   place.
+            CHECK(skin[3].point(s.bones[3].pos).x > 0.05f);
+            // The spring then brings it home: it swings and settles back at the new rest pose.
+            bool moving = true;
+            for (int i = 0; i < 600 && moving; ++i) moving = sim.Step(s, pw, 1, skin);
+            CHECK(!moving);
+            CHECK(std::fabs(skin[3].point(s.bones[3].pos).x - 0.3f) < 0.02f);   // settled under the anchor again
         }
         {   // boobs off: no particles at all
             PhysicsSim sim;
-            sim.Reset(s, pw, false, false, 1.0f);
+            sim.Reset(s, pw, false, false, JiggleSettings{});
             CHECK(sim.particleCount() == 0 && sim.empty());
         }
+    });
+
+    auto makeJiggleScene = [](int side) {   // side: 0 = the centre chain, +1 = left (_L), -1 = right (_R)
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        const float x = static_cast<float>(side) * 0.08f;
+        const std::string suffix = side > 0 ? "_L" : side < 0 ? "_R" : "";
+        s.bones.push_back({std::string("cf_s_bnip02") + suffix, 1, {x, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({std::string("cf_s_bnip02b") + suffix, 2, {x + static_cast<float>(side) * 0.01f, 0.95f, 0.12f}, "rig"});
+        SceneChain ch;
+        ch.name = std::string("bust") + suffix;
+        ch.bones = {2, 3};
+        ch.characterOwn = true;
+        ch.damping = 0.1f; ch.elasticity = 0.1f; ch.stiffness = 0.1f;
+        s.chains.push_back(ch);
+        return s;
+    };
+
+    test("jiggle: a posed jump moves the chain on the axis of the jump", [&makeJiggleScene] {
+        using namespace assemble;
+        // A synthetic jump applied to the chest: horizontal (x), vertical (y), depth (z).
+        for (int axis = 0; axis < 3; ++axis) {
+            Scene s = makeJiggleScene(0);
+            const Pose rest;
+            std::vector<Mat4> pw = BoneWorlds(s, rest);
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, JiggleSettings{});
+            std::vector<Mat4> skin(s.bones.size());
+            Pose pose;
+            pose.edit(0).pos = axis == 0 ? Vec3{0.1f, 0, 0} : axis == 1 ? Vec3{0, 0.1f, 0} : Vec3{0, 0, 0.1f};
+            pw = BoneWorlds(s, pose);
+            sim.Step(s, pw, 1, skin);
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            // the tip followed the chest's jump on the jumped axis (the jump is followed, not ignored)
+            const float want = axis == 0 ? p.x : axis == 1 ? p.y - 0.95f : p.z - 0.12f;
+            CHECK(want > 0.01f);
+            CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+        }
+    });
+
+    test("jiggle: each side is simulated independently, the other side does not move", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L", 1, {0.08f, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L2", 2, {0.09f, 0.95f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_R", 1, {-0.08f, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_R2", 4, {-0.09f, 0.95f, 0.12f}, "rig"});
+        SceneChain left;
+        left.name = "bust_L";
+        left.bones = {2, 3};
+        left.characterOwn = true;
+        s.chains.push_back(left);
+        SceneChain right;
+        right.name = "bust_R";
+        right.bones = {4, 5};
+        right.characterOwn = true;
+        s.chains.push_back(right);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        PhysicsSim sim;
+        sim.Reset(s, pw, true, true, JiggleSettings{});
+        std::vector<Mat4> skin(s.bones.size());
+        Pose pose;
+        pose.edit(2).pos = {0.15f, 0, 0};   // the LEFT chain's root bone moves, the right side's bones stay untouched
+        pw = BoneWorlds(s, pose);
+        sim.Step(s, pw, 1, skin);
+        const Vec3 pl = skin[3].point(s.bones[3].pos);
+        const Vec3 pr = skin[5].point(s.bones[5].pos);
+        CHECK(pl.x - 0.09f > 0.01f);                  // the left side followed its own bone
+        CHECK(std::fabs(pr.x - (-0.09f)) < 0.02f);    // the right side did not budge
+    });
+
+    test("jiggle: amplitude zero locks the axis to the posed pose exactly", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s = makeJiggleScene(0);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        JiggleSettings still;
+        still.amplitudeHorizontal = 0.0f;   // horizontal locked: the link is pinned to the posed place on x
+        PhysicsSim sim;
+        sim.Reset(s, pw, true, true, still);
+        std::vector<Mat4> skin(s.bones.size());
+        Pose pose;
+        pose.edit(0).pos = {0.1f, 0, 0};
+        pw = BoneWorlds(s, pose);
+        sim.Step(s, pw, 1, skin);
+        const Vec3 p = skin[3].point(s.bones[3].pos);
+        CHECK(std::fabs(p.x - 0.1f) < 1e-3f);   // the pinned axis follows the pose rigidly, never lags
+    });
+
+    test("jiggle: settles to the new pose from rest and stays deterministic", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s = makeJiggleScene(0);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        PhysicsSim a;
+        a.Reset(s, pw, true, true, JiggleSettings{});
+        PhysicsSim b;
+        b.Reset(s, pw, true, true, JiggleSettings{});
+        std::vector<Mat4> sa(s.bones.size()), sb(s.bones.size());
+        for (int i = 0; i < 240; ++i) a.Step(s, pw, 1, sa);
+        for (int i = 0; i < 240; ++i) b.Step(s, pw, 1, sb);
+        float maxDifference = 0.0f;
+        for (size_t i = 0; i < sa.size(); ++i)
+            for (int k = 0; k < 16; ++k) maxDifference = std::max(maxDifference, std::fabs(sa[i].m[k] - sb[i].m[k]));
+        CHECK(maxDifference == 0.0f);   // the same input replays exactly
+        const Vec3 p = sa[3].point(s.bones[3].pos);
+        CHECK(std::fabs(p.x - 0.0f) < 1e-3f && std::isfinite(p.y) && std::isfinite(p.z));
+    });
+
+    test("jiggle: static sag hangs a little, never below the tip's reach; zero gravity does not sag", [&makeJiggleScene] {
+        using namespace assemble;
+        {   // normal gravity: a small hang from the posed rest, no more than a few centimetres
+            Scene s = makeJiggleScene(0);
+            const Pose rest;
+            std::vector<Mat4> pw = BoneWorlds(s, rest);
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, JiggleSettings{});
+            std::vector<Mat4> skin(s.bones.size());
+            for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(p.y < 0.95f);                // it sags below the posed height
+            CHECK(p.y > 0.95f - 0.06f);       // but the body holds most of its weight: the preload leaves only a few millimetres of hang
+        }
+        {   // zero gravity: no sag at all
+            Scene s = makeJiggleScene(0);
+            const Pose rest;
+            std::vector<Mat4> pw = BoneWorlds(s, rest);
+            JiggleSettings noGrav;
+            noGrav.gravity = 0.0f;
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, noGrav);
+            std::vector<Mat4> skin(s.bones.size());
+            for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::fabs(p.y - 0.95f) < 1e-3f);
+        }
+    });
+
+    test("jiggle: a huge single step and many tiny steps stay stable (no explosion, no NaN)", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s = makeJiggleScene(0);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        std::vector<Mat4> skin(s.bones.size());
+        {   // one 0.5 s advance swallowed by the cap: finite, bounded, sane
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, JiggleSettings{});
+            sim.Advance(s, pw, 0.5, skin);
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+            CHECK(std::fabs(p.x) < 1.5f && std::fabs(p.y) < 2.0f && std::fabs(p.z) < 1.5f);
+        }
+        {   // variable step sizes, largest to smallest to largest
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, JiggleSettings{});
+            const double steps[] = {0.0001, 0.25, 0.0005, 0.1, 0.0, 0.05, 0.2, 0.0001};
+            for (double dt : steps) sim.Advance(s, pw, dt, skin);
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+            CHECK(std::fabs(p.x) < 1.5f && std::fabs(p.y) < 2.0f && std::fabs(p.z) < 1.5f);
+        }
+    });
+
+    test("jiggle: extreme settings do not blow up; strength zero makes the chain rigid", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s = makeJiggleScene(0);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        {   // the harshest stable corner: softest damping, heaviest mass, stiffest spring, full gravity, wide amplitude
+            JiggleSettings wild;
+            wild.mass = 20.0f;
+            wild.stiffness = 5000.0f;
+            wild.damping = 0.0f;
+            wild.gravity = 5.0f;
+            wild.amplitudeVertical = wild.amplitudeHorizontal = wild.amplitudeDepth = 3.0f;
+            wild.rotationStrength = 2.0f;
+            wild.strength = 4.0f;
+            wild.simulationHz = 480.0f;
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, wild);
+            std::vector<Mat4> skin(s.bones.size());
+            for (int i = 0; i < 600; ++i) sim.Step(s, pw, 1, skin);
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+            CHECK(std::fabs(p.x) < 2.0f && std::fabs(p.y) < 2.5f && std::fabs(p.z) < 2.0f);
+        }
+        {   // strength 0: the part is rigid, not simulated (like the PMX switch off)
+            JiggleSettings off;
+            off.strength = 0.0f;
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, off);
+            CHECK(sim.jiggleParticleCount() == 0);
+        }
+        {   // all amplitudes zero: the link follows the pose rigidly, never lags
+            JiggleSettings locked;
+            locked.amplitudeVertical = locked.amplitudeHorizontal = locked.amplitudeDepth = 0.0f;
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, locked);
+            std::vector<Mat4> skin(s.bones.size());
+            Pose jump;
+            jump.edit(0).pos = {0.15f, 0.1f, 0.12f};
+            pw = BoneWorlds(s, jump);
+            sim.Step(s, pw, 1, skin);
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::fabs(p.x - 0.15f) < 1e-3f);
+        }
+    });
+
+    test("jiggle: a chain with no valid bones is skipped; a stiff chain hangs less than a loose one", [&makeJiggleScene] {
+        using namespace assemble;
+        // a jiggle chain whose bones do not exist in the scene: nothing simulates, nothing crashes
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        SceneChain ch;
+        ch.name = "bust";
+        ch.bones = {4, 7};   // out of range
+        ch.characterOwn = true;
+        s.chains.push_back(ch);
+        const Pose rest;
+        const std::vector<Mat4> pw = BoneWorlds(s, rest);
+        PhysicsSim sim;
+        sim.Reset(s, pw, true, true, JiggleSettings{});
+        CHECK(sim.jiggleParticleCount() == 0);
+        // a very stiff card hangs less at rest than a very loose one (the static sag respects the settings)
+        auto hang = [&](float stiffness) {
+            Scene s = makeJiggleScene(0);
+            const Pose rest;
+            const std::vector<Mat4> pw = BoneWorlds(s, rest);
+            JiggleSettings set;
+            set.stiffness = stiffness;
+            PhysicsSim sim;
+            sim.Reset(s, pw, true, true, set);
+            std::vector<Mat4> skin(s.bones.size());
+            for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
+            return 0.95f - skin[3].point(s.bones[3].pos).y;   // how far below the posed place the tip settled
+        };
+        CHECK(hang(5.0f) > hang(2000.0f));
+    });
+
+    test("jiggle presets: matched, custom and sanitized; derived values stay finite", [] {
+        using namespace assemble;
+        const JiggleSettings natural;   // the Natural preset is the struct default
+        CHECK(MatchJigglePreset(natural) == JigglePreset::Natural);
+        CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::Subtle)) == JigglePreset::Subtle);
+        CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::Dynamic)) == JigglePreset::Dynamic);
+        JiggleSettings tweaked = natural;
+        tweaked.damping += 0.5f;
+        CHECK(MatchJigglePreset(tweaked) == JigglePreset::Custom);
+        // NaN and infinities are replaced by the defaults; out-of-range clamps to the allowed window
+        JiggleSettings bad;
+        bad.mass = std::nanf("");
+        bad.stiffness = std::numeric_limits<float>::infinity();
+        bad.damping = -3.0f;
+        bad.gravity = 99.0f;
+        bad.amplitudeVertical = 42.0f;
+        bad.strength = -1.0f;
+        bad.simulationHz = 100000.0f;
+        const JiggleSettings clean = SanitizeJiggleSettings(bad);
+        CHECK(std::isfinite(clean.mass) && std::isfinite(clean.stiffness));
+        CHECK(clean.mass == natural.mass && clean.stiffness == natural.stiffness);
+        CHECK(clean.damping == 0.0f);
+        CHECK(clean.gravity == 5.0f);
+        CHECK(clean.amplitudeVertical == 3.0f);
+        CHECK(clean.strength == 0.0f);
+        CHECK(clean.simulationHz == 480.0f);
+        // derived values: the spring's own oscillation, the damping ratio, the PMX decay and the static sag, all finite
+        CHECK(std::fabs(JiggleAngularFrequency(natural) - std::sqrt(220.0f)) < 1e-3f);
+        CHECK(JiggleDampingRatio(natural) > 0.0f && JiggleDampingRatio(natural) < 1.0f);
+        CHECK(JigglePmxDamping(natural, 1.0f) > 0.8f && JigglePmxDamping(natural, 1.0f) < 1.0f);
+        CHECK(JigglePmxDamping(natural, 0.5f) > JigglePmxDamping(natural, 1.0f));   // the lighter the link, the more it loses per second
+        CHECK(JiggleStaticSagMeters(natural) > 0.0f && JiggleStaticSagMeters(natural) < 0.02f);
+        CHECK(std::fabs(JiggleMaxDisplacement(natural, 0) - 0.060f) < 1e-6f);
+        CHECK(std::fabs(JiggleMaxDisplacement(natural, 1) - 0.045f) < 1e-6f);
+        CHECK(std::fabs(JiggleMaxDisplacement(natural, 2) - 0.055f) < 1e-6f);
+        CHECK(JiggleJointRange(natural, true, 0) > JiggleJointRange(natural, false, 0));   // the bust opens wider than the butt
+        CHECK(JiggleJointRange(natural, true, 2) > JiggleJointRange(natural, true, 1));   // the sway opens wider than the twist (the MMD lateral motion)
+        CHECK(JiggleJointRange(natural, true, 0) > JiggleJointRange(natural, true, 2));   // the flop is the widest axis
+    });
+
+    test("jiggle: PMX joint limits open the sway more than the twist, and the side asymmetry differs between the two breasts", [&makeJiggleScene] {
+        using namespace assemble;
+        // A card with only lateral sway unlocked and everything else zeroed: the MMD's sideways range (Z) must open, vertical/depth (X) and twist (Y) stay shut.
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L", 1, {0.08f, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L2", 2, {0.09f, 0.95f, 0.12f}, "rig"});
+        SceneChain ch;
+        ch.name = "bust_L";
+        ch.bones = {2, 3};
+        ch.characterOwn = true;
+        s.chains.push_back(ch);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        JiggleSettings lateral;
+        lateral.amplitudeVertical = 0.0f;
+        lateral.amplitudeDepth = 0.0f;
+        lateral.amplitudeHorizontal = 1.5f;
+        exporter::AddPhysics(s, m, 10.0f, true, false, lateral);
+        CHECK(m.joints.size() == 2);
+        CHECK(m.joints[1].rotUpper.x == 0.0f);    // the vertical/depth axis is locked
+        CHECK(m.joints[1].rotUpper.z > 0.3f);     // the sway opens wide
+        CHECK(m.joints[1].rotUpper.y > 0.0f);     // a little twist remains, narrower than the sway
+        CHECK(m.joints[1].rotUpper.z > m.joints[1].rotUpper.y);
+        // the two sides do not share the same mass: the left and the right differ by a few percent (they never bounce as one)
+        Scene r = s;
+        r.bones[2].name = "cf_s_bnip02_R";
+        r.bones[3].name = "cf_s_bnip02_R2";
+        r.chains[0].name = "bust_R";
+        pmx::Model mr;
+        for (const auto& b : r.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; mr.bones.push_back(pb); }
+        JiggleSettings natural;
+        exporter::AddPhysics(r, mr, 10.0f, true, false, natural);
+        CHECK(mr.rigidBodies.size() == m.rigidBodies.size());
+        CHECK(mr.rigidBodies[1].mass != m.rigidBodies[1].mass);
+        CHECK(std::fabs(mr.rigidBodies[1].mass - m.rigidBodies[1].mass) < 0.08f);   // only a few percent, the two stay coordinated
+    });
+
+    test("jiggle: re-resetting with a fresh pose restarts from rest (no stale velocity)", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s = makeJiggleScene(0);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(s, rest);
+        PhysicsSim sim;
+        sim.Reset(s, pw, true, true, JiggleSettings{});
+        std::vector<Mat4> skin(s.bones.size());
+        // shove the chain far from rest by hand
+        Pose jump;
+        jump.edit(0).pos = {2.0f, 0, 0};
+        pw = BoneWorlds(s, jump);
+        for (int i = 0; i < 600; ++i) sim.Step(s, pw, 1, skin);
+        // re-reset with a fresh pose: the links start from rest at the new pose, no residual swing
+        Pose fresh;
+        std::vector<Mat4> pw2 = BoneWorlds(s, fresh);
+        sim.Reset(s, pw2, true, true, JiggleSettings{});
+        std::vector<Mat4> skin2(s.bones.size());
+        sim.Step(s, pw2, 1, skin2);
+        const Vec3 p = skin2[3].point(s.bones[3].pos);
+        CHECK(std::fabs(p.x - 0.0f) < 1e-3f && std::fabs(p.y - 0.95f) < 1e-3f);
+        CHECK(sim.jiggleParticleCount() == 2);
     });
 
     test("auto cloth: hanging garment gets chains that follow their limb, torso stays rigid", [] {
@@ -6864,6 +7223,149 @@ void meshTests() {
         CHECK(ClassifyMesh(s, 4) == MeshClass::Clothing);
     });
 
+    test("garment intersections: vertices buried in the body are pushed out, everything else is untouched", [] {
+        using namespace assemble;
+        auto s = makeSkinnedScene();   // body sphere at y=0.8 r=0.5, identity bone worlds
+        // a skirt-like shell: one vertex deep inside the body, one just outside the surface,
+        // one comfortably outside, one far away
+        SceneMesh cloth;
+        cloth.name = "o_top";
+        cloth.reshapable = true;
+        auto vAt = [&](float y) {
+            SceneVertex v;
+            v.pos = {0.0f, y, 0.0f};
+            v.normal = {0, 1, 0};
+            v.uv = {0, 0};
+            v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv;
+            for (int k = 0; k < 4; ++k) { v.bone[k] = 1; v.weight[k] = k == 0 ? 1.0f : 0.0f; v.local[k] = v.pos; v.nlocal[k] = v.normal; }
+            return v;
+        };
+        const Vec3 insidePos = vAt(1.295f).pos;   // just under the surface, 5 mm deep inside
+        const Vec3 nearPos = vAt(1.301f).pos;      // 0.001 above the surface: inside the clearance band
+        const Vec3 farPos = vAt(1.31f).pos;        // 0.01 above the surface: outside the clearance band
+        const Vec3 awayPos = {5.0f, 5.0f, 5.0f};   // nowhere near
+        const Vec3 deepPos = vAt(1.29f).pos;    // deep inside the body, but within the pole-cap triangles' bounds: moved out with the rest
+        for (Vec3 p : {insidePos, nearPos, farPos, awayPos, deepPos}) {
+            SceneVertex v = vAt(p.y);
+            v.pos = p;
+            v.local[0] = p;
+            cloth.vertices.push_back(v);
+        }
+        SceneSubmesh sm;
+        sm.material = 0;
+        cloth.submeshes.push_back(sm);
+        const int clothMesh = static_cast<int>(s.meshes.size());
+        s.meshes.push_back(std::move(cloth));
+        ScenePart top; top.id = "outfit0.top"; top.group = "Outfit"; top.meshes = {clothMesh};
+        s.parts.push_back(top);
+        const auto stats = FixGarmentIntersections(s);
+        CHECK(stats.verticesMoved == 3);
+        CHECK(stats.partsFixed == 1);
+        CHECK(stats.skipped == 0);
+        CHECK(stats.maxMove > 0.002f);
+        // the vertex deep inside was pushed out with the others
+        CHECK(s.meshes[clothMesh].vertices[4].pos.y > 1.29f);
+        // every moved vertex now sits exactly the clearance away from the body's surface:
+        // the just-under-the-surface vertex moved to the sphere's radius plus the clearance, the near-surface one to exactly 1.302
+        for (size_t i = 0; i < s.meshes[clothMesh].vertices.size(); ++i) {
+            const Vec3& p = s.meshes[clothMesh].vertices[i].pos;
+            if (i == 0) {
+                const float r = std::sqrt((p.x - 0.0f) * (p.x - 0.0f) + (p.y - 0.8f) * (p.y - 0.8f) + (p.z - 0.0f) * (p.z - 0.0f));
+                CHECK(std::fabs(r - 0.502f) < 1e-4f);
+            } else if (i == 1) {
+                CHECK(std::fabs(p.y - 1.302f) < 1e-4f);
+            } else if (i == 2) {
+                CHECK(p.y == 1.31f);
+            } else if (i == 3) {
+                CHECK(p.x == 5.0f && p.y == 5.0f && p.z == 5.0f);
+            } else {
+                const float r = std::sqrt((p.x - 0.0f) * (p.x - 0.0f) + (p.y - 0.8f) * (p.y - 0.8f) + (p.z - 0.0f) * (p.z - 0.0f));
+                CHECK(std::fabs(r - 0.502f) < 1e-4f);
+            }
+        }
+        // the per-bone locals were re-derived from the moved positions
+        for (int k = 0; k < 4; ++k) CHECK(s.meshes[clothMesh].vertices[0].local[k].y == s.meshes[clothMesh].vertices[0].pos.y);
+        // the summary issue was raised and names the part
+        bool named = false;
+        for (const auto& is : s.issues) named = named || (is.part == "outfit0.top" && is.message.find("garment intersection correction") != std::string::npos);
+        CHECK(named);
+    });
+
+    test("garment intersections: excluded groups keep their buried vertices; a scene without a body is untouched", [] {
+        using namespace assemble;
+        auto s = makeSkinnedScene();
+        SceneMesh socks;
+        socks.name = "o_socks";
+        socks.reshapable = true;
+        SceneVertex shoeV;
+        shoeV.pos = {0.0f, 1.295f, 0.0f};   // just under the sphere's surface, inside the shoe region
+        shoeV.normal = {0, 1, 0}; shoeV.uv = {0, 0}; shoeV.uv1 = shoeV.uv; shoeV.uv2 = shoeV.uv; shoeV.uv3 = shoeV.uv;
+        for (int k = 0; k < 4; ++k) { shoeV.bone[k] = 1; shoeV.weight[k] = k == 0 ? 1.0f : 0.0f; shoeV.local[k] = shoeV.pos; shoeV.nlocal[k] = shoeV.normal; }
+        socks.vertices.push_back(shoeV);
+        SceneSubmesh sm; socks.submeshes.push_back(sm);
+        const int socksMesh = static_cast<int>(s.meshes.size());
+        s.meshes.push_back(std::move(socks));
+        SceneMesh acc;
+        acc.name = "o_acc";
+        acc.reshapable = true;
+        acc.vertices.push_back(shoeV);
+        SceneSubmesh sm2; acc.submeshes.push_back(sm2);
+        const int accMesh = static_cast<int>(s.meshes.size());
+        s.meshes.push_back(std::move(acc));
+        ScenePart shoes; shoes.id = "outfit0.shoes_outer"; shoes.group = "Outfit"; shoes.meshes = {socksMesh};
+        ScenePart accPart; accPart.id = "outfit0.acc03"; accPart.group = "Accessories"; accPart.meshes = {accMesh};
+        s.parts.push_back(shoes);
+        s.parts.push_back(accPart);
+        // a shoe encloses the foot by design: the shoe mesh keeps its buried vertex; the accessory's is pushed out
+        const auto stats = FixGarmentIntersections(s);
+        CHECK(stats.verticesMoved == 1);
+        CHECK(s.meshes[socksMesh].vertices[0].pos.y == 1.295f);
+        CHECK(s.meshes[accMesh].vertices[0].pos.y > 1.295f);
+        // a scene without a body part does nothing at all
+        assemble::Scene noBody;
+        noBody.name = "nobody";
+        assemble::SceneMesh cloth2; cloth2.vertices.push_back(shoeV);
+        SceneSubmesh sm2b; cloth2.submeshes.push_back(sm2b);
+        noBody.meshes.push_back(std::move(cloth2));
+        ScenePart p2; p2.id = "outfit0.top"; p2.group = "Outfit"; p2.meshes = {0};
+        noBody.parts.push_back(p2);
+        const auto stats2 = FixGarmentIntersections(noBody);
+        CHECK(stats2.verticesMoved == 0 && stats2.partsFixed == 0 && stats2.maxMove == 0.0f);
+    });
+
+    test("mask resolve: a typed texture match wins; a same-named non-texture is rejected loudly; missing names are reported", [] {
+        using namespace assemble;
+        struct Stub : MaskLookup {
+            std::map<std::string, unity::PPtr> tex, asset;
+            unity::PPtr findTexture(const std::string& n) const override { auto it = tex.find(n); return it == tex.end() ? unity::PPtr{} : it->second; }
+            unity::PPtr findAsset(const std::string& n) const override { auto it = asset.find(n); return it == asset.end() ? unity::PPtr{} : it->second; }
+        };
+        const auto fakeTex = [](const std::string& n) {
+            unity::TextureData d; d.name = n; d.width = 1; d.height = 1; d.rgba = {255, 255, 255, 255};
+            return std::make_shared<unity::TextureData>(d);
+        };
+        Stub s;
+        unity::PPtr someTex{0, 101}, someObj{0, 202};
+        s.tex["good"] = someTex;
+        // typed match and decode succeeds -> the texture is returned
+        std::string why;
+        auto out = ResolveBodyMask(s, "good", [&](const unity::PPtr&) { return fakeTex("good"); }, &why);
+        CHECK(out && out->name == "good");
+        // typed match but the decoder refuses -> nullptr and a named reason
+        out = ResolveBodyMask(s, "good", [](const unity::PPtr&) { return std::shared_ptr<unity::TextureData>{}; }, &why);
+        CHECK(!out && why.find("could not be decoded") != std::string::npos);
+        // no texture, an asset with the same name that is not a texture -> nullptr and a reason that names the shadow
+        s.asset["shadowed"] = someObj;
+        out = ResolveBodyMask(s, "shadowed", [](const unity::PPtr&) { return std::shared_ptr<unity::TextureData>{}; }, &why);
+        CHECK(!out && why.find("not a texture") != std::string::npos);
+        // no texture but the asset decodes (some mods store the mask as a sub-asset findAsset can resolve) -> accepted
+        out = ResolveBodyMask(s, "shadowed", [&](const unity::PPtr& p) { return p.pathId == 202 ? fakeTex("shadowed") : std::shared_ptr<unity::TextureData>{}; }, &why);
+        CHECK(out && out->name == "shadowed");
+        // nothing at all -> nullptr and a not-found reason
+        out = ResolveBodyMask(s, "nowhere", [&](const unity::PPtr&) { return fakeTex("x"); }, &why);
+        CHECK(!out && why.find("not found") != std::string::npos);
+    });
+
     test("simplify: a 0% reduction returns an untouched mesh", [] {
         auto s = makeSkinnedScene();
         assemble::SceneMesh m = s.meshes[0];
@@ -7613,11 +8115,112 @@ void integrationTests() {
     });
 }
 
+void customHairTests() {
+    using namespace assemble;
+
+    test("custom hair diagnostics: a head-attached imported hair is reported, not altered", [] {
+        ImportedRigReport r;
+        r.partId = "outfit0.acc00";
+        r.group = "Accessories";
+        r.attachNode = "a_n_headside";
+        r.skinnedMeshes = 3;
+        r.customBones = 40;
+        r.chains = 22;
+        r.droppedChains = 0;
+        r.rootScale = 0.01f;
+        r.minScale = 0.01f;
+        r.maxScale = 1.0f;
+        r.bindScaleErr = 0.0f;
+        r.strandDrop = 0.75f;
+        const CustomRigVerdict v = AnalyzeImportedRig(r);
+        CHECK(v.importedRig);
+        CHECK(v.hairLike);
+        CHECK(!v.headline.empty());
+        CHECK(v.warnings.empty());   // a consistent import is reported, never "corrected"
+        bool saidAuthored = false, saidHang = false;
+        for (const auto& m : v.infos) {
+            saidAuthored = saidAuthored || m.find("kept as authored") != std::string::npos;
+            saidHang = saidHang || m.find("below the attachment") != std::string::npos;
+        }
+        CHECK(saidAuthored);
+        CHECK(saidHang);
+    });
+
+    test("custom hair diagnostics: a plain side-hair item on a head socket is a hair, not a strand mismatch", [] {
+        ImportedRigReport r;
+        r.partId = "hair.side";
+        r.group = "Hair";
+        r.attachNode.clear();
+        r.skinnedMeshes = 1;
+        r.customBones = 8;
+        r.chains = 2;
+        r.rootScale = 1.0f;
+        r.strandDrop = 0.2f;
+        const CustomRigVerdict v = AnalyzeImportedRig(r);
+        CHECK(v.hairLike);
+        CHECK(v.warnings.empty());
+    });
+
+    test("custom hair diagnostics: a rig-bound hair item is not flagged as imported", [] {
+        ImportedRigReport r;
+        r.partId = "hair.back";
+        r.group = "Hair";
+        r.skinnedMeshes = 2;
+        r.customBones = 0;   // its bones are the shared skeleton's, like vanilla hair
+        r.chains = 4;
+        const CustomRigVerdict v = AnalyzeImportedRig(r);
+        CHECK(!v.importedRig);
+        CHECK(!v.hairLike);
+        CHECK(v.headline.empty());
+        CHECK(v.infos.empty() && v.warnings.empty());
+    });
+
+    test("custom hair diagnostics: a degenerate import is reported as a warning, not silently passed", [] {
+        ImportedRigReport r;
+        r.partId = "outfit0.acc00";
+        r.group = "Accessories";
+        r.attachNode = "a_n_headside";
+        r.skinnedMeshes = 1;
+        r.customBones = 3;
+        r.chains = 1;
+        r.droppedChains = 2;   // chains whose bones do not resolve to the scene are counted, not lost silently
+        r.rootScale = 1.0f;
+        r.minScale = 0.0f;     // near-zero scale somewhere in the import
+        r.bindScaleErr = 0.3f; // inverse bind does not agree with the transform hierarchy
+        r.strandDrop = 0.0f;
+        const CustomRigVerdict v = AnalyzeImportedRig(r);
+        CHECK(v.importedRig);
+        CHECK(v.hairLike);
+        CHECK(v.warnings.size() >= 2);
+        bool saidDropped = false, saidBind = false;
+        for (const auto& m : v.warnings) {
+            saidDropped = saidDropped || m.find("fewer than two bones") != std::string::npos;
+            saidBind = saidBind || m.find("bind pose") != std::string::npos;
+        }
+        CHECK(saidDropped);
+        CHECK(saidBind);
+    });
+
+    test("custom hair diagnostics: head sockets and non-head sockets are told apart", [] {
+        CHECK(IsHeadAttachNode("a_n_head"));
+        CHECK(IsHeadAttachNode("a_n_headside"));
+        CHECK(IsHeadAttachNode("a_n_head_L"));
+        CHECK(IsHeadAttachNode("a_n_hair"));
+        CHECK(IsHeadAttachNode("a_n_hair_pin"));
+        CHECK(!IsHeadAttachNode("a_n_hand_r"));
+        CHECK(!IsHeadAttachNode("a_n_bust"));
+        CHECK(!IsHeadAttachNode(""));
+        CHECK(!IsHeadAttachNode("cf_j_hips"));
+        CHECK(!IsHeadAttachNode("obj"));
+    });
+}
+
 } // namespace
 
 int main() {
     unitTests();
     meshTests();
+    customHairTests();
     integrationTests();
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;

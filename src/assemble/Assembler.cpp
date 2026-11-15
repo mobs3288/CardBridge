@@ -1,6 +1,7 @@
 #include "assemble/Assembler.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
+#include "assemble/CustomHairDiag.h"
 #include "assemble/HeelConfig.h"
 #include "assemble/Proportions.h"
 #include "unity/TextureDecode.h"
@@ -626,6 +627,15 @@ struct Builder {
     // Stiletto shoe warp for the footwear item being added (bind delta for cf_j_foot binds).
     HeelConfig heelWarp;
     bool heelWarpOn = false;
+    // Imported custom-skeleton diagnostics, gathered while the item is added and reported in one
+    // place (after its bones exist). Reset at the end of each item's assembly.
+    std::set<std::string> diagBones;   // skinned bone names not on the shared skeleton (a mod's own skeleton)
+    int diagSkinned = 0;               // renderers with usable skin data
+    int diagBindIssue = 0;             // inverse bind whose scale does not match the transform hierarchy (count)
+    float diagBindErr = 0.0f;          // the worst relative error seen
+    std::map<int64_t, float> diagCum;  // cumulative geometric-mean scale of every transform in the item
+    float diagMinS = 1.0f, diagMaxS = 1.0f;
+    int diagChainsDropped = 0;         // DynamicBone chains with fewer than two scene bones; silently skipped otherwise
 
     // The embedded images are linear dumps, not sRGB authoring images (the game displays them unconverted); `colour` picks the
     // cache slot only (colour maps are the main textures the ME edit points at).
@@ -1339,9 +1349,30 @@ struct Builder {
                 ch.gravity = vec3Of(mb.fields.at("m_Gravity"));
                 ch.force = vec3Of(mb.fields.at("m_Force"));
             } else {
-                ids.push_back(rootId);
+                // The component's Root is the chain's anchor, but only when it belongs to the chain's own subtree. Both butt components in
+                // the game's body bundle point Root at the left butt bone: keeping it anchored the right butt to the left bone. When the
+                // Root does not lead its own Bones list, the list alone is the chain.
+                std::vector<int64_t> simIds;
                 for (const auto& e : mb.fields.at("Bones").asArray())
-                    if (int64_t id = pathId(e); id && id != rootId && uf.xform(id)) ids.push_back(id);
+                    if (int64_t id = pathId(e); id && uf.xform(id)) simIds.push_back(id);
+                bool rootAnchors = false;
+                {
+                    const int rootBone = rootId ? sceneBoneOf(rootId) : -1;
+                    const int first = simIds.empty() ? -1 : sceneBoneOf(simIds[0]);
+                    if (rootBone >= 0 && first >= 0) {
+                        int p = first;
+                        for (;;) {
+                            if (p == rootBone) { rootAnchors = true; break; }
+                            if (p < 0 || static_cast<size_t>(p) >= scene.bones.size()) break;
+                            const int parent = scene.bones[static_cast<size_t>(p)].parent;
+                            if (parent == p) break;
+                            p = parent;
+                        }
+                    }
+                }
+                if (rootAnchors) ids.push_back(rootId);
+                for (int64_t id : simIds)
+                    if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
                 const Value& ptns = mb.fields.at("Patterns");
                 const Value& ptn = ptns.at(static_cast<size_t>(std::max<int64_t>(0, mb.fields.at("PtnNo").asInt())));
                 const auto& params = ptn.at("Params").asArray();
@@ -1358,7 +1389,12 @@ struct Builder {
             }
             for (int64_t id : ids)
                 if (int bi = sceneBoneOf(id); bi >= 0 && std::find(ch.bones.begin(), ch.bones.end(), bi) == ch.bones.end()) ch.bones.push_back(bi);
-            if (ch.bones.size() < 2) continue;
+            if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {   // the same dump as AddPhysics', printed as the chain is built
+                std::fprintf(stderr, "addChains: part='%s' class=%s own=%d bones=", partId.c_str(), mb.className.c_str(), ch.characterOwn ? 1 : 0);
+                for (int b : ch.bones) std::fprintf(stderr, "%s ", scene.bones[static_cast<size_t>(b)].name.c_str());
+                std::fprintf(stderr, "\n");
+            }
+            if (ch.bones.size() < 2) { ++diagChainsDropped; continue; }
             // The curves only for hair and accessory chains (a ponytail stiff where it is tied, free at its tip). A garment's chains keep the
             // component's own values all along: with its curves this card's skirt was rigid down to the hem and looked frozen in MMD.
             const bool garment = partId.rfind("outfit", 0) == 0 && partId.find(".acc") == std::string::npos;
@@ -1400,11 +1436,13 @@ struct Builder {
             std::vector<std::vector<int>> groups;
             std::map<int, size_t> groupOf;
             for (int b : ch.bones) {
+                // The chain root is the outermost in-set ancestor on the way up. The Bones list can skip the driven bones between
+                // the real joints (the breast chain is [cf_j_bust01_L, cf_j_bust02_L, cf_j_bust03_L] under cf_d_bust01_L, with the
+                // driven cf_d_bust02_L / cf_d_bust03_L in between), so the climb must go THROUGH ancestors that are not in the set
+                // instead of stopping at the first one. Stopping there split the breast into one live stub and two dead singles.
                 int root = b;
-                while (true) {
-                    const int p = scene.bones[static_cast<size_t>(root)].parent;
-                    if (p >= 0 && p != root && inSet.count(p)) root = p;
-                    else break;
+                for (int p = scene.bones[static_cast<size_t>(b)].parent; p >= 0; p = scene.bones[static_cast<size_t>(p)].parent) {
+                    if (p != b && inSet.count(p)) root = p;
                 }
                 auto it = groupOf.find(root);
                 size_t g;
@@ -1461,8 +1499,27 @@ struct Builder {
         Mat4 rendererW = Wp(uf, r.xformId);
         Mat4 rootInv = inverse(W(uf, prefabRoot));
         bool skinned = r.skinned && !r.boneXforms.empty() && !mesh->skin.empty() && mesh->bindPoses.size() >= r.boneXforms.size();
+        if (skinned) ++diagSkinned;
         if (r.skinned && !skinned && !r.boneXforms.empty())
             scene.warn(partId, "renderer '" + r.name + "' has bones but no usable skin data; placed rigidly");
+        // Imported custom-skeleton diagnostics: how far the inverse bind pose scale is from the cumulative
+        // scale of the bone's own transform chain. Only binds above zero are meaningful; anything out by
+        // more than a fifth is reported as a conversion inconsistency (never silently dropped).
+        auto diagBind = [&](int64_t boneId, const Mat4& bp) {
+            if (!boneId) return;
+            const unity::Xform* bx = uf.xform(boneId);
+            const std::string bname = bx ? bx->name : std::string();
+            if (!bname.empty() && rig.world.find(bname) == rig.world.end()) diagBones.insert(bname);
+            const float c0 = std::sqrt(bp.m[0] * bp.m[0] + bp.m[4] * bp.m[4] + bp.m[8] * bp.m[8]);
+            const float c1 = std::sqrt(bp.m[1] * bp.m[1] + bp.m[5] * bp.m[5] + bp.m[9] * bp.m[9]);
+            const float c2 = std::sqrt(bp.m[2] * bp.m[2] + bp.m[6] * bp.m[6] + bp.m[10] * bp.m[10]);
+            const float bpScale = std::pow(std::max(1e-12f, std::max(1e-12f, c0) * std::max(1e-12f, c1) * std::max(1e-12f, c2)), 1.0f / 3.0f);
+            const float hierScale = diagCum.count(boneId) ? diagCum[boneId] : 1.0f;
+            if (hierScale <= 1e-12f) return;
+            const float err = std::fabs(bpScale * hierScale - 1.0f);
+            diagBindErr = std::max(diagBindErr, err);
+            if (err > 0.20f) ++diagBindIssue;
+        };
 
         // Per bone: the PMX bone index and the matrix that takes bind-pose vertices to model space.
         // Stiletto UpdateShoeWarp: foot binds pre-multiply by R(-ankle-leg)*Shear*T*S*R(ankle+leg+
@@ -1484,6 +1541,7 @@ struct Builder {
                 const unity::Xform* bx = uf.xform(bid);
                 const std::string bname = bx ? bx->name : std::string();
                 const bool isFoot = bname == "cf_j_foot_L" || bname == "cf_j_foot_R";
+                diagBind(bid, mesh->bindPoses[i]);
                 Mat4 bp = mesh->bindPoses[i];
                 if (warpOn && isFoot) bp = warpMat * bp;
                 // A garment worn through an accessory slot is bound to the body skeleton: Unity ignores the accessory node's
@@ -1504,6 +1562,7 @@ struct Builder {
             for (size_t i = 0; i < r.boneXforms.size(); ++i) {
                 const unity::Xform* bx = uf.xform(r.boneXforms[i]);
                 std::string bname = bx ? bx->name : std::string();
+                diagBind(r.boneXforms[i], mesh->bindPoses[i]);
                 int bi = bname.empty() ? -1 : scene.boneIndex(bname);
                 auto rw = rig.world.find(bname);
                 if (rw == rig.world.end() && bx && bi < 0) {   // a bone only this item has (a mod's necklace joint ...)
@@ -1989,6 +2048,31 @@ void settleHeels(Scene& scene) {
 
 
 } // namespace
+
+class UnityMaskLookup : public MaskLookup {
+public:
+    const unity::UnityFile* uf = nullptr;
+    unity::PPtr findTexture(const std::string& name) const override { return uf ? uf->findTexture(name) : unity::PPtr{}; }
+    unity::PPtr findAsset(const std::string& name) const override { return uf ? uf->findAsset(name) : unity::PPtr{}; }
+};
+
+std::shared_ptr<unity::TextureData> ResolveBodyMask(const MaskLookup& lookup, const std::string& maskName,
+                                                   const MaskDecode& decode, std::string* whyOut) {
+    // The game resolves the mask as a Texture2D by name; a same-named GameObject is not a mask. A typed lookup wins, then any
+    // asset that decodes as a texture, then the loose file the caller may have.
+    if (unity::PPtr t = lookup.findTexture(maskName); !t.isNull()) {
+        if (auto mt = decode ? decode(t) : nullptr) return mt;
+        if (whyOut) *whyOut = "body mask '" + maskName + "' in the bundle is a texture that could not be decoded";
+        return nullptr;
+    }
+    if (unity::PPtr a = lookup.findAsset(maskName); !a.isNull()) {
+        if (auto mt = decode ? decode(a) : nullptr) return mt;
+        if (whyOut) *whyOut = "body mask '" + maskName + "' in the bundle is not a texture (a same-named non-texture asset shadows the name)";
+        return nullptr;
+    }
+    if (whyOut) *whyOut = "body mask '" + maskName + "' not found in the bundle";
+    return nullptr;
+}
 
 void SettleHeels(Scene& scene) { settleHeels(scene); }
 
@@ -3060,33 +3144,28 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         b.localOv = moveOv.empty() ? nullptr : &moveOv;
 
-        // The garment's body mask: the game hides the body under clothing with an alpha mask in body UV space.
+        // The garment's body mask: the game hides the body under clothing with an alpha mask in body UV space. A same-named
+        // GameObject is not the mask (a typed lookup happens first), and an asset that will not decode as a texture is not the mask either;
+        // every failure is named, so a silently unsuppressed body never happens.
         if (ref.group == "Outfit") {
-            std::string mab = item.listItem.get("OverBodyMaskAB"), mname = item.listItem.get("OverBodyMask");
-            if (!mname.empty() && mname != "0" && !mab.empty() && mab != "0") {
+            auto resolveMask = [&](const char* abKey, const char* nameKey, std::vector<MaskSource>& into) {
+                std::string mab = item.listItem.get(abKey), mname = item.listItem.get(nameKey);
+                if (mname.empty() || mname == "0" || mab.empty() || mab == "0") return;
                 std::string w;
                 auto mb = resolver.openItemBundle(item, mab, &w);
-                if (!mb) { if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back({loose, ref.partId}); }
-                if (mb) {
-                    PPtr mp = mb->findAsset(mname);
-                    if (mp.isNull()) mp = mb->findTexture(mname);
-                    if (!mp.isNull()) { if (auto mt = b.decode(*mb, mp, ref.partId)) bodyMasks.push_back({mt, ref.partId}); }
-                    else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) bodyMasks.push_back({loose, ref.partId});
-                    else scene.warn(ref.partId, "body mask '" + mname + "' not found in " + mab);
+                if (!mb) {
+                    if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) into.push_back({loose, ref.partId});
+                    else scene.warn(ref.partId, std::string("body mask '") + mname + "' not found in " + mab);
+                    return;
                 }
-            }
-            std::string bab = item.listItem.get("OverBraMaskAB"), bname = item.listItem.get("OverBraMask");
-            if (!bname.empty() && bname != "0" && !bab.empty() && bab != "0") {
-                std::string w;
-                auto bb = resolver.openItemBundle(item, bab, &w);
-                if (!bb) { if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back({loose, ref.partId}); }
-                if (bb) {
-                    PPtr bp = bb->findAsset(bname);
-                    if (bp.isNull()) bp = bb->findTexture(bname);
-                    if (!bp.isNull()) { if (auto bt = b.decode(*bb, bp, ref.partId)) braMasks.push_back({bt, ref.partId}); }
-                    else if (auto loose = resolver.openLooseTexture(item, bab, bname, nullptr)) braMasks.push_back({loose, ref.partId});
-                }
-            }
+                UnityMaskLookup ml; ml.uf = mb.get();
+                std::string why;
+                if (auto mt = ResolveBodyMask(ml, mname, [&](const unity::PPtr& p) { return b.decode(*mb, p, ref.partId); }, &why)) into.push_back({mt, ref.partId});
+                else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) into.push_back({loose, ref.partId});
+                else scene.warn(ref.partId, why.empty() ? ("body mask '" + mname + "' not found in " + mab) : why);
+            };
+            resolveMask("OverBodyMaskAB", "OverBodyMask", bodyMasks);
+            resolveMask("OverBraMaskAB", "OverBraMask", braMasks);
         }
 
         // The game always plays the face's blend shapes (FaceBlendShape on the head prefab): eyes open, mouth closed, the
@@ -3262,6 +3341,30 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
             }
         }
+        // The cumulative geometric-mean scale of every transform in the item, so the importer diagnostics
+        // can verify each skinned bone's inverse bind against the hierarchy it was exported from.
+        {
+            const unity::Xform* rootX = uf->xform(itemRoot);
+            std::map<int64_t, std::vector<int64_t>> kids;
+            if (uf->subtree(itemRoot).size() < 4096) {
+                for (const int64_t id : uf->subtree(itemRoot))
+                    if (const unity::Xform* x = uf->xform(id)) if (x->parent) kids[x->parent].push_back(id);
+                std::vector<std::pair<int64_t, float>> stack{{itemRoot, 1.0f}};
+                while (!stack.empty()) {
+                    const auto [id, parentScale] = stack.back();
+                    stack.pop_back();
+                    const unity::Xform* x = uf->xform(id);
+                    if (!x) continue;
+                    const float gm = std::pow(std::fabs(x->scl.x) * std::fabs(x->scl.y) * std::fabs(x->scl.z), 1.0f / 3.0f);
+                    const float s = parentScale * gm;
+                    b.diagCum[id] = s;
+                    b.diagMinS = std::min(b.diagMinS, gm);
+                    b.diagMaxS = std::max(b.diagMaxS, gm);
+                    for (const int64_t c : kids[id]) stack.push_back({c, s});
+                }
+                (void)rootX;
+            }
+        }
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(itemRoot)) {
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
@@ -3420,6 +3523,38 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (mi >= 0) part.meshes.push_back(mi);
         }
         b.addItemBones(*uf, itemRoot, ref.partId, placement, staticBone, accessoryMode, itemNoShake);
+        // Imported custom-skeleton diagnostics: measure what this item is and what the converter had to assume,
+        // then report it. This pass does not change bones, weights or physics. Not loaded during Reshape (the
+        // assembled scene already carries the report as issues).
+        {
+            ImportedRigReport diag;
+            diag.partId = ref.partId;
+            diag.group = ref.group;
+            diag.attachNode = ref.attachNode;
+            diag.skinnedMeshes = b.diagSkinned;
+            diag.customBones = static_cast<int>(b.diagBones.size());
+            diag.droppedChains = b.diagChainsDropped;
+            size_t ch = 0;
+            for (const auto& c : scene.chains) if (c.part == ref.partId) ++ch;
+            diag.chains = static_cast<int>(ch);
+            diag.rootScale = rootXf ? std::min(std::fabs(rootXf->scl.x), std::min(std::fabs(rootXf->scl.y), std::fabs(rootXf->scl.z))) : 1.0f;
+            diag.minScale = b.diagMinS;
+            diag.maxScale = b.diagMaxS;
+            diag.bindScaleErr = b.diagBindErr;
+            // How far the strands hang below the node the item is attached to (model units). Only the part's own meshes count.
+            float minY = 1e30f;
+            for (size_t mi = before; mi < scene.meshes.size(); ++mi)
+                for (const auto& v : scene.meshes[mi].vertices) minY = std::min(minY, v.pos.y);
+            float anchorY = 1e30f;
+            if (ref.group == "Hair") { if (auto hw = rig.world.find("cf_J_FaceUp_ty"); hw != rig.world.end()) anchorY = hw->second.translation().y; }
+            else if (!ref.attachNode.empty()) { if (auto aw = rig.world.find(ref.attachNode); aw != rig.world.end()) anchorY = aw->second.translation().y; }
+            else if (auto hw = rig.world.find("cf_J_FaceUp_ty"); hw != rig.world.end()) anchorY = hw->second.translation().y;
+            if (minY < 1e29f && anchorY < 1e29f) diag.strandDrop = std::max(0.0f, anchorY - minY);
+            const CustomRigVerdict verdict = AnalyzeImportedRig(diag);
+            if (!verdict.headline.empty()) log(ref.partId + ": " + verdict.headline);
+            for (const auto& m : verdict.infos) scene.note(ref.partId, m);
+            for (const auto& m : verdict.warnings) scene.warn(ref.partId, m);
+        }
         if (ref.group == "Head") {   // the expressions the face component can play: every pattern of brows, eyes and mouth, closed and open
             for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                 if (mb.className != "FaceBlendShape") continue;
@@ -3493,6 +3628,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         b.stOverride.clear();
         b.blend = nullptr;
         b.meType = -1;
+        b.diagBones.clear();
+        b.diagSkinned = 0;
+        b.diagBindIssue = 0;
+        b.diagBindErr = 0.0f;
+        b.diagCum.clear();
+        b.diagMinS = 1.0f;
+        b.diagMaxS = 1.0f;
+        b.diagChainsDropped = 0;
         std::string logId = part.id, logStatus = part.status;
         size_t logMeshes = part.meshes.size();
         scene.parts.push_back(std::move(part));

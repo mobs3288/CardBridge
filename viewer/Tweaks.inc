@@ -2,6 +2,7 @@
 
 bool ReshapeNow(bool final);   // defined in Pose.inc
 void TweakEdited(int id, bool released);   // defined in Pose.inc
+void JiggleSettingsChanged();              // defined in Pose.inc
 
 // ---- tweak access ----------------------------------------------------------------------------------------------------
 // A row wraps either one float (almost all of them) or a virtual value with its own read / write: the three Body
@@ -205,7 +206,16 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kAPoseDeg) { r.v = &g.aPoseDeg; r.def = 40.0f; r.lo = 15; r.hi = 70; r.step = 1; r.percent = false; r.fmt = "%.0f"; return true; }
     if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
     if (id == kSag) { r.v = &g.sag; r.def = g.sagDefault; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
-    if (id == kJiggleIntensity) { r.v = &g.jiggleIntensity; r.def = 0.5f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleMass) { r.v = &g.jiggle.mass; r.def = 1.0f; r.lo = 0.05f; r.hi = 5.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f kg"; return true; }
+    if (id == kJiggleStiffness) { r.v = &g.jiggle.stiffness; r.def = 220.0f; r.lo = 20.0f; r.hi = 2000.0f; r.step = 5.0f; r.percent = false; r.fmt = "%.0f N/m"; return true; }
+    if (id == kJiggleDamping) { r.v = &g.jiggle.damping; r.def = 4.0f; r.lo = 0.0f; r.hi = 40.0f; r.step = 0.1f; r.percent = false; r.fmt = "%.1f N s/m"; return true; }
+    if (id == kJiggleGravity) { r.v = &g.jiggle.gravity; r.def = 1.0f; r.lo = 0.0f; r.hi = 3.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f x"; return true; }
+    if (id == kJiggleAmpVertical) { r.v = &g.jiggle.amplitudeVertical; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleAmpHorizontal) { r.v = &g.jiggle.amplitudeHorizontal; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleAmpDepth) { r.v = &g.jiggle.amplitudeDepth; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleRotation) { r.v = &g.jiggle.rotationStrength; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleStrength) { r.v = &g.jiggle.strength; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.5f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kJiggleSimHz) { r.v = &g.jiggle.simulationHz; r.def = 120.0f; r.lo = 30.0f; r.hi = 240.0f; r.step = 10.0f; r.percent = false; r.fmt = "%.0f Hz"; return true; }
     if (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())) {   // a morph of the exported PMX
         const size_t i = static_cast<size_t>(id - kMorphBase);
         r.v = &g.morphWeights[i];
@@ -264,10 +274,11 @@ const char* const kBustBandLabels[kBustBandCount] = {"65", "70", "75", "80", "85
 const char* const kBustCupLabels[kBustCupCount] = {"AA", "A", "B", "C", "D", "E", "F", "G"};
 constexpr float kNippleSizeMm[4] = {-4.0f, 0.0f, 4.0f, 8.0f};   // out/in offsets per preset; the card default is 0
 const char* const kNippleSizeLabels[4] = {"S", "M", "L", "XL"};
+const char* const kJigglePresetLabels[3] = {"Subtle", "Natural", "Dynamic"};
 
-int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : 0; }
-int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : 32; }
-int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : 2; }
+int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 3 : 0; }
+int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 62 : 32; }
+int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset ? 6 : 2; }
 RECT PresetChipRect(int rowId, int i, int y) {
     const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
     const int x = 52 + i * (w + gap);
@@ -306,12 +317,21 @@ int ActivePresetChip(int rowId) {
         for (int i = 0; i < 4; ++i) { const float d = std::fabs(r.Value() - kNippleSizeMm[i]); if (d < bestD) { bestD = d; best = i; } }
         return best;
     }
+    if (rowId == kJigglePreset) {
+        switch (assemble::MatchJigglePreset(g.jiggle)) {
+        case assemble::JigglePreset::Subtle: return 0;
+        case assemble::JigglePreset::Natural: return 1;
+        case assemble::JigglePreset::Dynamic: return 2;
+        default: return -1;   // Custom: no chip is "it"
+        }
+    }
     return -1;
 }
 const char* PresetChipText(int rowId, int i) {
     if (rowId == kBustBand && i >= 0 && i < kBustBandCount) return kBustBandLabels[i];
     if (rowId == kBustCup && i >= 0 && i < kBustCupCount) return kBustCupLabels[i];
     if (rowId == kNippleSize && i >= 0 && i < 4) return kNippleSizeLabels[i];
+    if (rowId == kJigglePreset && i >= 0 && i < 3) return kJigglePresetLabels[i];
     return "";
 }
 void ApplyPresetChip(int rowId, int chip) {
@@ -339,6 +359,18 @@ void ApplyPresetChip(int rowId, int chip) {
         std::snprintf(msg, sizeof msg, "nipple size: %s (%+.0f mm)", kNippleSizeLabels[chip], static_cast<double>(kNippleSizeMm[chip]));
         Log(msg);
         InvalidatePanel();
+        return;
+    }
+    if (rowId == kJigglePreset) {
+        chip = std::clamp(chip, 0, 2);
+        // The preset replaces the whole set; the switches (breast / butt) stay as they are.
+        g.jiggle = assemble::JigglePresetSettings(static_cast<assemble::JigglePreset>(chip));
+        char msg[64];
+        std::snprintf(msg, sizeof msg, "jiggle: %s (mass %.2f kg, stiffness %.0f N/m, damping %.1f, strength %.2f)",
+                      kJigglePresetLabels[chip], static_cast<double>(g.jiggle.mass), static_cast<double>(g.jiggle.stiffness),
+                      static_cast<double>(g.jiggle.damping), static_cast<double>(g.jiggle.strength));
+        Log(msg);
+        JiggleSettingsChanged();
     }
 }
 
