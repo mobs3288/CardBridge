@@ -103,6 +103,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     lap(2);
     // tabs ----------------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.tabs[0].top - 2, l.tabs[0].bottom + 2)) {
+        if (l.tabScrollable) s.Begin(l.tabStrip);
         for (int i = 0; i < TabCount; ++i) {
             const RECT& t = l.tabs[i];
             const bool act = !g.showIssues && g.tab == i, hot = g.hoverButton == 10 + i;
@@ -113,6 +114,17 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                 s.FillRound(t, 7, ui::kCard);
             }
             s.TextCentered(act ? g.fontBold : g.fontSmall, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
+        }
+        if (l.tabScrollable) s.Begin(clip);   // restore the outer clip
+        if (l.tabScrollable) {   // the < > scroll arrows; dim at the ends
+            const bool fullLeft = g.tabPos > 0.0f, fullRight = g.tabPos < static_cast<float>(l.tabMaxScroll) - 0.5f;
+            const int arrowsY = 216, arrowsH = 240 - 216;
+            const auto drawArrow = [&](const RECT& r, bool enabled, bool hot, bool left) {
+                s.FillRound(r, 4, hot && enabled ? ui::kLineHi : ui::kCard);
+                s.TextCentered(g.fontSmall, enabled ? (hot ? ui::kText : ui::kSub) : ui::kFaint, r, left ? "<" : ">");
+            };
+            drawArrow(l.tabLeft, fullLeft, g.hoverButton == 30, true);
+            drawArrow(l.tabRight, fullRight, g.hoverButton == 31, false);
         }
     }
 
@@ -667,6 +679,7 @@ void ShowCoordinateImportDialog(const std::string& path) {
         const std::string m = envMode;
         if (m == "clothing") { PinOutfitFile(path, 0); return; }
         if (m == "coordinate") { PinOutfitFile(path, 1); return; }
+        if (m == "selective") { SelectiveOpen(path); return; }   // the per-component preview window
         // "cancel" (or anything else, e.g. "open", which makes no sense for an outfit file): nothing changes.
         Log("coordinate import cancelled", LogKind::Info);
         return;
@@ -687,9 +700,9 @@ void ShowCoordinateImportDialog(const std::string& path) {
         instruction = L"How should \"" + wFile + L"\" be imported?";
         content =
             L"This looks like a Koikatsu Coordinate saved from the maker (an outfit file named \"" + wWho + L"\").\n"
-            L"The import goes to the outfit on screen. Neither choice writes the card to disk.\n"
+            L"The import goes to the outfit on screen. None of the choices writes the card to disk.\n"
             L"\n"
-            L"Import as Clothing:\n"
+            L"Import as Clothing (Replace All):\n"
             L"   Extracts this coordinate's outfit - clothes, accessories and makeup - and merges them\n"
             L"   onto the outfit on screen with the outfit import. Your character keeps their identity, face, body,\n"
             L"   personality, every other outfit and the hair worn as accessories.\n"
@@ -697,7 +710,12 @@ void ShowCoordinateImportDialog(const std::string& path) {
             L"Import as Coordinate:\n"
             L"   Replaces the outfit on screen with the whole coordinate, exactly as saved - clothes, accessories,\n"
             L"   makeup and their settings. Accessories are replaced too (including hair worn as accessories).\n"
-            L"   Your character's identity is not imported either way.";
+            L"   Your character's identity is not imported either way.\n"
+            L"\n"
+            L"Selective Import...:\n"
+            L"   Opens a window with three live 3D views (your character, the imported source, and the proposed\n"
+            L"   result) plus a per-component picker: add or replace individual clothes and accessories, keep your\n"
+            L"   own, or skip the source's. Nothing is applied until you press Apply.";
     } else if (busy) {
         instruction = L"\"" + wFile + L"\" cannot be imported yet";
         content =
@@ -714,13 +732,14 @@ void ShowCoordinateImportDialog(const std::string& path) {
             L"\n"
             L"The card is not written to disk either way.";
     }
-    enum { kImportClothing = 101, kImportCoordinate = 102 };
-    TASKDIALOG_BUTTON importBtns[2] = {
-        {kImportClothing, L"Import as Clothing"},
+    enum { kImportClothing = 101, kImportCoordinate = 102, kSelectiveImport = 103 };
+    TASKDIALOG_BUTTON importBtns[3] = {
+        {kImportClothing, L"Import as Clothing (Replace All)"},
         {kImportCoordinate, L"Import as Coordinate"},
+        {kSelectiveImport, L"Selective Import..."},
     };
     const TASKDIALOG_BUTTON* btns = importBtns;
-    const UINT btnCount = canImport ? 2u : 0u;
+    const UINT btnCount = canImport ? 3u : 0u;
     TASKDIALOGCONFIG cfg{};
     cfg.cbSize = sizeof(cfg);
     cfg.hwndParent = g.hwnd;
@@ -737,6 +756,7 @@ void ShowCoordinateImportDialog(const std::string& path) {
     switch (pressed) {
     case kImportClothing: PinOutfitFile(path, 0); return;
     case kImportCoordinate: PinOutfitFile(path, 1); return;
+    case kSelectiveImport: SelectiveOpen(path); return;
     default:
         Log("coordinate import cancelled; the current character is unchanged", LogKind::Info);
         return;

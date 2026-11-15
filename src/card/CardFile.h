@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <map>
 
 namespace cardbridge::card {
 
@@ -215,6 +216,10 @@ struct ApplyClothingReport {
     int accessoriesRelocated = 0;     // placed elsewhere to keep hair
     int hairPreserved = 0;            // character hair accessories kept in place
     int hairSlotsPreserved = 0;       // character hair slots (back/front/side/extension) kept
+    // The selective import: where each chosen source accessory was placed ("acc.<source slot>" -> the merged
+    // slot). Empty for the whole-outfit merge except where it also relocated; the viewer uses it to light the
+    // right part in the 3D previews (an Add can land around the character's own accessories).
+    std::map<std::string, int> placedAccessorySlots;
     std::vector<std::string> notes;
 };
 

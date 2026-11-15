@@ -87,45 +87,49 @@ std::string ProportionSummary() {
 std::vector<TweakRow> BuildProportionRows() {
     std::vector<TweakRow> rows;
     const int applied = ProportionAppliedCount();
-    rows.push_back({0, -1, "PROPORTION CORRECTION (uncorrected = faithful)", 0});
-    rows.push_back({2, kPropMaster, std::string("Correction layer: ") + (g.propEnabled ? "ON" : "OFF") + (applied ? "" : " (empty - faithful)"), 0});
-    rows.push_back({4, -1, "Corrections are a separate layer; the card is never modified.", 0});
-    rows.push_back({4, -1, "OFF: the original character is shown and exported.", 0});
-    rows.push_back({4, -1, "ON: the layer is applied to preview and PMX export (1:1).", 0});
+    rows.push_back({0, -1, "PROPORTION CORRECTION (uncorrected = faithful)", ""});
+    rows.push_back({2, kPropMaster, std::string("Correction layer: ") + (g.propEnabled ? "ON" : "OFF") + (applied ? "" : " (empty - faithful)"), ""});
+    rows.push_back({4, -1, "Corrections are a separate layer; the card is never modified.", ""});
+    rows.push_back({4, -1, "OFF: the original character is shown and exported.", ""});
+    rows.push_back({4, -1, "ON: the layer is applied to preview and PMX export (1:1).", ""});
 
-    {   // diagnostics, read-only
+    // the actionable controls first: these are what a user touches
+    rows.push_back({5, kPropActSuggest, "Suggest corrections", ""});
+    rows.push_back({5, kPropActApply, "Apply recommended corrections", ""});
+    rows.push_back({5, kPropActReset, "Reset all corrections", ""});
+
+    rows.push_back({0, -1, "PRESETS", ""});
+    rows.push_back({5, kPropPresetHead, "Preset: normalize head proportions", ""});
+    rows.push_back({5, kPropPresetBody, "Preset: normalize body proportions", ""});
+    rows.push_back({5, kPropPresetFace, "Preset: normalize facial proportions", ""});
+    rows.push_back({5, kPropPresetOverall, "Preset: normalize overall proportions", ""});
+
+    {   // diagnostics, read-only (first few; the full list is in the issues panel as [proportions])
         std::string head = "DIAGNOSTICS";
         if (!g.propFindings.empty()) head += " (" + std::to_string(g.propFindings.size()) + ")";
-        rows.push_back({0, -1, head, 0});
-        if (g.propFindings.empty()) rows.push_back({4, -1, "Nothing flagged - the card looks proportionate.", 0});
+        rows.push_back({0, -1, head, ""});
+        if (g.propFindings.empty()) rows.push_back({4, -1, "Nothing flagged - the card looks proportionate.", ""});
+        constexpr size_t kMaxShown = 8;
+        size_t i = 0;
         for (const auto& f : g.propFindings) {
+            if (++i > kMaxShown) { rows.push_back({4, -1, "... and " + std::to_string(g.propFindings.size() - kMaxShown) + " more (see the issues panel, [proportions])", ""}); break; }
             std::string line = "[" + ProportionSafetyTag(f.safety) + "] " + f.property + " - " + f.reason;
-            rows.push_back({4, -1, line, 0});
-            if (!f.suggestion.empty()) rows.push_back({4, -1, "    -> " + f.suggestion, 0});
+            rows.push_back({4, -1, line, ""});
+            if (!f.suggestion.empty()) rows.push_back({4, -1, "    -> " + f.suggestion, ""});
         }
     }
 
     {   // suggested corrections, per-row apply/revert switches
         std::string head = "SUGGESTED CORRECTIONS";
         if (!g.propSugs.empty()) head += " (" + std::to_string(g.propSugs.size()) + ")";
-        rows.push_back({0, -1, head, 0});
+        rows.push_back({0, -1, head, ""});
         if (g.propSugs.empty()) {
-            rows.push_back({4, -1, "None yet. \"Suggest corrections\" re-checks this card.", 0});
+            rows.push_back({4, -1, "None yet. \"Suggest corrections\" re-checks this card.", ""});
         } else {
             for (size_t i = 0; i < g.propSugs.size(); ++i)
-                rows.push_back({2, kPropSugs0 + static_cast<int>(i), g.propSugs[i].op.label + "  [" + ProportionSafetyTag(g.propSugs[i].op.safety) + "]", 0});
+                rows.push_back({2, kPropSugs0 + static_cast<int>(i), g.propSugs[i].op.label + "  [" + ProportionSafetyTag(g.propSugs[i].op.safety) + "]", ""});
         }
     }
-
-    rows.push_back({5, kPropActSuggest, "Suggest corrections", 0});
-    rows.push_back({5, kPropActApply, "Apply recommended corrections", 0});
-    rows.push_back({5, kPropActReset, "Reset all corrections", 0});
-
-    rows.push_back({0, -1, "PRESETS", 0});
-    rows.push_back({5, kPropPresetHead, "Preset: normalize head proportions", 0});
-    rows.push_back({5, kPropPresetBody, "Preset: normalize body proportions", 0});
-    rows.push_back({5, kPropPresetFace, "Preset: normalize facial proportions", 0});
-    rows.push_back({5, kPropPresetOverall, "Preset: normalize overall proportions", 0});
     return rows;
 }
 

@@ -178,8 +178,10 @@ void Frame() {
     const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
     const bool c = EaseScroll(g.matPos, g.matScroll, dt);
     const bool wbList = EaseScroll(g.wbMatPos, g.wbMatScroll, dt);   // the workbench's own list
-    g.animating = a || b || c || wbList;
+    const bool tabMove = EaseScroll(g.tabPos, g.tabScroll, dt);     // the tab strip's horizontal scroll
+    g.animating = a || b || c || wbList || tabMove;
     if (g.animating) InvalidateList();
+    if (tabMove) InvalidatePanelBand(214, 242);
     if (wbList) InvalidateWbList();
     // While a job runs, Frame is the single painter for the bar (~30/s): it
     // repaints the overlay card, the strip and the footer hint, so worker
@@ -211,7 +213,11 @@ void DumpTestLayout() {
     j["rowH"] = kRowH;
     j["tab"] = g.tab;
     j["tabs"] = nlohmann::json::array();
-    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2});
+    j["tabScrollable"] = l.tabScrollable;
+    j["tabStrip"] = {l.tabStrip.left, l.tabStrip.top, l.tabStrip.right, l.tabStrip.bottom};
+    j["tabMaxScroll"] = l.tabMaxScroll;
+    j["tabScroll"] = g.tabScroll;
+    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, l.tabs[i].left >= l.tabStrip.left - 2 && l.tabs[i].right <= l.tabStrip.right + 2});
     j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     // The Optimize tab's controls (centre of each hit area), for scripted runs and the smoke test.
@@ -323,6 +329,8 @@ void DumpTestLayout() {
         j["clothingPath"] = g.clothingPath;
         j["clothingName"] = g.clothingName;
         j["clothingOutfit"] = g.clothingOutfit;
+        j["clothingMode"] = g.clothingMode;
+        j["selectiveDecisions"] = g.selectiveDecisions.size();
     }
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
@@ -379,6 +387,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 15) SaveMatFile();
         else if (wp == 16) LoadMatFile();
         else if (wp == 12) ResetClothing();   // reset the imported outfit to the card default
+        else if (wp == 20) {   // open the Selective Import window for the file in CARDBRIDGE_SELECTIVE_SRC
+            const char* src = std::getenv("CARDBRIDGE_SELECTIVE_SRC");
+            if (src && *src) SelectiveOpen(Slashes(src));
+        }
+        else if (wp == 21) SelApply();   // apply (only reached through the validation guard)
+        else if (wp == 22) SelectiveClose();   // close the selective import window
+        else if (wp == 24) {   // show the drop-time import dialog for the file in CARDBRIDGE_SELECTIVE_SRC (the modal harness must Dismiss it)
+            const char* src = std::getenv("CARDBRIDGE_SELECTIVE_SRC");
+            if (src && *src) ShowCoordinateImportDialog(Slashes(src));
+        }
         else if (wp == 10) DumpTestLayout();
         else if (wp == 11) {   // the nude body on, and the camera close on the chest (lp = pan up, in thousandths of the window height)
             if (std::shared_ptr<Loaded> L = Current())
@@ -641,6 +659,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             int button = ButtonAt(l, x, y);
+            if (l.tabScrollable && y >= 214 && y < 242) {   // the tab strip scrolls horizontally: arrows nudge, a drag moves it, a tap switches the tab
+                if (button == 30) { g.tabScroll = std::max(0, g.tabScroll - 88); InvalidatePanelBand(214, 242); return 0; }
+                if (button == 31) { g.tabScroll = std::min(l.tabMaxScroll, g.tabScroll + 88); InvalidatePanelBand(214, 242); return 0; }
+                g.tabDragging = true;
+                g.tabDragMoved = false;
+                g.tabDragAnchor = x;
+                g.tabDragStart = g.tabPos;
+                SetCapture(hwnd);
+                return 0;
+            }
             if (button == 1) { OpenCard(); return 0; }
             if (button == 2) { ExportFolderIfNeeded(); return 0; }
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
@@ -801,6 +829,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (g.tabDragging) {   // a press on the tab strip: a horizontal drag scrolls it
+            const int dx = x - g.tabDragAnchor;
+            if (!g.tabDragMoved && std::abs(dx) > 4) g.tabDragMoved = true;
+            if (g.tabDragMoved) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                const PanelLayout l = Lay(rc.bottom);
+                const float want = std::clamp(g.tabDragStart - static_cast<float>(dx), 0.0f, static_cast<float>(l.tabMaxScroll));
+                g.tabScroll = static_cast<int>(std::lround(want));
+                g.tabPos = static_cast<float>(g.tabScroll);
+                InvalidatePanelBand(214, 242);
+            }
+            return 0;
+        }
         if (g.listPressY >= 0) {   // a press in the list: a vertical drag scrolls it (the row's click is swallowed by the drag)
             const int dy = y - g.listPressY, dx = x - g.listPressX;
             if (!g.listScroll && std::abs(dy) > 4 && std::abs(dy) >= std::abs(dx)) {
@@ -1031,6 +1073,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        if (g.tabDragging) {   // a press on the scrollable tab strip: a drag scrolls it, a tap switches the tab
+            const bool tap = !g.tabDragMoved;
+            g.tabDragging = false;
+            g.tabDragMoved = false;
+            ReleaseCapture();
+            if (tap) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                const PanelLayout l = Lay(rc.bottom);
+                const int button = ButtonAt(l, x, y);
+                if (button >= 10 && button != 20 && button != 30 && button != 31) {
+                    g.showIssues = false;
+                    g.tab = button - 10;
+                    g.partScroll = 0;
+                    g.partPos = 0;
+                    g.hoverRow = g.hoverPart = -1;
+                    InvalidatePanel();
+                }
+            }
+            return 0;
+        }
         if (g.listScroll) {   // the list was dragged: the row's click is swallowed by the drag
             g.listScroll = false;
             g.listPressY = -1;
@@ -1125,6 +1189,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
+            if (l.tabScrollable && pt.y >= 214 && pt.y < 242) {   // over the tab strip: the wheel scrolls it horizontally
+                g.tabScroll = std::clamp(g.tabScroll - (d > 0 ? 48 : -48), 0, l.tabMaxScroll);
+                InvalidatePanelBand(214, 242);
+                return 0;
+            }
             if (pt.y >= l.logTop) {
                 std::lock_guard<std::mutex> lk(g.logMu);   // Log() touches logScroll from worker threads
                 int visible = std::max(1, (l.logBottom - (l.logTop + 24)) / 15);
@@ -1323,6 +1392,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        // The Selective Import window is this window's owned window: close it first too (it does not quit the process).
+        if (g.sel.hwnd) SelectiveClose();
         // The Material Workbench is this window's owned window: close it first (it
         // does not quit the process, this window does).
         if (g.matHwnd) {

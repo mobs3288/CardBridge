@@ -1,4 +1,5 @@
 #include "card/CardFile.h"
+#include "card/ClothingMerge.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -113,6 +114,108 @@ Value decodeCoordinate(const Bytes& blob, Outfit& out) {
 }
 
 } // namespace
+bool isEmptyAcc(const Value& part) {
+    if (!part.isMap()) return true;
+    const int type = static_cast<int>(part.at("type").asInt(120));
+    const int64_t id = part.at("id").asInt(0);
+    return type == 120 || id == 0;
+}
+
+void setPartId(Value& part, int64_t id) {
+    if (!part.isMap()) return;
+    for (auto& kv : part.map())
+        if (kv.first.isStr() && kv.first.asStr() == "id") { kv.second = Value(id); return; }
+}
+
+// An empty accessory slot to pad merged lists: a clone of a known empty part
+// when there is one, else a minimal type-120 part (ItemsFromCard skips it).
+Value emptyAccPart(const Value& a, const Value& b) {
+    auto findEmpty = [](const Value& v) -> const Value* {
+        if (!v.isMap()) return nullptr;
+        const Value& parts = v.at("parts");
+        if (!parts.isArray()) return nullptr;
+        for (const auto& p : parts.asArray()) if (isEmptyAcc(p)) return &p;
+        return nullptr;
+    };
+    if (const Value* p = findEmpty(a)) return *p;
+    if (const Value* p = findEmpty(b)) return *p;
+    // Minimal: type / id / parentKey are all a reader needs for an empty slot.
+    Value::Array colors[4];
+    Value::Array color;
+    for (int k = 0; k < 4; ++k) { Value::Array rgba; for (int j = 0; j < 4; ++j) rgba.emplace_back(1.0); colors[k] = rgba; color.emplace_back(colors[k]); }
+    Value::Array flat;
+    for (int k = 0; k < 2; ++k) for (int r = 0; r < 3; ++r) { Value::Array v3; for (int j = 0; j < 3; ++j) v3.emplace_back(r == 2 ? 1.0 : 0.0); flat.emplace_back(v3); }
+    Value::Array addMove{Value(int64_t{2}), Value(int64_t{3}), Value(std::move(flat))};
+    Value::Map part;
+    part.emplace_back(Value(std::string("type")), Value(int64_t{120}));
+    part.emplace_back(Value(std::string("id")), Value(int64_t{0}));
+    part.emplace_back(Value(std::string("parentKey")), Value(std::string("")));
+    part.emplace_back(Value(std::string("color")), Value(color));
+    part.emplace_back(Value(std::string("addMove")), Value(std::move(addMove)));
+    return Value(std::move(part));
+}
+
+// Find in a raw map (string keys only); nullptr when absent or not a map.
+int clothesSlotOfProperty(const std::string& property) {
+    static const char* kProp[9] = {"ClothesTop", "ClothesBot", "ClothesBra", "ClothesShorts", "ClothesGloves",
+                                   "ClothesPants", "ClothesSocks", "ClothesShoesInner", "ClothesShoesOuter"};
+    for (int i = 0; i < 9; ++i) if (property.find(kProp[i]) != std::string::npos) return i;
+    if (property.find("Sub") != std::string::npos) return 0;   // the top's jacket/sailor sub-parts follow the top
+    return -1;
+}
+
+// The shared local -> author-slot translation of a clothes Value: the nine slot ids, the pattern
+// ids of each colorInfo entry, and subPartsId. Every slot is translated (a whole-file merge takes
+// everything); the selective merge overwrites the kept slots with the target's parts afterwards.
+// Bumps rep.clothesReplaced for each slot whose id differs from `oldParts`.
+// The key the report uses for a source accessory slot ("acc.03").
+std::string accessoryKey(size_t i) {
+    char num[8];
+    std::snprintf(num, sizeof num, "%02zu", i);
+    return std::string("acc.") + num;
+}
+
+void translateOutfitClothesIds(Value& newClothes, const std::map<int64_t, int64_t>& localToSlot,
+                               const Value& oldParts, ApplyClothingReport& rep) {
+    auto translate = [&](int64_t id) -> int64_t {
+        auto it = localToSlot.find(id);
+        return it == localToSlot.end() ? id : it->second;
+    };
+    if (!newClothes.isMap() || !newClothes.at("parts").isArray()) return;
+    for (auto& kv : newClothes.map())
+        if (kv.first.isStr() && kv.first.asStr() == "parts" && kv.second.isArray()) {
+            for (size_t i = 0; i < kv.second.array().size(); ++i) {
+                Value& part = kv.second.array()[i];
+                const int64_t oldId = part.at("id").asInt(0);
+                const int64_t newId = translate(oldId);
+                if (newId != oldId) setPartId(part, newId);
+                // Each garment's four colour slots also carry a pattern id, stored the
+                // same session-local way (the outfit's resolver rows name it
+                // "ChaFileClothes.<Slot>Pattern0" etc.). Without translating it the
+                // resolver never finds the pattern, the pattern mask stays empty and
+                // the garment loses its pattern colours (the gold trim baked as the
+                // base colour instead: the Wiz H bug).
+                if (part.isMap())
+                    for (auto& pk : part.map())
+                        if (pk.first.isStr() && pk.first.asStr() == "colorInfo" && pk.second.isArray())
+                            for (auto& ci : pk.second.array())
+                                if (ci.isMap())
+                                    for (auto& ck : ci.map())
+                                        if (ck.first.isStr() && ck.first.asStr() == "pattern") {
+                                            const int64_t newPat = translate(ck.second.asInt(0));
+                                            if (newPat != ck.second.asInt(0)) ck.second = Value(newPat);
+                                            break;
+                                        }
+                const Value& oldP = oldParts.isArray() && i < oldParts.size() ? oldParts.at(i) : Value::nil();
+                if (oldP.at("id").asInt(0) != newId) ++rep.clothesReplaced;
+            }
+        }
+    for (auto& kv : newClothes.map())
+        if (kv.first.isStr() && kv.first.asStr() == "subPartsId" && kv.second.isArray())
+            for (auto& e : kv.second.array()) e = Value(translate(e.asInt()));
+}
+
+
 
 const char* ImageSourceKindName(ImageSourceKind k) {
     switch (k) {
@@ -436,47 +539,6 @@ bool containsLower(const std::string& s, const char* sub) {
     return h.find(n) != std::string::npos;
 }
 
-bool isEmptyAcc(const Value& part) {
-    if (!part.isMap()) return true;
-    const int type = static_cast<int>(part.at("type").asInt(120));
-    const int64_t id = part.at("id").asInt(0);
-    return type == 120 || id == 0;
-}
-
-void setPartId(Value& part, int64_t id) {
-    if (!part.isMap()) return;
-    for (auto& kv : part.map())
-        if (kv.first.isStr() && kv.first.asStr() == "id") { kv.second = Value(id); return; }
-}
-
-// An empty accessory slot to pad merged lists: a clone of a known empty part
-// when there is one, else a minimal type-120 part (ItemsFromCard skips it).
-Value emptyAccPart(const Value& a, const Value& b) {
-    auto findEmpty = [](const Value& v) -> const Value* {
-        if (!v.isMap()) return nullptr;
-        const Value& parts = v.at("parts");
-        if (!parts.isArray()) return nullptr;
-        for (const auto& p : parts.asArray()) if (isEmptyAcc(p)) return &p;
-        return nullptr;
-    };
-    if (const Value* p = findEmpty(a)) return *p;
-    if (const Value* p = findEmpty(b)) return *p;
-    // Minimal: type / id / parentKey are all a reader needs for an empty slot.
-    Value::Array colors[4];
-    Value::Array color;
-    for (int k = 0; k < 4; ++k) { Value::Array rgba; for (int j = 0; j < 4; ++j) rgba.emplace_back(1.0); colors[k] = rgba; color.emplace_back(colors[k]); }
-    Value::Array flat;
-    for (int k = 0; k < 2; ++k) for (int r = 0; r < 3; ++r) { Value::Array v3; for (int j = 0; j < 3; ++j) v3.emplace_back(r == 2 ? 1.0 : 0.0); flat.emplace_back(v3); }
-    Value::Array addMove{Value(int64_t{2}), Value(int64_t{3}), Value(std::move(flat))};
-    Value::Map part;
-    part.emplace_back(Value(std::string("type")), Value(int64_t{120}));
-    part.emplace_back(Value(std::string("id")), Value(int64_t{0}));
-    part.emplace_back(Value(std::string("parentKey")), Value(std::string("")));
-    part.emplace_back(Value(std::string("color")), Value(color));
-    part.emplace_back(Value(std::string("addMove")), Value(std::move(addMove)));
-    return Value(std::move(part));
-}
-
 // Find in a raw map (string keys only); nullptr when absent or not a map.
 const Value* mapFind(const Value::Map& map, const char* key) {
     for (const auto& kv : map)
@@ -701,7 +763,8 @@ std::string withOutfitPrefix(const std::string& property, int outfit) {
 // bins verbatim (their extra keys survive) and the rebased rows the merge added are
 // appended.
 void syncExtendedResolvedRows(Card& card, int dstOutfit, const std::vector<ResolveRow>& appended,
-                              const std::set<int>* replacedAcc /*nullptr: drop ALL rows of the outfit*/) {
+                              const std::set<int>* replacedAcc /*nullptr: drop ALL rows of the outfit*/,
+                              const std::set<int>* clothesSlots /*nullptr: drop ALL clothes rows of the outfit*/) {
     const std::string prefix = "outfit" + std::to_string(dstOutfit) + ".";
     if (!card.extended.isMap()) card.extended = Value(Value::Map{});
     bool hasUar = false;
@@ -729,8 +792,10 @@ void syncExtendedResolvedRows(Card& card, int dstOutfit, const std::vector<Resol
                 const std::string prop = row.at("Property").asStr();
                 bool drop = false;
                 if (prop.rfind(prefix, 0) == 0) {
-                    if (prop.find("ChaFileClothes.") != std::string::npos) drop = true;
-                    else if (prop.find("ChaFileAccessory.") != std::string::npos &&
+                    if (prop.find("ChaFileClothes.") != std::string::npos) {
+                        const int s = clothesSlotOfProperty(prop);
+                        if (!clothesSlots || (s >= 0 && clothesSlots->count(s))) drop = true;   // nullptr: every clothes row (old behaviour)
+                    } else if (prop.find("ChaFileAccessory.") != std::string::npos &&
                              (!replacedAcc || replacedAcc->count(accessoryIndexOfProperty(prop)) != 0)) drop = true;
                 }
                 if (!drop) outInfo.emplace_back(raw);   // verbatim: extra keys, other coordinates
@@ -787,7 +852,7 @@ void syncExtendedResolvedRows(Card& card, int dstOutfit, const std::vector<Resol
 // encoded bin, or empty when the source list is absent.
 Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
                   const std::vector<int>& clothToMerged, const std::map<int64_t, int64_t>& texRemap,
-                  int srcCoordinate = 0) {
+                  int srcCoordinate = 0, const std::set<int>* clothesSlots = nullptr) {
     const Value& srcBin = clothingPayload.at(key);
     if (!srcBin.isBin() || srcBin.asBin().empty()) return Bytes{};
     Value list;
@@ -813,6 +878,8 @@ Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
             if (merged < 0) continue;   // the outfit slot was empty: nothing to edit
             setKeyInt("Slot", merged);
         }
+        // A kept clothes slot's paint never travels into the selective import (it would repaint the garment the user kept).
+        if (objectType == 1 && clothesSlots && !clothesSlots->count(static_cast<int>(slot))) continue;
         if (std::string(key) == "MaterialTexturePropertyList" && row.has("TexID")) {
             const Value& t = row.at("TexID");
             if (t.isInt()) {
@@ -834,7 +901,8 @@ Bytes mergeMeList(const Value& clothingPayload, const char* key, int target,
 // every accessory row of the target coordinate regardless of `replacedAcc`
 // (used by a wholesale coordinate import). Returns the filtered list as
 // bytes, or an empty vector when the value is not a bin array.
-Bytes dropReplacedMeRows(const Value& listBin, int outfit, const std::set<int>& replacedAcc, bool* droppedAny = nullptr, bool dropAllAccRows = false) {
+Bytes dropReplacedMeRows(const Value& listBin, int outfit, const std::set<int>& replacedAcc, bool* droppedAny = nullptr, bool dropAllAccRows = false,
+                         const std::set<int>* clothesSlots = nullptr) {
     if (droppedAny) *droppedAny = false;
     if (!listBin.isBin() || listBin.asBin().empty()) return Bytes{};
     Value list;
@@ -849,7 +917,12 @@ Bytes dropReplacedMeRows(const Value& listBin, int outfit, const std::set<int>& 
         const int64_t objectType = row.at("ObjectType").asInt(-1);
         const int64_t slot = row.at("Slot").asInt(0);
         // Clothing (type 1) went wholesale; accessories (type 2) went where the outfit replaced them.
-        if (objectType == 1 || (objectType == 2 && (dropAllAccRows || replacedAcc.count(static_cast<int>(slot))))) { dropped = true; continue; }
+        if (objectType == 1) {
+            if (!clothesSlots || clothesSlots->count(static_cast<int>(slot))) { dropped = true; continue; }   // nullptr: the whole outfit (old behaviour); a kept slot keeps its paint
+            kept.emplace_back(row);
+            continue;
+        }
+        if (objectType == 2 && (dropAllAccRows || replacedAcc.count(static_cast<int>(slot)))) { dropped = true; continue; }
         kept.emplace_back(row);
     }
     if (droppedAny) *droppedAny = dropped;
@@ -1042,7 +1115,8 @@ bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::v
 void mergeMaterialEditorPayloads(Card& card, const Value& srcExtended, int dstOutfit,
                                  const std::vector<int>& clothToMerged, int srcCoordinate,
                                  const std::set<int>& replacedAcc, bool dropAllAccRows,
-                                 std::vector<std::string>& notes) {
+                                 std::vector<std::string>& notes,
+                                 const std::set<int>* clothesSlots /*nullptr = every clothes slot was replaced (old behaviour)*/) {
     const Value& srcMe = srcExtended.isMap() ? srcExtended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1)) : Value::nil();
     if (!srcMe.isMap() && !dropAllAccRows) return;
     const Value& charMe = card.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1));
@@ -1092,12 +1166,12 @@ void mergeMaterialEditorPayloads(Card& card, const Value& srcExtended, int dstOu
         setPayloadBin("TextureDictionary", MsgPackPack(Value(std::move(dict))));
     }
     for (const char* key : kMeLists) {
-        const Bytes rows = srcMe.isMap() ? mergeMeList(srcMe, key, dstOutfit, clothToMerged, texRemap, srcCoordinate) : Bytes{};
+        const Bytes rows = srcMe.isMap() ? mergeMeList(srcMe, key, dstOutfit, clothToMerged, texRemap, srcCoordinate, clothesSlots) : Bytes{};
         const Value& cur = charMe.isMap() ? charMe.at(key) : Value::nil();
         // The coordinate's own paint belonged to the outfit that was replaced:
         // drop it before merging the source's, or the new garments are repainted with the old ones' textures.
         bool paintDropped = false;
-        const Bytes kept = dropReplacedMeRows(cur, dstOutfit, replacedAcc, &paintDropped, dropAllAccRows);
+        const Bytes kept = dropReplacedMeRows(cur, dstOutfit, replacedAcc, &paintDropped, dropAllAccRows, clothesSlots);
         const Value keptValue = kept.empty() ? cur : Value(std::move(kept));
         if (rows.empty()) {
             if (paintDropped && keptValue.isBin()) { anyDropped = true; setPayloadBin(key, keptValue.asBin()); }
@@ -1159,9 +1233,32 @@ std::map<std::string, std::pair<Bytes, bool>> parseCoordinateOverlays(const Valu
 // The target coordinate's garment paint is dropped (it belonged to the outfit
 // that was replaced), all other coordinates keep theirs, and the source's
 // paint is stored under the target outfit's index.
+// `importedClothesSlots` (nullptr = the whole outfit was replaced): the selective import wants
+// this coordinate's paint for *kept* garments to survive, and the source's paint to travel only
+// for the garments the user chose to import. `accessoryImported` governs overlays whose garment
+// is not one of the nine clothes garments (almost always accessory paint); the source's travel
+// only when an accessory is imported too.
 void mergeKcoxPayloads(Card& card, const Value& srcExtended, int srcCoordinate, int dstOutfit,
-                       std::vector<std::string>& notes) {
+                       std::vector<std::string>& notes,
+                       const std::set<int>* importedClothesSlots /*nullptr = the whole outfit (old behaviour)*/,
+                       bool accessoryImported /*only read when importedClothesSlots != nullptr*/) {
     const auto srcOverlays = parseCoordinateOverlays(srcExtended, srcCoordinate);
+    const auto charOverlays = parseCoordinateOverlays(card.extended, dstOutfit);   // this coordinate's previous paint
+    const bool wholesale = importedClothesSlots == nullptr;
+    auto garmentSlot = [](const std::string& g) -> int {
+        static const char* kGarmentNames[] = {"ct_clothesTop", "ct_clothesBot", "ct_bra", "ct_shorts", "ct_gloves",
+                                              "ct_panst", "ct_socks", "ct_shoes_inner", "ct_shoes_outer"};
+        static const char* kSubNames[] = {"ct_top_parts_A", "ct_top_parts_B", "ct_top_parts_C"};
+        for (int i = 0; i < 9; ++i) if (g == kGarmentNames[i]) return i;
+        for (int k = 0; k < 3; ++k) if (g == kSubNames[k]) return 0;   // top sub-parts follow the top
+        return -1;   // not a clothes garment (an accessory, or something we cannot slot)
+    };
+    auto travels = [&](const std::string& g) {
+        if (wholesale) return true;
+        const int slot = garmentSlot(g);
+        if (slot >= 0) return importedClothesSlots->count(slot) != 0;
+        return accessoryImported;
+    };
     const bool srcHasKcox = srcExtended.at("KCOX").at(size_t(1)).isMap() && srcExtended.at("KCOX").at(size_t(1)).at("Overlays").isBin();
     Value::Map outer;
     Value::Map charPayload;
@@ -1178,16 +1275,22 @@ void mergeKcoxPayloads(Card& card, const Value& srcExtended, int srcCoordinate, 
             try { prev = MsgPackParse(charKcox.at("Overlays").asBin()); } catch (const FormatError&) {}
             if (prev.isMap()) {
                 for (const auto& kv : prev.asMap()) {
-                    // Character form is {coordinate: {...}}; a {garment: ...}
-                    // form has no coordinate to keep, so it is dropped with the target.
+                    // Character form is {coordinate: {...}}; other coordinates stay verbatim.
+                    // This coordinate's garments (and a flat {garment: ...} form) are re-decided per garment below.
                     if (kv.first.isInt() && kv.first.asInt() != static_cast<int64_t>(dstOutfit)) outer.emplace_back(kv.first, kv.second);
                 }
             }
         }
     }
-    if (!srcOverlays.empty()) {
+    std::map<std::string, std::pair<Bytes, bool>> mergedOverlays;
+    if (!wholesale)
+        for (const auto& kv : charOverlays)
+            if (!travels(kv.first)) mergedOverlays.emplace(kv.first, kv.second);   // paint on a kept garment stays
+    for (const auto& kv : srcOverlays)
+        if (travels(kv.first)) mergedOverlays.emplace(kv.first, kv.second);   // paint of an imported garment travels (overriding the kept one)
+    if (!mergedOverlays.empty()) {
         Value::Map garments;
-        for (const auto& kv : srcOverlays) {
+        for (const auto& kv : mergedOverlays) {
             Value::Array ga{Value(kv.second.first), Value(kv.second.second)};
             garments.emplace_back(Value(kv.first), Value(std::move(ga)));
         }
@@ -1212,12 +1315,18 @@ void mergeKcoxPayloads(Card& card, const Value& srcExtended, int srcCoordinate, 
         Value::Array entryV{Value(kcoxVersion), Value(std::move(charPayload))};
         card.extended.map().emplace_back(Value(std::string("KCOX")), Value(std::move(entryV)));
     }
-    if (!srcOverlays.empty())
-        notes.emplace_back("KoiClothesOverlayX: source's garment paint merged");
-    else if (srcHasKcox)
-        notes.emplace_back("KoiClothesOverlayX: source's garment paint cleared (no overlays in the source)");
-    else if (charHasKcox)
-        notes.emplace_back("KoiClothesOverlayX: previous outfit's garment paint cleared (the source has no overlays)");
+    if (wholesale) {
+        if (!srcOverlays.empty())
+            notes.emplace_back("KoiClothesOverlayX: source's garment paint merged");
+        else if (srcHasKcox)
+            notes.emplace_back("KoiClothesOverlayX: source's garment paint cleared (no overlays in the source)");
+        else if (charHasKcox)
+            notes.emplace_back("KoiClothesOverlayX: previous outfit's garment paint cleared (the source has no overlays)");
+    } else if (!srcOverlays.empty()) {
+        notes.emplace_back("KoiClothesOverlayX: source's garment paint merged (only the imported garments)");
+    } else if (charHasKcox && !charOverlays.empty()) {
+        notes.emplace_back("KoiClothesOverlayX: the kept garments' paint kept (nothing imported was painted)");
+    }
 }
 
 // --- source KKEx coordinate-scoped payloads ------------------------------
@@ -2291,39 +2400,7 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
     Value newClothes = clothes.outfit.clothes;
     {
         const Value& oldParts = target.clothes.at("parts");
-        if (newClothes.isMap() && newClothes.at("parts").isArray()) {
-            for (auto& kv : newClothes.map())
-                if (kv.first.isStr() && kv.first.asStr() == "parts" && kv.second.isArray()) {
-                    for (size_t i = 0; i < kv.second.array().size(); ++i) {
-                        Value& part = kv.second.array()[i];
-                        const int64_t oldId = part.at("id").asInt(0);
-                        const int64_t newId = translate(oldId);
-                        if (newId != oldId) setPartId(part, newId);
-                        // Each garment's four colour slots also carry a pattern id, stored the
-                        // same session-local way (the outfit's resolver rows name it
-                        // "ChaFileClothes.<Slot>Pattern0" etc.). Without translating it the
-                        // resolver never finds the pattern, the pattern mask stays empty and
-                        // the garment loses its pattern colours (the gold trim baked as the
-                        // base colour instead: the Wiz H bug).
-                        if (part.isMap())
-                            for (auto& pk : part.map())
-                                if (pk.first.isStr() && pk.first.asStr() == "colorInfo" && pk.second.isArray())
-                                    for (auto& ci : pk.second.array())
-                                        if (ci.isMap())
-                                            for (auto& ck : ci.map())
-                                                if (ck.first.isStr() && ck.first.asStr() == "pattern") {
-                                                    const int64_t newPat = translate(ck.second.asInt(0));
-                                                    if (newPat != ck.second.asInt(0)) ck.second = Value(newPat);
-                                                    break;
-                                                }
-                        const Value& oldP = oldParts.isArray() && i < oldParts.size() ? oldParts.at(i) : Value::nil();
-                        if (oldP.at("id").asInt(0) != (newId)) ++rep.clothesReplaced;
-                    }
-                }
-            for (auto& kv : newClothes.map())
-                if (kv.first.isStr() && kv.first.asStr() == "subPartsId" && kv.second.isArray())
-                    for (auto& e : kv.second.array()) e = Value(translate(e.asInt()));
-        }
+        translateOutfitClothesIds(newClothes, localToSlot, oldParts, rep);
     }
     target.clothes = newClothes;
 
@@ -2397,6 +2474,8 @@ ApplyClothingReport ApplyClothing(Card& card, const ClothingFile& clothes, const
         clothToMerged[i] = static_cast<int>(i);
         ++rep.accessoriesAdded;
     }
+    for (size_t i = 0; i < clothToMerged.size(); ++i)
+        if (clothToMerged[i] >= 0) rep.placedAccessorySlots[accessoryKey(i)] = clothToMerged[i];
     // Count every character hair accessory that survived (kept or relocated around).
     {
         rep.hairPreserved = 0;

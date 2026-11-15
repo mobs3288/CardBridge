@@ -17,6 +17,7 @@
 #include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
+#include "card/SelectiveImport.h"
 #include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
 #include "core/FileIo.h"
@@ -3436,6 +3437,321 @@ void unitTests() {
         bool hasTopPatRow = false;
         for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesTopPattern0" && r.slot == 2016115) hasTopPatRow = true;
         CHECK(hasTopPatRow);  // resolver can find the translated pattern
+    });
+
+    // ---- selective clothing import (the per-component workflow) ------------------------------------
+    // The source fixture: a nurse outfit (top, skirt, stockings, stilettos) + one necklace, like the
+    // whole-file clothing tests use. The tests capture the factories by value (non-capturing lambdas),
+    // so the stored test callbacks never dangle.
+    auto nurseClothesFile = [] {
+        auto clothPart = [](int64_t id) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("colorInfo")), Value(Value::Array{}));
+            return Value(std::move(m));
+        };
+        auto mkClothes = [&](std::initializer_list<int64_t> ids) {
+            Value::Array parts;
+            for (int64_t id : ids) parts.push_back(clothPart(id));
+            while (parts.size() < 9) parts.push_back(clothPart(0));
+            Value::Array sub{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})};
+            Value::Map m;
+            m.emplace_back(Value(std::string("parts")), Value(std::move(parts)));
+            m.emplace_back(Value(std::string("subPartsId")), Value(std::move(sub)));
+            return Value(std::move(m));
+        };
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        auto mkAcc = [&](std::initializer_list<Value> parts) {
+            Value::Array arr(parts.begin(), parts.end());
+            while (arr.size() < 20) arr.push_back(accPart(120, 0, ""));
+            Value::Map m;
+            m.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+            m.emplace_back(Value(std::string("parts")), Value(std::move(arr)));
+            return Value(std::move(m));
+        };
+        card::ClothingFile cl;
+        cl.supported = true;
+        cl.name = "Nurse-like outfit";
+        cl.outfit.clothes = mkClothes({100019615, 100020035, 0, 7, 0, 100007362, 0, 100027702, 100027702});
+        cl.outfit.accessory = mkAcc({accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""), accPart(120, 0, ""),
+                                     accPart(124, 100011501, "a_n_neck")});
+        cl.outfit.enableMakeup = false;
+        cl.rows = {
+            {"M2M.NurseOutfit", 1, 100019615, "ChaFileClothes.ClothesTop", 105},
+            {"Mint_E403.SuperMiniTightSkirt", 2822, 100020035, "ChaFileClothes.ClothesBot", 106},
+            {"com.Blanketman.NonLightStockings", 1486, 100007362, "ChaFileClothes.ClothesPants", 110},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesInner", 112},
+            {"ws54090.stiletto", 11, 100027702, "ChaFileClothes.ClothesShoesOuter", 112},
+            {"cream002", 801, 100011501, "accessory8.ChaFileAccessory.PartsInfo.id", 124},
+        };
+        return cl;
+    };
+    auto nurseCharacter = [] {
+        card::Card c;
+        c.family = card::CardFamily::Koikatsu;
+        c.status = Value(Value::Map{{Value(std::string("coordinateType")), Value(int64_t{0})}});
+        Value::Array hairParts;
+        {
+            Value::Map p;
+            p.emplace_back(Value(std::string("id")), Value(int64_t{500}));
+            hairParts.push_back(Value(std::move(p)));
+            hairParts.push_back(Value(Value::Map{}));
+        }
+        c.hair = Value(Value::Map{{Value(std::string("parts")), Value(std::move(hairParts))}});
+        c.outfits.resize(7);
+        // Outfit 0: top 56, bra 203, shoes 6/6; a hair accessory (pin) in slot 8.
+        c.outfits[0].clothes = Value(Value::Map{
+            {Value(std::string("parts")), Value(Value::Array{
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{56})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{203})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{0})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{6})}}),
+                Value(Value::Map{{Value(std::string("id")), Value(int64_t{6})}})})},
+            {Value(std::string("subPartsId")), Value(Value::Array{Value(int64_t{0}), Value(int64_t{0}), Value(int64_t{0})})}});
+        auto accPart = [](int64_t type, int64_t id, const char* parent) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("type")), Value(type));
+            m.emplace_back(Value(std::string("id")), Value(id));
+            m.emplace_back(Value(std::string("parentKey")), Value(std::string(parent)));
+            return Value(std::move(m));
+        };
+        Value::Array accs;
+        for (int i = 0; i < 8; ++i) accs.push_back(accPart(120, 0, ""));
+        accs.push_back(accPart(123, 568, "a_n_headside"));   // the hair pin, type 123
+        while (accs.size() < 20) accs.push_back(accPart(120, 0, ""));
+        c.outfits[0].accessory = Value(Value::Map{
+            {Value(std::string("version")), Value(std::string("0.0.0"))},
+            {Value(std::string("parts")), Value(std::move(accs))}});
+        c.rows = {
+            {"yamadamod.acchairF2", 568, 100018882, "outfit0.accessory8.ChaFileAccessory.PartsInfo.id", 123},
+        };
+        c.supported = true;
+        return c;
+    };
+
+    test("selective import: enumeration lists the source's components, matched to the target by slot, never by name", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        const auto comps = card::EnumerateSelectiveComponents(c, cl, -1);   // -1: the current outfit
+        std::vector<std::string> keys;
+        for (const auto& comp : comps) keys.push_back(comp.key);
+        CHECK(keys.size() == 7);
+        CHECK(keys[0] == "clothes.0" && keys[1] == "clothes.1" && keys[2] == "clothes.3" && keys[3] == "clothes.5" &&
+              keys[4] == "clothes.7" && keys[5] == "clothes.8" && keys[6] == "acc.08");
+        auto find = [&](const char* key) {
+            for (const auto& comp : comps) if (comp.key == key) return &comp;
+            return static_cast<const card::SelectiveComponent*>(nullptr);
+        };
+        // source ids are translated from the file's session-local ids to author slots
+        CHECK(find("clothes.0")->sourceId == 1 && find("clothes.1")->sourceId == 2822 && find("clothes.5")->sourceId == 1486);
+        CHECK(find("clothes.0")->category == "Tops" && find("clothes.1")->category == "Bottoms");
+        CHECK(find("clothes.3")->category == "Innerwear" && find("clothes.5")->category == "Socks");
+        CHECK(find("clothes.7")->category == "Shoes" && find("clothes.8")->category == "Shoes" && find("acc.08")->category == "Accessories");
+        // the counterpart exists by slot: top 56, shoes 6/6; nothing in the other slots
+        CHECK(find("clothes.0")->hasExisting && find("clothes.0")->existingId == 56);
+        CHECK(!find("clothes.1")->hasExisting && find("clothes.1")->existingId == 0);
+        CHECK(find("clothes.7")->hasExisting && find("clothes.7")->existingId == 6);
+        CHECK(find("acc.08")->hasExisting && find("acc.08")->existingHair);   // a hair pin, not a name match
+        // suggested defaults: replace what is there, add what is missing, keep hair
+        CHECK(card::ResolveAction(*find("clothes.0"), card::SelectiveDecisions{}) == card::SelectiveAction::Replace);
+        CHECK(card::ResolveAction(*find("clothes.1"), card::SelectiveDecisions{}) == card::SelectiveAction::Add);
+        CHECK(card::ResolveAction(*find("clothes.7"), card::SelectiveDecisions{}) == card::SelectiveAction::Replace);
+        CHECK(card::ResolveAction(*find("acc.08"), card::SelectiveDecisions{}) == card::SelectiveAction::KeepExisting);
+        // an explicit choice overrides the suggestion
+        card::SelectiveDecisions d;
+        d.actions["clothes.0"] = card::SelectiveAction::Skip;
+        d.actions["acc.08"] = card::SelectiveAction::Replace;
+        CHECK(card::ResolveAction(*find("clothes.0"), d) == card::SelectiveAction::Skip);
+        CHECK(card::ResolveAction(*find("acc.08"), d) == card::SelectiveAction::Replace);
+    });
+
+    test("selective import: importing every component equals Replace All for clothes and accessories", [nurseClothesFile, nurseCharacter] {
+        card::Card a = nurseCharacter(), b = nurseCharacter();
+        card::ClothingFile clA = nurseClothesFile(), clB = nurseClothesFile();
+        card::SelectiveDecisions all;   // import everything: an explicit choice in every row, nothing skipped
+        for (const auto& comp : card::EnumerateSelectiveComponents(a, clA, 0))
+            all.actions[comp.key] = comp.kind == 0 ? card::SelectiveAction::Replace : card::SelectiveAction::Add;
+        (void)card::ApplySelectiveClothing(a, clA, all, card::ApplyClothingOptions{});
+        (void)card::ApplyClothing(b, clB, card::ApplyClothingOptions{});
+        const auto& pa = a.outfits[0].clothes.at("parts").asArray();
+        const auto& pb = b.outfits[0].clothes.at("parts").asArray();
+        for (size_t i : {0, 1, 3, 5, 7, 8})
+            CHECK(pa[i].at("id").asInt() == pb[i].at("id").asInt());   // every slot the source carries matches Replace All
+        // the one deliberate difference: an empty source slot is "no component", so the selective import
+        // preserves the target's garment there (203, the bra) while Replace All wipes it. Kept by default, never silently.
+        CHECK(pa[2].at("id").asInt() == 203 && pb[2].at("id").asInt() == 0);
+        const auto& aa = a.outfits[0].accessory.at("parts").asArray();
+        const auto& ab = b.outfits[0].accessory.at("parts").asArray();
+        for (size_t i = 0; i < 15; ++i)
+            CHECK(aa[i].at("id").asInt() == ab[i].at("id").asInt() && aa[i].at("type").asInt() == ab[i].at("type").asInt());
+        // the hair accessory is kept on the target's slot; the necklace relocated to the first free slot, like Replace All
+        CHECK(aa[8].at("id").asInt() == 568 && aa[0].at("id").asInt() == 801);
+        CHECK(ab[8].at("id").asInt() == 568 && ab[0].at("id").asInt() == 801);
+        CHECK(a.hasClothing && b.hasClothing);
+    });
+
+    test("selective import: skipping everything leaves the character byte-identical", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        const card::Card before = c;
+        card::SelectiveDecisions none;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c, cl, 0))
+            none.actions[comp.key] = card::SelectiveAction::Skip;
+        const card::SelectivePlan plan = card::BuildSelectivePlan(card::EnumerateSelectiveComponents(c, cl, 0), none);
+        CHECK(plan.importsNothing() && plan.skipped == 7 && plan.replaced == 0 && plan.added == 0 && plan.kept == 0);
+        (void)card::ApplySelectiveClothing(c, cl, none, card::ApplyClothingOptions{});
+        const auto& partsA = c.outfits[0].clothes.at("parts").asArray();
+        const auto& partsB = before.outfits[0].clothes.at("parts").asArray();
+        for (size_t i = 0; i < 9; ++i) CHECK(partsA[i].at("id").asInt() == partsB[i].at("id").asInt());
+        const auto& accA = c.outfits[0].accessory.at("parts").asArray();
+        const auto& accB = before.outfits[0].accessory.at("parts").asArray();
+        for (size_t i = 0; i < 20; ++i)
+            CHECK(accA[i].at("id").asInt() == accB[i].at("id").asInt() && accA[i].at("type").asInt() == accB[i].at("type").asInt());
+        CHECK(c.rows.size() == before.rows.size());
+        CHECK(!c.hasClothing && c.clothingPartIds.empty());
+        CHECK(!c.outfits[0].enableMakeup);
+    });
+
+    test("selective import: replacing only the chosen clothes slot leaves the kept garments' ids, paint and rows alone", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        // The target has paint for its top (slot 0) and shoes (slot 7); the source paints its top (slot 0) and bottom (slot 1).
+        auto meWith = [](std::initializer_list<std::pair<int, int>> rowsSpec) {
+            Value::Array rows;
+            for (const auto& [slot, marker] : rowsSpec) {
+                Value::Map r;
+                r.emplace_back(Value(std::string("CoordinateIndex")), Value(int64_t{0}));
+                r.emplace_back(Value(std::string("ObjectType")), Value(int64_t{1}));
+                r.emplace_back(Value(std::string("Slot")), Value(static_cast<int64_t>(slot)));
+                r.emplace_back(Value(std::string("Marker")), Value(static_cast<int64_t>(marker)));
+                rows.emplace_back(Value(std::move(r)));
+            }
+            Value::Map payload;
+            payload.emplace_back(Value(std::string("RendererPropertyList")), Value(std::move(MsgPackPack(Value(std::move(rows))))));
+            return Value(Value::Array{Value(int64_t{0}), Value(std::move(payload))});
+        };
+        c.extended = Value(Value::Map{{Value(std::string("com.deathweasel.bepinex.materialeditor")), meWith({{0, 111}, {7, 222}})}});
+        cl.extended = Value(Value::Map{{Value(std::string("com.deathweasel.bepinex.materialeditor")), meWith({{0, 333}, {1, 444}})}});
+        card::SelectiveDecisions d;
+        d.actions["clothes.1"] = card::SelectiveAction::Replace;   // only the skirt
+        for (const char* key : {"clothes.0", "clothes.3", "clothes.5", "clothes.7", "clothes.8", "acc.08"})
+            d.actions[key] = card::SelectiveAction::Skip;
+        (void)card::ApplySelectiveClothing(c, cl, d, card::ApplyClothingOptions{});
+        const auto& parts = c.outfits[0].clothes.at("parts").asArray();
+        CHECK(parts[0].at("id").asInt() == 56);      // the kept top is the character's
+        CHECK(parts[1].at("id").asInt() == 2822);    // the skirt came from the file (author slot)
+        CHECK(parts[7].at("id").asInt() == 6);       // shoes kept
+        // MaterialEditor: the target's paint for the kept garments (111/222) survives; the source's paint for the
+        // kept top (333) never travels; the source's bottom paint (444) does
+        Value list;
+        try { list = MsgPackParse(c.extended.at("com.deathweasel.bepinex.materialeditor").at(size_t(1)).at("RendererPropertyList").asBin()); } catch (const FormatError&) { list = Value(); }
+        CHECK(list.isArray());
+        std::set<int64_t> markers;
+        std::map<int64_t, int64_t> slotOf;
+        for (const auto& row : list.asArray()) {
+            markers.insert(row.at("Marker").asInt());
+            slotOf[row.at("Marker").asInt()] = row.at("Slot").asInt();
+        }
+        CHECK(markers.count(111) == 1 && markers.count(222) == 1);
+        CHECK(markers.count(333) == 0 && markers.count(444) == 1);
+        CHECK(slotOf[444] == 1);
+        // resolver rows: the source's top row must NOT arrive; the source's bottom row must
+        bool srcTop = false;
+        for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesTop" && r.slot == 1) srcTop = true;
+        CHECK(!srcTop);
+        bool srcBottom = false;
+        for (const auto& r : c.rows) if (r.property == "outfit0.ChaFileClothes.ClothesBot" && r.slot == 2822) srcBottom = true;
+        CHECK(srcBottom);
+        // provenance marks only the imported part
+        CHECK(c.hasClothing);
+        CHECK(c.clothingPartIds.count("outfit0.bottom") == 1);
+        CHECK(c.clothingPartIds.count("outfit0.top") == 0);
+        CHECK(c.clothingPartIds.count("outfit0.acc08") == 0);
+    });
+
+    test("selective import: Add relocates around a taken slot; Replace takes it; the existing accessory always survives Add", [nurseClothesFile, nurseCharacter] {
+        card::Card c = nurseCharacter();
+        card::ClothingFile cl = nurseClothesFile();
+        card::SelectiveDecisions d;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c, cl, 0)) d.actions[comp.key] = card::SelectiveAction::Skip;
+        d.actions["acc.08"] = card::SelectiveAction::Add;   // the necklace, against the hair pin: relocate, never delete
+        (void)card::ApplySelectiveClothing(c, cl, d, card::ApplyClothingOptions{});
+        const auto& a1 = c.outfits[0].accessory.at("parts").asArray();
+        CHECK(a1[8].at("id").asInt() == 568 && a1[8].at("type").asInt() == 123);   // the pin is untouched
+        bool necklaceFound = false; int necklaceSlot = -1;
+        for (size_t i = 0; i < a1.size(); ++i)
+            if (a1[i].at("id").asInt() == 801) { necklaceFound = true; necklaceSlot = static_cast<int>(i); }
+        CHECK(necklaceFound && necklaceSlot != 8);
+        // Replace takes the slot outright (an explicit, previewed choice - hair is not preserved)
+        card::Card c2 = nurseCharacter();
+        card::ClothingFile cl2 = nurseClothesFile();
+        card::SelectiveDecisions d2;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c2, cl2, 0)) d2.actions[comp.key] = card::SelectiveAction::Skip;
+        d2.actions["acc.08"] = card::SelectiveAction::Replace;
+        (void)card::ApplySelectiveClothing(c2, cl2, d2, card::ApplyClothingOptions{});
+        const auto& a2 = c2.outfits[0].accessory.at("parts").asArray();
+        CHECK(a2[8].at("id").asInt() == 801 && a2[8].at("type").asInt() == 124);
+        // and with Add into an empty slot the placement stays in place
+        card::Card c3 = nurseCharacter();
+        c3.outfits[0].accessory = Value(Value::Map{
+            {Value(std::string("version")), Value(std::string("0.0.0"))},
+            {Value(std::string("parts")), Value(std::move(Value::Array{}))}});   // no accessory at all
+        card::ClothingFile cl3 = nurseClothesFile();
+        card::SelectiveDecisions d3;
+        for (const auto& comp : card::EnumerateSelectiveComponents(c3, cl3, 0)) d3.actions[comp.key] = card::SelectiveAction::Skip;
+        d3.actions["acc.08"] = card::SelectiveAction::Add;
+        (void)card::ApplySelectiveClothing(c3, cl3, d3, card::ApplyClothingOptions{});
+        const auto& a3 = c3.outfits[0].accessory.at("parts").asArray();
+        CHECK(a3[8].at("id").asInt() == 801);
+    });
+
+    test("selective import: applied on a copy, discarded unchanged (the cancel path)", [nurseClothesFile, nurseCharacter] {
+        // The selective flow never touches the loaded card until Apply; the merge itself runs on a copy
+        // of the card (see the viewer). Here the copy semantics are pinned: the original is untouched
+        // when the merge runs on a clone.
+        card::Card original = nurseCharacter();
+        card::Card copy = original;
+        card::ClothingFile cl = nurseClothesFile();
+        card::SelectiveDecisions d;
+        for (const auto& comp : card::EnumerateSelectiveComponents(copy, cl, 0)) d.actions[comp.key] = card::SelectiveAction::Replace;
+        (void)card::ApplySelectiveClothing(copy, cl, d, card::ApplyClothingOptions{});
+        const auto& pa = original.outfits[0].clothes.at("parts").asArray();
+        const auto& pc = copy.outfits[0].clothes.at("parts").asArray();
+        CHECK(pa[0].at("id").asInt() == 56 && pc[0].at("id").asInt() == 1);   // the copy got the file's translated top
+        CHECK(original.clothingPartIds.empty() && !original.hasClothing && copy.hasClothing);
+    });
+
+    test("selective import of a Coordinate PNG: extracts only the chosen coordinate's outfit, never the identity", [nurseClothesFile, nurseCharacter] {
+        Value::Map kkexMap;
+        kkexMap.emplace_back(Value(std::string("com.bepis.sideloader.universalautoresolver")), testToruResolverRows());
+        const std::string toruPath = writeTestCardFile("selective_toru.png", testToruCoords(), testToruParameter(),
+                                                       testToruStatus(), testToruHair(), Value(std::move(kkexMap)));
+        card::Card moe = testMoeCard();
+        card::ApplyClothingOptions opt;
+        opt.srcOutfit = -1;   // the source's own current coordinate (Toru's outfit 1)
+        card::Card probe = card::LoadCard(toruPath);
+        CHECK(probe.supported);
+        card::ClothingFile cl = card::ExtractClothingFromCard(probe, 1);
+        const auto comps = card::EnumerateSelectiveComponents(moe, cl, 0);
+        CHECK(comps.size() == 2);   // Toru's outfit 1: the gym top and the pin (his current coordinate only)
+        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(moe, toruPath, opt, card::SelectiveDecisions{});
+        CHECK(rep.fromCoordinate && rep.srcOutfit == 1);
+        // Moe's identity never travels; her hair stays; makeup followed (only components imported)
+        CHECK(moe.parameter.at("lastname").asStr() == "Moe" && moe.hair.at("parts").at(size_t(0)).at("id").asInt() == 1234);
+        CHECK(moe.outfits[0].clothes.at("parts").at(size_t(0)).at("id").asInt() == 2222);   // the gym top
+        CHECK(moe.outfits[0].enableMakeup);
+        CHECK(rep.plan.replaced == 1 || rep.plan.added == 1);   // something was imported (the clothes); hair stayed on the suggestion
     });
 
     test("source detection: regular clothing PNGs vs Coordinate PNGs vs plain PNGs, by content not name", [] {

@@ -54,6 +54,7 @@ void ApplyPoseLive(int simSteps = 0) {
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
+    SelectivePoseChanged();   // the static previews in the Selective Import window follow the same pose
     g.dirty = true;
     InvalidateView();
 }
@@ -514,7 +515,7 @@ bool EnsureResolver(std::string& err) {
     Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile", LogKind::Good);
     g.lists = resolve::ListTable();
     g.lists.loadBaseGame(library::AbdataRoot(g.settings.library), &issues);
-    g.resolver = std::make_unique<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
+    g.resolver = std::make_shared<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
     if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
     g.resolverKey = key;
     return true;
@@ -528,12 +529,14 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     int clothingOutfit = -1;
     int clothingMode = 0;
     int clothingSrcOutfit = -1;
+    std::map<std::string, card::SelectiveAction> selectiveDecisions;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         clothingPath = g.clothingPath;
         clothingOutfit = g.clothingOutfit;
         clothingMode = g.clothingMode;
         clothingSrcOutfit = g.clothingSrcOutfit;
+        selectiveDecisions = g.selectiveDecisions;
     }
     g.applyKeep = keepTweaks;
     g.keepHidden.clear();
@@ -547,7 +550,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, clothingMode, clothingSrcOutfit, prevCardPath]() {
+    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, clothingMode, clothingSrcOutfit, selectiveDecisions, prevCardPath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -578,10 +581,32 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
                                        clothingOutfit < static_cast<int>(c.outfits.size());
             if (applyClothing) {
-                ProgSet(0.20, clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
+                ProgSet(0.20, clothingMode == 2 ? "applying selective import" : clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
                 try {
                     const card::ImageSourceKind srcKind = card::DetectImageSource(clothingPath);
-                    if (clothingMode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
+                    if (clothingMode == 2) {
+                        // The selective import: only the components the user chose in the Selective
+                        // Import window are merged. Same pin as the other imports (an outfit file on
+                        // disk is never written; the card itself is only ever this in-memory copy).
+                        card::SelectiveDecisions sd;
+                        sd.actions = selectiveDecisions;
+                        card::ApplyClothingOptions sopt;
+                        sopt.outfit = shown;
+                        sopt.srcOutfit = clothingSrcOutfit;
+                        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(c, clothingPath, sopt, sd);
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(g.mu);
+                            g.clothingOutfit = rep.apply.outfit;
+                            g.clothingName = rep.sourceName + " (selective)";
+                            g.clothingSrcOutfit = rep.srcOutfit;
+                        }
+                        out->clothing = g.clothingName;
+                        Log("selective: " + std::to_string(rep.plan.replaced) + " replaced, " + std::to_string(rep.plan.added) +
+                            " added, " + std::to_string(rep.plan.kept) + " kept, " + std::to_string(rep.plan.skipped) + " skipped" +
+                            (rep.fromCoordinate ? " (outfit source: the coordinate it was pinned to)" : "") +
+                            " -> outfit " + std::to_string(rep.apply.outfit) + "; in memory only, card not saved", LogKind::Good);
+                        for (const std::string& note : rep.apply.notes) Log("  " + note);
+                    } else if (clothingMode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
                         // A character card used as a source: the whole-coordinate semantics (Status copies included).
                         card::Card src = card::LoadCard(clothingPath);
                         if (!src.supported) throw std::runtime_error(src.supportNote);

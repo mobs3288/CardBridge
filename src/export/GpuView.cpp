@@ -1414,6 +1414,16 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
 
 bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                      int highlightPart) {
+    std::vector<HighlightPart> hs;
+    if (highlightPart >= 0) hs.push_back(HighlightPart{highlightPart});   // the defaults are the legacy warm tint + ring
+    return RenderImpl(cam, W, H, hiddenParts, bgra, hs);
+}
+bool GpuView::RenderHighlighted(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                                const std::vector<HighlightPart>& highlights) {
+    return RenderImpl(cam, W, H, hiddenParts, bgra, highlights);
+}
+bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                         const std::vector<HighlightPart>& highlights) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene || W < 8 || H < 8) return false;
     const assemble::Scene& scene = *I.scene;
@@ -1809,11 +1819,9 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         }
     }
 
-    // Hovered component: tint its visible surface, then draw the same silhouette ring the game's outlines use in a warm
-    // colour so the part pops out of the model. Depth-tested against the finished frame, never written.
-    if (highlightPart >= 0 && static_cast<size_t>(highlightPart) < scene.parts.size() && visible(static_cast<size_t>(highlightPart)) &&
-        I.olVs && I.olPs && I.olIl && I.olCb && I.depthOverlay && I.blendOverlay) {
-        const auto& part = scene.parts[static_cast<size_t>(highlightPart)];
+    // Highlighted components: each part gets a translucent tint over its visible surface, then a silhouette ring in
+    // its colour so the matches stand out of the model. Depth-tested against the finished frame, never written.
+    if (!highlights.empty() && I.olVs && I.olPs && I.olIl && I.olCb && I.depthOverlay && I.blendOverlay) {
         ctx->OMSetDepthStencilState(I.depthOverlay, 0);
         ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
         ctx->IASetInputLayout(I.olIl);
@@ -1821,24 +1829,31 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
         ctx->PSSetShader(I.olPs, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &I.olCb);
         ctx->PSSetConstantBuffers(0, 1, &I.olCb);
-        for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
-            float cbv[24];
-            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-            const float colr[4] = {1.0f, LinearLight() ? ToLinear(0.62f) : 0.62f, LinearLight() ? ToLinear(0.16f) : 0.16f, pass == 0 ? 0.38f : 0.95f};
-            const float px = 2.2f * H / 800.0f;
-            const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
-                                  pass == 0 ? 0.0f : 0.004f, 0.0f};
-            std::memcpy(cbv + 16, colr, 16);
-            std::memcpy(cbv + 20, prm, 16);
-            ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
-            for (int mi : part.meshes) {
-                const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
-                if (!gm.vb) continue;
-                ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
-                for (const auto& gs : gm.subs) {
-                    if (!gs.ib || !gs.count) continue;
-                    ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
-                    ctx->DrawIndexed(gs.count, 0, 0);
+        for (const auto& hl : highlights) {
+            if (hl.part < 0 || static_cast<size_t>(hl.part) >= scene.parts.size()) continue;
+            if (!visible(static_cast<size_t>(hl.part))) continue;
+            const auto& part = scene.parts[static_cast<size_t>(hl.part)];
+            for (int pass = 0; pass < 2; ++pass) {   // 0: translucent tint over the surface, 1: opaque ring outside it
+                float cbv[24];
+                for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                const float colr[4] = {hl.tint[0], LinearLight() ? ToLinear(hl.tint[1]) : hl.tint[1], LinearLight() ? ToLinear(hl.tint[2]) : hl.tint[2], pass == 0 ? hl.tint[3] : hl.ring[3]};
+                const float ringCol[4] = {hl.ring[0], LinearLight() ? ToLinear(hl.ring[1]) : hl.ring[1], LinearLight() ? ToLinear(hl.ring[2]) : hl.ring[2], hl.ring[3]};
+                const float* useCol = pass == 0 ? colr : ringCol;
+                const float px = hl.ringWidth * H / 800.0f;
+                const float prm[4] = {pass == 0 ? 0.0f : px * 2.0f / W, pass == 0 ? 0.0f : px * 2.0f / H,
+                                      pass == 0 ? 0.0f : 0.004f, 0.0f};
+                std::memcpy(cbv + 16, useCol, 16);
+                std::memcpy(cbv + 20, prm, 16);
+                ctx->UpdateSubresource(I.olCb, 0, nullptr, cbv, 0, 0);
+                for (int mi : part.meshes) {
+                    const GpuMesh& gm = I.meshes[static_cast<size_t>(mi)];
+                    if (!gm.vb) continue;
+                    ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
+                    for (const auto& gs : gm.subs) {
+                        if (!gs.ib || !gs.count) continue;
+                        ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                        ctx->DrawIndexed(gs.count, 0, 0);
+                    }
                 }
             }
         }

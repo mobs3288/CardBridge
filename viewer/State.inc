@@ -134,6 +134,77 @@ struct OptPending {
     bool done = false;
     bool cancelled = false;
 };
+
+// ---- the Selective Import window (Selective.inc) ------------------------------------------------
+// A second top-level window, like the Material Workbench: a dedicated multi-view outfit composer for
+// the clothing import. The user picks, per component, Add / Replace / Keep existing / Skip;
+// three real 3D views (current character, imported source, proposed result) render it. Nothing is
+// applied until Apply; Cancel discards the whole thing.
+struct SelView {
+    exporter::ViewCamera cam;
+    std::vector<uint32_t> frame;
+    int fw = 0, fh = 0;        // the size `frame` was rendered at
+    bool dirty = true;          // the picture needs re-rendering (scene/pose/camera/highlights changed)
+    // view 0 renders through the main window's GPU view (g.gpu, same scene, zero extra resources);
+    // views 1 and 2 own theirs (they upload their own preview scenes).
+    exporter::GpuView gpu;
+    bool gpuOk = false;
+    exporter::ViewStatePtr swState = exporter::NewViewState();   // the software fallback's cache
+    std::shared_ptr<const assemble::Scene> scene;   // null until the worker finishes (for view 0: aliases the loaded character)
+    std::vector<char> hidden;                  // effective hidden parts for this view's scene
+    int state = 0;                             // 0 idle, 1 building, 2 ready, 3 failed
+    std::string error;
+    std::vector<std::vector<int>> compParts;   // per component index: scene part indices (parallel to comps)
+    std::vector<Mat4> previewSkin;             // views 1 and 2: the shared A-pose's skin matrices (empty = rest pose)
+    std::map<std::string, int> placedAcc;      // source accessory key -> merged slot (where each chosen accessory landed)
+};
+
+struct SelectiveComp {
+    card::SelectiveComponent comp;
+    std::string sourceName;    // the source item's display name (resolved from the previews; falls back to the slot label)
+    std::string existingName;  // the counterpart's display name (empty when there is no counterpart)
+    std::string sourceStatus;  // "resolved-mod", "missing-mod", ... - shown on a missing item
+    std::string modName;       // the mod the source item comes from, when known
+    bool missing = false;      // the source item failed to resolve (nothing to import / blocked)
+};
+
+struct SelectiveState {
+    HWND hwnd = nullptr;
+    bool open = false;
+    int session = 0;   // incremented per open; stale build messages from a previous window are ignored
+    std::mutex selGpuMu;   // uploads (worker threads) vs. rendering (UI thread) vs. drop-on-close
+    // the source file and where it will land
+    std::string srcPath;
+    bool srcIsCoordinate = false;
+    std::string srcName;
+    int srcOutfit = -1;      // coordinate sources: which coordinate of the source (-1 until resolved)
+    int dstOutfit = -1;      // the outfit slot the import lands on (the on-screen outfit)
+    // the three views: current character / imported source / proposed result
+    SelView views[3];
+    std::vector<SelectiveComp> comps;
+    std::map<std::string, card::SelectiveAction> decisions;
+    int hoverComp = -1, selComp = -1;   // hover (transient) and selected (sticky, -1 = none)
+    int hoverAction = 0;                // hit id of a row/right-column/link button (0 = none; see SelBtn)
+    int listScroll = 0;
+    float listPos = 0;
+    bool linkCams = true, aPose = true;
+    int dragging = 0;                   // 1 orbit, 2 pan (which button)
+    int dragView = -1;                  // which viewport the drag started in
+    int dragX = 0, dragY = 0;           // last pointer position
+    POINT downAt{0, 0};                 // press position (for the click-vs-drag distinction)
+    bool dragMoved = false;
+    // the build debounce (a decision change rebuilds the proposed scene 250 ms later)
+    ULONGLONG debounceTick = 0;
+    int proposalGen = 0;                // requests outstanding for the proposed scene (generation counter)
+    bool proposalQueued = false;        // a rebuild is pending the debounce
+    bool buildingProposal = false;      // a proposal worker is running
+    // validation for the Apply button (recomputed at paint; error text blocks Apply)
+    std::string validation;             // empty = apply is fine
+    bool validationError = false;
+    std::vector<std::string> notes;     // warning lines for the user (hair replaced, relocated, ...)
+    std::string status;                 // footer line
+    ULONGLONG lastHoverPick = 0;        // the pick throttle
+};
 void SettingsAction(int id);
 void MorphSlideEdited();   // Morphs tab: a slider moved, or the tab cleared the weights
 void LoadMorphCatalog();   // after a character is built: collect the exported PMX's vertex morphs (weights all 0)
@@ -163,6 +234,11 @@ struct TweakRow {
 
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};
+    // The tab strip: when the full strip does not fit the panel, it scrolls horizontally. tabStrip is the visible clip window;
+    // tabLeft / tabRight are the < > arrow buttons; tabMaxScroll is the furthest the strip can move (pixels).
+    bool tabScrollable = false;
+    RECT tabStrip{}, tabLeft{}, tabRight{};
+    int tabMaxScroll = 0;
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
     RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
@@ -180,64 +256,7 @@ struct PanelLayout {
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
 constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
 
-PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows) {
-    PanelLayout l;
-    l.logo = {12, 12, 68, 68};
-    const int by = 98, bh = 26;
-    l.open = {10, by, 58, by + bh};
-    l.exportPmx = {64, by, 156, by + bh};
-    l.issues = {162, by, 214, by + bh};
-    l.reset = {220, by, 288, by + bh};
-    l.all = {294, by, 324, by + bh};
-    l.asExported = {330, by, 370, by + bh};
-    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
-    // then the imported-outfit status line with its reset button.
-    l.outfitNameTop = 138;
-    l.outfitChipsTop = 160;
-    l.outfitClothTop = 184;
-    l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
-    l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
-    l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
-    l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // The tab strip fits its labels (Segoe UI 11px, measured literal widths): uniform padding, small gaps, centered as a strip.
-    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 55, 46, 30};
-    constexpr int kTabPad = 8;
-    int tabsTotal = 0;
-    for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
-    const int tabGap = std::max(1, (kPanel - 24 - tabsTotal) / (TabCount - 1));
-    const int used = tabsTotal + tabGap * (TabCount - 1);
-    int tx = (kPanel - used) / 2;
-    for (int i = 0; i < TabCount; ++i) {
-        const int w = kTabTextW[i] + kTabPad;
-        l.tabs[i] = {tx, 216, tx + w, 240};
-        tx += w + tabGap;
-    }
-    l.partsHeadingTop = 222;
-    l.partsTop = 248;
-    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
-    l.footerTop = H - 36;
-    l.logBottom = l.footerTop - 4;
-    l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
-    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
-    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
-    l.boneListTop = l.partsTop + kRowH;
-    l.boneListBottom = l.boneEditTop - 4;
-    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
-    l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
-    l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
-    const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
-    l.boneResetOne = {10, ry, 145, ry + kRowH};
-    l.boneResetAll = {149, ry, 262, ry + kRowH};
-    l.boneUndo = {10, ay, 56, ay + kRowH};
-    l.boneRedo = {60, ay, 110, ay + kRowH};
-    l.boneSave = {114, ay, 190, ay + kRowH};
-    l.boneLoad = {194, ay, 268, ay + kRowH};
-    l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
-    l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
-    l.matListTop = l.partsTop + kRowH + 34;
-    l.matListBottom = l.partsBottom;
-    return l;
-}
+PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows);   // defined after App (needs g)
 
 // One entry of the Proportions tab's suggestion list: the op plus whether the user wants it applied.
 struct PropSugItem {
@@ -253,12 +272,14 @@ struct App {
     // and the outfit slot it overwrote. Empty = none.
     // clothingMode: 0 = outfit import (a regular clothing file, or a Coordinate PNG imported as clothing -
     // the extracted clothes+accessories are merged via the clothing import); 1 = Coordinate import (the
-    // whole coordinate replaces the slot, including accessories).
+    // whole coordinate replaces the slot, including accessories); 2 = selective import (only the components
+    // the user chose in the Selective Import window are merged; g.selectiveDecisions carries the choice).
     // clothingSrcOutfit: for a Coordinate source, which coordinate of the source card is imported (-1 = the source's own current outfit).
     std::string clothingPath, clothingName;
     int clothingOutfit = -1;
     int clothingMode = 0;
     int clothingSrcOutfit = -1;
+    std::map<std::string, card::SelectiveAction> selectiveDecisions;   // the pinned selective import's per-component choices (session only)
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up
@@ -266,7 +287,7 @@ struct App {
     // library state, built once
     resolve::ModIndex mods;
     resolve::ListTable lists;
-    std::unique_ptr<resolve::Resolver> resolver;
+    std::shared_ptr<resolve::Resolver> resolver;   // shared with the worker threads (assembly in flight keeps it alive)
     std::string resolverKey;
 
     std::shared_ptr<Loaded> loaded;
@@ -290,6 +311,7 @@ struct App {
     bool showExp = false, expOk = false, expGrade = false, expPendingGrade = false;
     OptState opt;                      // the Optimize tab (triangle reduction, presets, LODs)
     OptPending optPending;             // what the Optimize worker produced; adopted on WM_OPT_READY
+    SelectiveState sel;                // the Selective Import window (Selective.inc)
     std::atomic<bool> expBusy{false};
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
@@ -304,6 +326,11 @@ struct App {
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0, logScroll = 0;        // list scroll targets, in rows
     float partPos = 0, bonePos = 0;           // what the lists show now: the targets, eased (smooth scrolling)
+    int tabScroll = 0;                        // the tab strip's horizontal scroll, in pixels
+    float tabPos = 0;                         // eased position of the tab strip
+    bool tabDragging = false, tabDragMoved = false;
+    int tabDragAnchor = 0;                    // x of the press that may become a strip drag
+    float tabDragStart = 0;                   // tabPos when that press began
     ui::Surface panel;                        // the panel, drawn off screen and copied where it changed
     // Mouse movement during a drag is only noted here; Frame() applies it once per picture, so a fast mouse cannot queue up work.
     bool dragPending = false;
@@ -483,6 +510,85 @@ struct App {
 };
 App g;
 
+PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
+    PanelLayout l;
+    l.logo = {12, 12, 68, 68};
+    const int by = 98, bh = 26;
+    l.open = {10, by, 58, by + bh};
+    l.exportPmx = {64, by, 156, by + bh};
+    l.issues = {162, by, 214, by + bh};
+    l.reset = {220, by, 288, by + bh};
+    l.all = {294, by, 324, by + bh};
+    l.asExported = {330, by, 370, by + bh};
+    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
+    // then the imported-outfit status line with its reset button.
+    l.outfitNameTop = 138;
+    l.outfitChipsTop = 160;
+    l.outfitClothTop = 184;
+    l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
+    l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
+    l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
+    l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
+    // The tab strip: if the labels fit the panel they are centred and static; otherwise the strip scrolls
+    // horizontally inside a clipped window, with small "<" ">" arrow buttons at the ends (wheel / drag also scroll it).
+    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 55, 46, 30};
+    constexpr int kTabPad = 8, kTabGap = 4, kTabArrowW = 16;
+    int tabsTotal = 0;
+    for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
+    const int stripWidth = tabsTotal + kTabGap * (TabCount - 1);
+    const int avail = kPanel - 24;
+    if (stripWidth <= avail) {
+        l.tabScrollable = false;
+        const int tabGap = std::max(1, (avail - tabsTotal) / (TabCount - 1));
+        const int used = tabsTotal + tabGap * (TabCount - 1);
+        int tx = (kPanel - used) / 2;
+        for (int i = 0; i < TabCount; ++i) {
+            const int w = kTabTextW[i] + kTabPad;
+            l.tabs[i] = {tx, 216, tx + w, 240};
+            tx += w + tabGap;
+        }
+    } else {
+        l.tabScrollable = true;
+        l.tabLeft = {8, 216, 8 + kTabArrowW, 240};
+        l.tabRight = {kPanel - 8 - kTabArrowW, 216, kPanel - 8, 240};
+        l.tabStrip = {8 + kTabArrowW + 4, 214, kPanel - 8 - kTabArrowW - 4, 242};
+        l.tabMaxScroll = std::max(0, stripWidth - (kPanel - 24 - 2 * (kTabArrowW + 4)));
+        const int off = static_cast<int>(std::lround(std::clamp(std::max(0.0f, g.tabPos), 0.0f, static_cast<float>(l.tabMaxScroll))));
+        int tx = l.tabStrip.left + 2 - off;
+        for (int i = 0; i < TabCount; ++i) {
+            const int w = kTabTextW[i] + kTabPad;
+            l.tabs[i] = {tx, 216, tx + w, 240};
+            tx += w + kTabGap;
+        }
+    }
+    l.partsHeadingTop = 222;
+    l.partsTop = 248;
+    const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
+    l.footerTop = H - 36;
+    l.logBottom = l.footerTop - 4;
+    l.logTop = std::max(l.partsTop + 90, l.logBottom - logH);
+    l.partsBottom = std::max(l.partsTop + kRowH, l.logTop - 10);
+    l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
+    l.boneListTop = l.partsTop + kRowH;
+    l.boneListBottom = l.boneEditTop - 4;
+    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
+    l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
+    l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
+    const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
+    l.boneResetOne = {10, ry, 145, ry + kRowH};
+    l.boneResetAll = {149, ry, 262, ry + kRowH};
+    l.boneUndo = {10, ay, 56, ay + kRowH};
+    l.boneRedo = {60, ay, 110, ay + kRowH};
+    l.boneSave = {114, ay, 190, ay + kRowH};
+    l.boneLoad = {194, ay, 268, ay + kRowH};
+    l.matFilter = {10, l.partsTop, 200, l.partsTop + kRowH};
+    l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
+    l.matListTop = l.partsTop + kRowH + 34;
+    l.matListBottom = l.partsBottom;
+    return l;
+}
+
+
 PanelLayout Lay(int H) { return LayoutFor(H, g.tab == TabBones && !g.showIssues, kBoneEditRows); }
 
 // ---- the Material Workbench window's layout ---------------------------------------------------------------------------
@@ -559,11 +665,17 @@ constexpr UINT WM_LIBRARY_DONE = WM_APP + 5;    // the library import finished (
 constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, offer to build one
 constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: repaint the bar
 constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finished (wParam: 1 cancelled, 2 failed)
+constexpr UINT WM_SEL_READY = WM_APP + 9;      // the Selective Import window's workers finished (wParam: 0 = imported source view, 1 = proposed scene; lParam = session)
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
 constexpr UINT WM_BENCH = WM_APP + 41;   // CARDBRIDGE_BENCH: run the scripted timing session (see RunBench)
 void RunBench();
+void SelectiveOpen(const std::string& path);   // the Selective Import window (Selective.inc): per-component outfit import preview
+void SelectiveClose();
+void SelectiveInvalidateView();
+void SelectivePoseChanged();                   // called when the pose moved: reskins the static previews
+void SelApply();                               // apply the selective import (through the validation guard)
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 
 std::shared_ptr<Loaded> Current() {

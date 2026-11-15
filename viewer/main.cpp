@@ -45,6 +45,7 @@
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"
 #include "card/CardFile.h"
+#include "card/SelectiveImport.h"
 #include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
 #include "export/OutfitIcon.h"
@@ -120,6 +121,7 @@ namespace {
 #include "Panel.inc"
 #include "Clicks.inc"
 #include "Window.inc"
+#include "Selective.inc"
 #include "Bench.inc"
 } // namespace
 
@@ -165,6 +167,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         wcm.hIcon = wc.hIcon;
         wcm.lpszClassName = kWbClassName;
         RegisterClassW(&wcm);
+    }
+    {   // the Selective Import window's class; the window itself opens on first drop of an outfit file
+        WNDCLASSW wcs{};
+        wcs.lpfnWndProc = SelWndProc;
+        wcs.hInstance = inst;
+        wcs.hCursor = wc.hCursor;
+        wcs.hIcon = wc.hIcon;
+        wcs.lpszClassName = kSelClassName;
+        RegisterClassW(&wcs);
     }
     g.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES | (testQuiet ? WS_EX_NOACTIVATE : 0), wc.lpszClassName, L"CardBridge " L"viewer",
                              WS_OVERLAPPEDWINDOW | (testQuiet ? 0 : WS_VISIBLE), testQuiet ? -32000 : CW_USEDEFAULT, testQuiet ? -32000 : CW_USEDEFAULT,

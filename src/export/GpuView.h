@@ -54,6 +54,16 @@ struct SkinMemoryStats {
 // real GPU instead of the integrated one wherever it is. WARP (Direct3D running on the CPU) is the fallback when there
 // is no usable hardware device, and when that is gone too the callers keep the software interpreter renderer. That CPU
 // fallback is the supported path on a machine without a GPU; it is not a degraded second implementation.
+// One highlighted part in a picture, for RenderHighlighted. The two passes are the same overlay
+// the single hovered-component highlight uses (a translucent surface tint, then a bright ring),
+// coloured per part so several components can be colour-coded at once.
+struct HighlightPart {
+    int part = -1;                            // scene part index
+    float tint[4] = {1.0f, 0.62f, 0.16f, 0.38f};   // surface tint (rgba)
+    float ring[4] = {1.0f, 0.62f, 0.16f, 0.95f};   // ring colour (rgba)
+    float ringWidth = 2.2f;                    // ring width in pixels at 800px picture height (scaled by the height)
+};
+
 class GpuView {
 public:
     GpuView();
@@ -117,6 +127,10 @@ public:
     // highlightPart gets a warm tint and a bright silhouette ring (the viewer's hovered component), -1 = none.
     bool Render(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
                 int highlightPart = -1);
+    // Like Render, but highlights every part in `highlights` at once, each with its own colours (the selective
+    // import colour-codes components this way). An empty vector is the same as highlightPart = -1.
+    bool RenderHighlighted(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                           const std::vector<HighlightPart>& highlights);
 
     // Selects a viewport diagnostic mode for the *next* Render call (0 = Lit = the game's shaders, the
     // default; anything else draws the scene with the runtime-compiled diagnostic fallback shader, so the
@@ -169,6 +183,8 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    bool RenderImpl(const ViewCamera& cam, int width, int height, const std::vector<char>* hiddenParts, std::vector<uint32_t>& bgra,
+                    const std::vector<HighlightPart>& highlights);
 };
 
 } // namespace cardbridge::exporter

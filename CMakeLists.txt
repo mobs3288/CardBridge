@@ -64,6 +64,7 @@ add_library(cardbridge_core STATIC
     src/core/MsgPack.cpp
     src/core/ZipArchive.cpp
     src/card/CardFile.cpp
+    src/card/SelectiveImport.cpp
     src/card/ClothingExport.cpp
     src/card/MaterialEdits.cpp
     src/card/Abmx.cpp
