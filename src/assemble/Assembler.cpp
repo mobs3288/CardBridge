@@ -703,6 +703,25 @@ struct Builder {
                 if (n == name) { result = shaderFor(*f, o->pathId, name); break; }
             }
         }
+        // Sideloader's shader registration: a mod that ships a shader declares it in manifest.xml
+        // (<MaterialEditor><Shader Name="..." AssetBundle="...">) and the game's Shader.Find binds it there.
+        // An outfit authored against a mod shader (IBL_Shader_alpha) is meant to run with it; without it
+        // the fallback keeps the blending mode but loses the mod's own lighting.
+        if (result < 0 && resolverPtr) {
+            std::string why;
+            auto f = resolverPtr->openShaderBundle(name, &why);
+            if (!f) {
+                if (std::getenv("CARDBRIDGE_DEBUG_MAT")) std::fprintf(stderr, "shader %s: not in the library or any mod's <MaterialEditor> shader table (%s)\n", name.c_str(), why.c_str());
+            } else {
+                for (const auto* o : f->serialized().ofClass(48)) {   // Shader
+                    Value v = f->serialized().read(*o);
+                    std::string n = v.at("m_ParsedForm").at("m_Name").asStr();
+                    if (n.empty()) n = v.at("m_Name").asStr();
+                    if (n == name) { result = shaderFor(*f, o->pathId, name); break; }
+                }
+                if (result < 0 && std::getenv("CARDBRIDGE_DEBUG_MAT")) std::fprintf(stderr, "shader %s: its bundle (%s) holds no shader of that name\n", name.c_str(), f->name().c_str());
+            }
+        }
         shaderByNameCache[name] = result;
         return result;
     }
@@ -1127,6 +1146,16 @@ struct Builder {
                 if (e->hasScale) { bind->st.x = e->scale[0]; bind->st.y = e->scale[1]; }
                 if (e->hasOffset) { bind->st.z = e->offset[0]; bind->st.w = e->offset[1]; }
             }
+        }
+        // A material binding no texture at all whose shader default for _MainTex is black renders nothing in the game
+        // (every fragment discarded: the jacket crest's paint of a black default texture with no material binding).
+        // Hide it everywhere too, instead of drawing a flat white plate.
+        if (!sm.translucent && sm.shaderIndex >= 0 && static_cast<size_t>(sm.shaderIndex) < scene.shaders.size()) {
+            bool anyTex = false;
+            for (const auto& tb : sm.texProps) if (tb.texture >= 0) { anyTex = true; break; }
+            if (!anyTex)
+                for (const auto& d : scene.shaders[static_cast<size_t>(sm.shaderIndex)].texDefaults)
+                    if (d.first == "_MainTex" && d.second == "black") sm.hidden = true;
         }
         scene.materials.push_back(std::move(sm));
         return static_cast<int>(scene.materials.size()) - 1;

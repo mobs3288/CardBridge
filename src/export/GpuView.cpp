@@ -128,7 +128,8 @@ struct GpuView::Impl {
     ID3D11RasterizerState* raster = nullptr;
     ID3D11RasterizerState* rasterCull = nullptr;   // back faces culled: what the game and MikuMikuDance do for a single-sided material
     ID3D11DepthStencilState* depth = nullptr;
-    ID3D11DepthStencilState* depthOverlay = nullptr;   // depth test without write, for the highlight tint
+    ID3D11DepthStencilState* depthOverlay = nullptr;          // depth test without write, for the highlight tint
+    ID3D11DepthStencilState* depthOverlayWrite = nullptr;     // depth test+write with the overlay's LEqual, for the game's ZWrite-on transparent materials
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendOverlay = nullptr;          // ordinary src-alpha blending, for the highlight
     // Per-frame constant buffers, by (material, stage, slot).
@@ -588,7 +589,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Clear();
         Rel(samplerWrap); Rel(samplerClamp);
         Rel(raster); Rel(rasterCull);
-        Rel(depth); Rel(depthOverlay);
+        Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite);
         Rel(blend); Rel(blendOverlay);
         for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); }
         ReleaseTargets();
@@ -1163,6 +1164,9 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     D3D11_DEPTH_STENCIL_DESC od = dd;
     od.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; od.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     I.dev->CreateDepthStencilState(&od, &I.depthOverlay);
+    D3D11_DEPTH_STENCIL_DESC wd = dd;
+    wd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; wd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    I.dev->CreateDepthStencilState(&wd, &I.depthOverlayWrite);
     D3D11_BLEND_DESC bd{};
     bd.AlphaToCoverageEnable = TRUE;   // the shaders' alpha cut-out (eyelines, lashes, hair tips) without sorting
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
@@ -1595,13 +1599,20 @@ bool GpuView::Render(const ViewCamera& cam, int W, int H, const std::vector<char
                 if (!gm.vb) continue;
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
-                    // A material the bake moved to the transparent pass (painted translucency) draws like the game's alpha
-                    // garments: depth-tested, never written, alpha-blended, among the transparent paint layers. The plain
-                    // (as-exported) view keeps bucket 2: that path also has no doubt the PMX would draw blended there.
-                    const int bucket = (!I.plain && mat.translucent) ? 1 : (mat.alpha ? 2 : (!I.plain && detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
+                    if (mat.hidden) continue;
+                    // The plain (as exported / MMD) view blends every alpha-flagged material, like MikuMikuDance's transparent pass:
+                    // the stockings/tights diffuse alpha is 0.99, and blindly alpha-testing them (bucket 2) drew them as solid
+                    // black shapes. MikuMikuDance blends them instead, so we do too.
+                    const int bucket = I.plain ? (mat.alpha ? 1 : 0)
+                                       : (mat.translucent || (mat.alpha && detail::RenderQueueOf(scene, mat) >= 2500)) ? 1
+                                       : (mat.alpha ? 2 : (detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
                     if (bucket != pass) continue;
-                    if (bucket == 1) {   // the game's transparent compositing: tested, not written, alpha-blended
-                        ctx->OMSetDepthStencilState(I.depthOverlay, 0);
+                    // The game's forward pass writes depth for materials whose shader says ZWrite On (Shader Forge/main_alpha):
+                    // layered garments then resolve by depth, not draw order. ZWrite-off compositing keeps the tint state.
+                    // The plain (as exported / MMD) view keeps the no-write tint: MikuMikuDance does not write depth for blended materials.
+                    const bool zWrite = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) ? scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite : (!I.plain);
+                    if (bucket == 1) {   // the game's transparent compositing: depth per the shader's ZWrite, alpha-blended
+                        ctx->OMSetDepthStencilState(zWrite ? I.depthOverlayWrite : I.depthOverlay, 0);
                         ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
                     } else {
                         ctx->OMSetDepthStencilState(I.depth, 0);

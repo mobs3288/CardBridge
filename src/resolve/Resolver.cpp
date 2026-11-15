@@ -339,6 +339,37 @@ std::shared_ptr<unity::UnityFile> Resolver::openBaseBundle(const std::string& re
     }
 }
 
+namespace {
+std::string lowerOf(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; }
+}
+
+std::shared_ptr<unity::UnityFile> Resolver::openShaderBundle(const std::string& name, std::string* why) {
+    std::string bundleRel;
+    const ModEntry* entry = mods_.findShader(name, &bundleRel);
+    if (!entry) { if (why) *why = "no installed mod declares shader '" + name + "' (<MaterialEditor><Shader> in manifest.xml)"; return nullptr; }
+    if (bundleRel.empty()) { if (why) *why = "mod '" + entry->name + "' declares shader '" + name + "' with no AssetBundle"; return nullptr; }
+    std::string key = "shaderbundle:" + entry->path + "|" + bundleRel;
+    if (auto hit = cacheFind(key)) return hit;
+    std::string want = "abdata/" + bundleRel;
+    std::string lowerWant = lowerOf(want);
+    try {
+        ZipArchive z(entry->path);
+        const ZipArchive::Entry* found = z.find(want);
+        if (!found)
+            for (const auto& e : z.entries())
+                if (lowerOf(e.name) == lowerWant) { found = &e; break; }
+        if (!found) { if (why) *why = "bundle '" + want + "' (declared by mod '" + entry->name + "') is not inside " + entry->path; return nullptr; }
+        auto b = unity::UnityBundle::Open(z.read(*found), bundleRel);
+        auto uf = std::make_shared<unity::UnityFile>(b);
+        uf->setSource(entry->path + "|" + bundleRel, entry->path);
+        cachePut(key, uf);
+        return uf;
+    } catch (const std::exception& e) {
+        if (why) *why = std::string(e.what());
+        return nullptr;
+    }
+}
+
 std::shared_ptr<unity::UnityFile> Resolver::openByCab(const std::string& externalName, std::string* why) {
     std::string cab = externalName;
     for (char& c : cab) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -382,10 +413,6 @@ std::shared_ptr<unity::UnityFile> Resolver::openBundle(const ResolvedItem& item,
     std::string rel = item.bundleRel();
     if (rel.empty()) { if (why) *why = "list entry has no MainAB"; return nullptr; }
     return openItemBundle(item, rel, why);
-}
-
-namespace {
-std::string lowerOf(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; }
 }
 
 void Resolver::registerBundleProvider(const ResolvedItem& item) {

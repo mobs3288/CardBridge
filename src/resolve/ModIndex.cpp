@@ -38,6 +38,30 @@ bool readManifest(const std::string& path, ModEntry& e) {
     e.name = tagText(xml, "name");
     e.version = tagText(xml, "version");
     e.author = tagText(xml, "author");
+    // <MaterialEditor><Shader Name="IBL_Shader_alpha" AssetBundle="chara/IBLShader_alpha.unity3d">: the shader the
+    // game's Shader.Find would bind. Flat machine-written XML, so a tag scan is enough.
+    e.shaders.clear();
+    {
+        size_t p = xml.find("<MaterialEditor");
+        const size_t stop = p == std::string::npos ? std::string::npos : xml.find("</MaterialEditor>", p);
+        auto attrOf = [&xml](size_t tagStart, size_t tagEnd, const char* name) {
+            const std::string needle = std::string(name) + "=\"";
+            size_t a = xml.find(needle, tagStart);
+            if (a == std::string::npos || a >= tagEnd) return std::string{};
+            a += needle.size();
+            size_t b = xml.find('"', a);
+            return b == std::string::npos ? std::string{} : xml.substr(a, b - a);
+        };
+        while (p != std::string::npos && p < stop) {
+            size_t s = xml.find("<Shader ", p);
+            if (s == std::string::npos || s >= stop) break;
+            size_t end = xml.find('>', s);
+            if (end == std::string::npos) break;
+            const std::string n = attrOf(s, end, "Name"), b = attrOf(s, end, "AssetBundle");
+            if (!n.empty() && !b.empty()) e.shaders.emplace_back(n, b);
+            p = end + 1;
+        }
+    }
     e.listIds.clear();
     for (const auto& entry : z.entries()) {   // the (category, id) rows of the mod's character lists
         std::string lower = entry.name;
@@ -77,7 +101,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
         try {
             Bytes raw = fileio::ReadFile(cachePath);
             auto j = nlohmann::json::parse(raw.begin(), raw.end());
-            if (j.value("version", 0) == 2)
+            if (j.value("version", 0) == 3)
                 for (const auto& e : j["entries"]) {
                     ModEntry m;
                     m.path = e.value("path", "");
@@ -88,6 +112,9 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
                     m.size = e.value("size", uint64_t(0));
                     m.mtime = e.value("mtime", int64_t(0));
                     m.listIds = e.value("ids", std::vector<int64_t>{});
+                    if (e.contains("shaders") && e["shaders"].is_array())
+                        for (const auto& s : e["shaders"])
+                            if (s.is_array() && s.size() >= 2) m.shaders.emplace_back(s[0].get<std::string>(), s[1].get<std::string>());
                     cached[m.path] = m;
                 }
         } catch (const std::exception&) {
@@ -147,7 +174,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
 
     ModIndex idx;
     nlohmann::json out;
-    out["version"] = 2;
+    out["version"] = 3;
     out["root"] = root;
     auto& arr = out["entries"] = nlohmann::json::array();
     for (size_t i = 0; i < results.size(); ++i) {
@@ -160,8 +187,16 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
             auto& at = idx.byListId_[{static_cast<int>(e.listIds[k]), e.listIds[k + 1]}];
             if (at.empty() || at.back().first != e.guid || at.back().second != vec.size() - 1) at.emplace_back(e.guid, vec.size() - 1);
         }
-        arr.push_back({{"path", e.path}, {"guid", e.guid}, {"name", e.name}, {"version", e.version},
-                       {"author", e.author}, {"size", e.size}, {"mtime", e.mtime}, {"ids", e.listIds}});
+        const size_t myIdx = vec.size() - 1;
+        for (const auto& kv : e.shaders) idx.byShaderName_.emplace(kv.first, std::make_pair(e.guid, myIdx));
+        nlohmann::json entry{{"path", e.path}, {"guid", e.guid}, {"name", e.name}, {"version", e.version},
+                             {"author", e.author}, {"size", e.size}, {"mtime", e.mtime}, {"ids", e.listIds}};
+        if (!e.shaders.empty()) {
+            nlohmann::json sh = nlohmann::json::array();
+            for (const auto& kv : e.shaders) sh.push_back({kv.first, kv.second});
+            entry["shaders"] = std::move(sh);
+        }
+        arr.push_back(std::move(entry));
     }
     if (!cachePath.empty()) {
         try {
@@ -191,6 +226,17 @@ std::vector<const ModEntry*> ModIndex::findByListId(int category, int64_t id) co
 const std::vector<ModEntry>* ModIndex::find(const std::string& guid) const {
     auto it = byGuid_.find(guid);
     return it == byGuid_.end() ? nullptr : &it->second;
+}
+
+const ModEntry* ModIndex::findShader(const std::string& name, std::string* bundle) const {
+    auto it = byShaderName_.find(name);
+    if (it == byShaderName_.end()) return nullptr;
+    auto g = byGuid_.find(it->second.first);
+    if (g == byGuid_.end() || it->second.second >= g->second.size()) return nullptr;
+    const ModEntry& e = g->second[it->second.second];
+    for (const auto& kv : e.shaders)
+        if (kv.first == name) { if (bundle) *bundle = kv.second; return &e; }
+    return nullptr;
 }
 
 } // namespace cardbridge::resolve

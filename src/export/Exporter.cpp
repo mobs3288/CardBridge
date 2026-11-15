@@ -200,6 +200,14 @@ bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& 
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment) {
     MmdLook look;
     look.diffuse = mat.diffuse;
+    if (mat.hidden) {   // the shader leaves nothing behind in the game: MikuMikuDance draws nothing either
+        look.drawFlags = 0x00;
+        look.diffuse = {0.0f, 0.0f, 0.0f, 0.0f};
+        look.ambient = {0.0f, 0.0f, 0.0f};
+        look.edgeColor = {0.0f, 0.0f, 0.0f, 0.0f};
+        look.edgeSize = 0.0f;
+        return look;
+    }
     if (mat.shader.find("glasses") != std::string::npos) {   // lenses: the shader's _Color alpha (see-through), not a solid
         float a = 0.35f;
         for (const auto& pr : mat.props) if (pr.first == "_Color") a = pr.second.w < 0.99f ? pr.second.w : 0.35f;

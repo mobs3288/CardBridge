@@ -78,6 +78,9 @@ struct SceneMaterial {
     // -1 (bottom), each the colour factor the shader gives that light angle relative to the baked front light. Empty = none.
     std::vector<Vec3> toon;
     bool bakedLit = false;                   // the texture already holds the shader's lighting: write the material unlit
+    // The game's shader discards every fragment it draws (e.g. a crest painted with a black fallback texture and no binding of its
+    // own): the game shows nothing for it, so the views and the exported model skip it too instead of drawing a flat white plate.
+    bool hidden = false;
     bool cardAreola = false;                 // its _nipsize is the card's areola size, not the material's own default (a re-shape follows the slider)
     bool cardSkin = false;                   // the body's skin material (cf_m_body): _overcolor1 tints the nipple / areola overlay
     Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)

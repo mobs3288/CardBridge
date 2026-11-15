@@ -73,6 +73,10 @@ public:
     void registerBundleProvider(const ResolvedItem& item);
     // A base-game bundle by its abdata-relative path, e.g. "chara/oo_base.unity3d".
     std::shared_ptr<unity::UnityFile> openBaseBundle(const std::string& rel, std::string* why);
+    // A shader a MaterialEditor override names, from the mod that declares it (<MaterialEditor><Shader> in its manifest):
+    // the game's Shader.Find loads these; without it an outfit authored against a mod shader keeps its blending mode
+    // through the fallback but loses the mod's own lighting. Null when no installed mod declares the shader.
+    std::shared_ptr<unity::UnityFile> openShaderBundle(const std::string& name, std::string* why);
     // The library bundle that holds an object a material points at in "another file" (a PPtr's external name, e.g.
     // "archive:/CAB-xxxx/CAB-xxxx"): the first call indexes which bundle holds which CAB (cached in library/cab_index.json).
     // A row of the base-game lists (the library's abdata/list), or null.

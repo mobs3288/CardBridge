@@ -72,14 +72,25 @@ float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
     return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
 
-// A material the game composites in its transparent queue with depth write off (the face's paint layers: eye white, iris,
-// brow, eyelines, nose line — their closeness is meaningless, the queue order is what keeps the iris over the white).
-// An authored translucency shader (a cloth worn see-through) composites the same way: blended, in queue order.
-// The software renderers draw these after the depth-writing materials, alpha-blended and without writing depth, like the game.
+// The forward pass writes depth when the material's shader says ZWrite On (Shader Forge/main_alpha declares it in its
+// FORWARDBASE pass). The transparent compositing then resolves layered garments by depth - the way the game draws a
+// corset over pantyhose regardless of draw order. Unknown shaders (not in any bundle) keep the game's convention:
+// Shader Forge's mod shader fallbacks write depth, so an unindexed material layers correctly too.
+bool ShaderWritesDepth(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) return scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite;
+    return true;
+}
+
+// A material the game composites in its transparent queue (queue >= 2500): the face's paint layers (eye white, iris, brow, eyelines,
+// nose line — their closeness is meaningless, the queue order is what keeps the iris over the white), an authored translucency shader
+// or an alpha-blend shader like Shader Forge/main_alpha (Transparent+40): the material blends over what is behind it, in queue order.
+// The software renderers and the GPU view draw these after the depth-writing materials, alpha-blended.
 bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     if (mat.translucent) return true;
-    if (mat.alpha || mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
-    return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && RenderQueueOf(scene, mat) >= 2500;
+    const int q = RenderQueueOf(scene, mat);
+    if (mat.alpha && q >= 2500) return true;
+    if (mat.shaderIndex < 0 || static_cast<size_t>(mat.shaderIndex) >= scene.shaders.size()) return false;
+    return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && q >= 2500;
 }
 
 // The orthographic framing, shared by the renderers and the translucency brush (see Preview.h).
@@ -266,6 +277,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                 const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
                 for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                    if (mat.hidden) continue;
                     items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
@@ -320,7 +332,8 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * opt.viewWidth + x;
-                        if (z <= zbuf[zi]) continue;
+                        const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
+                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         if (tex) {
                             const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
@@ -338,7 +351,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         r *= (mat.shadow.x + (1.0f - mat.shadow.x) * lit);
                         g *= (mat.shadow.y + (1.0f - mat.shadow.y) * lit);
                         bl *= (mat.shadow.z + (1.0f - mat.shadow.z) * lit);
-                        if (!blend) zbuf[zi] = z;
+                        if (writeZ) zbuf[zi] = z;
                         uint8_t* o = &img[(static_cast<size_t>(y) * W + ox + x) * 4];
                         if (blend) {
                             const float a = std::min(1.0f, std::max(0.0f, al));
@@ -452,6 +465,18 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
             }
             if (pm.name == "_WorldSpaceLightPos0") { f[0] = lightDir[0]; f[1] = lightDir[1]; f[2] = lightDir[2]; f[3] = 0.0f; continue; }
             if (pm.name == "_WorldSpaceCameraPos") { f[0] = camPos[0]; f[1] = camPos[1]; f[2] = camPos[2]; continue; }
+            // The IBL (image-based-lighting) family samples unity_SHAr..unity_OcclusionMaskSelector for its ambient
+            // and its occlusion. Unity fills them from the scene's lighting; here there is one headlight, so a strong,
+            // neutral hemisphere is synthesised - without it the IBL shaders see a black environment and render black.
+            // unity_SHBr/g/b stay 0 (no directional asymmetry); unity_SHC stays 0 (no opposite-lobe).
+            if (pm.name == "unity_SHAr" || pm.name == "unity_SHAg" || pm.name == "unity_SHAb") { f[0] = f[1] = f[2] = f[3] = 0.45f; continue; }
+            if (pm.name == "unity_SHC" || pm.name == "unity_SHBr" || pm.name == "unity_SHBg" || pm.name == "unity_SHBb") { f[0] = f[1] = f[2] = f[3] = 0.0f; continue; }
+            if (pm.name == "unity_OcclusionMaskSelector") { f[0] = 1.0f; f[1] = 1.0f; f[2] = 0.0f; f[3] = 1.0f; continue; }   // Unity's built-in: RGB occlusion, full pass
+            // Unity's unity_SpecCube*_HDR carries the decode scale/bias of the reflection probes; zero kills the IBL
+            // reflection term entirely (the env light is then 0 and the garment renders black). A partial scale keeps
+            // the maker's sheen without washing the garment out (the fallback sample is plain white).
+            if (pm.name == "unity_SpecCube0_HDR" || pm.name == "unity_SpecCube1_HDR") { f[0] = 0.55f; f[1] = 0.55f; f[2] = 0.55f; f[3] = 0.55f; continue; }
+            if (pm.name == "unity_SpecCube0_ProbePosition" || pm.name == "unity_SpecCube1_ProbePosition") { f[0] = 0.0f; f[1] = 0.0f; f[2] = 0.0f; f[3] = 1.0f; continue; }
             bool found = false;
             for (const auto& pr : mat.props) if (pr.first == pm.name) { f[0] = pr.second.x; f[1] = pr.second.y; f[2] = pr.second.z; f[3] = pr.second.w; found = true; }
             if (!found && globals)
@@ -707,6 +732,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                 const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
+                if (mat.hidden) continue;
                 jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
             }
         }
@@ -832,7 +858,8 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         if (l0 < -1e-4f || l1 < -1e-4f || l2 < -1e-4f) continue;
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * W + x;
-                        if (z <= zbuf[zi]) continue;
+                        const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
+                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         // Diagnostic view modes (spec S13): per-pixel substitution of the shading, never touching
                         // the game's shader path. They fall through to the same write-out below. Lit is unchanged.
@@ -946,7 +973,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
                             if (al < detail::DiscardBelow(mat, blend)) continue;
                             if (highlight) highlightTint(r, g, bl);
-                            if (!blend) zbuf[zi] = z;
+                            if (writeZ) zbuf[zi] = z;
                             auto q2f = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return f; };
                             const float a = std::min(1.0f, std::max(0.0f, al));
                             const float sr2 = q2f(r), sg2 = q2f(g), sb2 = q2f(bl);
@@ -963,7 +990,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                         bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f + 0.5f) << 16) | (static_cast<uint32_t>(cg * 255.0f + 0.5f) << 8) | static_cast<uint32_t>(cb * 255.0f + 0.5f);
                                     } else {
                                         bgra[zj] = shadedPx;
-                                        zbuf[zj] = z;
+                                        if (writeZ) zbuf[zj] = z;
                                     }
                                 }
                             continue;
@@ -1010,7 +1037,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             }
                         }
                         if (highlight) highlightTint(r, g, bl);
-                        if (!blend) zbuf[zi] = z;
+                        if (writeZ) zbuf[zi] = z;
                         auto q = [](float f) { return static_cast<uint32_t>(std::min(255.0f, std::max(0.0f, f * 255.0f))); };
                         uint32_t px32 = 0xFF000000u | (q(r) << 16) | (q(g) << 8) | q(bl);
                         const float a2 = std::min(1.0f, std::max(0.0f, al));
@@ -1025,7 +1052,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                     bgra[zj] = 0xFF000000u | (static_cast<uint32_t>(cr * 255.0f) << 16) | (static_cast<uint32_t>(cg * 255.0f) << 8) | static_cast<uint32_t>(cb * 255.0f);
                                 } else {
                                     bgra[zj] = px32;
-                                    zbuf[zj] = z;
+                                    if (writeZ) zbuf[zj] = z;
                                 }
                             }
                     }
@@ -1494,7 +1521,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                 if (cov[ti] && img[ti * 4 + 3] >= 0.5f) {
                     if (++solid >= 16) break;
                 }
-            if (solid < 16) { ++skipEmptyBake; continue; }
+            if (solid < 16) {
+                // The game's shader discards every fragment here (a crest drawn with a black fallback texture and no binding of its own):
+                // the game shows nothing for it, so we skip it in the views and in the export too - drawing a flat white plate is wrong.
+                scene.materials[mi].hidden = true;
+                scene.warn("", "material '" + mat.name + "' draws nothing (every fragment discarded) and is skipped everywhere");
+                ++skipEmptyBake;
+                continue;
+            }
         }
 
         if (toon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
