@@ -20,7 +20,6 @@
 
 constexpr wchar_t kSelClassName[] = L"CardBridgeSelectiveImport";
 constexpr UINT_PTR kSelBuildTimer = 3;   // the 250 ms debounce that rebuilds the proposed scene
-constexpr UINT_PTR kSelRenderTimer = 4;  // defers the Direct3D work so WM_PAINT is always a blit
 
 // Forward declarations (the input handlers reach these before their definitions appear):
 card::SelectiveDecisions SelDecisionsNow();
@@ -101,6 +100,7 @@ std::vector<int> SelComponentParts(const assemble::Scene& scene, int outfit, con
 
 // Recompute the per-view component->parts mapping after a scene lands.
 void SelRemapComponents(int view) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     SelView& v = g.sel.views[view];
     if (!v.scene) return;
     const int outfit = SelViewOutfit(view);
@@ -114,6 +114,7 @@ void SelRemapComponents(int view) {
 // and 2 colour every visible piece by its action; the proposed view colours retained (keep/skip)
 // parts with KeepExisting blue.
 std::vector<exporter::HighlightPart> SelHighlightsFor(int view) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // the render worker calls this; the map and the rows are UI state
     std::vector<exporter::HighlightPart> hs;
     const SelView& v = g.sel.views[view];
     if (!v.scene) return hs;
@@ -287,36 +288,38 @@ assemble::AssembleOptions SelAssembleOptions(int outfit, bool useSource) {
 }
 
 // Uploads the scene into a preview view's Direct3D copy (or marks the software fallback ready).
-// Called on a worker thread after the scene is built; the GPU calls and the state flip are serialised
-// against the paint path and the drop-on-close path through selGpuMu.
+// Called on a worker thread after the scene is built. Locks never nest: g.mu guards the state reads/writes,
+// selGpuMu is a leaf around the device calls only, so the render worker and the paint path stay lock-brief.
 void SelUploadScene(int view, int session) {
-    std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
-    {
-        std::lock_guard<std::recursive_mutex> lk(g.mu);
-        if (g.sel.session != session) return;   // the window was closed or reopened; do not touch the new state
-    }
     SelView& v = g.sel.views[view];
-    if (!v.scene) { v.state = 3; return; }
+    std::shared_ptr<const assemble::Scene> scene;
     exporter::GpuOptions go;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.sel.session != session) return;   // the window was closed or reopened; do not touch the new state
+        scene = v.scene;
         go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
     }
+    if (!scene) { std::lock_guard<std::recursive_mutex> lk(g.mu); v.state = 3; return; }
     v.gpuOk = false;
-    if (v.gpu.Init(go)) {
-        std::string why;
-        if (v.gpu.Load(*v.scene, &why)) v.gpuOk = true;
-        else Log("selective import preview: GPU upload failed (" + why + ") - using the software renderer", LogKind::Warn);
-    } else {
-        Log("selective import preview: Direct3D 11 unavailable - the preview uses the software renderer", LogKind::Warn);
+    {
+        std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
+        if (v.gpu.Init(go)) {
+            std::string why;
+            if (v.gpu.Load(*scene, &why)) v.gpuOk = true;
+            else Log("selective import preview: GPU upload failed (" + why + ") - using the software renderer", LogKind::Warn);
+        } else {
+            Log("selective import preview: Direct3D 11 unavailable - the preview uses the software renderer", LogKind::Warn);
+        }
     }
-    std::vector<char> zero(v.scene->parts.size(), 0);
-    v.hidden = exporter::EffectiveHiddenParts(*v.scene, zero);
-    SelRemapComponents(view);
+    std::vector<char> zero(scene->parts.size(), 0);
+    const std::vector<char> hidden0 = exporter::EffectiveHiddenParts(*scene, zero);
+    SelRemapComponents(view);   // takes g.mu itself
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         if (g.sel.session == session) {
+            v.hidden = hidden0;
             v.state = 2;
             v.error.clear();
             v.dirty = true;   // the freshly assembled picture needs one full render
@@ -439,14 +442,14 @@ void SelQueueProposal() {
 
 // False while any preview is building (decisions may have changed under it); true once everything is ready.
 bool SelPreviewsReady() {
-    for (const SelView& v : g.sel.views) if (v.state == 1) return false;
+    for (const SelView& v : g.sel.views) if (v.state.load() == 1) return false;
     return true;
 }
 
 // ==================================================================== render & paint ========================
-// The preview panes draw directly on the window DC: the three 3D pictures via StretchDIBits, the 2D
-// chrome (header, chips, rows, buttons) via plain GDI — the picture regions are never touched by the
-// 2D pass, so the two layers never fight.
+// Everything is composed into an off-screen device context and blitted once per WM_PAINT: the window
+// never shows a half-drawn frame, no matter how often invalidations arrive (a hover, a camera drag).
+// The 3D pictures themselves are produced on the render worker (never here) and blitted as-is.
 
 void SelSyncView0Hidden() {
     SelView& v = g.sel.views[0];
@@ -458,66 +461,130 @@ void SelSyncView0Hidden() {
     }
 }
 
-// Re-renders the dirty preview views into their cached frames. Called from the deferred render
-// timer, never from WM_PAINT: the window's paint path is a pure cache blit, so the user never
-// sees a half-drawn or lagging frame.
-void SelRenderViews() {
-    if (!g.sel.hwnd) return;
+// ==================================================================== the render worker ========================
+// Every Direct3D call happens on one background thread, never on the UI thread: WM_PAINT only blits the
+// cached pictures, and this worker produces them whenever something changed (a new scene, the pose, the
+// camera, hidden parts, the hover/selection highlights, a resize). Each view owns its own Direct3D device,
+// so the three pictures never touch the main window's device.
+
+// Snapshots everything one picture needs, under g.mu (the Direct3D call itself happens after the lock is released).
+struct SelFrameInputs {
+    std::shared_ptr<const assemble::Scene> scene;
+    exporter::ViewCamera cam;
+    std::vector<char> hidden;
+    std::vector<exporter::HighlightPart> highlights;
+    std::vector<Mat4> skin;      // the software fallback's skin (views 1 and 2: the shared A-pose)
+    int singleHighlight = -1;    // the software fallback colours one part
+};
+
+bool SelSnapshotView(int view, SelFrameInputs& in) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    SelView& v = g.sel.views[view];
+    if (view == 0) SelSyncView0Hidden();   // the main view's hide/show must reach the picture
+    if (v.state != 2 || !v.scene) return false;
+    in.scene = v.scene;
+    in.cam = v.cam;
+    in.hidden = v.hidden;
+    in.highlights = SelHighlightsFor(view);
+    in.skin = v.previewSkin;
+    const int hov = g.sel.hoverComp >= 0 ? g.sel.hoverComp : g.sel.selComp;
+    in.singleHighlight = (hov >= 0 && static_cast<size_t>(hov) < v.compParts.size() && !v.compParts[hov].empty()) ? v.compParts[hov][0] : -1;
+    return true;
+}
+
+// Renders one view if (and only if) it owes a picture. Returns true when one was produced.
+bool SelRenderViewNow(int view, const SelLayout& l) {
+    SelView& v = g.sel.views[view];
+    const RECT rect = l.views[view];
+    const int W = rect.right - rect.left, H = rect.bottom - rect.top;
+    if (W < 8 || H < 8) return false;
+    if (!v.dirty) {   // cached and current: free
+        std::lock_guard<std::mutex> flk(v.frameMtx);
+        if (v.fw == W && v.fh == H && !v.frame.empty()) return false;
+    }
+    SelFrameInputs in;
+    if (!SelSnapshotView(view, in)) { v.dirty = false; return false; }
+    std::vector<uint32_t> bgra;
+    bool drawn = false;
+    {
+        std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
+        if (v.gpuOk && v.gpu.ready())
+            drawn = v.gpu.RenderHighlighted(in.cam, W, H, &in.hidden, bgra, in.highlights);
+        if (!drawn) {
+            // Software fallback (no Direct3D 11): one tinted part (the hovered one).
+            exporter::ViewOptions vopt;
+            vopt.textured = true;
+            vopt.shaded = true;
+            vopt.hiddenParts = &in.hidden;
+            vopt.skin = in.skin.empty() ? nullptr : &in.skin;
+            vopt.highlightPart = in.singleHighlight;
+            if (in.scene) exporter::RenderView(*in.scene, in.cam, W, H, vopt, *v.swState, bgra);
+            drawn = !bgra.empty();
+        }
+    }
+    if (drawn && !bgra.empty()) {
+        std::lock_guard<std::mutex> flk(v.frameMtx);
+        v.frame = std::move(bgra);
+        v.fw = W; v.fh = H;
+    }
+    v.dirty = false;   // one attempt per invalidation: a failure keeps the placeholder/the old frame, no retry loop
+    return drawn;
+}
+
+// True while any view owes a picture (the worker's wait predicate).
+bool SelAnyViewDirty() {
+    HWND h = nullptr;
+    int states[3];
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        h = g.sel.open ? g.sel.hwnd : nullptr;
+        for (int i = 0; i < 3; ++i) states[i] = g.sel.views[i].state;
+    }
+    if (!h) return false;
     RECT rc;
-    GetClientRect(g.sel.hwnd, &rc);
-    if (rc.right <= 8 || rc.bottom <= 8) return;
+    if (!GetClientRect(h, &rc)) return false;
+    if (rc.right <= 8 || rc.bottom <= 8) return false;
     const SelLayout l = SelLay(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
     for (int view = 0; view < 3; ++view) {
         SelView& v = g.sel.views[view];
-        const RECT rect = l.views[view];
-        const int W = rect.right - rect.left, H = rect.bottom - rect.top;
-        if (W < 8 || H < 8) continue;
-        std::shared_ptr<const assemble::Scene> scene;
-        int state;
-        {
-            std::lock_guard<std::recursive_mutex> lk(g.mu);
-            scene = v.scene;   // a local copy under the lock: the workers swap it while the UI paints
-            state = v.state;
-        }
-        if (!scene || state != 2) continue;   // placeholder branch paints nothing cached yet
-        if (!v.dirty && v.fw == W && v.fh == H && !v.frame.empty()) continue;   // cached and current: free
-        if (view == 0) SelSyncView0Hidden();
-        const std::vector<exporter::HighlightPart> hs = SelHighlightsFor(view);
-        bool drawn = false;
-        if (view == 0) {
-            g.gpu.SetDiagnosticMode(0, nullptr);   // pin Lit for the preview; the main view re-sets its own mode every frame
-            drawn = g.gpu.RenderHighlighted(v.cam, W, H, &v.hidden, v.frame, hs);
-        } else {
-            {
-                std::lock_guard<std::mutex> lk(g.sel.selGpuMu);
-                if (v.gpuOk) drawn = v.gpu.RenderHighlighted(v.cam, W, H, &v.hidden, v.frame, hs);
-            }
-            if (!drawn) {
-                // Software fallback (no Direct3D 11): shaded, tinted by the hovered component only
-                // (the software view takes a single highlight part).
-                const int hov = g.sel.hoverComp >= 0 ? g.sel.hoverComp : g.sel.selComp;
-                const int single = (hov >= 0 && static_cast<size_t>(hov) < v.compParts.size() && !v.compParts[hov].empty()) ? v.compParts[hov][0] : -1;
-                exporter::ViewOptions vopt;
-                vopt.textured = true;
-                vopt.shaded = true;
-                vopt.hiddenParts = &v.hidden;
-                vopt.skin = v.previewSkin.empty() ? nullptr : &v.previewSkin;
-                vopt.highlightPart = single;
-                exporter::RenderView(*scene, v.cam, W, H, vopt, *v.swState, v.frame);
-                drawn = !v.frame.empty();
-            }
-        }
-        if (drawn && !v.frame.empty()) { v.fw = W; v.fh = H; v.dirty = false; }
+        const RECT r = l.views[view];
+        const int W = r.right - r.left, H = r.bottom - r.top;
+        if (W < 8 || H < 8 || states[view] != 2) continue;
+        if (v.dirty) return true;
+        std::lock_guard<std::mutex> flk(v.frameMtx);
+        if (v.fw != W || v.fh != H || v.frame.empty()) return true;
     }
-    if (g.sel.hwnd) InvalidateRect(g.sel.hwnd, nullptr, FALSE);   // arm the blit of the fresh frames
+    return false;
+}
+
+// The render worker: waits until a view owes a picture, re-renders the dirty views, and wakes the paint
+// path (WM_SEL_FRAME). Runs for the window's lifetime; joined in SelectiveClose before anything is torn down.
+void SelRenderWorkerLoop() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(g.sel.renderMtx);
+            g.sel.renderCv.wait(lk, [] { return g.sel.renderStop || SelAnyViewDirty(); });
+            if (g.sel.renderStop) return;
+        }
+        HWND h = nullptr;
+        { std::lock_guard<std::recursive_mutex> lk(g.mu); h = g.sel.open ? g.sel.hwnd : nullptr; }
+        if (!h) continue;
+        RECT rc;
+        if (!GetClientRect(h, &rc) || rc.right <= 8 || rc.bottom <= 8) continue;
+        const SelLayout l = SelLay(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
+        bool any = false;
+        for (int view = 0; view < 3; ++view) if (SelRenderViewNow(view, l)) any = true;
+        if (any) PostMessageW(h, WM_SEL_FRAME, 0, 0);
+    }
 }
 
 void SelDrawFrame(int view, HDC dc, const RECT& rect) {
     SelView& v = g.sel.views[view];
     const int W = rect.right - rect.left, H = rect.bottom - rect.top;
     if (W >= 8 && H >= 8) {
-        std::lock_guard<std::recursive_mutex> lk(g.mu);
-        if (v.state == 2 && v.scene && !v.frame.empty() && v.fw == W && v.fh == H) {
+        const int state = v.state;
+        std::lock_guard<std::mutex> flk(v.frameMtx);
+        if (state == 2 && !v.frame.empty() && v.fw == W && v.fh == H) {
             BITMAPINFO bi{};
             bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
@@ -526,7 +593,7 @@ void SelDrawFrame(int view, HDC dc, const RECT& rect) {
             return;
         }
     }
-    // Not ready: a placeholder card
+    // Not ready (or the first worker frame has not landed yet): a placeholder card
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         if (view == 0) SelSyncView0Hidden();
@@ -666,16 +733,26 @@ assemble::Pose SelBuildPreviewPose(const assemble::Scene& scene) {
 }
 
 // Skins the static previews with the shared A-pose, keeps the matrices for the picker, refreshes the pictures.
+// View 0 now owns its device, so it is skinned like the other two. The GPU calls are serialised with the render worker.
 void SelApplyPreviewSkins() {
-    for (int view : {1, 2}) {
+    // Build the A-pose matrices on the CPU first (g.mu), then push them to the GPU (selGpuMu leaf).
+    std::vector<std::pair<int, std::vector<Mat4>>> skins;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        for (int view = 0; view < 3; ++view) {
+            SelView& v = g.sel.views[view];
+            if (!v.scene) continue;
+            const assemble::Pose p = SelBuildPreviewPose(*v.scene);
+            v.previewSkin = assemble::SkinMatrices(*v.scene, p);
+            skins.emplace_back(view, v.previewSkin);
+        }
+    }
+    std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
+    for (const auto& [view, skin] : skins) {
         SelView& v = g.sel.views[view];
-        if (!v.scene) continue;
-        const assemble::Pose p = SelBuildPreviewPose(*v.scene);
-        v.previewSkin = assemble::SkinMatrices(*v.scene, p);
-        if (v.gpuOk) v.gpu.SetSkin(v.previewSkin.empty() ? nullptr : &v.previewSkin);
+        if (v.gpuOk) v.gpu.SetSkin(skin.empty() ? nullptr : &skin);
         v.dirty = true;   // the pose changed: re-render once, then cache
     }
-    g.sel.views[0].dirty = true;
 }
 
 // Möller–Trumbore; on hit, t is written.
@@ -698,29 +775,41 @@ bool SelRayTriangle(const Vec3& o, const Vec3& d, const Vec3& a, const Vec3& b, 
 // Picks the component under (px, py) in a view's picture. Skinned positions are computed on the fly (clothing meshes only).
 int SelPick(int view, int px, int py, int viewW, int viewH) {
     SelView& v = g.sel.views[view];
-    if (!v.scene) return -1;
-    const assemble::Scene& scene = *v.scene;
+    std::shared_ptr<const assemble::Scene> scene;
+    std::vector<char> hidden;
+    exporter::ViewCamera cam;
+    std::vector<std::vector<int>> compParts;
+    std::vector<Mat4> previewSkin;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);   // a rebuild swaps these; take a consistent snapshot
+        scene = v.scene;
+        hidden = v.hidden;
+        cam = v.cam;
+        compParts = v.compParts;
+        previewSkin = v.previewSkin;
+    }
+    if (!scene) return -1;
     exporter::ViewFraming f;
-    if (!exporter::detail::ComputeViewFraming(scene, &v.hidden, static_cast<float>(viewW), static_cast<float>(viewH), v.cam, f)) return -1;
+    if (!exporter::detail::ComputeViewFraming(*scene, &hidden, static_cast<float>(viewW), static_cast<float>(viewH), cam, f)) return -1;
     Vec3 o, d;
-    if (!exporter::detail::ViewRayAt(f, static_cast<float>(viewW), static_cast<float>(viewH), v.cam, static_cast<float>(px), static_cast<float>(py), o, d)) return -1;
+    if (!exporter::detail::ViewRayAt(f, static_cast<float>(viewW), static_cast<float>(viewH), cam, static_cast<float>(px), static_cast<float>(py), o, d)) return -1;
     const std::vector<Mat4>* skin = nullptr;
     std::vector<Mat4> copied;
     if (view == 0) {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         copied = g.skin;
         skin = &copied;
-    } else skin = &v.previewSkin;
+    } else skin = &previewSkin;
     const bool posed = skin && !skin->empty();
     float bestT = 1e30f; int best = -1;
     std::vector<Vec3> sp;
     for (size_t ci = 0; ci < g.sel.comps.size(); ++ci) {
-        if (ci >= v.compParts.size()) break;
-        for (int pi : v.compParts[ci]) {
-            const auto& part = scene.parts[static_cast<size_t>(pi)];
+        if (ci >= compParts.size()) break;
+        for (int pi : compParts[ci]) {
+            const auto& part = scene->parts[static_cast<size_t>(pi)];
             if (!part.visibleInPreview) continue;
             for (int mi : part.meshes) {
-                const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
+                const auto& mesh = scene->meshes[static_cast<size_t>(mi)];
                 sp.assign(mesh.vertices.size(), Vec3{});
                 for (size_t vi = 0; vi < mesh.vertices.size(); ++vi)
                     sp[vi] = posed ? assemble::SkinPoint(mesh.vertices[vi], *skin) : mesh.vertices[vi].pos;
@@ -751,27 +840,51 @@ void SelTimerFired() {
 
 void SelectiveInvalidateView();
 
+// Stops the render worker and waits for it to finish: afterwards no picture can be produced and the
+// Direct3D copies can be torn down safely.
+void SelStopRenderWorker() {
+    {
+        std::lock_guard<std::mutex> lk(g.sel.renderMtx);
+        g.sel.renderStop = true;
+    }
+    g.sel.renderCv.notify_one();
+    if (g.sel.renderWorker.joinable()) g.sel.renderWorker.join();
+}
+
 // Drops everything a preview view holds (GPU copies, scene, posed positions, frame buffers). The loaded character is untouched.
 void SelDropViews() {
-    std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);   // wait out an in-flight upload so its GpuView is never torn down under it
-    for (SelView& v : g.sel.views) {
-        v.gpu.Unload();
-        v.gpu.Shutdown();
+    {   // leaf: the GPU copies go first (the render worker and any in-flight upload are already done by the caller's join,
+        std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);   // or serialise here without ever holding g.mu at the same time)
+        for (SelView& v : g.sel.views) {
+            v.gpu.Unload();
+            v.gpu.Shutdown();
+        }
+    }
+    {
+        std::lock_guard<std::recursive_mutex> gLk(g.mu);   // then the CPU-side state (paint placeholders read it)
+        for (SelView& v : g.sel.views) {
         v.scene.reset();
         v.hidden.clear();
         v.compParts.clear();
         v.placedAcc.clear();
         v.previewSkin.clear();
-        v.frame.clear();
+        {
+            std::lock_guard<std::mutex> flk(v.frameMtx);   // the cached picture: drop it under the same guard the blit uses
+            v.frame.clear();
+            v.fw = v.fh = 0;
+        }
+        v.dirty = true;
         v.state = 0;
         v.gpuOk = false;
         v.error.clear();
-        v.swState = exporter::NewViewState();
-    }
-}
+            v.swState = exporter::NewViewState();
+        }   // for
+    }       // gLk
+}           // SelDropViews
 
 // Fill the component rows from the assembled preview scenes (the parts carry the item's names, mods and resolution status).
 void SelFillNames(int view) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     SelView& v = g.sel.views[view];
     if (!v.scene) return;
     for (size_t i = 0; i < g.sel.comps.size(); ++i) {
@@ -795,6 +908,7 @@ void SelFillNames(int view) {
 
 // Rebuilds the component list and the suggested decisions from the (re)parsed source. False when the source cannot be read.
 bool SelBuildComponentList() {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // the render worker reads the rows and the decisions
     g.sel.comps.clear();
     g.sel.decisions.clear();
     std::shared_ptr<Loaded> L;
@@ -825,7 +939,7 @@ bool SelBuildComponentList() {
     }
     g.sel.listScroll = 0;
     g.sel.listPos = 0;
-    g.sel.hoverComp = g.sel.selComp = -1;
+    g.sel.hoverComp.store(-1); g.sel.selComp.store(-1);
     return true;
 }
 
@@ -874,6 +988,7 @@ void SelectiveOpen(const std::string& path) {
         return;
     }
     const int outfit = L->outfit;
+    SelStopRenderWorker();   // a previous selective window's picture may still be produced; stop it before touching the devices
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         SelDropViews();              // release any previous preview completely before building a new one
@@ -886,7 +1001,8 @@ void SelectiveOpen(const std::string& path) {
         g.sel.dstOutfit = outfit;
         g.sel.comps.clear();
         g.sel.decisions.clear();
-        g.sel.hoverComp = g.sel.selComp = -1;
+        g.sel.hoverComp.store(-1); g.sel.selComp.store(-1);
+        g.sel.hoverAction = 0;
         g.sel.listScroll = 0;
         g.sel.listPos = 0;
         g.sel.linkCams = true;
@@ -902,7 +1018,7 @@ void SelectiveOpen(const std::string& path) {
         g.sel.notes.clear();
         g.sel.status = "assembling the preview ...";
         g.sel.views[0].scene = std::shared_ptr<const assemble::Scene>(L, &L->scene);   // the loaded character itself, kept alive while the window is open
-        g.sel.views[0].state = 2;
+        g.sel.views[0].state = 1;   // uploaded on its own Direct3D device on a worker thread (see below)
         std::vector<char> zero(L->scene.parts.size(), 0);
         g.sel.views[0].hidden = exporter::EffectiveHiddenParts(L->scene, zero);
     }
@@ -940,6 +1056,20 @@ void SelectiveOpen(const std::string& path) {
     if (HICON icon = LoadIconW(g.hinst, MAKEINTRESOURCEW(1))) SendMessageW(g.sel.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
     ShowWindow(g.sel.hwnd, testQuiet ? SW_SHOWNOACTIVATE : SW_SHOW);   // a hidden window never paints (PrintWindow included)
     SetForegroundWindow(g.sel.hwnd);
+    const int session = g.sel.session;
+    // The render worker produces all three pictures (spawned per window; joined in SelectiveClose).
+    {
+        if (g.sel.renderWorker.joinable()) g.sel.renderWorker.join();
+        g.sel.renderStop = false;
+        g.sel.renderWorker = std::thread(SelRenderWorkerLoop);
+    }
+    // view 0 uploads its own Direct3D copy on a worker thread too: the window never blocks on the upload
+    { std::thread([session] {
+        SelUploadScene(0, session);
+        bool mine = false;
+        { std::lock_guard<std::recursive_mutex> lk(g.mu); mine = g.sel.open && g.sel.session == session; }
+        if (mine) SelApplyPreviewSkins();   // the shared A-pose for view 0 as well (takes g.mu itself)
+    }).detach(); }
     SelectiveInvalidateView();
     SelBuildImported();          // view 1: the imported source
     g.sel.buildingProposal = true;
@@ -951,17 +1081,15 @@ void SelectiveOpen(const std::string& path) {
 }
 
 void SelectiveInvalidateView() {
-    if (!g.sel.hwnd) return;
-    // Arm the deferred render (it coalesces bursts of invalidation into one render pass per tick,
-    // so a fast mouse can never queue up full renders of three scenes).
-    SetTimer(g.sel.hwnd, kSelRenderTimer, 33, nullptr);
-    InvalidateRect(g.sel.hwnd, nullptr, FALSE);
+    g.sel.renderCv.notify_one();   // wake the render worker: a view owes a picture now
+    if (g.sel.hwnd) InvalidateRect(g.sel.hwnd, nullptr, FALSE);
 }
 
 // The window is closing: discard the preview and release every Direct3D copy. The loaded character is untouched.
 void SelectiveClose() {
-    if (g.sel.hwnd) { KillTimer(g.sel.hwnd, kSelBuildTimer); KillTimer(g.sel.hwnd, kSelRenderTimer); }
+    if (g.sel.hwnd) KillTimer(g.sel.hwnd, kSelBuildTimer);
     HWND hwnd = g.sel.hwnd;
+    SelStopRenderWorker();   // no picture may be produced while the devices are torn down
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.sel.open = false;
@@ -1049,6 +1177,7 @@ void SelRevealComponent(const SelLayout& l, int compIdx) {
 }
 
 void SelSetDecision(int compIdx, card::SelectiveAction action) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     if (compIdx < 0 || compIdx >= static_cast<int>(g.sel.comps.size())) return;
     g.sel.decisions[g.sel.comps[static_cast<size_t>(compIdx)].comp.key] = action;
     for (SelView& v : g.sel.views) v.dirty = true;   // highlight colours changed
@@ -1056,6 +1185,7 @@ void SelSetDecision(int compIdx, card::SelectiveAction action) {
 }
 
 void SelApplyCameraDelta(int view, float dx, float dy, bool orbit) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // the render worker reads the cameras under the same lock
     auto apply = [&](exporter::ViewCamera& cam) {
         if (orbit) {
             cam.yawDeg -= dx * 0.5f;
@@ -1074,6 +1204,7 @@ void SelApplyCameraDelta(int view, float dx, float dy, bool orbit) {
 }
 
 void SelWheelZoom(int view, int delta) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // the render worker reads the cameras under the same lock
     const float f = delta > 0 ? 1.12f : 1.0f / 1.12f;
     auto apply = [&](exporter::ViewCamera& cam) { cam.zoom = std::max(0.2f, std::min(20.0f, cam.zoom * f)); };
     if (g.sel.linkCams) {
@@ -1126,6 +1257,7 @@ void SelMouseDown(int x, int y, bool right, bool middle) {
         case kSelLinkCams:
             g.sel.linkCams = !g.sel.linkCams;
             if (g.sel.linkCams) {   // adopt the current view (view 0) as the reference for all three
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
                 for (int i = 1; i < 3; ++i) g.sel.views[i].cam = g.sel.views[0].cam;
             }
             SelectiveInvalidateView();
@@ -1250,6 +1382,7 @@ void SelWheel(int x, int y, int delta) {
 void SelDumpLayout() {
     const char* path = std::getenv("CARDBRIDGE_TEST_LAYOUT");
     if (!path) return;
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // the views and the decisions are swapped by workers; take a consistent snapshot
     RECT rc;
     GetClientRect(g.sel.hwnd, &rc);
     const SelLayout l = SelLay(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
@@ -1259,7 +1392,7 @@ void SelDumpLayout() {
     j["views"] = nlohmann::json::array();
     for (int i = 0; i < 3; ++i) {
         const SelView& v = g.sel.views[i];
-        j["views"].push_back({{"state", v.state}, {"gpuOk", v.gpuOk}, {"parts", v.scene ? static_cast<int>(v.scene->parts.size()) : -1},
+        j["views"].push_back({{"state", v.state.load()}, {"gpuOk", v.gpuOk.load()}, {"parts", v.scene ? static_cast<int>(v.scene->parts.size()) : -1},
                               {"rect", mid(l.views[i])}});
     }
     j["comps"] = static_cast<int>(g.sel.comps.size());
@@ -1303,7 +1436,9 @@ LRESULT CALLBACK SelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY: SelectiveClose(); return 0;
     case WM_TIMER:
         if (wp == kSelBuildTimer) { SelTimerFired(); return 0; }
-        if (wp == kSelRenderTimer) { KillTimer(hwnd, kSelRenderTimer); SelRenderViews(); return 0; }
+        return 0;
+    case WM_SEL_FRAME:   // the render worker produced fresh pictures; repaint (a plain blit of the cache)
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_SEL_READY: {
         const int session = static_cast<int>(lp);
@@ -1335,7 +1470,7 @@ LRESULT CALLBACK SelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const SelLayout l = SelLay(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
             const int n = static_cast<int>(g.sel.comps.size());
             if (n > 0) {
-                int idx = g.sel.selComp >= 0 ? g.sel.selComp : (g.sel.hoverComp >= 0 ? g.sel.hoverComp : 0);
+                int idx = g.sel.selComp >= 0 ? g.sel.selComp.load() : (g.sel.hoverComp >= 0 ? g.sel.hoverComp.load() : 0);
                 if (key == VK_HOME) idx = 0;
                 else if (key == VK_END) idx = n - 1;
                 else idx = std::clamp(idx + (key == VK_DOWN ? 1 : -1), 0, n - 1);
@@ -1650,11 +1785,24 @@ void SelDrawFooter(HDC dc, const RECT& r) {
 
 void SelPaint(HWND hwnd) {
     PAINTSTRUCT ps;
-    HDC dc = BeginPaint(hwnd, &ps);
+    HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
     const int W = static_cast<int>(rc.right), H = static_cast<int>(rc.bottom);
     if (W <= 0 || H <= 0) { EndPaint(hwnd, &ps); return; }
+    // Compose into an off-screen DC and blit once: no background-flash, no partial picture, however the
+    // invalidations land (a hover storm coalesces into a single clean copy).
+    static HDC mem = nullptr;
+    static HBITMAP bmp = nullptr;
+    static int mw = 0, mh = 0;
+    if (!mem) { mem = CreateCompatibleDC(hdc); }
+    if (mw != W || mh != H) {
+        HBITMAP nb = CreateCompatibleBitmap(hdc, W, H);
+        SelectObject(mem, nb);   // the previous bmp is no longer selected; safe to delete
+        if (bmp) DeleteObject(bmp);
+        bmp = nb; mw = W; mh = H;
+    }
+    HDC dc = mem;
     { HBRUSH b = CreateSolidBrush(ui::kBg); RECT f{0, 0, W, H}; FillRect(dc, &f, b); DeleteObject(b); }
     const SelLayout l = SelLay(W, H);
     // header: title / coordinate cycler + the two toggles
@@ -1671,6 +1819,7 @@ void SelPaint(HWND hwnd) {
     SelDrawComponentList(dc, l);
     SelDrawSummary(dc, l);
     SelDrawFooter(dc, l.footer);
+    BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
     EndPaint(hwnd, &ps);
 }
 
@@ -1726,12 +1875,14 @@ void SelRecomputeValidation() {
 // The plan's counts for the chips.
 // The library decision map wrapped for the library calls.
 card::SelectiveDecisions SelDecisionsNow() {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);   // paint-side callers run outside the lock
     card::SelectiveDecisions d;
     d.actions = g.sel.decisions;
     return d;
 }
 card::SelectivePlan SelPlan() {
     std::vector<card::SelectiveComponent> ccs;
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     ccs.reserve(g.sel.comps.size());
     for (const auto& sc : g.sel.comps) ccs.push_back(sc.comp);
     return card::BuildSelectivePlan(ccs, SelDecisionsNow());
@@ -1757,7 +1908,7 @@ void SelApply() {
         g.clothingOutfit = outfit;
         g.selectiveDecisions = g.sel.decisions;
     }
-    const int kept = g.sel.decisions.size();
+    const int kept = static_cast<int>(g.selectiveDecisions.size());
     SelectiveClose();
     StartLoad(g.cardPath, outfit, true);
     Log("selective import applied to outfit " + std::to_string(outfit + 1) + " (" + std::to_string(kept) + " component choice(s)); in memory only, card not saved", LogKind::Good);
@@ -1765,12 +1916,14 @@ void SelApply() {
 
 // Reset all decisions to the suggested actions.
 void SelResetDecisions() {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     for (auto& sc : g.sel.comps) g.sel.decisions[sc.comp.key] = sc.comp.action;
     for (SelView& v : g.sel.views) v.dirty = true;
     SelQueueProposal();
 }
 // Set every component to one action.
 void SelSetAllDecisions(card::SelectiveAction action) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
     for (const auto& sc : g.sel.comps) g.sel.decisions[sc.comp.key] = action;
     for (SelView& v : g.sel.views) v.dirty = true;
     SelQueueProposal();
@@ -1787,13 +1940,16 @@ void SelCycleCoordinate(int delta) {
         return;
     }
     if (!src.supported || src.outfits.empty()) return;
-    const int n = static_cast<int>(src.outfits.size());
-    int idx = (g.sel.srcOutfit + delta) % n;
-    if (idx < 0) idx += n;
-    g.sel.srcOutfit = idx;
-    SelBuildComponentList();          // re-enumerate from the new coordinate
-    SelRemapComponents(0);            // the target's parts are unchanged (identity mapping), kept for clarity
-    for (auto& sc : g.sel.comps) g.sel.decisions[sc.comp.key] = sc.comp.action;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        const int n = static_cast<int>(src.outfits.size());
+        int idx = (g.sel.srcOutfit + delta) % n;
+        if (idx < 0) idx += n;
+        g.sel.srcOutfit = idx;
+        SelBuildComponentList();          // re-enumerate from the new coordinate
+        SelRemapComponents(0);            // the target's parts are unchanged (identity mapping), kept for clarity
+        for (auto& sc : g.sel.comps) g.sel.decisions[sc.comp.key] = sc.comp.action;
+    }
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.sel.views[1].scene.reset();

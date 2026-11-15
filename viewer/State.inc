@@ -143,16 +143,17 @@ struct OptPending {
 struct SelView {
     exporter::ViewCamera cam;
     std::vector<uint32_t> frame;
-    int fw = 0, fh = 0;        // the size `frame` was rendered at
-    bool dirty = true;          // the picture needs re-rendering (scene/pose/camera/highlights changed)
-    // view 0 renders through the main window's GPU view (g.gpu, same scene, zero extra resources);
-    // views 1 and 2 own theirs (they upload their own preview scenes).
+    int fw = 0, fh = 0;        // the size `frame` was rendered at (guarded by frameMtx)
+    std::mutex frameMtx;        // the render worker swaps `frame` while WM_PAINT blits it
+    std::atomic<bool> dirty{true};   // the picture needs re-rendering (scene/pose/camera/highlights changed)
+    // Every view owns its Direct3D device. (View 0 used to render through the main window's device, but
+    // the pictures are produced on the render worker now, and a device context is not safe to use from two threads.)
     exporter::GpuView gpu;
-    bool gpuOk = false;
+    std::atomic<bool> gpuOk{false};
     exporter::ViewStatePtr swState = exporter::NewViewState();   // the software fallback's cache
     std::shared_ptr<const assemble::Scene> scene;   // null until the worker finishes (for view 0: aliases the loaded character)
     std::vector<char> hidden;                  // effective hidden parts for this view's scene
-    int state = 0;                             // 0 idle, 1 building, 2 ready, 3 failed
+    std::atomic<int> state{0};              // 0 idle, 1 building, 2 ready, 3 failed
     std::string error;
     std::vector<std::vector<int>> compParts;   // per component index: scene part indices (parallel to comps)
     std::vector<Mat4> previewSkin;             // views 1 and 2: the shared A-pose's skin matrices (empty = rest pose)
@@ -183,8 +184,8 @@ struct SelectiveState {
     SelView views[3];
     std::vector<SelectiveComp> comps;
     std::map<std::string, card::SelectiveAction> decisions;
-    int hoverComp = -1, selComp = -1;   // hover (transient) and selected (sticky, -1 = none)
-    int hoverAction = 0;                // hit id of a row/right-column/link button (0 = none; see SelBtn)
+    std::atomic<int> hoverComp{-1}, selComp{-1};   // hover (transient) and selected (sticky, -1 = none)
+    std::atomic<int> hoverAction{0};               // hit id of a row/right-column/link button (0 = none; see SelBtn)
     int listScroll = 0;
     float listPos = 0;
     bool linkCams = true, aPose = true;
@@ -193,6 +194,12 @@ struct SelectiveState {
     int dragX = 0, dragY = 0;           // last pointer position
     POINT downAt{0, 0};                 // press position (for the click-vs-drag distinction)
     bool dragMoved = false;
+    // the render worker: all Direct3D work happens here (never on the UI thread), so hover, camera drags
+    // and list scrolling never wait for a picture. WM_SEL_FRAME wakes the paint path when fresh frames land.
+    std::thread renderWorker;
+    std::mutex renderMtx;
+    std::condition_variable renderCv;
+    bool renderStop = false;            // set on close; the worker wakes, drops out and is joined
     // the build debounce (a decision change rebuilds the proposed scene 250 ms later)
     ULONGLONG debounceTick = 0;
     int proposalGen = 0;                // requests outstanding for the proposed scene (generation counter)
@@ -666,6 +673,7 @@ constexpr UINT WM_SETUP_LIBRARY = WM_APP + 6;   // first run: no library yet, of
 constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: repaint the bar
 constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finished (wParam: 1 cancelled, 2 failed)
 constexpr UINT WM_SEL_READY = WM_APP + 9;      // the Selective Import window's workers finished (wParam: 0 = imported source view, 1 = proposed scene; lParam = session)
+constexpr UINT WM_SEL_FRAME = WM_APP + 10;     // the render worker produced fresh pictures; repaint
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
