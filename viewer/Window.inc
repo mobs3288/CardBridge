@@ -326,11 +326,13 @@ void DumpTestLayout() {
     j["outfits"] = L ? L->outfits : 0;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        j["clothingPath"] = g.clothingPath;
-        j["clothingName"] = g.clothingName;
-        j["clothingOutfit"] = g.clothingOutfit;
-        j["clothingMode"] = g.clothingMode;
-        j["selectiveDecisions"] = g.selectiveDecisions.size();
+        const ClothingPin* last = g.clothingPins.empty() ? nullptr : &g.clothingPins.back();
+        j["clothingPath"] = last ? last->path : std::string();
+        j["clothingName"] = ClothingDisplayName();
+        j["clothingOutfit"] = last ? last->dstOutfit : -1;
+        j["clothingMode"] = last ? last->mode : 0;
+        j["selectiveDecisions"] = last && last->mode == 2 ? last->decisions.size() : 0;
+        j["clothingPins"] = g.clothingPins.size();
     }
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
@@ -628,11 +630,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.cam = {};
                 {
                     std::lock_guard<std::recursive_mutex> lk(g.mu);
-                    g.clothingPath.clear();
-                    g.clothingName.clear();
-                    g.clothingOutfit = -1;
-                    g.clothingMode = 0;
-                    g.clothingSrcOutfit = -1;
+                    g.clothingPins.clear();
                 }
                 StartLoad(dropped, -1);
             }

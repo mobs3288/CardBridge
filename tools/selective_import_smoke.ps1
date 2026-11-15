@@ -5,6 +5,8 @@
   to assemble, and drives the picker and the Apply button with posted mouse messages, taking PrintWindow
   screenshots as it goes. Verifies the window opens, the previews render, the plan summary follows the
   decisions, Cancel/Apply behave, and nothing reaches the loaded character before Apply.
+  The 'stack' stage applies a second Selective Import and verifies the two layers compose into one outfit
+  (pinned clothing stacks, it does not overwrite).
 
 .DESCRIPTION
   Needs CARDBRIDGE_TEST_CARD (a Koikatsu card .png, e.g. a test fixture card)
@@ -231,6 +233,34 @@ try {
         Start-Sleep -Milliseconds 1500
         $s = Shot $script:mainHwnd 'selective_applied'
         Check 'applied picture draws' ($s.Distinct -gt 20) "$($s.Distinct) colours"
+    }
+
+    if (Want 'stack') {
+        # a second Selective Import layers on top of the first: the stack accumulates, it does not overwrite
+        Check 'the first commit pins one layer' ($lay -and $lay.clothingPins -eq 1) ($(if ($lay) { "layers $($lay.clothingPins)" } else { 'timed out' }))
+        Check 'the selective window reopens for a second import' (Hook 20 20000)
+        Start-Sleep -Milliseconds 1500
+        $sel = [V]::ByClass('CardBridgeSelectiveImport')
+        Check 'the selective window exists again' ($sel -ne [IntPtr]::Zero)
+        if ($sel -ne [IntPtr]::Zero) {
+            $selReady = SelWait $PreviewTimeoutSec
+            Check 'previews ready before the second import' ($null -ne $selReady)
+            if ($selReady) {
+                ClickSel $sel $selReady.buttons.allReplace[0] $selReady.buttons.allReplace[1] 500
+                $selReady = SelWait $PreviewTimeoutSec
+                Check 'rebuild after the second All: Replace becomes ready' ($null -ne $selReady)
+                if ($selReady) {
+                    ClickSel $sel $selReady.buttons.apply[0] $selReady.buttons.apply[1] 300
+                }
+            }
+        }
+        Start-Sleep -Seconds 2
+        $sel = [V]::ByClass('CardBridgeSelectiveImport')
+        Check 'the window closes on the second commit' ($sel -eq [IntPtr]::Zero)
+        $lay = WaitFor { param($l) -not $l.state.busy } 180
+        Check 'the character reloads after the second import' ($null -ne $lay)
+        Check 'two selective layers are pinned' ($lay -and $lay.clothingPins -eq 2) ($(if ($lay) { "layers $($lay.clothingPins)" } else { 'timed out' }))
+        Check 'both layers are applied to the character' ($lay -and $lay.clothingApplied -like '* + *') ($(if ($lay) { $lay.clothingApplied } else { 'timed out' }))
     }
 
     if (Want 'cancel') {

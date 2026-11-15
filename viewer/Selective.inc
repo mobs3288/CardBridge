@@ -293,10 +293,13 @@ assemble::AssembleOptions SelAssembleOptions(int outfit, bool useSource) {
 void SelUploadScene(int view, int session) {
     SelView& v = g.sel.views[view];
     std::shared_ptr<const assemble::Scene> scene;
+    std::shared_ptr<exporter::GpuView> dev;
     exporter::GpuOptions go;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         if (g.sel.session != session) return;   // the window was closed or reopened; do not touch the new state
+        if (!v.gpu) v.gpu = std::make_shared<exporter::GpuView>();   // the cleaner may have taken the device; make a fresh one
+        dev = v.gpu;   // one local copy for the whole upload (the cleaner never touches a local copy)
         scene = v.scene;
         go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
@@ -305,9 +308,9 @@ void SelUploadScene(int view, int session) {
     v.gpuOk = false;
     {
         std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
-        if (v.gpu.Init(go)) {
+        if (dev->Init(go)) {
             std::string why;
-            if (v.gpu.Load(*scene, &why)) v.gpuOk = true;
+            if (dev->Load(*scene, &why)) v.gpuOk = true;
             else Log("selective import preview: GPU upload failed (" + why + ") - using the software renderer", LogKind::Warn);
         } else {
             Log("selective import preview: Direct3D 11 unavailable - the preview uses the software renderer", LogKind::Warn);
@@ -504,12 +507,21 @@ bool SelRenderViewNow(int view, const SelLayout& l) {
     }
     SelFrameInputs in;
     if (!SelSnapshotView(view, in)) { v.dirty = false; return false; }
+    std::shared_ptr<exporter::GpuView> dev;
+    std::unique_ptr<exporter::ViewState, exporter::ViewStateDeleter> swState;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);   // one local copy of the device and the software cache for this render
+        if (!v.gpu) v.gpu = std::make_shared<exporter::GpuView>();
+        dev = v.gpu;
+        if (!v.swState) v.swState = exporter::NewViewState();
+        swState = std::move(v.swState);
+    }
     std::vector<uint32_t> bgra;
     bool drawn = false;
     {
         std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
-        if (v.gpuOk && v.gpu.ready())
-            drawn = v.gpu.RenderHighlighted(in.cam, W, H, &in.hidden, bgra, in.highlights);
+        if (v.gpuOk && dev->ready())
+            drawn = dev->RenderHighlighted(in.cam, W, H, &in.hidden, bgra, in.highlights);
         if (!drawn) {
             // Software fallback (no Direct3D 11): one tinted part (the hovered one).
             exporter::ViewOptions vopt;
@@ -518,9 +530,18 @@ bool SelRenderViewNow(int view, const SelLayout& l) {
             vopt.hiddenParts = &in.hidden;
             vopt.skin = in.skin.empty() ? nullptr : &in.skin;
             vopt.highlightPart = in.singleHighlight;
-            if (in.scene) exporter::RenderView(*in.scene, in.cam, W, H, vopt, *v.swState, bgra);
+            if (in.scene) exporter::RenderView(*in.scene, in.cam, W, H, vopt, *swState, bgra);
             drawn = !bgra.empty();
         }
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.sel.renderStop) {   // the window is already gone: hand the software cache back and discard the picture
+            if (!v.swState) v.swState = std::move(swState);
+            v.dirty = false;
+            return false;
+        }
+        if (!v.swState) v.swState = std::move(swState);   // hand it back if nothing replaced it
     }
     if (drawn && !bgra.empty()) {
         std::lock_guard<std::mutex> flk(v.frameMtx);
@@ -558,7 +579,9 @@ bool SelAnyViewDirty() {
 }
 
 // The render worker: waits until a view owes a picture, re-renders the dirty views, and wakes the paint
-// path (WM_SEL_FRAME). Runs for the window's lifetime; joined in SelectiveClose before anything is torn down.
+// path (WM_SEL_FRAME). Runs for the window's lifetime. SelectiveClose asks it to stop (never joins mid-render):
+// it bails between pictures and returns; the detached cleaner thread (SelectiveClose) joins it and releases
+// the GPU copies — so the window closes instantly and no Direct3D object is torn down under a running render.
 void SelRenderWorkerLoop() {
     for (;;) {
         {
@@ -573,8 +596,18 @@ void SelRenderWorkerLoop() {
         if (!GetClientRect(h, &rc) || rc.right <= 8 || rc.bottom <= 8) continue;
         const SelLayout l = SelLay(static_cast<int>(rc.right), static_cast<int>(rc.bottom));
         bool any = false;
-        for (int view = 0; view < 3; ++view) if (SelRenderViewNow(view, l)) any = true;
-        if (any) PostMessageW(h, WM_SEL_FRAME, 0, 0);
+        for (int view = 0; view < 3; ++view) {
+            {
+                std::lock_guard<std::mutex> lk(g.sel.renderMtx);
+                if (g.sel.renderStop) break;   // stop between pictures, never inside one
+            }
+            if (SelRenderViewNow(view, l)) any = true;
+        }
+        if (any) {
+            HWND h2 = nullptr;
+            { std::lock_guard<std::recursive_mutex> lk(g.mu); h2 = g.sel.open ? g.sel.hwnd : nullptr; }
+            if (h2) PostMessageW(h2, WM_SEL_FRAME, 0, 0);
+        }
     }
 }
 
@@ -747,11 +780,16 @@ void SelApplyPreviewSkins() {
             skins.emplace_back(view, v.previewSkin);
         }
     }
+    std::vector<std::pair<int, std::shared_ptr<exporter::GpuView>>> devs;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);   // copy the devices under the same lock the cleaner steals them
+        for (const auto& [view, skin] : skins) devs.emplace_back(view, g.sel.views[view].gpu);
+    }
     std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);
-    for (const auto& [view, skin] : skins) {
-        SelView& v = g.sel.views[view];
-        if (v.gpuOk) v.gpu.SetSkin(skin.empty() ? nullptr : &skin);
-        v.dirty = true;   // the pose changed: re-render once, then cache
+    for (size_t i = 0; i < devs.size(); ++i) {
+        const int view = devs[i].first;
+        if (g.sel.views[view].gpuOk && devs[i].second) devs[i].second->SetSkin(skins[i].second.empty() ? nullptr : &skins[i].second);
+        g.sel.views[view].dirty = true;   // the pose changed: re-render once, then cache
     }
 }
 
@@ -840,47 +878,37 @@ void SelTimerFired() {
 
 void SelectiveInvalidateView();
 
-// Stops the render worker and waits for it to finish: afterwards no picture can be produced and the
-// Direct3D copies can be torn down safely.
-void SelStopRenderWorker() {
+// Drops the CPU-side state of every preview view (scene, component maps, cached pictures, software caches).
+// The loaded character is untouched. The Direct3D devices are NOT released here: SelectiveClose hands them
+// to a detached cleaner thread (see there), so this function never waits on a GPU call and is safe at any time.
+void SelTeardownPreview() {
     {
-        std::lock_guard<std::mutex> lk(g.sel.renderMtx);
-        g.sel.renderStop = true;
+        std::lock_guard<std::recursive_mutex> gLk(g.mu);   // the CPU-side state (paint placeholders read it)
+        for (SelView& v : g.sel.views) {
+            v.scene.reset();
+            v.hidden.clear();
+            v.compParts.clear();
+            v.placedAcc.clear();
+            v.previewSkin.clear();
+            {
+                std::lock_guard<std::mutex> flk(v.frameMtx);   // the cached picture: drop it under the same guard the blit uses
+                v.frame.clear();
+                v.fw = v.fh = 0;
+            }
+            v.dirty = true;
+            v.state = 0;
+            v.gpuOk = false;
+            v.error.clear();
+            // the software cache (ViewState) is recreated lazily by the render path; never reset it here —
+            // an old worker may still be using it until the cleaner joins it
+        }
+        g.sel.comps.clear();
+        g.sel.decisions.clear();
+        g.sel.buildingProposal = false;
+        g.sel.proposalQueued = false;
+        g.sel.proposalGen = 0;
     }
-    g.sel.renderCv.notify_one();
-    if (g.sel.renderWorker.joinable()) g.sel.renderWorker.join();
 }
-
-// Drops everything a preview view holds (GPU copies, scene, posed positions, frame buffers). The loaded character is untouched.
-void SelDropViews() {
-    {   // leaf: the GPU copies go first (the render worker and any in-flight upload are already done by the caller's join,
-        std::lock_guard<std::mutex> gpuLk(g.sel.selGpuMu);   // or serialise here without ever holding g.mu at the same time)
-        for (SelView& v : g.sel.views) {
-            v.gpu.Unload();
-            v.gpu.Shutdown();
-        }
-    }
-    {
-        std::lock_guard<std::recursive_mutex> gLk(g.mu);   // then the CPU-side state (paint placeholders read it)
-        for (SelView& v : g.sel.views) {
-        v.scene.reset();
-        v.hidden.clear();
-        v.compParts.clear();
-        v.placedAcc.clear();
-        v.previewSkin.clear();
-        {
-            std::lock_guard<std::mutex> flk(v.frameMtx);   // the cached picture: drop it under the same guard the blit uses
-            v.frame.clear();
-            v.fw = v.fh = 0;
-        }
-        v.dirty = true;
-        v.state = 0;
-        v.gpuOk = false;
-        v.error.clear();
-            v.swState = exporter::NewViewState();
-        }   // for
-    }       // gLk
-}           // SelDropViews
 
 // Fill the component rows from the assembled preview scenes (the parts carry the item's names, mods and resolution status).
 void SelFillNames(int view) {
@@ -988,10 +1016,9 @@ void SelectiveOpen(const std::string& path) {
         return;
     }
     const int outfit = L->outfit;
-    SelStopRenderWorker();   // a previous selective window's picture may still be produced; stop it before touching the devices
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        SelDropViews();              // release any previous preview completely before building a new one
+        SelTeardownPreview();         // release any previous preview completely before building a new one
         g.sel.session += 1;          // fresh window; any stale build from a previous one is ignored
         g.sel.open = true;
         g.sel.srcPath = path;
@@ -1027,7 +1054,7 @@ void SelectiveOpen(const std::string& path) {
         {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
             g.sel.open = false;
-            SelDropViews();
+            SelTeardownPreview();       // no GPU was ever uploaded; resets the CPU-side state
         }
         g.sel.hwnd = nullptr;
         return;   // nothing was shown; the character was never touched
@@ -1057,9 +1084,9 @@ void SelectiveOpen(const std::string& path) {
     ShowWindow(g.sel.hwnd, testQuiet ? SW_SHOWNOACTIVATE : SW_SHOW);   // a hidden window never paints (PrintWindow included)
     SetForegroundWindow(g.sel.hwnd);
     const int session = g.sel.session;
-    // The render worker produces all three pictures (spawned per window; joined in SelectiveClose).
+    // The render worker produces all three pictures (spawned per window; stopped at close, joined by the cleaner).
     {
-        if (g.sel.renderWorker.joinable()) g.sel.renderWorker.join();
+        if (g.sel.renderWorker.joinable()) g.sel.renderWorker.join();   // a previous worker, already stopped; a moved-from slot otherwise
         g.sel.renderStop = false;
         g.sel.renderWorker = std::thread(SelRenderWorkerLoop);
     }
@@ -1085,24 +1112,64 @@ void SelectiveInvalidateView() {
     if (g.sel.hwnd) InvalidateRect(g.sel.hwnd, nullptr, FALSE);
 }
 
-// The window is closing: discard the preview and release every Direct3D copy. The loaded character is untouched.
+// The window is closing: discard the preview. The window leaves the screen immediately; the Direct3D
+// copies and the software caches are released on a detached cleaner thread that first waits for the
+// render worker to exit (it may still be finishing a picture) — the UI thread never blocks on a GPU call.
 void SelectiveClose() {
-    if (g.sel.hwnd) KillTimer(g.sel.hwnd, kSelBuildTimer);
     HWND hwnd = g.sel.hwnd;
-    SelStopRenderWorker();   // no picture may be produced while the devices are torn down
+    if (!hwnd && !g.sel.open) return;   // already closed (WM_DESTROY after WM_CLOSE)
+    if (hwnd) KillTimer(hwnd, kSelBuildTimer);
+    {
+        std::lock_guard<std::mutex> lk(g.sel.renderMtx);
+        g.sel.renderStop = true;
+    }
+    g.sel.renderCv.notify_one();
+    // the views' GPU copies and software caches move into the cleaner's ownership; the window rebuilds from clean state
+    std::array<std::shared_ptr<exporter::GpuView>, 3> corpseGpus;
+    std::array<std::unique_ptr<exporter::ViewState, exporter::ViewStateDeleter>, 3> corpseSw;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.sel.open = false;
         g.sel.hwnd = nullptr;
         g.sel.session += 1;   // in-flight workers drop their results
+        for (int i = 0; i < 3; ++i) {
+            SelView& v = g.sel.views[i];
+            v.scene.reset();
+            v.hidden.clear();
+            v.compParts.clear();
+            v.placedAcc.clear();
+            v.previewSkin.clear();
+            {
+                std::lock_guard<std::mutex> flk(v.frameMtx);   // the cached picture: drop it under the same guard the blit uses
+                v.frame.clear();
+                v.fw = v.fh = 0;
+            }
+            v.dirty = true;
+            v.state = 0;
+            v.gpuOk = false;
+            v.error.clear();
+            corpseGpus[i] = std::move(v.gpu);
+            corpseSw[i] = std::move(v.swState);
+        }
+        g.sel.comps.clear();
+        g.sel.decisions.clear();
+        g.sel.buildingProposal = false;
+        g.sel.proposalQueued = false;
+        g.sel.proposalGen = 0;
     }
     if (hwnd) DestroyWindow(hwnd);
-    std::lock_guard<std::recursive_mutex> lk(g.mu);
-    SelDropViews();
-    g.sel.comps.clear();
-    g.sel.decisions.clear();
-    g.sel.buildingProposal = false;
-    g.sel.proposalQueued = false;
+    // Hand the old worker thread and the GPU copies to a detached cleaner: it joins the worker (however long
+    // its current picture takes) and then releases the devices. The window leaves the screen without waiting.
+    std::thread oldWorker;
+    {
+        std::lock_guard<std::mutex> lk(g.sel.renderMtx);
+        oldWorker = std::move(g.sel.renderWorker);
+    }
+    std::thread([corpseGpus = std::move(corpseGpus), corpseSw = std::move(corpseSw), w = std::move(oldWorker)]() mutable {
+        if (w.joinable()) w.join();
+        for (const auto& dev : corpseGpus) if (dev) { dev->Unload(); dev->Shutdown(); }
+        (void)corpseSw;   // the software caches are released here
+    }).detach();
 }
 
 void SelectivePoseChanged() {
@@ -1899,19 +1966,28 @@ void SelApply() {
     if (!L) return;
     const int outfit = g.sel.dstOutfit;
     const std::string name = g.sel.srcName;
+    size_t layerCount = 0;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        g.clothingPath = g.sel.srcPath;
-        g.clothingName = (name.empty() ? fileio::FileName(g.sel.srcPath) : name) + " (selective)";
-        g.clothingMode = 2;
-        g.clothingSrcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
-        g.clothingOutfit = outfit;
-        g.selectiveDecisions = g.sel.decisions;
+        ClothingPin pin;
+        pin.path = g.sel.srcPath;
+        pin.name = (name.empty() ? fileio::FileName(g.sel.srcPath) : name) + " (selective)";
+        pin.mode = 2;
+        pin.srcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
+        pin.dstOutfit = outfit;
+        pin.decisions = g.sel.decisions;
+        // A Selective Import layers onto whatever is pinned before it (on every reload, from disk, in
+        // order): sources from several cards compose into one outfit. Replace All and Coordinate imports
+        // still replace the stack wholesale when they are applied.
+        g.clothingPins.push_back(std::move(pin));
+        layerCount = g.clothingPins.size();
     }
-    const int kept = static_cast<int>(g.selectiveDecisions.size());
+    const int kept = static_cast<int>(g.sel.decisions.size());
     SelectiveClose();
     StartLoad(g.cardPath, outfit, true);
-    Log("selective import applied to outfit " + std::to_string(outfit + 1) + " (" + std::to_string(kept) + " component choice(s)); in memory only, card not saved", LogKind::Good);
+    Log("selective import applied to outfit " + std::to_string(outfit + 1) + " (" + std::to_string(kept) + " component choice(s))" +
+        (layerCount > 1 ? "; layer " + std::to_string(layerCount) + " of the imported-clothing stack" : std::string()) +
+        "; in memory only, card not saved", LogKind::Good);
 }
 
 // Reset all decisions to the suggested actions.

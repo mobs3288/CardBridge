@@ -138,13 +138,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == "--mods" && i + 1 < argc) g.settings.mods = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--pose" && i + 1 < argc) g.wantPose = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--outfit" && i + 1 < argc) g.wantOutfit = std::atoi(WideToUtf8(argvw[++i]).c_str());
-        else if (a == "--clothes" && i + 1 < argc) g.clothingPath = Slashes(WideToUtf8(argvw[++i]));
+        else if (a == "--clothes" && i + 1 < argc) {
+            ClothingPin pin;
+            pin.path = Slashes(WideToUtf8(argvw[++i]));
+            pin.name = fileio::FileName(pin.path);
+            pin.mode = 0;
+            g.clothingPins.push_back(std::move(pin));   // --clothes replaces everything, like the drop dialog's Replace All
+        }
         else if (a.rfind("--", 0) == 0) continue;
         else card = Slashes(a);
     }
     LocalFree(argvw);
     // --clothes pins to --outfit when given, otherwise to the card's current slot on load (StartLoad pins it there).
-    if (!g.clothingPath.empty()) g.clothingOutfit = g.wantOutfit;
+    if (!g.clothingPins.empty() && g.wantOutfit >= 0) g.clothingPins.back().dstOutfit = g.wantOutfit;
     SaveSettings(g.settings);
 
     ui::Startup();

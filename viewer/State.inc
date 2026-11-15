@@ -148,9 +148,11 @@ struct SelView {
     std::atomic<bool> dirty{true};   // the picture needs re-rendering (scene/pose/camera/highlights changed)
     // Every view owns its Direct3D device. (View 0 used to render through the main window's device, but
     // the pictures are produced on the render worker now, and a device context is not safe to use from two threads.)
-    exporter::GpuView gpu;
+    // The device lives behind a shared_ptr so SelectiveClose can hand it to a detached cleaner thread that
+    // waits for the render worker's exit and then releases it — the window closes without waiting on a GPU call.
+    std::shared_ptr<exporter::GpuView> gpu = std::make_shared<exporter::GpuView>();
     std::atomic<bool> gpuOk{false};
-    exporter::ViewStatePtr swState = exporter::NewViewState();   // the software fallback's cache
+    std::unique_ptr<exporter::ViewState, exporter::ViewStateDeleter> swState = exporter::NewViewState();   // the software fallback's cache (recreated lazily after a steal)
     std::shared_ptr<const assemble::Scene> scene;   // null until the worker finishes (for view 0: aliases the loaded character)
     std::vector<char> hidden;                  // effective hidden parts for this view's scene
     std::atomic<int> state{0};              // 0 idle, 1 building, 2 ready, 3 failed
@@ -199,7 +201,7 @@ struct SelectiveState {
     std::thread renderWorker;
     std::mutex renderMtx;
     std::condition_variable renderCv;
-    bool renderStop = false;            // set on close; the worker wakes, drops out and is joined
+    bool renderStop = false;       // set on close/reset; the worker bails between pictures and exits
     // the build debounce (a decision change rebuilds the proposed scene 250 ms later)
     ULONGLONG debounceTick = 0;
     int proposalGen = 0;                // requests outstanding for the proposed scene (generation counter)
@@ -271,22 +273,27 @@ struct PropSugItem {
     bool applied = false;
 };
 
+// An outfit file (or a Coordinate PNG) applied in memory only (never saved as a card): the path, the
+// outfit slot it overwrites, and — for a Selective Import — the per-component choices. Layers are
+// applied in order on every reload, so Selective Imports from several cards compose into one outfit
+// (each reload re-applies the stack from the card on disk, in order). A Replace All / Coordinate
+// import is always a single layer (it replaces the whole stack, the classic single-import overwrite).
+// clothingMode: 0 = outfit import; 1 = Coordinate import (the whole coordinate replaces the slot,
+// including accessories); 2 = selective import. clothingSrcOutfit: for a Coordinate source, which
+// coordinate of the source card is imported (-1 = the source's own current outfit).
+struct ClothingPin {
+    std::string path, name;                     // the source file and its display label
+    int mode = 0;                                // 0 clothing, 1 coordinate, 2 selective
+    int srcOutfit = -1;                          // coordinate sources: which coordinate of the source (-1 = current)
+    int dstOutfit = -1;                          // the outfit slot the layer targets (pinned to the slot on screen at Apply time)
+    std::map<std::string, card::SelectiveAction> decisions;   // mode == 2: the per-component choices
+};
+
 struct App {
     HWND hwnd = nullptr;
     Settings settings;
     std::string cardPath;
-    // An outfit file (or a Coordinate PNG) applied in memory only (never saved as a card): the path
-    // and the outfit slot it overwrote. Empty = none.
-    // clothingMode: 0 = outfit import (a regular clothing file, or a Coordinate PNG imported as clothing -
-    // the extracted clothes+accessories are merged via the clothing import); 1 = Coordinate import (the
-    // whole coordinate replaces the slot, including accessories); 2 = selective import (only the components
-    // the user chose in the Selective Import window are merged; g.selectiveDecisions carries the choice).
-    // clothingSrcOutfit: for a Coordinate source, which coordinate of the source card is imported (-1 = the source's own current outfit).
-    std::string clothingPath, clothingName;
-    int clothingOutfit = -1;
-    int clothingMode = 0;
-    int clothingSrcOutfit = -1;
-    std::map<std::string, card::SelectiveAction> selectiveDecisions;   // the pinned selective import's per-component choices (session only)
+    std::vector<ClothingPin> clothingPins;   // the imported-clothing layers of the outfit on screen, in apply order (first to last); empty = none
     int wantOutfit = -1;
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up
@@ -516,6 +523,16 @@ struct App {
     HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr;
 };
 App g;
+
+// The label for the pinned clothing on screen: empty when nothing is pinned; the last layer's name with
+// a "(+N more)" suffix when several Selective Import layers are stacked.
+std::string ClothingDisplayName() {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    const size_t n = g.clothingPins.size();
+    if (n == 0) return {};
+    const std::string& last = g.clothingPins.back().name;
+    return n == 1 ? last : last + " (+" + std::to_string(n - 1) + " more)";
+}
 
 PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     PanelLayout l;

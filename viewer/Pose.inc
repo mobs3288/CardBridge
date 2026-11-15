@@ -525,18 +525,10 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     const std::string prevCardPath = g.cardPath;
     g.cardPath = path;
-    std::string clothingPath;
-    int clothingOutfit = -1;
-    int clothingMode = 0;
-    int clothingSrcOutfit = -1;
-    std::map<std::string, card::SelectiveAction> selectiveDecisions;
+    std::vector<ClothingPin> clothingPins;   // the stack copy StartLoad applies, first to last
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        clothingPath = g.clothingPath;
-        clothingOutfit = g.clothingOutfit;
-        clothingMode = g.clothingMode;
-        clothingSrcOutfit = g.clothingSrcOutfit;
-        selectiveDecisions = g.selectiveDecisions;
+        clothingPins = g.clothingPins;
     }
     g.applyKeep = keepTweaks;
     g.keepHidden.clear();
@@ -550,7 +542,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPath, clothingOutfit, clothingMode, clothingSrcOutfit, selectiveDecisions, prevCardPath]() {
+    std::thread([path, outfit, keepTweaks, clothingPins, prevCardPath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -573,74 +565,62 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             // out-of-range slot falls back to the first, the way Assembler does.
             int shown = outfit >= 0 ? outfit : static_cast<int>(c.status.at("coordinateType").asInt());
             if (shown < 0 || shown >= static_cast<int>(c.outfits.size())) shown = 0;
-            // The outfit file is pinned to the one slot it was dropped onto (--clothes
-            // with no --outfit pins to the card's current slot on the first load): it
-            // replaces only that slot. Every other slot keeps the card's own clothing,
-            // so switching away and back shows native -> imported -> native. A pinned
-            // slot outside this card never applies.
-            const bool applyClothing = !clothingPath.empty() && (clothingOutfit < 0 || clothingOutfit == shown) &&
-                                       clothingOutfit < static_cast<int>(c.outfits.size());
-            if (applyClothing) {
-                ProgSet(0.20, clothingMode == 2 ? "applying selective import" : clothingMode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
+            // The pinned clothing layers, in apply order (first to last). A Selective Import pushes a
+            // layer each time it is applied, so pieces from several cards compose into one outfit (each
+            // reload re-derives the composite from the card on disk — deterministic, in memory only).
+            // Replace All and Coordinate imports are single layers by definition. A pinned slot outside
+            // this card never applies; switching away and back shows native -> imported -> native.
+            std::string clothingLabel;
+            bool appliedUnpinned = false;
+            int layerIndex = 0;
+            for (const ClothingPin& pin : clothingPins) {
+                ++layerIndex;
+                bool applyPin = true;
+                if (pin.dstOutfit >= 0) applyPin = pin.dstOutfit == shown && pin.dstOutfit < static_cast<int>(c.outfits.size());
+                if (!applyPin) continue;
+                const card::ImageSourceKind srcKind = card::DetectImageSource(pin.path);
+                ProgSet(0.20, pin.mode == 2 ? "applying selective import" : pin.mode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
+                const std::string layerTag = clothingPins.size() > 1 ? " (layer " + std::to_string(layerIndex) + "/" + std::to_string(clothingPins.size()) + ")" : std::string();
                 try {
-                    const card::ImageSourceKind srcKind = card::DetectImageSource(clothingPath);
-                    if (clothingMode == 2) {
+                    if (pin.mode == 2) {
                         // The selective import: only the components the user chose in the Selective
-                        // Import window are merged. Same pin as the other imports (an outfit file on
-                        // disk is never written; the card itself is only ever this in-memory copy).
+                        // Import window are merged. An outfit file on disk is never written; the card
+                        // itself is only ever this in-memory copy.
                         card::SelectiveDecisions sd;
-                        sd.actions = selectiveDecisions;
+                        sd.actions = pin.decisions;
                         card::ApplyClothingOptions sopt;
                         sopt.outfit = shown;
-                        sopt.srcOutfit = clothingSrcOutfit;
-                        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(c, clothingPath, sopt, sd);
-                        {
-                            std::lock_guard<std::recursive_mutex> lk(g.mu);
-                            g.clothingOutfit = rep.apply.outfit;
-                            g.clothingName = rep.sourceName + " (selective)";
-                            g.clothingSrcOutfit = rep.srcOutfit;
-                        }
-                        out->clothing = g.clothingName;
-                        Log("selective: " + std::to_string(rep.plan.replaced) + " replaced, " + std::to_string(rep.plan.added) +
+                        sopt.srcOutfit = pin.srcOutfit;
+                        const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(c, pin.path, sopt, sd);
+                        clothingLabel += (clothingLabel.empty() ? std::string() : " + ") + rep.sourceName + " (selective)";
+                        Log("selective" + layerTag + ": " + std::to_string(rep.plan.replaced) + " replaced, " + std::to_string(rep.plan.added) +
                             " added, " + std::to_string(rep.plan.kept) + " kept, " + std::to_string(rep.plan.skipped) + " skipped" +
                             (rep.fromCoordinate ? " (outfit source: the coordinate it was pinned to)" : "") +
                             " -> outfit " + std::to_string(rep.apply.outfit) + "; in memory only, card not saved", LogKind::Good);
                         for (const std::string& note : rep.apply.notes) Log("  " + note);
-                    } else if (clothingMode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
+                    } else if (pin.mode == 1 && srcKind == card::ImageSourceKind::Coordinate) {
                         // A character card used as a source: the whole-coordinate semantics (Status copies included).
-                        card::Card src = card::LoadCard(clothingPath);
+                        card::Card src = card::LoadCard(pin.path);
                         if (!src.supported) throw std::runtime_error(src.supportNote);
                         card::ApplyCoordinateOptions copt;
-                        copt.srcOutfit = clothingSrcOutfit;
+                        copt.srcOutfit = pin.srcOutfit;
                         copt.dstOutfit = shown;
                         const card::ApplyCoordinateReport rep = card::ApplyCoordinate(c, src, copt);
-                        {
-                            std::lock_guard<std::recursive_mutex> lk(g.mu);
-                            g.clothingOutfit = rep.dstOutfit;
-                            g.clothingName = rep.sourceName + " - " + src.outfitName(rep.srcOutfit) + " (coordinate)";
-                            g.clothingSrcOutfit = rep.srcOutfit;
-                            out->clothing = g.clothingName;
-                        }
+                        clothingLabel += (clothingLabel.empty() ? std::string() : " + ") + rep.sourceName + " - " + src.outfitName(rep.srcOutfit) + " (coordinate)";
                         for (const std::string& note : rep.notes) Log("  coordinate: " + note, LogKind::Warn);
-                        Log("coordinate: " + rep.sourceName + " (" + src.outfitName(rep.srcOutfit) + ") -> outfit " + std::to_string(rep.dstOutfit) +
+                        Log("coordinate" + layerTag + ": " + rep.sourceName + " (" + src.outfitName(rep.srcOutfit) + ") -> outfit " + std::to_string(rep.dstOutfit) +
                             " (" + std::to_string(rep.clothesReplaced) + " clothes slot(s) replaced, " + std::to_string(rep.accessoriesReplaced) +
                             " accessory slot(s) replaced; the whole coordinate was imported; in memory only, card not saved)");
                     } else {
                         // A Coordinate (outfit) file: as clothing (the merge) or as a coordinate (wholesale).
                         card::ApplyClothingOptions opt;
                         opt.outfit = shown;
-                        opt.srcOutfit = clothingSrcOutfit;   // -1 for plain files
-                        if (clothingMode == 1) opt.coordinateImport = true;
-                        const card::OutfitSourceReport rep = card::ApplyOutfitSource(c, clothingPath, opt);
-                        {
-                            std::lock_guard<std::recursive_mutex> lk(g.mu);
-                            g.clothingOutfit = rep.apply.outfit;
-                            g.clothingName = rep.sourceName + (clothingMode == 1 ? std::string(" (coordinate)") : std::string());
-                            g.clothingSrcOutfit = rep.srcOutfit;
-                        }
-                        out->clothing = g.clothingName;
-                        if (clothingMode == 1) {
-                            Log("coordinate import: " + rep.sourceName + " -> outfit " + std::to_string(rep.apply.outfit) +
+                        opt.srcOutfit = pin.srcOutfit;   // -1 for plain files
+                        if (pin.mode == 1) opt.coordinateImport = true;
+                        const card::OutfitSourceReport rep = card::ApplyOutfitSource(c, pin.path, opt);
+                        clothingLabel += (clothingLabel.empty() ? std::string() : " + ") + rep.sourceName + (pin.mode == 1 ? std::string(" (coordinate)") : std::string());
+                        if (pin.mode == 1) {
+                            Log("coordinate import" + layerTag + ": " + rep.sourceName + " -> outfit " + std::to_string(rep.apply.outfit) +
                                 " (the whole coordinate replaced verbatim, including accessories; " + std::to_string(rep.apply.clothesReplaced) +
                                 " clothes slot(s) replaced; in memory only, card not saved)");
                         } else {
@@ -652,10 +632,16 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                                 ", " + std::to_string(rep.apply.hairPreserved) + " hair accessories kept; in memory only, card not saved)");
                         }
                     }
+                    if (pin.dstOutfit < 0) appliedUnpinned = true;   // --clothes with no --outfit: the layer landed on the shown slot
                 } catch (const std::exception& e) {
                     out->notes.push_back(e.what());
-                    Log(std::string(clothingMode == 1 ? "coordinate import failed: " : "clothing failed: ") + e.what(), LogKind::Error);
+                    Log(std::string(pin.mode == 1 ? "coordinate import failed: " : "clothing failed: ") + e.what(), LogKind::Error);
                 }
+            }
+            if (!clothingLabel.empty()) out->clothing = clothingLabel;
+            if (appliedUnpinned) {
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
+                for (ClothingPin& p : g.clothingPins) if (p.dstOutfit < 0) p.dstOutfit = shown;
             }
             if (card::ClearOutfitCoordinateSlot(c, shown, static_cast<int>(c.outfits.size()), nullptr))
                 Log("ABMX: this outfit's coordinate-specific bone mods cleared (default outfit load; the export uses the same table)");

@@ -57,7 +57,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             bool hasC = false;
             int cOutfit = -1;
             if (L && L->card.hasClothing) { hasC = true; cOutfit = L->card.clothingOutfit; }
-            else { std::lock_guard<std::recursive_mutex> lk(g.mu); hasC = !g.clothingPath.empty(); cOutfit = g.clothingOutfit; }
+            else { std::lock_guard<std::recursive_mutex> lk(g.mu); hasC = !g.clothingPins.empty(); cOutfit = g.clothingPins.empty() ? -1 : g.clothingPins.back().dstOutfit; }
             for (int i = 0; i < chips; ++i) {
                 const bool marked = hasC && i == cOutfit;   // the slot whose base outfit was replaced
                 Button(s, OutfitChipRect(l, i), marked ? (std::to_string(i + 1) + "*") : std::to_string(i + 1),
@@ -75,9 +75,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         bool hasClothing = false;
         {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
-            hasClothing = !g.clothingPath.empty();
-            clothingName = g.clothingName;
-            clothingOutfit = g.clothingOutfit;
+            hasClothing = !g.clothingPins.empty();
+            clothingName = ClothingDisplayName();
+            clothingOutfit = hasClothing ? g.clothingPins.back().dstOutfit : -1;
         }
         int shown = L ? L->outfit : -1;
         if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
@@ -617,11 +617,7 @@ void OpenCard() {
         g.cam = {};
         {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
-            g.clothingPath.clear();
-            g.clothingName.clear();
-            g.clothingOutfit = -1;
-            g.clothingMode = 0;
-            g.clothingSrcOutfit = -1;
+            g.clothingPins.clear();   // a fresh card is a fresh workspace: imported clothing does not carry over
         }
         StartLoad(c, -1);
     }
@@ -648,11 +644,13 @@ void PinOutfitFile(const std::string& path, int mode) {
     const std::string name = cl.displayName().empty() ? fileio::FileName(path) : cl.displayName();
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        g.clothingPath = path;
-        g.clothingName = name + (mode == 1 ? std::string(" (coordinate)") : std::string());
-        g.clothingSrcOutfit = -1;
-        g.clothingMode = mode;
-        g.clothingOutfit = L->outfit;   // the outfit on screen
+        ClothingPin pin;
+        pin.path = path;
+        pin.name = name + (mode == 1 ? std::string(" (coordinate)") : std::string());
+        pin.mode = mode;
+        pin.srcOutfit = -1;
+        pin.dstOutfit = L->outfit;   // the outfit on screen
+        g.clothingPins.assign(1, std::move(pin));   // Replace All / Coordinate: one source, the classic full overwrite
     }
     g.cam = {};
     if (mode == 1)
@@ -783,13 +781,9 @@ void ResetClothing() {
     std::string name;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        if (g.clothingPath.empty()) return;
-        name = g.clothingName;
-        g.clothingPath.clear();
-        g.clothingName.clear();
-        g.clothingOutfit = -1;
-        g.clothingMode = 0;
-        g.clothingSrcOutfit = -1;
+        if (g.clothingPins.empty()) return;
+        name = ClothingDisplayName();
+        g.clothingPins.clear();
     }
     Log("clothing reset to the card's own outfit" + (name.empty() ? std::string() : " (dropped " + name + ")"), LogKind::Good);
     g.cam = {};
@@ -807,11 +801,11 @@ void MoveClothing(int delta) {
     std::string name;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        if (g.clothingPath.empty()) return;
-        name = g.clothingName;
-        target = g.clothingOutfit + delta;
+        if (g.clothingPins.empty()) return;
+        name = ClothingDisplayName();
+        target = g.clothingPins.back().dstOutfit + delta;
         if (target < 0 || target >= L->outfits) return;
-        g.clothingOutfit = target;
+        for (ClothingPin& pin : g.clothingPins) pin.dstOutfit = target;   // move every applied layer to the slot
     }
     Log("clothing moved to outfit " + std::to_string(target + 1) + (name.empty() ? std::string() : " (" + name + ")"), LogKind::Good);
     StartLoad(g.cardPath, target, true);
