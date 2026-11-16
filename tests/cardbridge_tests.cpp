@@ -2220,7 +2220,7 @@ void unitTests() {
         }
     });
 
-    test("physics: MikuMikuDance does not fold the skirt by append rotation - garments attach to no leg, stay at layer 0", [] {
+    test("physics: garments in front of the thighs take a modest append to the lead leg (20% folded, not 75%)", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
         for (int side = 0; side < 2; ++side) {   // the game's leg bones; the toes point to +Z, so that is the front
@@ -2252,12 +2252,18 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        // MikuMikuDance evaluates append rotations at rest too; an append toward the thigh would fold the skirt into a
-        // tube in the character's standing pose (observed on the Kurumi card). No garment appends the legs at all.
-        for (int b : {frontLeft, centre, centreTop, side, back, hair})
-            CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0);
-        for (size_t i = 0; i < m.bones.size(); ++i)
-            CHECK(m.bones[i].layer == 0);        // no deform-layer promotion off the back of the leg bones either
+        // The modest rate still pulls the front hang and the centre-of-thighs chain toward the lead leg by append.
+        const auto& fl = m.bones[static_cast<size_t>(frontLeft)];
+        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.1f && fl.appendRatio <= 0.25f && fl.layer == 1);
+        const auto& c = m.bones[static_cast<size_t>(centre)];
+        const auto& ct = m.bones[static_cast<size_t>(centreTop)];
+        // Both lead and second legs may be picked as lead; the mode-2 chain appends one leg via the root and, since centreTop
+        // is the only child of the centre chain, the other leg via centreTop.
+        CHECK(c.appendParent >= 0 && (c.appendParent == 1 || c.appendParent == 5) && c.appendRatio > 0.05f && c.appendRatio <= 0.15f);
+        CHECK(ct.appendParent >= 0 && (ct.appendParent == 1 || ct.appendParent == 5) && ct.appendParent != c.appendParent && ct.layer == 1);
+        // The extremes we chose not to fold: the sides, the back and the hair and the legs themselves.
+        for (int b : {side, back, hair}) CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0 && m.bones[static_cast<size_t>(b)].layer == 0);
+        CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);
     });
 
     test("physics: garment chain bodies are bone-aligned (mode 2) - the bone holds the panel; the panel swings around its joints", [] {

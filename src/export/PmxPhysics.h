@@ -36,6 +36,12 @@ constexpr uint8_t kPmxGroupChain = 1;
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
                 const assemble::JiggleSettings& jiggle = {});
 
+// Garment chains — skirts, capes, kimono panels, skirt hems — may follow the thighs through an append bone (MikuMikuDance's 付与).
+// The append rate is deliberately modest (kLegFollow = 0.20f), not the 75% of the original AddLegFollow (observed to fold the
+// standing pose into a pinned tube in MikuMikuDance, since append evaluation applies at rest). With a modest rate the chain
+// still pulls itself near the thigh during moderate extension but follows the authored drape far more closely.
+void AddLegFollow(const assemble::Scene& scene, pmx::Model& model);
+
 // The bones of a chain that get a rigid body: the chain's valid bones without its stubs. A stub is a leaf node that points back up the chain
 // (the skirts' cf_j_sk_xx_05_end sits above its parent): a body spanning to it would stand on its joint upside down and flip over in
 // MikuMikuDance, so the parent stays the last link and its body carries on in the direction the chain came from.
