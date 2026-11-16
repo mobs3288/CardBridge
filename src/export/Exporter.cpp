@@ -231,16 +231,18 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // shadow, casts and receives self-shadow and has an edge, as those models do (without the flags MMD drew no shadow at all).
     const bool overlay = mat.shader.find("toon_") != std::string::npos, lens = mat.shader.find("glasses") != std::string::npos;
     const bool tooth = IsTooth(mat);
-    // Transparent (alpha) materials blend over what is behind them: MikuMikuDance's ground shadow, shadow map and self-shadow on such a
-    // material draw it as a solid dark shape (the underpants / swimsuit / lace looked like a shadow), so they get none of those, like
-    // lenses. A material whose texture's alpha actually cuts texels (the stocking's lace) is transparent too: MMD does not test alpha
-    // for an opaque material, so the cut texels would draw black; in the transparent pass its binary alpha works as the cutout it is.
+    // Transparent (alpha) materials blend over what is behind them. They still belong to the model's silhouette and its cast shadow:
+    // MikuMikuDance's ground shadow and shadow map use the geometry, and a mesh shaped like the visible garment or hair gives the right
+    // shape. What such a material may not do is receive the self-shadow: MMD multiplies the map over its texture, and a see-through
+    // garment then reads as one solid dark shape (the underpants / swimsuit / lace looked like a shadow). So receive stays off.
+    // A material whose texture's alpha actually cuts texels (the stocking's lace) is transparent too: MMD does not test alpha for an
+    // opaque material, so the cut texels would draw black; in the transparent pass its binary alpha works as the cutout it is.
     const bool alphaCutout = HasAlphaCutout(scene, mat);
     const bool transparent = mat.alpha || mat.translucent || alphaCutout;
     if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
-    // A mesh cut to a shape by its texture (HasCutout) still takes shadow, but MMD's ground shadow, shadow map and edge use the whole mesh:
-    // they would draw the cut-away part (as dark shapes round the armour of a MaterialEditor-built outfit).
+    // A mesh cut to a shape by its texture (HasCutout): MMD's shadow map and edge use the whole mesh, so they would draw the cut-away part
+    // (as dark shapes round the armour of a MaterialEditor-built outfit). It keeps receiving shadow on its visible texels.
     const bool cutout = HasCutout(scene, mat);
     // A mesh modelled as two co-located layers (an outer and an inner surface sharing one vertex grid): MikuMikuDance's edge draws back
     // faces pushed outward, so it draws the inner layer pushed through the outer one. On a flat garment that covered it in the edge colour
@@ -248,14 +250,22 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // which reads as hair clipping back-to-front. Such a mesh gets no edge; its texture still shows. Single-layer meshes (the skirt) keep theirs.
     const bool innerLayer = HasInnerLayer(scene, mat);
     const bool hair = mat.shader.find("hair") != std::string::npos;
-    // The outfit's cloth is drawn like the hair in this respect, not like the skin: a cape or a jacket panel that touches the body turns to
-    // two slices of black edge back-faces and a depth-map stripe of dark shadow wherever it clips into it. The ambient shade (baked from the
-    // game shader) already carries the fold shading; the cloth casts no shadow, takes no shadow and gets no edge (like the hair).
-    if (!overlay && !lens && !transparent && !outfitGarment) look.drawFlags |= cutout ? 0x08 : 0x02 | 0x04 | 0x08;
-    // Hair gets no edge either: the game's outline width for hair is mostly 0, and MMD's fixed 0.6 edge, drawn in the
-    // card's dark outline colour, covers these thin strands and reads as a second, black, shaggy hair over the real
-    // one (in the viewer there is no such outline, so the hair there is purple and clean). Its shading still comes
-    // from the toon ramp and the sphere gloss below.
+    // The ground shadow is the model's silhouette: every visible material takes part, including cloth, hair, shoes, accessories, see-through
+    // fabric and cut-out items. Without this a clothed character cast only the body's shadow - a bald, body-shaped shadow - because the
+    // garment and hair materials had no ground-shadow flag at all.
+    if (!overlay && !lens) look.drawFlags |= 0x02;
+    // Self-shadow casters: the same geometry feeds the depth map, so the hair and the clothes shadow the body and each other. A mesh cut to
+    // a shape is the exception: MMD draws its whole mesh into the map, so the cut-away part would darken the body as a slab (the black
+    // shapes round a MaterialEditor-built armour).
+    if (!overlay && !lens && !cutout) look.drawFlags |= 0x04;
+    // Self-shadow receive: skipped for transparent cloth (see above) and for an outfit garment. A cape or jacket panel that touches the
+    // body is turned inside out where it clips, and receiving the depth map there paints dark bands; the baked ambient/toon shade already
+    // carries the folds. The garment still casts its own shadow and receives the ground shadow.
+    if (!overlay && !lens && (cutout || (!transparent && !outfitGarment))) look.drawFlags |= 0x08;
+    // Hair gets no edge: the game's outline width for hair is mostly 0, and MMD's fixed 0.6 edge, drawn in the card's dark outline colour,
+    // covers these thin strands and reads as a second, black, shaggy hair over the real one (in the viewer there is no such outline, so the
+    // hair there is purple and clean). Its shading still comes from the toon ramp and the sphere gloss below. Garments get no edge for the
+    // same reason (back faces pushed through the cloth: the black slices).
     if (!overlay && !lens && !tooth && !cutout && !innerLayer && !hair && !outfitGarment) look.drawFlags |= 0x10;
     // The edge: MMD draws the back faces pushed outwards in one colour. A dark game outline colour (the card's hair line) is kept; the
     // game's light default (0.5 grey) darkens the surface it rings, so it is applied to the texture's mean colour (a skin edge is a
@@ -276,6 +286,19 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     else if (!mat.bakedLit && !overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
     else if (!mat.bakedLit && !overlay && !lens && !skin && gloss * 0.25f >= 0.02f) { look.sphere = 2; look.sphereStrength = std::min(0.25f, gloss * 0.25f); }
     return look;
+}
+
+std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene) {
+    std::vector<char> garment(scene.materials.size(), 0);
+    for (const auto& part : scene.parts) {
+        if (!(part.garment || part.group == "Outfit")) continue;   // group fallback: hand-built scenes and tests
+        for (int mi : part.meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+            for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes)
+                if (sm.material >= 0 && static_cast<size_t>(sm.material) < garment.size()) garment[static_cast<size_t>(sm.material)] = 1;
+        }
+    }
+    return garment;
 }
 
 assemble::SceneTexture MmdSphereImage(const MmdLook& look) {
@@ -596,10 +619,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         sphereFiles = reuse->sphereFiles;
     }
     int meshOrdinal = 0;
-    // Parts that move cloth (capes, panels, sleeves, skirts - authored DynamicBone or synthesized auto cloth) get the cloth material pass:
-    // no edge, no cast/receive shadows, so they never paint the black slices against whatever they briefly touch.
-    std::set<std::string> clothParts;
-    for (const auto& ch : scene.chains) if (ch.part.rfind("outfit", 0) == 0) clothParts.insert(ch.part);
+    const std::vector<char> garmentMaterials = MmdGarmentMaterials(scene);
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         checkCancel();
         const auto& part = scene.parts[pi];
@@ -619,7 +639,6 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             uint32_t base = static_cast<uint32_t>(model.vertices.size());
             meshBase[static_cast<size_t>(mi)] = static_cast<int>(base);
-            const bool garment = part.group == "Outfit" || clothParts.count(part.id) != 0;
             for (const auto& v : mesh.vertices) {
                 pmx::Vertex pv;
                 pv.position = v.pos * opt.scale;
@@ -635,6 +654,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                 pm.name = part.id + "/" + mesh.name + "#" + std::to_string(sub++);
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
+                const bool garment = static_cast<size_t>(sm.material) < garmentMaterials.size() && garmentMaterials[static_cast<size_t>(sm.material)] != 0;
                 const MmdLook look = MmdMaterialLook(scene, mat, garment);
                 pm.diffuse = look.diffuse;
                 pm.ambient = look.ambient;

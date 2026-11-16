@@ -34,7 +34,8 @@ static std::string lower(std::string s) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "usage: mmdsim <file.pmx> [--seconds N] [--shift Sx,Sy,Sz,startT,durT] [--chain F]\n"); return 1; }
+    if (std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "start\n");
+    if (argc < 2) { std::fprintf(stderr, "usage: mmdsim <file.pmx> [--seconds N] [--shift Sx,Sy,Sz,startT,durT] [--chain F] [--summary] [--limb-all|--limb-deep] [--nocollide]\n"); return 1; }
     Bytes raw = fileio::ReadFile(argv[1]);
     Model m = Read(raw.data(), raw.size());
     double seconds = 5.0;
@@ -42,9 +43,14 @@ int main(int argc, char** argv) {
     const char* chainFilter = nullptr;
     double springScale = 1.0, springAbs = -1.0, dampAbs = -1.0, limitDeg = -1.0, gravY = -98.0;
     bool summaryOnly = false;
+    int limbExclude = 0;   // 0 = as written in the file; 1 = drop limb bit for bodies overlapping a limb collider (rest-overlap rule); 2 = only for bodies whose centre is inside a limb collider
+    bool noColliders = false;   // drop every collider (every body with a group other than 1): for isolating joint vs collider problems
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--chain") && i + 1 < argc) chainFilter = argv[++i];
+        else if (!strcmp(argv[i], "--limb-all")) limbExclude = 1;
+        else if (!strcmp(argv[i], "--limb-deep")) limbExclude = 2;
+        else if (!strcmp(argv[i], "--nocollide")) noColliders = true;
         else if (!strcmp(argv[i], "--summary")) summaryOnly = true;
         else if (!strcmp(argv[i], "--spring-scale") && i + 1 < argc) springScale = atof(argv[++i]);
         else if (!strcmp(argv[i], "--spring-abs") && i + 1 < argc) springAbs = atof(argv[++i]);
@@ -56,6 +62,61 @@ int main(int argc, char** argv) {
             if (std::sscanf(buf, "%lf,%lf,%lf,%lf,%lf", &shiftX, &shiftY, &shiftZ, &shiftAt, &shiftDur) < 4) shiftAt = -1;
         }
     }
+    // Optionally re-apply rest-overlap filtering to the generated limb colliders (group 15), as the game's colliders are filtered.
+    if (limbExclude == 1 || limbExclude == 2) {
+        auto segOf = [&](size_t i, btVector3& a, btVector3& b, float& r) {
+            const RigidBody& rb = m.bodies[i];
+            r = rb.size.x;
+            if (rb.shape == 2) {
+                btMatrix3x3 rot; rot.setEulerZYX(rb.rot.x, rb.rot.y, rb.rot.z);
+                const btVector3 axis = rot * btVector3(0, 1, 0);
+                const float half = std::max(0.0f, rb.size.y * 0.5f);
+                a = btVector3(rb.pos.x, rb.pos.y, rb.pos.z) - axis * half;
+                b = btVector3(rb.pos.x, rb.pos.y, rb.pos.z) + axis * half;
+            } else {
+                a = b = btVector3(rb.pos.x, rb.pos.y, rb.pos.z);
+            }
+        };
+        auto distPointSeg = [](const btVector3& p, const btVector3& a, const btVector3& b) {
+            const btVector3 ab = b - a;
+            const float l2 = ab.length2();
+            float t = l2 > 1e-12f ? btClamped((p - a).dot(ab) / l2, 0.0f, 1.0f) : 0.0f;
+            return (p - (a + ab * t)).length();
+        };
+        auto distSegSeg = [](const btVector3& p1, const btVector3& q1, const btVector3& p2, const btVector3& q2) {
+            const btVector3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+            const float a = d1.length2(), e = d2.length2(), f = d2.dot(r);
+            const float c = d1.dot(r), b = d1.dot(d2);
+            const float denom = a * e - b * b;
+            float s = denom > 1e-12f ? btClamped((b * f - c * e) / denom, 0.0f, 1.0f) : 0.0f;
+            float t = (b * s + f) / e;
+            if (t < 0.0f) { t = 0.0f; s = btClamped(-c / a, 0.0f, 1.0f); }
+            else if (t > 1.0f) { t = 1.0f; s = btClamped((b - c) / a, 0.0f, 1.0f); }
+            const btVector3 diff = (p1 + d1 * s) - (p2 + d2 * t);
+            return diff.length();
+        };
+        std::vector<std::pair<btVector3, btVector3>> limbs;
+        std::vector<float> limbR;
+        for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].group == 15) {
+            btVector3 a, b; float r;
+            segOf(i, a, b, r);
+            limbs.push_back({a, b});
+            limbR.push_back(r);
+        }
+        for (size_t i = 0; i < m.bodies.size(); ++i) {
+            if (m.bodies[i].group != 1 || m.bodies[i].mode == 0) continue;   // dynamic chain bodies only
+            btVector3 ca, cb; float cr;
+            segOf(i, ca, cb, cr);
+            for (size_t li = 0; li < limbs.size(); ++li) {
+                if (limbExclude == 1) {
+                    if (distSegSeg(limbs[li].first, limbs[li].second, ca, cb) < limbR[li] + cr + 0.02f * 12.5f) { m.bodies[i].mask = m.bodies[i].mask & ~(1 << 15); break; }
+                } else {
+                    if (distPointSeg((ca + cb) * 0.5f, limbs[li].first, limbs[li].second) < limbR[li]) { m.bodies[i].mask = m.bodies[i].mask & ~(1 << 15); break; }
+                }
+            }
+        }
+    }
+
     btDiscreteDynamicsWorld world(new btCollisionDispatcher(new btDefaultCollisionConfiguration), new btDbvtBroadphase, new btSequentialImpulseConstraintSolver, new btDefaultCollisionConfiguration);
     // saba's config: sequential impulse solver, 120 Hz, gravity (1 unit = 10 cm in MMD)
     world.setGravity(btVector3(0, (float)gravY, 0));
@@ -64,6 +125,7 @@ int main(int argc, char** argv) {
     std::vector<BodyEntry> entries(m.bodies.size());
     // The kinematic bodies anchor the chains: at rest they hold their rest places. A --shift moves them (a head-turn / step sideways).
     for (size_t i = 0; i < m.bodies.size(); ++i) {
+        if (noColliders && (m.bodies[i].name.rfind("collider ", 0) == 0 || m.bodies[i].name.rfind("limb collider ", 0) == 0)) continue;   // every collider is dropped for this run
         const RigidBody& b = m.bodies[i];
         btCollisionShape* shape = nullptr;
         if (b.shape == 0) shape = new btSphereShape(b.size.x);
@@ -97,8 +159,12 @@ int main(int argc, char** argv) {
         entries[i].rb->setActivationState(DISABLE_DEACTIVATION);
         world.addRigidBody(entries[i].rb, 1 << b.group, b.mask);
         if (!dynamic) entries[i].rb->setCollisionFlags(entries[i].rb->getCollisionFlags() | btCollisionObject::CF_KINEMATIC_OBJECT);
+        if (std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "body %zu ok\n", i);
     }
+    size_t ji = 0;
     for (const Joint& j : m.joints) {
+        if (std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "joint %zu a=%zu b=%zu\n", ji, (size_t)j.a, (size_t)j.b);
+        ++ji;
         btMatrix3x3 rotA; rotA.setEulerZYX(m.bodies[j.a].rot.x, m.bodies[j.a].rot.y, m.bodies[j.a].rot.z);
         btTransform ta; ta.setIdentity(); ta.setBasis(rotA); ta.setOrigin(btVector3(m.bodies[j.a].pos.x, m.bodies[j.a].pos.y, m.bodies[j.a].pos.z));
         btMatrix3x3 rotB; rotB.setEulerZYX(m.bodies[j.b].rot.x, m.bodies[j.b].rot.y, m.bodies[j.b].rot.z);
@@ -145,7 +211,7 @@ int main(int argc, char** argv) {
     std::vector<double> speedWindow;   // rolling last second
     double lastSecondPeak = 0.0;
     auto displacementAt = [&](double t, bool record) {
-        for (size_t i = 0; i < m.bodies.size(); ++i) snaps[i].push_back(entries[i].rb->getCenterOfMassPosition());
+        for (size_t i = 0; i < m.bodies.size(); ++i) if (entries[i].rb) snaps[i].push_back(entries[i].rb->getCenterOfMassPosition());
     };
     for (int step = 0; step < totalSteps; ++step) {
         const double t = step * dt;
@@ -153,15 +219,16 @@ int main(int argc, char** argv) {
         if (shiftAt >= 0 && t >= shiftStart && t <= shiftEnd + 0.0001) {
             double phase = (t - shiftStart) / std::max(1e-6, shiftDur);
             double w = phase <= 0 ? 0 : (phase >= 1 ? 1 : 0.5 - 0.5 * std::cos(3.14159265 * phase));
-            for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].mode == 0) {
+            for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].mode == 0 && entries[i].rb) {
                 entries[i].ms->t0.setOrigin(btVector3(m.bodies[i].pos.x + shift.x() * w, m.bodies[i].pos.y + shift.y() * w, m.bodies[i].pos.z + shift.z() * w));
             }
         }
         if (t >= seconds) break;
+        if (step % 60 == 0 && std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "step %d t=%.3f\n", step, t);
         world.stepSimulation((float)dt, 1, (float)dt);
         // report
         double speedMax = 0.0;
-        for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].mode != 0) {
+        for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].mode != 0 && entries[i].rb) {
             const btVector3 v = entries[i].rb->getLinearVelocity();
             const double s = v.length();
             speedMax = std::max(speedMax, s);

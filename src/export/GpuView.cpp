@@ -278,7 +278,17 @@ VO vs(VI i) {
     return o;
 }
 float4 ps(VO i) : SV_Target {
-    if (mmd.y > 0.5) return diffuse;
+    // Shadow passes. The material flags choose which meshes cast, but only the texture knows which texels of a hair card, lace or
+    // MaterialEditor cut-out are actually there: a solid whole-mesh shadow is the bald UV-sheet shadow the PMX flags alone cannot avoid.
+    // MikuMikuDance has no per-fragment shadow alpha test; the as-exported view can do it, so it does.
+    if (mmd.x > 1.5) {   // the self-shadow map: depth only, cut texels do not cast
+        clip(t0.Sample(s0, i.uv).a - 0.5);
+        return 0;
+    }
+    if (mmd.y > 0.5) {   // the ground shadow: the model flattened along the light, in one flat shade
+        clip(t0.Sample(s0, i.uv).a - 0.5);
+        return diffuse;
+    }
     float4 c = t0.Sample(s0, i.uv) * diffuse;
     // The normal map's tangent-space normal, folded into the vertex frame. Unity DXT5nm: X in alpha, Y in green, Z reconstructed
     // (a flat default normal map has alpha = green = 0.5, which yields (0, 0, 1)). Shading by the perturbed normal is what the
@@ -1530,9 +1540,13 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
     const bool fallbackOk = I.fbVs && I.fbPs && I.fbIl && I.fbCb;
     if (I.plain && fallbackOk) {
         if (I.looks.size() != scene.materials.size()) {
+            // The PMX's garment pass is a property of the part, not of the material: ask the exporter for the same per-material map it
+            // writes the PMX from, so the as-exported view and the file cannot drift apart.
+            const std::vector<char> garment = MmdGarmentMaterials(scene);
             I.looks.clear();
-            for (const auto& m : scene.materials) {
-                I.looks.push_back(MmdMaterialLook(scene, m));
+            for (size_t i = 0; i < scene.materials.size(); ++i) {
+                const auto& m = scene.materials[i];
+                I.looks.push_back(MmdMaterialLook(scene, m, garment[i] != 0));
                 if (I.looks.back().sphere == 0) continue;
                 const assemble::SceneTexture t = MmdSphereImage(I.looks.back());
                 if (!I.spheres.count(t.name)) I.MakeTexture(t.width, t.height, t.rgba.data(), I.spheres[t.name], false, LinearLight());
@@ -1566,17 +1580,35 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
         };
         ID3D11ShaderResourceView* none = nullptr;
         ctx->PSSetShaderResources(1, 1, &none);
+        // The main texture bound for one of the shadow passes. The fallback pixel shader tests its alpha, so a hair card, lace or
+        // MaterialEditor cut-out casts its visible texels instead of its whole UV sheet (the part MMD's material flags cannot know).
+        auto bindShadowTexture = [&](const assemble::SceneMaterial& mat) {
+            const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv)
+                                   ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
+            const bool clamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
+            ctx->PSSetShaderResources(0, 1, &ft->srv);
+            ctx->PSSetSamplers(0, 1, clamp ? &I.samplerClamp : &I.samplerWrap);
+        };
         if (I.MakeShadowMap()) {
             selfShadow = true;
             for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = LS[r][col];
+            cbv[(7 + 32 + 3) * 4] = 2.0f;   // mmd.x = 2: the fallback shader's cast pass (alpha-tested, depth only)
             ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
             ctx->OMSetRenderTargets(0, nullptr, I.smDsv);
             ctx->ClearDepthStencilView(I.smDsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
             const D3D11_VIEWPORT sv{0, 0, static_cast<float>(Impl::kShadowSize), static_cast<float>(Impl::kShadowSize), 0, 1};
             ctx->RSSetViewports(1, &sv);
-            ctx->PSSetShader(nullptr, nullptr, 0);
-            eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial&) {
-                if (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x04) draw(gm, gs);
+            ctx->RSSetState(I.raster);   // a caster is opaque from either side; the texture, not the winding, decides its silhouette
+            ctx->OMSetDepthStencilState(I.depth, 0);
+            ctx->IASetInputLayout(I.fbIl);
+            ctx->VSSetShader(I.fbVs, nullptr, 0);
+            ctx->PSSetShader(I.fbPs, nullptr, 0);
+            ctx->VSSetConstantBuffers(0, 1, &I.fbCb);
+            ctx->PSSetConstantBuffers(0, 1, &I.fbCb);
+            eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial& mat) {
+                if (!(I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x04)) return;
+                bindShadowTexture(mat);
+                draw(gm, gs);
             });
             ctx->OMSetRenderTargets(1, &I.rtv, I.dsv);
             ctx->RSSetViewports(1, &vp);
@@ -1588,12 +1620,16 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
         for (int i = 0; i < 3; ++i) cbv[16 + i] = LinearLight() ? ToLinear(0.7f * (i == 0 ? 0xE2 : i == 1 ? 0xE4 : 0xE8) / 255.0f) : 0.7f * (i == 0 ? 0xE2 : i == 1 ? 0xE4 : 0xE8) / 255.0f;
         cbv[19] = 1.0f;
         cbv[24] = L[0]; cbv[25] = L[1]; cbv[26] = L[2];
+        cbv[(7 + 32 + 3) * 4] = 0.0f;   // not the cast pass
         cbv[(7 + 32 + 3) * 4 + 1] = 1.0f; cbv[(7 + 32 + 3) * 4 + 2] = mn[1]; cbv[(7 + 32 + 3) * 4 + 3] = radius;
         ctx->UpdateSubresource(I.fbCb, 0, nullptr, cbv, 0, 0);
+        ctx->RSSetState(I.raster);
         ctx->PSSetShader(I.fbPs, nullptr, 0);
         ctx->OMSetDepthStencilState(I.depthOverlay, 0);
-        eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial&) {
-            if (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x02) draw(gm, gs);
+        eachSub([&](const GpuMesh& gm, const GpuSub& gs, const assemble::SceneMaterial& mat) {
+            if (!(I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x02)) return;
+            bindShadowTexture(mat);
+            draw(gm, gs);
         });
         ctx->OMSetDepthStencilState(I.depth, 0);
     }

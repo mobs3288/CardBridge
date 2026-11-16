@@ -265,6 +265,10 @@ struct ScenePart {
     std::string label;
     std::string group;        // Body, Head, Hair, Outfit, Accessories
     bool fromClothing = false;   // the mesh came from the added clothing file (see Card::hasClothing); viewer lists it under "Added outfit"
+    // An outfit garment (including one worn through an accessory slot, see AssembleOptions): the PMX gives its cloth the garment pass,
+    // no edge and no self-shadow receive, so a garment clipping the body or its see-through lining never paints black slices. Its shade
+    // still comes from the material and its ground/cast shadow is kept (the silhouette belongs in the shadow).
+    bool garment = false;
     std::string property;
     int category = 0;
     int64_t sourceItemId = 0;

@@ -2683,6 +2683,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.id = ref.partId;
         part.label = ref.label;
         part.group = ref.group;
+        part.garment = ref.group == "Outfit";
         part.fromClothing = card.clothingPartIds.count(ref.partId) != 0;
         if (!part.fromClothing && ref.subKind >= 0) {   // top sub-parts inherit the top's provenance
             const size_t at = ref.partId.find(".sub_");
@@ -2818,6 +2819,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (boundAsGarment) {
                 accessoryMode = false;
                 garmentAsAccessory = true;
+                part.garment = true;
                 placement = Mat4();
                 staticBone = 0;
             }
@@ -3822,6 +3824,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 piece.id = parent.id + ".under." + tag;
                 piece.label = parent.label + " under " + tag;
                 piece.group = parent.group;
+                piece.garment = parent.garment;
                 piece.fromClothing = parent.fromClothing;
                 piece.status = parent.status;
                 piece.bundle = parent.bundle;

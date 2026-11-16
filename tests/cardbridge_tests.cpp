@@ -1180,7 +1180,11 @@ void unitTests() {
         CHECK(!exporter::HasCutout(s, s.materials[0]));   // the triangle samples only the solid half
         for (auto& v : s.meshes[0].vertices) v.uv.x -= 0.5f;
         CHECK(exporter::HasCutout(s, s.materials[0]));
-        CHECK((exporter::MmdMaterialLook(s, s.materials[0]).drawFlags & 0x16) == 0);   // no ground shadow, shadow map or edge for the cut mesh
+        const uint8_t cutFlags = exporter::MmdMaterialLook(s, s.materials[0]).drawFlags;
+        CHECK((cutFlags & 0x02) != 0);   // the cut mesh still belongs to the ground shadow silhouette
+        CHECK((cutFlags & 0x04) == 0);   // but MMD would draw its whole mesh into the shadow map: no cast
+        CHECK((cutFlags & 0x10) == 0);   // and the whole-mesh edge would ring the cut-away part
+        CHECK((cutFlags & 0x08) != 0);   // its visible texels take shadow
         s.materials[0].shader = "Shader Forge/main_opaque";
         CHECK(!exporter::HasCutout(s, s.materials[0]));
     });
@@ -1205,6 +1209,43 @@ void unitTests() {
         CHECK((exporter::MmdMaterialLook(dbl, dbl.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (garment)
         CHECK((exporter::MmdMaterialLook(hair, hair.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (hair: it would clip)
         CHECK((exporter::MmdMaterialLook(sgl, sgl.materials[0]).drawFlags & 0x10) != 0);   // the single surface keeps its edge
+    });
+    test("MMD shadow flags: cloth, hair, shoes and accessories cast the silhouette; transparent cloth only loses receive", [] {
+        using namespace assemble;
+        Scene s;
+        auto addMat = [&](const char* shader, bool alpha, const char* name) {
+            SceneMaterial m; m.shader = shader; m.alpha = alpha; m.name = name;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            for (float y : {0.0f, 1.0f, 1.0f}) { SceneVertex v; v.pos = {0, y, 0}; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+            SceneSubmesh sub; sub.material = static_cast<int>(s.materials.size()) - 1; sub.indices = {0, 1, 2};
+            mesh.submeshes.push_back(sub);
+            s.meshes.push_back(mesh);
+            return static_cast<int>(s.materials.size()) - 1;
+        };
+        const int body = addMat("Shader Forge/main_skin", false, "body");
+        const int top = addMat("Shader Forge/main_opaque", false, "top");
+        const int hair = addMat("Shader Forge/main_hair", false, "hair");
+        const int lace = addMat("Shader Forge/main_alpha", true, "lace");
+        const int eye = addMat("Shader Forge/toon_eye_lod0", false, "eye");
+        const int sock = addMat("Shader Forge/main_opaque", false, "sock");   // an outfit garment worn through an accessory slot
+        ScenePart bp; bp.id = "body"; bp.group = "Body"; bp.meshes = {body};
+        ScenePart tp; tp.id = "outfit0.top"; tp.group = "Outfit"; tp.garment = true; tp.meshes = {top};
+        ScenePart hp; hp.id = "hair.back"; hp.group = "Hair"; hp.meshes = {hair};
+        ScenePart lp; lp.id = "outfit0.bra"; lp.group = "Outfit"; lp.garment = true; lp.meshes = {lace};
+        ScenePart ep; ep.id = "head"; ep.group = "Head"; ep.meshes = {eye};
+        ScenePart gp; gp.id = "outfit0.acc00"; gp.group = "Accessories"; gp.garment = true; gp.meshes = {sock};
+        s.parts = {bp, tp, hp, lp, ep, gp};
+        const std::vector<char> garment = exporter::MmdGarmentMaterials(s);
+        CHECK(garment[static_cast<size_t>(top)] && garment[static_cast<size_t>(lace)] && garment[static_cast<size_t>(sock)]);
+        CHECK(!garment[static_cast<size_t>(hair)] && !garment[static_cast<size_t>(body)]);   // a hair accessory is not outfit cloth
+        auto flags = [&](int i) { return exporter::MmdMaterialLook(s, s.materials[static_cast<size_t>(i)], garment[static_cast<size_t>(i)] != 0).drawFlags; };
+        CHECK((flags(body) & 0x1E) == 0x1E);   // body: ground, cast, receive, edge
+        CHECK((flags(hair) & 0x0E) == 0x0E && !(flags(hair) & 0x10));   // hair casts and receives, no edge
+        CHECK((flags(top) & 0x1E) == 0x06);   // cloth: ground and cast, no receive (black bands), no edge (back faces)
+        CHECK((flags(lace) & 0x0E) == 0x06);   // transparent cloth: ground and cast, no receive (solid dark shape)
+        CHECK((flags(sock) & 0x1E) == 0x06);   // a garment worn through an accessory slot gets the same cloth pass
+        CHECK(flags(eye) == 0x00);   // face paint casts and receives nothing
     });
     test("KoiClothesOverlayX: overlays are read for the asked coordinate only, with the replace flag", [] {
         Bytes png = tinyPng();
@@ -8186,6 +8227,7 @@ void integrationTests() {
                 if (p.underPiece) {
                     ++pieces;
                     CHECK(!p.visibleInPreview && p.startHidden && !p.coveredBy.empty() && !p.underOf.empty());
+                    if (p.underOf.rfind("outfit", 0) == 0) CHECK(p.garment);   // an under piece of a garment stays cloth for the shadow flags
                     for (int mi : p.meshes) for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes) CHECK(!sm.indices.empty());
                 }
             }

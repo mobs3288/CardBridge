@@ -65,6 +65,7 @@ void EmitUnderPieces(Scene& scene, const std::string& what, size_t pi, const Und
         piece.id = pieceId;
         piece.label = parent.label + " under " + tag;
         piece.group = parent.group;
+        piece.garment = parent.garment;
         piece.fromClothing = parent.fromClothing;
         piece.status = parent.status;
         piece.bundle = parent.bundle;
