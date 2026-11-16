@@ -14,8 +14,10 @@ namespace cardbridge::exporter {
 // Collision groups of the exported bodies. In the PMX a rigid body's mask has bit n set for every group it collides with (the
 // Bullet filter; saba, babylon-mmd and MikuMikuDance itself take it as is), so colliders list only the chains and chains list only
 // colliders. Chains are group 1. Colliders are group 0, or 2..14 when they overlap some chain body in the rest pose (see AddPhysics):
-// a chain body's mask lists the collider groups it may meet. The exception is a jiggle body (the body's own): it meets the generated
-// arm colliders (group 15) only, never its own bust / hip hit spheres, or those would push it for ever and it would shiver at rest.
+// a chain body's mask lists the collider groups it may meet — the groups none of whose colliders it overlaps in the rest pose.
+// The limb colliders (arms, hands, shins — see AddPhysics) are ordinary colliders in that scheme. The one exception is a jiggle body
+// (the body's own): it meets only the groups carrying a limb collider that it does not overlap in the rest pose, never its own
+// bust / hip hit spheres, or those would push it for ever and it would shiver at rest.
 constexpr uint8_t kPmxGroupChain = 1;
 
 // Physics for the PMX: every DynamicBone chain of the scene (hair, skirts, ribbons; the body's own breast / hip jiggle chains when their switch is on) becomes one capsule body per

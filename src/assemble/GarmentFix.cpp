@@ -15,6 +15,7 @@
 // keeps it off even for a caller that enables it on purpose.
 
 #include "assemble/Assembler.h"
+#include "assemble/MeshQueries.h"
 
 #include "core/Math.h"
 #include "core/Timing.h"
@@ -35,57 +36,12 @@ namespace cardbridge::assemble {
 
 namespace {
 
-struct Tri {
-    Vec3 a, b, c;
-    Vec3 n;         // unit face normal, oriented away from the body centroid
-    float minX, minY, minZ, maxX, maxY, maxZ;
-};
-
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 Vec3 add(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 mul(Vec3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
 Vec3 cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 float len(Vec3 v) { return std::sqrt(dot(v, v)); }
-
-// Ericson's closest point on a triangle; never allocates.
-void closestOnTriangle(Vec3 p, const Tri& t, Vec3& closest, float& distSq) {
-    const Vec3 ab = sub(t.b, t.a), ac = sub(t.c, t.a), ap = sub(p, t.a);
-    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) { closest = t.a; distSq = dot(sub(p, t.a), sub(p, t.a)); return; }
-    const Vec3 bp = sub(p, t.b);
-    const float d3 = dot(ab, bp), d4 = dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) { closest = t.b; distSq = dot(sub(p, t.b), sub(p, t.b)); return; }
-    const float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
-        const float v = d1 / (d1 - d3);
-        closest = add(t.a, mul(ab, v));
-        distSq = dot(sub(p, closest), sub(p, closest));
-        return;
-    }
-    const Vec3 cp = sub(p, t.c);
-    const float d5 = dot(ab, cp), d6 = dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) { closest = t.c; distSq = dot(sub(p, t.c), sub(p, t.c)); return; }
-    const float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
-        const float w = d2 / (d2 - d6);
-        closest = add(t.a, mul(ac, w));
-        distSq = dot(sub(p, closest), sub(p, closest));
-        return;
-    }
-    const float va = d3 * d6 - d5 * d4;
-    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
-        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        closest = add(t.b, mul(sub(t.c, t.b), w));
-        distSq = dot(sub(p, closest), sub(p, closest));
-        return;
-    }
-    const float denom = 1.0f / (dot(ab, ab) * dot(ac, ac) - dot(ab, ac) * dot(ab, ac));
-    const float v = (dot(ac, ac) * d1 - dot(ab, ac) * d2) * denom;
-    const float w = (dot(ab, ab) * d2 - dot(ab, ac) * d1) * denom;
-    closest = add(add(t.a, mul(ab, v)), mul(ac, w));
-    distSq = dot(sub(p, closest), sub(p, closest));
-}
 
 // Moller's ray-triangle intersection for the inside/outside parity test. The direction is deliberately tilted off-axis: a ray
 // straight up passes exactly through pole vertices shared by many triangles (the parity count doubles and the vertex reads as
@@ -142,16 +98,8 @@ GarmentFixStats FixGarmentIntersections(Scene& scene, float clearance) {
                 for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) {
                     const uint32_t ia = sm.indices[t], ib = sm.indices[t + 1], ic = sm.indices[t + 2];
                     if (ia >= m.vertices.size() || ib >= m.vertices.size() || ic >= m.vertices.size()) continue;
-                    Tri tri;
-                    tri.a = m.vertices[ia].pos;
-                    tri.b = m.vertices[ib].pos;
-                    tri.c = m.vertices[ic].pos;
-                    tri.n = cross(sub(tri.b, tri.a), sub(tri.c, tri.a));
-                    const float nl = len(tri.n);
-                    tri.n = nl > 1e-12f ? mul(tri.n, 1.0f / nl) : Vec3{0, 1, 0};
-                    tri.minX = std::min({tri.a.x, tri.b.x, tri.c.x}); tri.maxX = std::max({tri.a.x, tri.b.x, tri.c.x});
-                    tri.minY = std::min({tri.a.y, tri.b.y, tri.c.y}); tri.maxY = std::max({tri.a.y, tri.b.y, tri.c.y});
-                    tri.minZ = std::min({tri.a.z, tri.b.z, tri.c.z}); tri.maxZ = std::max({tri.a.z, tri.b.z, tri.c.z});
+                    Tri tri = MakeTri(m.vertices[ia].pos, m.vertices[ib].pos, m.vertices[ic].pos,
+                                      cross(sub(m.vertices[ib].pos, m.vertices[ia].pos), sub(m.vertices[ic].pos, m.vertices[ia].pos)));
                     body.push_back(tri);
                     centroid = add(centroid, add(add(tri.a, tri.b), tri.c));
                 }

@@ -226,10 +226,10 @@ void PhysicsSim::CollectColliders(const Scene& scene, const std::vector<Mat4>& p
     // The arms are not in the game's collider list, but the breast clipping into them is the classic break:
     // add an upper-arm + forearm capsule per arm so the jiggle particles slide off the arm instead of through it.
     // Hand capsules (forearm -> hand) and shin capsules (knee -> ankle) close the other two universal gaps.
-    for (const char* side : {"_L", "_R"}) {
-        const int shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);
-        const int arm = scene.boneIndex(std::string("cf_j_arm00") + side);
-        const int forearm = scene.boneIndex(std::string("cf_j_forearm01") + side);
+    for (const char* side : {"L", "R"}) {
+        const int shoulder = scene.boneIndex(std::string("cf_j_shoulder_") + side);
+        const int arm = scene.boneIndex(std::string("cf_j_arm00_") + side);
+        const int forearm = scene.boneIndex(std::string("cf_j_forearm01_") + side);
         const int hand = scene.boneIndex(std::string("cf_j_hand_") + side);
         const int knee = scene.boneIndex(std::string("cf_j_leg01_") + side);
         const int leg03 = scene.boneIndex(std::string("cf_j_leg03_") + side);

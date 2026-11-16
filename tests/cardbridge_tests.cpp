@@ -9,6 +9,7 @@
 //
 // Without them the integration tests are skipped, not failed.
 
+#include "assemble/BodySuppression.h"
 #include "assemble/Assembler.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
@@ -7634,6 +7635,235 @@ void meshTests() {
         CHECK(manifest.find("lodtest_lod2.pmx") != std::string::npos);
         CHECK(manifest.find("\"simplification\"") != std::string::npos);
         CHECK(manifest.find("\"applied\": true") != std::string::npos);
+    });
+
+    test("suppression: an opaque garment hides the body beneath it; exposed skin stays", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        SceneMesh mesh; mesh.name = "body"; mesh.reshapable = false;
+        // two triangles of the body plane (x from -1 to 1), facing +z, at z=0; a garment 2 mm in front of the left half
+        auto v = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, 0.0f}; sv.normal = {0, 0, 1}; sv.uv = {x, y}; mesh.vertices.push_back(sv); return static_cast<uint32_t>(mesh.vertices.size()) - 1; };
+        const uint32_t a = v(-1.0f, 0.0f), b = v(1.0f, 0.0f), c = v(1.0f, 2.0f), d = v(-1.0f, 2.0f);
+        SceneSubmesh sub; sub.material = 0; sub.indices = {a, b, c, a, c, d};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial bodyMat; bodyMat.name = "cf_m_body"; s.materials.push_back(bodyMat);
+        SceneMesh gm; gm.name = "cloth"; gm.reshapable = false;
+        auto gv = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, 0.002f}; sv.normal = {0, 0, 1}; gm.vertices.push_back(sv); return static_cast<uint32_t>(gm.vertices.size()) - 1; };
+        const uint32_t ga = gv(-1.0f, 0.0f), gb = gv(0.0f, 0.0f), gc = gv(0.0f, 2.0f), gd = gv(-1.0f, 2.0f);
+        SceneSubmesh gsub; gsub.material = 1; gsub.indices = {ga, gb, gc, ga, gc, gd};
+        gm.submeshes.push_back(gsub);
+        s.meshes.push_back(gm);
+        SceneMaterial garmentMat; garmentMat.name = "cf_m_clothes_00"; s.materials.push_back(garmentMat);
+        ScenePart body; body.id = "body"; body.group = "Body"; body.meshes = {0}; s.parts.push_back(body);
+        ScenePart top; top.id = "outfit0.top"; top.group = "Outfit"; top.meshes = {1}; s.parts.push_back(top);
+        const auto stats = SuppressBodyUnderGarments(s, {}, 0.004f);
+        CHECK(stats.coverageTotal == 2);
+        CHECK(stats.coverageTraits == 1);     // only the left triangle is behind the fabric
+        CHECK(stats.kokanTraits == 0);
+        CHECK(stats.providers == 2);
+        size_t bodyKeep = 0; for (const auto& sm : s.meshes[0].submeshes) bodyKeep += sm.indices.size();
+        CHECK(bodyKeep == 3);                 // one triangle remains visible
+        bool foundUnder = false;
+        for (const auto& p : s.parts)
+            if (p.underPiece && p.underOf == "body" && p.coveredBy == std::vector<std::string>{"outfit0.top"}) {
+                foundUnder = true;
+                size_t tris = 0; for (int mi : p.meshes) for (const auto& sm : s.meshes[static_cast<size_t>(mi)].submeshes) tris += sm.indices.size() / 3;
+                CHECK(tris == 1);
+            }
+        CHECK(foundUnder);
+    });
+
+    test("suppression: a translucent garment hides nothing (the skin is meant to show through)", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        SceneMesh mesh; mesh.name = "body"; mesh.reshapable = false;
+        auto v = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, 0.0f}; sv.normal = {0, 0, 1}; sv.uv = {x, y}; mesh.vertices.push_back(sv); return static_cast<uint32_t>(mesh.vertices.size()) - 1; };
+        const uint32_t a = v(-1.0f, 0.0f), b = v(1.0f, 0.0f), c = v(1.0f, 2.0f), d = v(-1.0f, 2.0f);
+        SceneSubmesh sub; sub.material = 0; sub.indices = {a, b, c, a, c, d};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial bodyMat; bodyMat.name = "cf_m_body"; s.materials.push_back(bodyMat);
+        SceneMesh gm; gm.name = "sheer"; gm.reshapable = false;
+        auto gv = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, 0.002f}; sv.normal = {0, 0, 1}; gm.vertices.push_back(sv); return static_cast<uint32_t>(gm.vertices.size()) - 1; };
+        const uint32_t ga = gv(-1.0f, 0.0f), gb = gv(0.0f, 0.0f), gc = gv(0.0f, 2.0f), gd = gv(-1.0f, 2.0f);
+        SceneSubmesh gsub; gsub.material = 1; gsub.indices = {ga, gb, gc, ga, gc, gd};
+        gm.submeshes.push_back(gsub);
+        s.meshes.push_back(gm);
+        SceneMaterial sheerMat; sheerMat.name = "cf_m_clothes_sheer"; sheerMat.translucent = true; s.materials.push_back(sheerMat);
+        ScenePart body; body.id = "body"; body.group = "Body"; body.meshes = {0}; s.parts.push_back(body);
+        ScenePart top; top.id = "outfit0.top"; top.group = "Outfit"; top.meshes = {1}; s.parts.push_back(top);
+        const auto stats = SuppressBodyUnderGarments(s, {}, 0.004f);
+        CHECK(stats.providers == 0);
+        CHECK(stats.coverageTraits == 0);
+        size_t bodyKeep = 0; for (const auto& sm : s.meshes[0].submeshes) bodyKeep += sm.indices.size();
+        CHECK(bodyKeep == 6);
+        for (const auto& p : s.parts) CHECK(!p.underPiece);
+    });
+
+    test("suppression: layered opaque garments tag a covered triangle with every coverer", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        SceneMesh mesh; mesh.name = "body"; mesh.reshapable = false;
+        auto v = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, 0.0f}; sv.normal = {0, 0, 1}; sv.uv = {x, y}; mesh.vertices.push_back(sv); return static_cast<uint32_t>(mesh.vertices.size()) - 1; };
+        const uint32_t a = v(-1.0f, 0.0f), b = v(0.0f, 0.0f), c = v(0.0f, 2.0f), d = v(-1.0f, 2.0f);
+        SceneSubmesh sub; sub.material = 0; sub.indices = {a, b, c, a, c, d};   // one triangle, centroid (-1/3, 2/3) / (-1/3, 4/3)
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        SceneMaterial bodyMat; bodyMat.name = "cf_m_body"; s.materials.push_back(bodyMat);
+        const char* ids[2] = {"outfit0.top", "outfit0.dress"};
+        for (int k = 0; k < 2; ++k) {   // two opaque layers, 2 mm and 3.5 mm in front of the body
+            SceneMesh gm; gm.name = k == 0 ? "cloth" : "dress"; gm.reshapable = false;
+            const float z = k == 0 ? 0.002f : 0.0035f;
+            auto gv = [&](float x, float y) { SceneVertex sv; sv.pos = {x, y, z}; sv.normal = {0, 0, 1}; gm.vertices.push_back(sv); return static_cast<uint32_t>(gm.vertices.size()) - 1; };
+            const uint32_t ga = gv(-1.0f, 0.0f), gb = gv(0.0f, 0.0f), gc = gv(0.0f, 2.0f), gd = gv(-1.0f, 2.0f);
+            SceneSubmesh gsub; gsub.material = 1 + k; gsub.indices = {ga, gb, gc, ga, gc, gd};
+            gm.submeshes.push_back(gsub);
+            s.meshes.push_back(gm);
+            SceneMaterial garmentMat; garmentMat.name = k == 0 ? "cf_m_clothes_00" : "cf_m_clothes_01"; s.materials.push_back(garmentMat);
+            ScenePart top; top.id = ids[k]; top.group = "Outfit"; top.meshes = {1 + k}; s.parts.push_back(top);
+        }
+        ScenePart body; body.id = "body"; body.group = "Body"; body.meshes = {0}; s.parts.push_back(body);
+        const auto stats = SuppressBodyUnderGarments(s, {}, 0.004f);
+        CHECK(stats.coverageTraits == 2);   // both triangles covered by both layers
+        bool found = false;
+        for (const auto& p : s.parts)
+            if (p.underPiece && p.coveredBy == std::vector<std::string>{"outfit0.dress", "outfit0.top"}) found = true;
+        CHECK(found);
+    });
+
+    test("suppression: KokanHide hides the crotch triangles and nothing else; without a kokan bone it warns and hides nothing", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {}, "rig"});
+        s.bones.push_back({"cf_d_kokan", 0, {0, 1.0f, 0}, "rig"});
+        SceneMesh mesh; mesh.name = "body"; mesh.reshapable = false;
+        auto tri = [&](Vec3 a, Vec3 b, Vec3 c) {
+            int base = static_cast<int>(mesh.vertices.size());
+            for (Vec3 p : {a, b, c}) { SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+            SceneSubmesh sm; sm.material = 0; sm.indices = {static_cast<uint32_t>(base), static_cast<uint32_t>(base + 1), static_cast<uint32_t>(base + 2)};
+            mesh.submeshes.push_back(sm);
+        };
+        tri({0.0f, 0.98f, 0.05f}, {0.02f, 1.0f, 0.05f}, {0.01f, 1.02f, 0.05f});   // inside the crotch ellipsoid
+        tri({5.0f, 1.0f, 0.0f}, {5.02f, 1.0f, 0.0f}, {5.01f, 1.02f, 0.0f});        // far away from it
+        s.meshes.push_back(mesh);
+        SceneMaterial mat; mat.name = "cf_m_body"; s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0}; s.parts.push_back(p);
+        const auto stats = SuppressBodyUnderGarments(s, {"outfit0.shorts"}, 0.004f);
+        CHECK(stats.kokanTraits == 1);
+        CHECK(stats.coverageTraits == 0);
+        size_t kept = 0; for (const auto& sm : s.meshes[0].submeshes) kept += sm.indices.size();
+        CHECK(kept == 3);   // only the distant triangle remains
+        bool found = false;
+        for (const auto& q : s.parts)
+            if (q.underPiece && q.coveredBy == std::vector<std::string>{"outfit0.shorts"}) found = true;
+        CHECK(found);
+
+        Scene s3;   // the same crotch body on a rig without a kokan bone
+        s3.bones.push_back({"root", -1, {}, "rig"});
+        SceneMesh m3; m3.name = "body"; m3.reshapable = false;
+        auto tri2 = [&](Vec3 a, Vec3 b, Vec3 c) {
+            int base = static_cast<int>(m3.vertices.size());
+            for (Vec3 p : {a, b, c}) { SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; m3.vertices.push_back(v); }
+            SceneSubmesh sm; sm.material = 0; sm.indices = {static_cast<uint32_t>(base), static_cast<uint32_t>(base + 1), static_cast<uint32_t>(base + 2)};
+            m3.submeshes.push_back(sm);
+        };
+        tri2({0.0f, 0.98f, 0.05f}, {0.02f, 1.0f, 0.05f}, {0.01f, 1.02f, 0.05f});
+        s3.meshes.push_back(m3);
+        s3.materials.push_back(mat);
+        ScenePart b3; b3.id = "body"; b3.group = "Body"; b3.meshes = {0}; s3.parts.push_back(b3);
+        const auto stats3 = SuppressBodyUnderGarments(s3, {"outfit0.shorts"}, 0.004f);
+        CHECK(stats3.kokanTraits == 0);
+        bool warned = false;
+        for (const auto& i : s3.issues) if (i.part == "kokan") warned = true;
+        CHECK(warned);
+        size_t kept3 = 0; for (const auto& sm : s3.meshes[0].submeshes) kept3 += sm.indices.size();
+        CHECK(kept3 == 3);
+    });
+
+    test("physics: limb colliders are generated for the arms, hands and shins; the limb a chain starts inside excludes that limb for it", [] {
+        using namespace assemble;
+        Scene s;
+        auto addBone = [&](const std::string& name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = addBone("root", -1, {0, 1.3f, 0});
+        const float sign[2] = {1.0f, -1.0f};
+        for (int i = 0; i < 2; ++i) {
+            const float g = sign[i];
+            const std::string side = g > 0 ? "_L" : "_R";
+            const int shoulder = addBone("cf_j_shoulder" + side, root, {0.2f * g, 1.25f, 0});
+            const int arm = addBone("cf_j_arm00" + side, shoulder, {0.4f * g, 1.22f, 0});
+            const int forearm = addBone("cf_j_forearm01" + side, arm, {0.55f * g, 1.05f, 0});
+            addBone("cf_j_hand_" + std::string(side).substr(1), forearm, {0.66f * g, 0.9f, 0});
+            const int knee = addBone("cf_j_leg01" + side, root, {0.12f * g, 0.55f, 0});
+            addBone("cf_j_leg03" + side, knee, {0.12f * g, 0.12f, 0.05f});
+        }
+        // chain one: well clear of every limb (in front of the body)
+        const int c0 = addBone("skirt_root", root, {0.0f, 0.9f, 0.6f});
+        const int c1 = addBone("skirt_1", c0, {0.0f, 0.6f, 0.6f});
+        SceneChain ch; ch.name = "skirtaway"; ch.bones = {c0, c1}; ch.stiffness = 0.3f; s.chains.push_back(ch);
+        // chain two: its bodies start inside the left shin's capsule
+        const int s0 = addBone("inside_root", root, {0.12f, 0.5f, 0.02f});
+        const int s1 = addBone("inside_1", s0, {0.12f, 0.42f, 0.03f});
+        SceneChain ch2; ch2.name = "buried"; ch2.bones = {s0, s1}; ch2.stiffness = 0.3f; s.chains.push_back(ch2);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        int limbBodies = 0;
+        std::map<int, int> limbGroup;   // limb body index -> group
+        for (size_t i = 0; i < m.rigidBodies.size(); ++i)
+            if (m.rigidBodies[i].name.find("limb collider") == 0) { ++limbBodies; limbGroup[static_cast<int>(i)] = m.rigidBodies[i].group; }
+        CHECK(limbBodies == 8);   // upper/forearm/hand/shin, both sides
+        // the shin the buried chain starts inside gets a group of its own; that chain does not meet it
+        int shinGroupL = -1, awayGroupHit = 0;
+        for (const auto& [idx, g] : limbGroup) {
+            if (m.rigidBodies[static_cast<size_t>(idx)].name == "limb collider L shin") shinGroupL = g;
+        }
+        CHECK(shinGroupL >= 2);   // it overlaps the buried chain at rest, so it was moved out of group 0
+        int awayMask = 0, buriedMask = 0;
+        for (size_t i = 0; i < m.rigidBodies.size(); ++i) {
+            if (m.rigidBodies[i].mode != 1) continue;
+            if (m.rigidBodies[i].bone == c1 || m.rigidBodies[i].bone == c0) awayMask |= m.rigidBodies[i].mask;
+            if (m.rigidBodies[i].bone == s1 || m.rigidBodies[i].bone == s0) buriedMask |= m.rigidBodies[i].mask;
+        }
+        (void)awayGroupHit;
+        CHECK((awayMask & (1u << shinGroupL)) != 0);      // the clear chain meets the limb group
+        CHECK((buriedMask & (1u << shinGroupL)) == 0);     // the chain that starts inside it does not
+        for (const auto& j : m.joints) CHECK(j.bodyA >= 0 && j.bodyB > j.bodyA);
+    });
+
+    test("physics: a garment chain hanging in front of a thigh follows it by append rotation; a rear chain does not", [] {
+        using namespace assemble;
+        Scene s;
+        auto addBone = [&](const std::string& name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = addBone("root", -1, {0, 1.3f, 0});
+        for (const char* side : {"_L", "_R"}) {
+            const float g = side[1] == 'L' ? 1.0f : -1.0f;
+            const int thigh = addBone(std::string("cf_j_thigh00") + side, root, {0.1f * g, 1.0f, 0});
+            const int knee = addBone(std::string("cf_j_leg01") + side, thigh, {0.1f * g, 0.6f, 0});
+            const int foot = addBone(std::string("cf_j_foot") + side, knee, {0.1f * g, 0.12f, 0});
+            addBone(std::string("cf_j_toes") + side, foot, {0.1f * g, 0.05f, 0.08f});
+        }
+        // a skirt chain in front of the left thigh
+        const int skirt = addBone("cf_j_sk_00", root, {0.08f, 1.02f, 0.28f});
+        const int s1 = addBone("cf_j_sk_01", skirt, {0.08f, 0.78f, 0.30f});
+        const int s2 = addBone("cf_j_sk_02", s1, {0.08f, 0.55f, 0.31f});
+        SceneChain ch; ch.name = "skirt"; ch.bones = {skirt, s1, s2}; ch.stiffness = 0.3f; s.chains.push_back(ch);
+        // a chain hanging behind the body
+        const int back = addBone("cf_j_bk_00", root, {0.0f, 1.02f, -0.28f});
+        const int b1 = addBone("cf_j_bk_01", back, {0.0f, 0.78f, -0.30f});
+        const int b2 = addBone("cf_j_bk_02", b1, {0.0f, 0.55f, -0.31f});
+        SceneChain ch2; ch2.name = "back"; ch2.bones = {back, b1, b2}; ch2.stiffness = 0.3f; s.chains.push_back(ch2);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        const int thighL = s.boneIndex("cf_j_thigh00_L");
+        CHECK(m.bones[static_cast<size_t>(skirt)].appendParent == thighL);
+        CHECK(m.bones[static_cast<size_t>(skirt)].layer == 1);
+        CHECK(m.bones[static_cast<size_t>(s1)].appendParent == -1);
+        CHECK(m.bones[static_cast<size_t>(back)].appendParent == -1);
     });
 
     test("lod: no simplification means the pipeline is byte-identical to before", [] {

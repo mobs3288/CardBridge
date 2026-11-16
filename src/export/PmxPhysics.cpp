@@ -110,6 +110,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     const float gravity = 9.8f * scale;   // model units a second squared
     std::vector<Core> colliderCore;       // per collider body, in the order they were added
     std::vector<int> colliderBody;        // its rigid body index
+    std::vector<char> colliderLimb;       // 1 when the collider is a generated limb (vs the body's own hit spheres)
     for (const auto& c : scene.colliders) {
         if (c.bone < 0 || c.bone >= boneCount || c.inside || c.radius <= 0.0f) continue;
         pmx::RigidBody rb;
@@ -137,6 +138,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             core.b = c.center * scale + half;
         }
         colliderCore.push_back(core);
+        colliderLimb.push_back(0);
         colliderBody.push_back(static_cast<int>(model.rigidBodies.size()));
         model.rigidBodies.push_back(std::move(rb));
     }
@@ -385,12 +387,64 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         }
     }
 
+    // Generated limb colliders so cloth slides off arms, hands and shins instead of clipping through them. They are ordinary
+    // colliders in the exclusion below: a chain body meets a limb collider unless it already overlaps it in the rest pose.
+    {
+        auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
+        for (const char* side : {"L", "R"}) {
+            const int shoulder = findBone(std::string("cf_j_shoulder_") + side);
+            const int arm = findBone(std::string("cf_j_arm00_") + side);
+            const int forearm = findBone(std::string("cf_j_forearm01_") + side);
+            const int hand = findBone(std::string("cf_j_hand_") + side);
+            const int knee = findBone(std::string("cf_j_leg01_") + side);
+            const int leg03 = findBone(std::string("cf_j_leg03_") + side);
+            auto addSeg = [&](int a, int b, float radius, const std::string& what) {
+                if (a < 0 || b < 0 || static_cast<size_t>(a) >= scene.bones.size() || static_cast<size_t>(b) >= scene.bones.size()) return;
+                const Vec3 pa = scene.bones[static_cast<size_t>(a)].pos * scale;
+                const Vec3 pb = scene.bones[static_cast<size_t>(b)].pos * scale;
+                const Vec3 dir = sub(pb, pa);
+                const float len3d = length(dir);
+                if (len3d < 1e-5f) return;
+                const Vec3 axis = normalize(dir);
+                pmx::RigidBody rb;
+                rb.name = std::string("limb collider ") + side + " " + what;
+                rb.bone = a;
+                rb.group = 0;   // assigned in the exclusion below
+                rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);
+                rb.mode = 0;
+                rb.shape = (len3d - 2.0f * radius * scale) > 1e-4f ? 2 : 0;
+                rb.size = {radius * scale, std::max(0.0f, len3d - 2.0f * radius * scale), 0};
+                rb.position = (pa + pb) * 0.5f;
+                if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(axis);
+                rb.mass = 1.0f;
+                Core core;
+                const float cyl = rb.shape == 2 ? rb.size.y : 0.0f;
+                core.r = radius * scale;
+                core.a = core.b = rb.position;
+                if (rb.shape == 2) {
+                    const Vec3 half = axis * (0.5f * cyl);
+                    core.a = sub(rb.position, half);
+                    core.b = rb.position + half;
+                }
+                colliderCore.push_back(core);
+                colliderLimb.push_back(1);
+                colliderBody.push_back(static_cast<int>(model.rigidBodies.size()));
+                model.rigidBodies.push_back(std::move(rb));
+            };
+            addSeg(shoulder, arm, 0.040f, "upper");
+            addSeg(arm, forearm, 0.032f, "forearm");
+            addSeg(forearm, hand, 0.030f, "hand");
+            addSeg(knee, leg03, 0.038f, "shin");
+        }
+    }
+
     // Who collides with whom. A body that starts inside a collider (a skirt over the thigh, a breast bone in the bust sphere, a strand
     // in the head) is thrown out of it the moment the simulation starts, and the whole model with it. So a body meets only the colliders
     // it does not overlap in the rest pose: colliders that overlap the same bodies share a group, and a body's mask lists the groups none
     // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
     // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
-    // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
+    // so it meets only the groups that carry a limb collider and that it does not overlap in the rest pose — never its own bust / hip
+    // hit spheres (those would shove it for ever: the shiver at rest).
     // A garment chain gets the same rule, not an exemption: an export's cloth can only start at its authored pose (the viewer does not
     // drape it), and a skirt authored over the thighs starts buried. Keeping the colliders it overlaps launches the whole skirt outward
     // at load — the hips come out bigger than the authored mesh, which no amount of tuning in the viewer's preview shows. The cloth still
@@ -416,64 +470,19 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
     }
-    // The chain collider groups (assigned above for the rest-overlap exclusion).
+    // The chain collider groups (assigned above for the rest-overlap exclusion). Non-jiggle chains meet the groups they don't overlap;
+    // jiggle bodies meet only the groups carrying a limb collider that they don't overlap (never the bust / hip spheres).
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
+    std::set<int> limbGroups;
+    for (size_t ci = 0; ci < colliderLimb.size(); ++ci)
+        if (colliderLimb[ci]) limbGroups.insert(model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
-        if (chainJiggle[bi]) continue;   // jiggle masks are set with the arm colliders below (arm only, never the bust spheres)
         uint16_t mask = 0;
-        for (int g : usedGroups)
+        const std::set<int>& meet = chainJiggle[bi] ? limbGroups : usedGroups;
+        for (int g : meet)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
-    }
-    // Generated limb colliders, so cloth slides off arms/hands/shins instead of
-    // clipping through them. The bust's own hit spheres are deliberately not met
-    // (they shove the jiggle forever); these limbs are clear of the bust at rest,
-    // so the jiggle can meet them safely. Group 15 is the limbs alone.
-    {
-        constexpr uint8_t kLimbGroup = 15;
-        bool hasLimb = false;
-        auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
-        for (const char* side : {"_L", "_R"}) {
-            const int shoulder = findBone(std::string("cf_j_shoulder") + side);
-            const int arm = findBone(std::string("cf_j_arm00") + side);
-            const int forearm = findBone(std::string("cf_j_forearm01") + side);
-            const int hand = findBone(std::string("cf_j_hand_") + side);
-            const int knee = findBone(std::string("cf_j_leg01_") + side);
-            const int leg03 = findBone(std::string("cf_j_leg03_") + side);
-            auto addSeg = [&](int a, int b, float radius, const std::string& what) {
-                if (a < 0 || b < 0 || static_cast<size_t>(a) >= scene.bones.size() || static_cast<size_t>(b) >= scene.bones.size()) return;
-                const Vec3 pa = scene.bones[static_cast<size_t>(a)].pos * scale;
-                const Vec3 pb = scene.bones[static_cast<size_t>(b)].pos * scale;
-                const Vec3 dir = sub(pb, pa);
-                const float len3d = length(dir);
-                if (len3d < 1e-5f) return;
-                const Vec3 axis = normalize(dir);
-                pmx::RigidBody rb;
-                rb.name = std::string("limb collider ") + side + " " + what;
-                rb.bone = a;
-                rb.group = kLimbGroup;
-                rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);
-                rb.mode = 0;
-                rb.shape = (len3d - 2.0f * radius * scale) > 1e-4f ? 2 : 0;
-                rb.size = {radius * scale, std::max(0.0f, len3d - 2.0f * radius * scale), 0};
-                rb.position = (pa + pb) * 0.5f;
-                if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(axis);
-                rb.mass = 1.0f;
-                model.rigidBodies.push_back(std::move(rb));
-                hasLimb = true;
-            };
-            addSeg(shoulder, arm, 0.040f, "upper");
-            addSeg(arm, forearm, 0.032f, "forearm");
-            addSeg(forearm, hand, 0.030f, "hand");
-            addSeg(knee, leg03, 0.038f, "shin");
-        }
-        if (hasLimb) {
-            for (size_t bi = 0; bi < chainBody.size(); ++bi) {
-                if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kLimbGroup);
-                else model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask |= static_cast<uint16_t>(1u << kLimbGroup);
-            }
-        }
     }
     AddLegFollow(scene, model);
 }
