@@ -398,8 +398,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
             // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
+            const bool garmentChainEarly = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
+            // Garment cloth: short of a generous swing budget the panel slams its stop on every step (it parks there while the bone rotates
+            // under it and rattles). The card's own envelope is honoured as a floor only via the global cap; MikuMikuDance's own cloth swings
+            // within ±30-46 degrees. The bone-aligned body holds the silhouette, so the envelope only budgets swing here.
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : std::min(!jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0 ? kGarmentMaxBend : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+                                       : garmentChainEarly ? kGarmentMaxBend
+                                       : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
             const float hairBend = hairChain ? std::min(bend, kHairMaxSwing) : bend;
@@ -437,8 +442,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
             // Note: the garment centring spring is the flat 50 (MikuMikuDance reference) - see kGarmentClothSpring.
-            const bool garmentChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
-            if (garmentChain) {
+            if (garmentChainEarly) {
                 // Flat 50 like MMD's own cloth: the centring spring is for swing smoothing only, not for holding the drape.
                 // The silhouette is carried by the envelope (the limit stops) and the bone-aligned bodies, never by this spring.
                 stiffnessK = kGarmentClothSpring;
@@ -468,7 +472,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: the spring derived above
             // already holds the authored drape inside the limits, and a forced lock on top of it pins the panel to the shoulders -
             // the stiff paper slab. The garment stays a plain hinge inside its bend range with the (now substantial) centring spring.
-            if (garmentChain) range = std::max(range, bend);
+            if (garmentChainEarly) range = std::max(range, bend);
             if (jigBody) {
                 // The reference models' breast joints: wide on the flop, moderate on the sway, narrow on the twist, all from the
                 // amplitude and strength settings. A jiggle joint is never droop-locked - locked would mean no jiggle at all, which
