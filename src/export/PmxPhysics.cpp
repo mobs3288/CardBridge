@@ -38,9 +38,40 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
 constexpr float kMaxBodySwing = 15.0f;
 
+// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia, not a paper slab and not a feather: the
+// authored drape is baked to MikuMikuDance's world-gravity hang (BakeGarmentSettle), so the joint spring never carries a static torque -
+// it only resists motion, the way cloth resists being swung. The spring is capped at the single-body swing rate like every strand, and
+// the weight comes from the raised per-link mass plus heavy linear/angular damping.
+constexpr float kGarmentMassScale = 1.6f;      // cloth has real inertia: per-link mass is scaled up (gravity response is untouched; the swing against animation is heavier)
+constexpr float kGarmentMassCap = 4.0f;        // ... but never past this, to keep the collider/body mass ratios sane
+constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
+constexpr float kGarmentMaxDamping = 0.95f;    // ... and capped below 1 so it still settles
+
 // How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
 // A skirt flares out from the thighs at rest: following the whole turn lifted it off them and showed its lining (MMD, crouching).
 constexpr float kLegFollow = 0.75f;
+
+// A strand's travel limit, radians about the joint's swing axes (about 5 degrees). Hair has no gravity in the game (the hair components
+// carry gravity (0, 0, 0) and only a tiny m_Force) but MikuMikuDance applies its own world gravity (98 model units per second squared,
+// saba's gravity) to every dynamic body, so a loose strand falls to its stop and buzzes on it. A small envelope keeps the authored
+// silhouette - the hairstyle the artist draws IS the hairstyle the user gets - with enough room for subtle secondary motion.
+constexpr float kHairMaxSwing = 0.090f;
+
+// The spring a hair joint gets, N m per radian. Sized so the authored pose holds against MikuMikuDance's gravity without
+// resting on the stop (torque from gravity / sag the spring may allow), never below what carries the link's own inertia at a
+// calm swing rate, never above what a 120 Hz solver integrates without aliasing.
+constexpr float kHairSpringMin = 25.0f;
+constexpr float kHairSpringMax = 280.0f;
+
+// Bullet damp for a hair body (both linear and angular). MikuMikuDance integrates at 120 Hz and bullet's damping is (1 - d)^dt: d stays
+// out of the jitter regime while the velocity still decays visibly within a second. The game's own 60 Hz retention (0.2 velocity kept
+// is 0.8/frame) would leave no motion at all, so this is the overdamped-but-living value the swing needs to settle in one smooth
+// approach instead of snapping back to the stop.
+constexpr float kHairDamp = 0.90f;
+
+// MikuMikuDance / PMXEditor world gravity in model units per second squared (saba: 0, -9.8 * 10, 0). Only the hair spring sizing uses
+// it; the rest of the export keeps the scale-derived figure it has always used.
+constexpr float kMmdWorldGravity = 98.0f;
 
 // The least distance between the segments a-b and c-d (a segment may be a point).
 float SegmentDistance(Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
@@ -160,6 +191,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             jigBust = bust;
             jigSide = assemble::BoneSideSign(scene.bones[static_cast<size_t>(ch.bones[0])].name);
         }
+        const bool hairChain = !jigBody && assemble::SceneChainIsHair(scene, ch);   // imported / base hair: the authored hairstyle is the resting shape
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
             std::fprintf(stderr, "chain '%s' own=%d raw=[", ch.name.c_str(), ch.characterOwn ? 1 : 0);
@@ -200,6 +232,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             l.cylinder = std::max(0.0f, l.len - 2.0f * l.radius);
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
+            if (!jigBody && ch.part.rfind("outfit", 0) == 0)
+                l.mass = std::min(kGarmentMassCap, l.mass * kGarmentMassScale);   // cloth carries real inertia, not feather weight
             if (jigBody) {
                 // The reference models' taper: the root carries the setting's mass, each link below it half. The two sides differ by
                 // a couple of percent so they never move as one rigid pair.
@@ -267,9 +301,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             float damp = jigBody ? assemble::JigglePmxDamping(jiggleSet, l.mass)
                                  : std::min(0.9999f, 1.0f - std::pow(1.0f - c, 60.0f));
             // The outfit's cloth does not use the game's frozen-still damping (the strict mapping leaves it nearly immobile - the
-            // paper cape); clamp it to a working MMD cloth range so the panel actually sways like fabric.
-            const bool garmentBody = !jigBody && ch.part.rfind("outfit", 0) == 0;
-            if (garmentBody) damp = std::min(damp, 0.75f);
+            // paper cape), but it does not ride the old light-weight 0.75 either: cloth carries its swing visibly instead of fluttering.
+            const bool garmentBody = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
+            if (garmentBody) damp = std::clamp(damp, kGarmentMinDamping, kGarmentMaxDamping);
+            // Hair is the other way round: MikuMikuDance's world gravity is strong against the component's (the hair components carry
+            // no gravity at all in the game), so a strand gets heavy damping - enough to settle in one smooth approach, never a snap.
+            if (hairChain) damp = kHairDamp;
             rb.moveDamping = damp;
             rb.rotDamping = damp;
             rb.friction = jigBody ? 0.0f : 0.5f;
@@ -323,9 +360,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
                                        : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+            // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
+            // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
+            const float hairBend = hairChain ? std::min(bend, kHairMaxSwing) : bend;
             // How far a strand may droop when it stands out sideways: a loose chain gives way, a stiff one hardly (never more than half the limit).
             const float baseDroop = std::min(0.5f * bend, 0.25f - 0.15f * clamp01(stiffness * 2.0f));
-            const float droop = jigBody ? std::min(bend * 0.85f, baseDroop * 2.0f) : baseDroop;
+            const float droop = jigBody ? std::min(bend * 0.85f, baseDroop * 2.0f) : (hairChain ? 0.06f : baseDroop);
             const int parentBone = scene.bones[static_cast<size_t>(b)].parent;
             auto pb = bodyOf.find(parentBone);
             const int bodyA = pb != bodyOf.end() ? pb->second : bodyOf[bones[0]];   // a bone whose parent is outside the chain hangs from the root
@@ -348,6 +388,17 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float own = self.mass * arm * arm + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
+            // A garment rests at the world-gravity hang (baked at export), so the spring carries no static torque at rest: it exists to damp
+            // motion, and the strand cap (own * 15^2) is both stable in MikuMikuDance's solver and generous for that job. The pre-hang
+            // export needed a much harder spring to hold the authored lean off its stop limit, which made the solver pump the joint.
+            if (hairChain) {
+                // MikuMikuDance applies its own world gravity; the game's hair components carry none, so the elastic mapping bottoms
+                // out and the spring cannot hold the strand. Size it from gravity torque instead: the torque of every link hanging
+                // below this joint, held within the allowed sag - and never past what the 120 Hz solver integrates cleanly.
+                const float strandHold = lever * kMmdWorldGravity / droop;
+                stiffnessK = std::min(std::max(std::max(inertia * omega * omega, strandHold), own * 900.0f), kHairSpringMax);
+                stiffnessK = std::max(stiffnessK, kHairSpringMin);
+            }
             // A jiggle joint's rotational spring is the preview's linear spring about the joint: torque = k r^2 theta, i.e. the
             // body's own inertia times (stiffness / mass). It lets the part hang and swing instead of pinning it to the rest pose.
             float jigSpring = 0.0f;
@@ -361,12 +412,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
             // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
             const bool holds = sideways * gravity / std::max(1e-6f, stiffnessK) < 0.6f * bend;
-            float range = holds ? bend : 0.0f;
-            // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: a zero-range joint
-            // carries a zero spring, and on its own gravity folds the panel into a stiff paper slab pinned to the shoulders. Cloth
-            // behaves as a plain hinge inside its bend range with a small centring tug - like the loose-cloth preset - and Bullet
-            // manages the draping by itself. A stop spring on top of a stop limit rail is what reads as tweaking and shivering.
-            const bool garmentChain = !jigBody && ch.part.rfind("outfit", 0) == 0;
+            float range = hairChain ? hairBend : (holds ? bend : 0.0f);
+            // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: the spring derived above
+            // already holds the authored drape inside the limits, and a forced lock on top of it pins the panel to the shoulders -
+            // the stiff paper slab. The garment stays a plain hinge inside its bend range with the (now substantial) centring spring.
+            const bool garmentChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
             if (garmentChain) range = std::max(range, bend);
             if (jigBody) {
                 // The reference models' breast joints: wide on the flop, moderate on the sway, narrow on the twist, all from the
@@ -376,10 +426,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 j.rotUpper = {jigRange[0], jigRange[1], jigRange[2]};
                 j.springRot = {jigSpring, jigSpring, jigSpring};
             } else {
-                // A strand keeps the old shape: the twist nearly locked, the two bends wide.
+                // A strand keeps the old shape: the twist nearly locked, the two bends wide. Cloth gets the spring derived above (it
+                // holds the drape); the twist stays narrow, the swings wide.
                 j.rotLower = {-range, -0.1f * range, -range};
                 j.rotUpper = {range, 0.1f * range, range};
-                j.springRot = garmentChain ? Vec3{5.0f, 5.0f, 5.0f} : Vec3{stiffnessK, stiffnessK, stiffnessK};
+                j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             }
             model.joints.push_back(std::move(j));
         }
@@ -426,10 +477,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
-    // Generated limb colliders, so cloth slides off arms/hands/shins instead of
-    // clipping through them. The bust's own hit spheres are deliberately not met
-    // (they shove the jiggle forever); these limbs are clear of the bust at rest,
-    // so the jiggle can meet them safely. Group 15 is the limbs alone.
+    // Generated limb colliders, so cloth and hair slide off arms/hands/shins instead of clipping through them. The strand bodies that
+    // start buried inside an arm carry the group unconditionally: with hair held to a few degrees of swing about the authored pose by
+    // its joint limits, the arm capsule does useful work as a rest stop under the strands instead of ejecting them (measured better
+    // than excluding it, which let the strands sink through the shoulder). The bust's own hit spheres are deliberately not met
+    // (they shove the jiggle forever); these limbs are clear of the bust at rest, so the jiggle can meet them safely. Group 15 is the limbs alone.
     {
         constexpr uint8_t kLimbGroup = 15;
         bool hasLimb = false;

@@ -21,7 +21,7 @@ public:
     // settle, Pose::BakeSettledPhysics) limits the sim to the body's own chains: hair and accessory chains keep their authored
     // pose, which is how the game displays them anyway. `outfitOnly` limits the sim to the clothing and accessory chains.
     void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = true,
-               const JiggleSettings& jiggle = {}, bool jiggleOnly = false, bool outfitOnly = false);
+               const JiggleSettings& jiggle = {}, bool jiggleOnly = false, bool outfitOnly = false, bool fallFully = false);
 
     // Runs `steps` fixed 1/60 s updates (0 only refreshes the output after the anchors moved) and writes the skin matrices of
     // the chain bones into `skin`, sized like the scene's bones. The jiggle chains accumulate their own fixed substeps from the
@@ -100,6 +100,7 @@ private:
     std::vector<JiggleChain> jiggles_;
     std::vector<WorldCollider> colliders_;
     JiggleSettings jiggle_;
+    bool fallFully_ = false;   // the garment hang bake wants the full world gravity, not the rest-pose residual (see Reset)
     double genericAccum_ = 0.0;   // seconds not yet simulated at 60 Hz
     double jiggleAccum_ = 0.0;    // seconds not yet simulated at the jiggle rate
     float speed_ = 0.0f;          // largest particle displacement / speed in the last update

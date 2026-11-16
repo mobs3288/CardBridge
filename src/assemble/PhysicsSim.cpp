@@ -53,7 +53,8 @@ float clamp01(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 } // namespace
 
 void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust, bool jiggleButt,
-                       const JiggleSettings& jiggle, bool jiggleOnly, bool outfitOnly) {
+                       const JiggleSettings& jiggle, bool jiggleOnly, bool outfitOnly, bool fallFully) {
+    fallFully_ = fallFully;
     particles_.clear();
     chains_.clear();
     jiggles_.clear();
@@ -254,8 +255,9 @@ bool PhysicsSim::StepGeneric(const Scene& scene, const std::vector<Mat4>& poseWo
         const Vec3 objectMove = sub(anchorPos, chain.anchorPrev);
         chain.anchorPrev = anchorPos;
         // gravity as the component has it: what the rest pose already hangs under is left out, the rest of it acts.
+        // (The garment hang bake sets fallFully_: MikuMikuDance's world gravity applies in full at load, so the whole thing acts.)
         Vec3 force = sc.gravity;
-        const float gl = length(sc.gravity);
+        const float gl = fallFully_ ? 0.0f : length(sc.gravity);
         if (gl > 1e-12f) {
             const Vec3 fdir = sc.gravity * (1.0f / gl);
             const Vec3 rf = rotationPart(anchorWorld).dir(sc.gravity);

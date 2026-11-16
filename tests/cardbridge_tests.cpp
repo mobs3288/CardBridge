@@ -2329,6 +2329,117 @@ void unitTests() {
         }
     });
 
+    test("hair: the chain predicate reads the part table (hair slots and head sockets are hair; garments and the body's own jiggle are not)", [] {
+        assemble::Scene s;
+        assemble::SceneChain ch;
+        ch.name = "chain";
+        ch.bones = {0, 1};
+        auto part = [&](const char* id, const char* group, const char* attach) {
+            assemble::ScenePart p;
+            p.id = id; p.group = group; p.attachNode = attach;
+            s.parts.push_back(p);
+            return id;
+        };
+        s.bones.push_back({"a", -1, {0, 1, 0}, "rig"});
+        s.bones.push_back({"b", 0, {0, 0.9f, 0}, "rig"});
+        ch.part = part("hair.back", "Hair", "");   // the character's hair slot: always hair
+        CHECK(assemble::SceneChainIsHair(s, ch));
+        ch.part = part("outfit0.acc00", "Outfit", "a_n_headside");   // an imported back / front hair item on a head socket
+        CHECK(assemble::SceneChainIsHair(s, ch));
+        ch.part = part("outfit0.acc01", "Outfit", "a_n_hair_pony");   // a tail tied on a hair socket
+        CHECK(assemble::SceneChainIsHair(s, ch));
+        ch.part = part("outfit0.acc02", "Accessories", "a_n_headtop");   // glasses / pin socket: still head-attached
+        CHECK(assemble::SceneChainIsHair(s, ch));
+        ch.part = part("outfit0.acc03", "Outfit", "a_n_bust");   // a chest-mounted accessory is not hair
+        CHECK(!assemble::SceneChainIsHair(s, ch));
+        ch.part = part("outfit0.top", "Outfit", "");   // a garment is never hair
+        CHECK(!assemble::SceneChainIsHair(s, ch));
+        ch.part = "outfit0.acc99";   // a part the scene does not know (or a synthetic test scene): not hair
+        CHECK(!assemble::SceneChainIsHair(s, ch));
+        ch.part = part("rig", "Body", "");
+        ch.characterOwn = true;   // the body's own jiggle is never hair, whatever the part says
+        CHECK(!assemble::SceneChainIsHair(s, ch));
+    });
+
+    test("physics: a hair strand chain keeps a small envelope with a strong centering spring and heavy damping; cloth keeps its own treatment", [] {
+        auto make = [&](const char* id, const char* group, const char* attach) {
+            assemble::Scene s;
+            s.bones.push_back({"cf_J_FaceUp_ty", -1, {0, 1.2f, 0}, "rig"});
+            // a fanned shoulder-length strand: gravity would pull it down onto a stop
+            for (int i = 0; i < 4; ++i) s.bones.push_back({"h" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f - 0.02f * float(i), 0.2f * float(i) - 0.1f}, "item"});
+            assemble::ScenePart part;
+            part.id = id; part.group = group; part.attachNode = attach;
+            s.parts.push_back(part);
+            assemble::SceneChain ch;
+            ch.name = "strand"; ch.part = part.id; ch.bones = {1, 2, 3, 4};
+            ch.damping = 0.2f; ch.elasticity = 0.2f; ch.stiffness = 0.1f;
+            s.chains.push_back(ch);
+            return s;
+        };
+        auto exportPhysics = [&](assemble::Scene s) {
+            pmx::Model m;
+            for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+            exporter::AddPhysics(s, m, 10.0f);
+            return m;
+        };
+        {   // imported hair: the small envelope, the strong centering spring, the heavy damping, still joined to the anchor
+            const pmx::Model m = exportPhysics(make("outfit0.acc00", "Outfit", "a_n_headside"));
+            CHECK(m.joints.size() == 3);
+            for (const auto& j : m.joints) {
+                CHECK(j.rotUpper.x > 0.05f && j.rotUpper.x <= 0.0901f);   // the ~5-degree envelope, never the 34.4-degree cloth bend
+                CHECK(j.rotUpper.y <= 0.0091f);                            // the twist stays nearly locked
+                CHECK(j.springRot.x >= 25.0f);                             // the strand is held near the authored pose, not on a stop
+                CHECK(j.springRot.x <= 280.0f);                            // ... but inside what a 120 Hz solver integrates cleanly
+            }
+            int moving = 0;
+            for (const auto& b : m.rigidBodies) if (b.mode != 0) { CHECK(b.moveDamping >= 0.9f - 1e-6f && b.rotDamping >= 0.9f - 1e-6f); ++moving; }
+            CHECK(moving == 3);
+            const pmxread::Model back = readPmx(pmx::WritePmx(m));
+            CHECK(pmxPhysicsFindings(back).empty());   // everything the exporter's own reader insists on, still holds
+        }
+        {   // the base game's own hair slot: the same treatment
+            const pmx::Model m = exportPhysics(make("hair.back", "Hair", ""));
+            for (const auto& j : m.joints) CHECK(j.rotUpper.x <= 0.0901f);
+        }
+        {   // a chest-mounted accessory (a_n_bust) is not hair: the wide garment envelope applies
+            const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
+            CHECK(m.joints.size() == 3);
+            for (const auto& j : m.joints) {
+                CHECK(j.rotUpper.x > 0.3f);   // the wide garment bend for stiffness 0.1
+                CHECK(j.rotUpper.x <= 0.6f + 1e-6f);
+            }
+        }
+    });
+
+    test("hair: the garment hang bake drops cloth under world gravity but never the hair (the authored hairstyle is the rest pose)", [] {
+        assemble::Scene s;
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        // a fanned back / front strand and a fanned cloth panel, both angled out sideways so the bake has work to do
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"h" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f - 0.01f * float(i), 0.0f}, "item"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"c" + std::to_string(i), i == 0 ? 0 : i + 4, {0.1f * float(i) + 0.4f, 1.2f - 0.01f * float(i), 0.3f}, "item"});
+        assemble::ScenePart hairPart;
+        hairPart.id = "outfit0.acc00"; hairPart.group = "Outfit"; hairPart.attachNode = "a_n_headside";
+        s.parts.push_back(hairPart);
+        assemble::ScenePart clothPart;
+        clothPart.id = "outfit0.top"; clothPart.group = "Outfit"; clothPart.attachNode = "";
+        s.parts.push_back(clothPart);
+        assemble::SceneChain hair;
+        hair.name = "hair"; hair.part = hairPart.id; hair.bones = {1, 2, 3, 4};
+        hair.damping = 0.2f; hair.elasticity = 0.2f; hair.stiffness = 0.1f;
+        s.chains.push_back(hair);
+        assemble::SceneChain cloth;
+        cloth.name = "cloth"; cloth.part = clothPart.id; cloth.bones = {5, 6, 7, 8};
+        cloth.damping = 0.15f; cloth.elasticity = 0.1f; cloth.stiffness = 0.8f;
+        s.chains.push_back(cloth);
+        const Vec3 hair1 = s.bones[1].pos, hair4 = s.bones[4].pos;
+        const Vec3 cloth8 = s.bones[8].pos;
+        assemble::BakeGarmentSettle(s);
+        CHECK(s.bones[1].pos.x == hair1.x && s.bones[1].pos.y == hair1.y && s.bones[1].pos.z == hair1.z);   // hair: exactly where it was authored
+        CHECK(s.bones[4].pos.x == hair4.x && s.bones[4].pos.y == hair4.y && s.bones[4].pos.z == hair4.z);
+        const float clothDrop = std::fabs(s.bones[8].pos.y - cloth8.y) + std::fabs(s.bones[8].pos.x - cloth8.x);
+        CHECK(clothDrop > 1e-3f);   // the cloth panel fell toward its hanging drape
+    });
+
     test("pmx writer: IK bones come back through the independent reader", [] {
         pmx::Model m;
         m.name = "t";

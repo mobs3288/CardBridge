@@ -344,6 +344,24 @@ struct Scene {
     void note(const std::string& part, const std::string& msg) { issues.push_back({"info", part, msg}); }
 };
 
+// A chain is hair when its part is the character's hair slot, or its item hangs on one of the head's attach sockets (the list row's
+// attach node: a_n_head, a_n_headside, a_n_headtop, a_n_hair*, ...): imported custom-skeleton hair (the card's back / front / ponytail
+// accessories) and the base game's own hair items. Garments, skirts and the body's own jiggle are not hair - they want the garment
+// treatment (their authored drape falls under MMD's world gravity), while hair keeps its authored pose (the hair components carry
+// no gravity in the game, so its silhouette IS the intended resting shape).
+inline bool SceneChainIsHair(const Scene& scene, const SceneChain& ch) {
+    if (ch.characterOwn) return false;   // the body's own jiggle (breast / hip) is not hair
+    const std::string& partId = ch.part;
+    for (const auto& p : scene.parts) {
+        if (p.id != partId) continue;
+        if (p.group == "Hair") return true;
+        auto has = [&](const char* s) { return p.attachNode.rfind(s, 0) == 0; };
+        return has("a_n_head") || has("a_n_hair");
+    }
+    // No part row (or an empty part id, as in synthetic test scenes): not hair.
+    return false;
+}
+
 // Which of a character's own (characterOwn) jiggle chains this is: the breast chains carry the bnip / bust bones, the hip (butt) chains
 // the siri / kosi ones. Anything else of the body's own is left to the butt switch's side.
 inline bool IsBustJiggleChain(const Scene& scene, const SceneChain& ch) {
