@@ -2553,8 +2553,7 @@ void unitTests() {
         for (const auto& j : m.joints)
             if (j.name.rfind("cloth", 0) == 0) { CHECK(j.rotUpper.x > 0.0f); clothSprings.push_back(j.springRot.x); }
         CHECK(clothSprings.size() == 3);
-        for (float k : clothSprings) CHECK(k > 200.0f);                    // hold springs from subchain torque, not the old flat 5.0
-        CHECK(clothSprings[0] > clothSprings[1] && clothSprings[1] > clothSprings[2]);   // root spring carries the most (the sizing sees the whole subchain)
+        for (float k : clothSprings) CHECK(k == 50.0f);                     // the MikuMikuDance reference cloth spring (flat 50)
     });
 
     test("pmx writer: IK bones come back through the independent reader", [] {

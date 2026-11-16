@@ -38,20 +38,17 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
 constexpr float kMaxBodySwing = 15.0f;
 
-// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia, not a paper slab and not a
-// feather. The authored drape IS the preferred resting equilibrium: the joints carry springs sized so gravity torque
-// cannot fold the chain away from it (per joint, from that joint's own subchain — see AddPhysics), so the rest pose the
-// card ships is the pose MikuMikuDance holds. Gravity still acts on every body: it is what produces the cloth's secondary
-// motion, weighs the swing during animation, and settles the cloth after a jump — it just cannot push the equilibrium
-// out of the joint envelope. (Previously the export baked a world-gravity hang into the rest pose and then kept the joints
-// lax against it, which is what flattened wide skirts.)
-constexpr float kGarmentHoldDroop = 0.005f;      // rad per joint of droop at full hang; the spring is sized so gravity alone droops at most this much
-constexpr float kGarmentHoldSpringMin = 50.0f;   // a leaf with nothing under it still gets a usable spring
-constexpr float kGarmentHoldSpringMax = 500000.0f;   // solver-stable ceiling at 120 Hz (a 1e6 spring was measured stable); heavier garments droop slightly more instead of ringing
+// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia. MikuMikuDance's own cloth chains
+// (the reference models) run a modest centring spring (50) with heavy damping (up to 1.0), and the joint ENVELOPE is what holds
+// the shape: the spring only smooths the swing, it never has to hold gravity alone. A spring stiff enough to hold the chain to
+// anything like the authored pose would be un-integrable at MMD's 120 Hz (1.5 samples per cycle) and shivers. So garment joints
+// carry a flat 50 spring and dampers that go up to 1.0, matching the reference models. The silhouette is carried by the
+// card's-own-stiffness envelope (plus bone-aligned mode 2). Gravity still acts on every body: it produces the cloth's swing.
+constexpr float kGarmentClothSpring = 50.0f;     // flat spring, MikuMikuDance reference cloth (Temari, TDA)
 constexpr float kGarmentMassScale = 1.0f;        // cloth mass is len/scale*10 like the rest of the system; no arbitrary inflation
 constexpr float kGarmentMassCap = 4.0f;          // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
-constexpr float kGarmentMaxDamping = 0.95f;    // ... and capped below 1 so it still settles
+constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs up to 1.0 (Temari); 1.0 makes it settle fully instead of ringing
 constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees). This card's loose skirt physics (stiffness 0.6) exports ±34-47 degrees per link, which MikuMikuDance turns into a flap on every step.
 
 // How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
@@ -439,13 +436,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
-            // alone droops the link by at most kGarmentHoldDroop. The spring scales automatically with chain dimensions, per-link masses and
-            // what hangs below this joint — a small skirt gets a light spring, a long layered one a strong one; the equilibrium is the
-            // authored pose and the joint limits stay far above it, never engaged in normal use.
+            // Note: the garment centring spring is the flat 50 (MikuMikuDance reference) - see kGarmentClothSpring.
             const bool garmentChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
             if (garmentChain) {
-                const float holdK = lever * kMmdWorldGravity / kGarmentHoldDroop;
-                stiffnessK = std::clamp(std::max(std::max(inertia * omega * omega, holdK), kGarmentHoldSpringMin), kGarmentHoldSpringMin, kGarmentHoldSpringMax);
+                // Flat 50 like MMD's own cloth: the centring spring is for swing smoothing only, not for holding the drape.
+                // The silhouette is carried by the envelope (the limit stops) and the bone-aligned bodies, never by this spring.
+                stiffnessK = kGarmentClothSpring;
             }
             if (hairChain) {
                 // MikuMikuDance applies its own world gravity; the game's hair components carry none, so the elastic mapping bottoms
