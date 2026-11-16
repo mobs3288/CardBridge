@@ -46,7 +46,6 @@ constexpr float kGarmentMassScale = 1.6f;      // cloth has real inertia: per-li
 constexpr float kGarmentMassCap = 4.0f;        // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
 constexpr float kGarmentMaxDamping = 0.95f;    // ... and capped below 1 so it still settles
-constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees); the authored skirt physics here runs to 47 degrees, which MikuMikuDance turns into a flap on every step
 
 // How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
 // A skirt flares out from the thighs at rest: following the whole turn lifted it off them and showed its lining (MMD, crouching).
@@ -359,9 +358,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
             // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
-            const bool garmentLink = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : std::min(garmentLink ? kGarmentMaxBend : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+                                       : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
             const float hairBend = hairChain ? std::min(bend, kHairMaxSwing) : bend;
@@ -438,23 +436,25 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         }
     }
 
-    // Who collides with whom. A body buried deeply in a collider at rest is thrown out of it the moment the simulation starts, and the
-    // rest of the model with it, so bodies are excluded from the colliders they overlap at rest - but ONLY when the overlap is real
-    // burial: the rest pose distance below kRestBurial of the sum of the two radii. A shallow overlap is not an overlap at all in
-    // MikuMikuDance's solver (a few percent of a radius separates without a jump), and excluding it forbids the cloth from ever
-    // meeting the thighs: the mask cannot come back, so the skirt passed through them for good. A garment chain that rests ON the
-    // body keeps its collision; only deep burial (the waist band, a panel buried in a thigh) is excluded. Colliders that overlap the
-    // same bodies share a group, and a body's mask lists the groups none of whose colliders it is buried in. Group 0 (buried in
-    // nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one takes any signature beyond them (so it
-    // excludes the union). The one exception is a jiggle body: it is the body itself, not a strand, so its own bust / hip hit spheres
-    // would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
-    constexpr float kRestBurial = 0.75f;   // fraction of the combined radii; deeper overlap is treated as buried at spawn
+    // Who collides with whom. A body that starts inside a collider (a skirt over the thigh, a breast bone in the bust sphere, a strand
+    // in the head) is thrown out of it the moment the simulation starts, and the whole model with it. So a body meets only the colliders
+    // it does not overlap in the rest pose: colliders that overlap the same bodies share a group, and a body's mask lists the groups none
+    // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
+    // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
+    // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
+    // A garment chain gets the same rule, not an exemption: an export's cloth can only start at its authored pose (the viewer does not
+    // drape it), and a skirt authored over the thighs starts buried. Keeping the colliders it overlaps launches the whole skirt outward
+    // at load — the hips come out bigger than the authored mesh, which no amount of tuning in the viewer's preview shows. The cloth still
+    // meets every collider it does not overlap at rest; the colliders it is buried in are passed through instead, which is what the
+    // authored rest pose means. The garment settle can place the cloth touching the body at export; until it runs in every export path,
+    // the rest-overlap exclusion is the only spawn-safe start for cloth authored over the body.
+    const float margin = 0.02f * scale;
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
         std::vector<int> sig;
         for (size_t bi = 0; bi < chainCore.size(); ++bi)
-            if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < (colliderCore[ci].r + chainCore[bi].r) * kRestBurial) sig.push_back(static_cast<int>(bi));
+            if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin) sig.push_back(static_cast<int>(bi));
         int group = 0;
         if (!sig.empty()) {
             auto it = groupOf.find(sig);

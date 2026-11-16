@@ -659,7 +659,7 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
             if ((b.mask & ~(1u << exporter::kPmxGroupChain)) != 0) out.push_back(who + ": a collider that meets more than chains");
         } else if (b.mode != 0) {
             if (bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
-            // it meets only colliders it is not buried in at rest: accepted grazing is allowed, burial deeper than a quarter of the combined radius is not (a buried body is thrown out of it, and the model with it)
+            // it meets only colliders it does not already overlap: a body that starts inside one is thrown out of it, and the model with it
             for (size_t k = 0; k < m.bodies.size(); ++k) {
                 const auto& c = m.bodies[k];
                 if (c.group == exporter::kPmxGroupChain || !bit(b.mask, c.group)) continue;
@@ -672,7 +672,7 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
                 Vec3 a0, a1, c0, c1;
                 core(b, a0, a1);
                 core(c, c0, c1);
-                if (exporter::SegmentDistance(a0, a1, c0, c1) < (b.size.x + c.size.x) * 0.75f) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts buried inside it");
+                if (exporter::SegmentDistance(a0, a1, c0, c1) < b.size.x + c.size.x) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts inside it");
             }
         } else if (b.mask != 0) {
             out.push_back(who + ": an anchor that collides");
