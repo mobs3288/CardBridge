@@ -9,6 +9,7 @@
 //
 // Without them the integration tests are skipped, not failed.
 
+#include "assemble/BodySuppression.h"
 #include "assemble/Assembler.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
@@ -7360,6 +7361,91 @@ void meshTests() {
         CHECK(stats2.verticesMoved == 0 && stats2.partsFixed == 0 && stats2.maxMove == 0.0f);
     });
 
+    test("body suppression fallback: an opaque garment over the sphere hides it; the exposed slit stays on the body", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        SceneMesh body;
+        auto addVertex = [&](const Vec3& p, const Vec3& n) {
+            SceneVertex v; v.pos = p; v.normal = n; v.uv = {0, 0}; v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv;
+            v.bone[0] = 0; v.weight[0] = 1.0f; v.bone[1] = 0; v.weight[1] = 0.0f;
+            for (int k = 0; k < 4; ++k) { v.local[k] = v.pos; v.nlocal[k] = v.normal; }
+            body.vertices.push_back(v);
+            return static_cast<uint32_t>(body.vertices.size()) - 1u;
+        };
+        // eight triangles of a box-ish body (front/back/left/right/top/bottom quadrant); the cloth panel covers the front only
+        const Vec3 p0{-0.5f, 0.0f, -0.5f}, p1{0.5f, 0.0f, -0.5f}, p2{-0.5f, 0.0f, 0.5f}, p3{0.5f, 0.0f, 0.5f};
+        // a flat "body" quad at z = 0
+        const uint32_t a = addVertex({-0.4f, 0.2f, 0.0f}, {0, 0, 1});
+        const uint32_t b = addVertex({ 0.4f, 0.2f, 0.0f}, {0, 0, 1});
+        const uint32_t c = addVertex({ 0.4f, 0.6f, 0.0f}, {0, 0, 1});
+        const uint32_t d = addVertex({-0.4f, 0.6f, 0.0f}, {0, 0, 1});
+        const uint32_t e = addVertex({-0.4f, 1.0f, 0.0f}, {0, 0, 1});
+        const uint32_t f = addVertex({ 0.4f, 1.0f, 0.0f}, {0, 0, 1});
+        SceneSubmesh bodySub; bodySub.material = 0;
+        bodySub.indices = {a, c, b, a, d, c, e, c, d, e, f, c};   // two quads (low and high): cloth covers the lower quad
+        body.submeshes.push_back(bodySub);
+        s.meshes.push_back(std::move(body));
+        SceneMesh gown;
+        auto addGownVertex = [&](const Vec3& p) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {0, 0}; v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv;
+            v.bone[0] = 0; v.weight[0] = 1.0f; v.bone[1] = 0; v.weight[1] = 0.0f;
+            for (int k = 0; k < 4; ++k) { v.local[k] = v.pos; v.nlocal[k] = v.normal; }
+            gown.vertices.push_back(v);
+            return static_cast<uint32_t>(gown.vertices.size()) - 1u;
+        };
+        // one opaque quad in front of the lower body quad: hides it, and only it
+        const uint32_t g0 = addGownVertex({-0.5f, 0.0f, 0.01f}), g1 = addGownVertex({0.5f, 0.0f, 0.01f}), g2 = addGownVertex({0.5f, 0.7f, 0.01f}), g3 = addGownVertex({-0.5f, 0.7f, 0.01f});
+        SceneSubmesh gownSub; gownSub.material = 1;
+        gownSub.indices = {g0, g2, g1, g0, g3, g2};
+        gown.submeshes.push_back(gownSub);
+        s.meshes.push_back(std::move(gown));
+        SceneMaterial matBody; matBody.name = "mf_m_body"; matBody.shader = "Shader Forge/main_opaque"; s.materials.push_back(matBody);
+        SceneMaterial matCloth; matCloth.name = "clothes"; matCloth.shader = "Shader Forge/main_opaque"; s.materials.push_back(matCloth);
+        ScenePart bodyPart; bodyPart.id = "body"; bodyPart.group = "Body"; bodyPart.meshes = {0}; s.parts.push_back(bodyPart);
+        ScenePart outfit; outfit.id = "outfit0.top"; outfit.group = "Outfit"; outfit.meshes = {1}; s.parts.push_back(outfit);
+        const auto stats = SuppressBodyUnderGarments(s, {});
+        CHECK(stats.coverageTraits > 0);          // the lower quad was hidden by the cloth in front of it
+        CHECK(stats.coverageTotal > 0);
+        CHECK(stats.kokanTraits == 0);
+        // the lower quad has vertices a and b (unique); the upper quad has e and f; c and d are shared
+        size_t stayedLow = 0, stayedHigh = 0;
+        for (const auto& sm : s.meshes[0].submeshes) for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+            for (int k = 0; k < 3; ++k) {
+                const uint32_t idx = sm.indices[i + k];
+                if (idx == static_cast<uint32_t>(a) || idx == static_cast<uint32_t>(b)) ++stayedLow;
+                if (idx == static_cast<uint32_t>(e) || idx == static_cast<uint32_t>(f)) ++stayedHigh;
+            }
+        CHECK(stayedLow == 0);     // the lower quad (a..d) is fully under the cloth now
+        CHECK(stayedHigh == 3);    // the high quad (e,f,c) is exposed and stays
+        // the under piece exists and holds the hidden quad
+        bool hasUnder = false;
+        for (const auto& p : s.parts) if (p.underPiece && p.underOf == "body" && p.coveredBy == std::vector<std::string>{"always"}) hasUnder = true;
+        CHECK(hasUnder);
+    });
+
+    test("body suppression fallback: KokanHide hides the crotch even without a body mask", [] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"root", -1, {0, 0, 0}, "rig"});
+        s.bones.push_back({"cf_d_kokan", 0, {0, 1.0f, 0}, "rig"});
+        SceneMesh body;
+        auto addVertex = [&](Vec3 p) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {0, 0}; v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv; v.bone[0] = 0; v.weight[0] = 1.0f;
+            for (int k = 0; k < 4; ++k) { v.local[k] = v.pos; v.nlocal[k] = v.normal; }
+            body.vertices.push_back(v); return static_cast<uint32_t>(body.vertices.size()) - 1u;
+        };
+        const uint32_t a = addVertex({0.0f, 1.0f, 0.05f}), b = addVertex({0.02f, 1.0f, 0.05f}), c = addVertex({0.01f, 1.01f, 0.05f});
+        SceneSubmesh sub; sub.material = 0; sub.indices = {a, b, c}; body.submeshes.push_back(sub);
+        s.meshes.push_back(std::move(body));
+        SceneMaterial matBody; matBody.name = "body"; matBody.shader = "Shader Forge/main_opaque"; s.materials.push_back(matBody);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0}; s.parts.push_back(p);
+        const auto stats = SuppressBodyUnderGarments(s, {"outfit0.shorts"});
+        CHECK(stats.kokanTraits == 1);
+        size_t kept = 0; for (const auto& sm : s.meshes[0].submeshes) kept += sm.indices.size();
+        CHECK(kept == 0);
+    });
+
     test("mask resolve: a typed texture match wins; a same-named non-texture is rejected loudly; missing names are reported", [] {
         using namespace assemble;
         struct Stub : MaskLookup {
@@ -7368,7 +7454,8 @@ void meshTests() {
             unity::PPtr findAsset(const std::string& n) const override { auto it = asset.find(n); return it == asset.end() ? unity::PPtr{} : it->second; }
         };
         const auto fakeTex = [](const std::string& n) {
-            unity::TextureData d; d.name = n; d.width = 1; d.height = 1; d.rgba = {255, 255, 255, 255};
+            unity::TextureData d; d.name = n; d.width = 512; d.height = 512; d.rgba.assign(512 * 512 * 4, 255);
+            d.rgba[0] = 0; d.rgba[1] = 0; d.rgba[2] = 0;   // one dark pixel: the mask keeps most of the body, as real masks do
             return std::make_shared<unity::TextureData>(d);
         };
         Stub s;

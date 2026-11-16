@@ -1,5 +1,6 @@
 #include "assemble/Assembler.h"
 #include "assemble/AutoCloth.h"
+#include "assemble/BodySuppression.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/CustomHairDiag.h"
 #include "assemble/HeelConfig.h"
@@ -2061,12 +2062,21 @@ std::shared_ptr<unity::TextureData> ResolveBodyMask(const MaskLookup& lookup, co
     // The game resolves the mask as a Texture2D by name; a same-named GameObject is not a mask. A typed lookup wins, then any
     // asset that decodes as a texture, then the loose file the caller may have.
     if (unity::PPtr t = lookup.findTexture(maskName); !t.isNull()) {
-        if (auto mt = decode ? decode(t) : nullptr) return mt;
+        std::shared_ptr<unity::TextureData> found = decode ? decode(t) : nullptr;
+        if (found) {
+            if (found->width < 8 || found->height < 8) { if (whyOut) *whyOut = "body mask '" + maskName + "' decodes to " + std::to_string(found->width) + "x" + std::to_string(found->height) + " - smaller than any usable body mask"; return nullptr; }
+            if (found->width > 4096 || found->height > 4096) { if (whyOut) *whyOut = "body mask '" + maskName + "' decodes to " + std::to_string(found->width) + "x" + std::to_string(found->height) + " - larger than any supported mask"; return nullptr; }
+            if (static_cast<int64_t>(found->rgba.size()) != static_cast<int64_t>(found->width) * static_cast<int64_t>(found->height) * 4) { if (whyOut) *whyOut = "body mask '" + maskName + "' decoded buffer size mismatch"; return nullptr; }
+            size_t hidden = 0; for (size_t i = 0; i + 3 < found->rgba.size(); i += 4) if (found->rgba[i] < 128) ++hidden;
+            if (!found->rgba.empty() && hidden * 100 >= found->rgba.size() / 4) { if (whyOut) *whyOut = "body mask '" + maskName + "' hides 100% of pixels - either not a body mask, or a full hide"; return nullptr; }
+            return found;
+        }
         if (whyOut) *whyOut = "body mask '" + maskName + "' in the bundle is a texture that could not be decoded";
         return nullptr;
     }
     if (unity::PPtr a = lookup.findAsset(maskName); !a.isNull()) {
-        if (auto mt = decode ? decode(a) : nullptr) return mt;
+        std::shared_ptr<unity::TextureData> found = decode ? decode(a) : nullptr;
+        if (found) return found;
         if (whyOut) *whyOut = "body mask '" + maskName + "' in the bundle is not a texture (a same-named non-texture asset shadows the name)";
         return nullptr;
     }
@@ -2632,6 +2642,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (sk2.size() >= 3) skinColor = vec4Of(sk2);
 
     bool topCoversBra = false;
+    std::vector<std::string> kokanHiders;   // outfit part ids whose list row has KokanHide=1 (they hide the crotch, as the game does)
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
     std::vector<MaskSource> bodyMasks, braMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
@@ -3689,6 +3700,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             else scene.warn(ref.partId, "no renderable geometry found in the prefab");
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
+        if (ref.group == "Outfit" && item.listItem.get("KokanHide") == "1") kokanHiders.push_back(part.id);
         b.localOv = nullptr;
         b.goMesh.clear();
         b.simW = nullptr;
@@ -3849,6 +3861,17 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
     applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && !p.underPiece && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
                [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
+    // Body suppression fallback: when NO body mask could be resolved for this outfit (missing texture, its mask asset is a prefab shadowing the name,
+    // or no mask declared), conceal the body triangles that opaque clothing covers anyway (ray-occluded — never the open slits).
+    // A resolved mask still drives everything above; this runs only for outfits whose mask is unavailable or invalid.
+    // KokanHide=1 bottoms always hide the crotch, same as the game.
+    if (!std::getenv("CARDBRIDGE_NO_BODY_SUPPRESSION")) {
+        const bool maskResolved = !bodyMasks.empty();   // a mask that resolved is authoritative; only KokanHide composes with it
+        const BodySuppressionStats suppression = SuppressBodyUnderGarments(scene, kokanHiders, /*applyCoverage=*/!maskResolved);
+        if (suppression.coverageTraits > 0 || suppression.kokanTraits > 0)
+            log("body suppression fallback: " + std::to_string(suppression.coverageTraits) + " triangles hidden by occlusion, " +
+                std::to_string(suppression.kokanTraits) + " by KokanHide (" + std::to_string(suppression.providers) + " provider triangles)");
+    }
     // The body triangles the clothes cover move onto "body.under.*" copies. The skin shading has to follow them:
     // they hold the chest and the cleavage, and those are exactly the places the shade is for.
     for (const auto& p : scene.parts)
