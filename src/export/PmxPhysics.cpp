@@ -46,6 +46,7 @@ constexpr float kGarmentMassScale = 1.6f;      // cloth has real inertia: per-li
 constexpr float kGarmentMassCap = 4.0f;        // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
 constexpr float kGarmentMaxDamping = 0.95f;    // ... and capped below 1 so it still settles
+constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees). This card's loose skirt physics (stiffness 0.6) exports ±34-47 degrees per link, which MikuMikuDance turns into a flap on every step.
 
 // How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
 // A skirt flares out from the thighs at rest: following the whole turn lifted it off them and showed its lining (MMD, crouching).
@@ -359,7 +360,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
+                                       : std::min(!jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0 ? kGarmentMaxBend : 0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
             const float hairBend = hairChain ? std::min(bend, kHairMaxSwing) : bend;
