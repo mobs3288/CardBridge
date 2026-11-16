@@ -399,7 +399,7 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const Ji
     // baked the same way as the settle above (both previews and the exported PMX).
     if (!std::getenv("CARDBRIDGE_NO_SAG")) {
         Pose droop;
-        AddSagPose(scene, droop, jiggleBust, jiggleButt, clean, sag);
+        AddSagPose(scene, droop, sag);
         if (!droop.empty()) BakeSkin(scene, SkinMatrices(scene, droop));
     }
 }
@@ -430,23 +430,19 @@ void BakeGarmentSettle(Scene& scene) {
     BakeSkin(scene, skin);
 }
 
-float SagTiltRad(bool bust, float jiggleIntensity) {
-    return SagTiltRad(bust, jiggleIntensity, 0.1f, 0.1f, 1.0f);
-}
-// (kept for compatibility: a typical loose chain)
-float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale) {
+// How far the bust / butt hangs at rest, radians. The hang comes from the card's own DynamicBone chain parameters only (a stiff,
+// perky card scarcely hangs), never from any of our jiggle settings: the Sag slider is the only user-facing control of static sag,
+// and no jiggle parameter may touch it.
+float SagTiltRad(bool bust, float stiffness, float elasticity, float gravityScale) {
     // Per-card hang: stiffness 1 = perky (no droop), 0 = loose (full hang); elasticity pulls back a little;
-    // no downward force (gravityScale 0) means no hang at all. Capped so max intensity stays natural.
+    // no downward force (gravityScale 0) means no hang at all. Capped so the maximum stays natural.
     const float maxTilt = bust ? 0.22f : 0.16f;
     const float loose = std::max(0.0f, 1.0f - std::min(1.0f, std::max(0.0f, stiffness)));
     const float elastFactor = 1.0f - 0.4f * std::min(1.0f, std::max(0.0f, elasticity));
-    return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale * (0.5f + jiggleIntensity));
+    return std::min(maxTilt, maxTilt * loose * elastFactor * gravityScale);
 }
 
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag) {
-    // The hang scale follows the master strength: 1.0 strength = the old 0.5 intensity, which was the default (strength * 0.5 keeps the
-    // same hang whatever the user dials the strength to).
-    const float jiggleIntensity = SanitizeJiggleSettings(jiggle).strength * 0.5f;
+void AddSagPose(const Scene& scene, Pose& pose, float sag) {
     auto isBust = [](const std::string& n) {
         return n.find("bust") != std::string::npos || n.find("bnip") != std::string::npos;
     };
@@ -484,7 +480,7 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
     for (size_t i = 0; i < scene.bones.size(); ++i) {
         const std::string& name = scene.bones[i].name;
         const bool bust = isBust(name), butt = isButt(name);
-        if ((bust && !jiggleBust) || (butt && !jiggleButt) || !(bust || butt)) continue;
+        if (!(bust || butt)) continue;   // the jiggle switches do not take part here: the Sag slider owns the static rest shape
         if (bust && !hasBust) continue;
         if (butt && !hasButt) continue;
         // The bust chain has ~6 bones in a row (bust01 > 02 > 03 > bnip ...). Tilting every one stacks to 100+ degrees
@@ -498,10 +494,11 @@ void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt
         }
         // A bone the user already moved keeps its edit.
         if (i < pose.bones.size() && !IsIdentity(pose.bones[i])) continue;
-        float tilt = bust ? SagTiltRad(true, jiggleIntensity, bustStiff, bustElast, bustGravScale)
-                          : SagTiltRad(false, jiggleIntensity, buttStiff, buttElast, buttGravScale);
+        float tilt = bust ? SagTiltRad(true, bustStiff, bustElast, bustGravScale)
+                          : SagTiltRad(false, buttStiff, buttElast, buttGravScale);
         tilt = std::min(bust ? 0.30f : 0.22f, tilt * std::max(0.0f, sag));
-        if (tilt < 0.01f) continue;   // stiff / perky card (or strength at 0 / slider at 0): leave it as it is
+        // Stiff / perky card (or a zero Sag slider): leave it as it is
+        if (tilt < 0.01f) continue;
         // Forward for the bust, backward for the butt, both tipped toward straight down.
         const Vec3 from = bust ? Vec3{0, 0, 1} : Vec3{0, 0, -1};
         const Vec3 to = bust ? normalize(Vec3{0, -std::sin(tilt), std::cos(tilt)})

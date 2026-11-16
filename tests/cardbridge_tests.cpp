@@ -2085,7 +2085,7 @@ void unitTests() {
             exporter::AddPhysics(s, m, 10.0f, bust, butt, jiggle);
             return m;
         };
-        const assemble::JiggleSettings natural;   // the Natural preset (default): mass 1 kg, stiffness 220 N/m, damping 4 N s/m, amplitudes 1
+        const assemble::JiggleSettings natural;   // the Natural preset (default): mass 1 kg, stiffness 150 N/m, damping 10 N s/m, amplitudes 1
         {   // the default export: breast jiggle on, the butt off (explicit args; both defaults are on)
             pmx::Model m = count(make(true), true, false, natural);
             CHECK(m.rigidBodies.size() == 3 && m.joints.size() == 2);   // anchor body + the jiggle chain, and the anchor joint + the link joint
@@ -2100,8 +2100,8 @@ void unitTests() {
             // the reference models' breast bodies: mode 2 (the body follows its bone with physics on top), damping derived from the
             // damper (1 - exp(-c / 2m)), no friction, no collider, a derived joint spring, weight tapering toward the tip
             CHECK(jig.rigidBodies[1].mode == 2 && jig.rigidBodies[2].mode == 2);
-            CHECK(std::fabs(jig.rigidBodies[1].moveDamping - (1.0f - std::exp(-2.0f))) < 1e-4f);   // root, mass 1: 1 - exp(-4 / (2*1)) = 1 - e^-2
-            CHECK(std::fabs(jig.rigidBodies[2].moveDamping - (1.0f - std::exp(-4.0f))) < 1e-4f);   // mass 1/2: 1 - exp(-4 / (2*0.5)) = 1 - e^-4
+            CHECK(std::fabs(jig.rigidBodies[1].moveDamping - (1.0f - std::exp(-5.0f))) < 1e-4f);   // root, mass 1: 1 - exp(-10 / (2*1)) = 1 - e^-5
+            CHECK(std::fabs(jig.rigidBodies[2].moveDamping - assemble::JigglePmxDamping(natural, 0.5f)) < 1e-6f);   // mass 1/2, damping 10: 1 - exp(-10), clamped below 1
             CHECK(jig.rigidBodies[2].rotDamping == jig.rigidBodies[2].moveDamping);
             CHECK(jig.rigidBodies[2].friction == 0.0f);
             CHECK(jig.rigidBodies[2].mask == 0);
@@ -2831,32 +2831,27 @@ void unitTests() {
         CHECK(std::fabs(p.x - 0.0f) < 1e-3f && std::isfinite(p.y) && std::isfinite(p.z));
     });
 
-    test("jiggle: static sag hangs a little, never below the tip's reach; zero gravity does not sag", [&makeJiggleScene] {
+    test("jiggle: rest pose is exactly the posed pose regardless of gravity and stiffness (the Sag slider owns all static sag)", [&makeJiggleScene] {
         using namespace assemble;
-        {   // normal gravity: a small hang from the posed rest, no more than a few centimetres
-            Scene s = makeJiggleScene(0);
-            const Pose rest;
-            std::vector<Mat4> pw = BoneWorlds(s, rest);
-            PhysicsSim sim;
-            sim.Reset(s, pw, true, true, JiggleSettings{});
-            std::vector<Mat4> skin(s.bones.size());
-            for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
-            const Vec3 p = skin[3].point(s.bones[3].pos);
-            CHECK(p.y < 0.95f);                // it sags below the posed height
-            CHECK(p.y > 0.95f - 0.06f);       // but the body holds most of its weight: the preload leaves only a few millimetres of hang
-        }
-        {   // zero gravity: no sag at all
-            Scene s = makeJiggleScene(0);
-            const Pose rest;
-            std::vector<Mat4> pw = BoneWorlds(s, rest);
-            JiggleSettings noGrav;
-            noGrav.gravity = 0.0f;
-            PhysicsSim sim;
-            sim.Reset(s, pw, true, true, noGrav);
-            std::vector<Mat4> skin(s.bones.size());
-            for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
-            const Vec3 p = skin[3].point(s.bones[3].pos);
-            CHECK(std::fabs(p.y - 0.95f) < 1e-3f);
+        for (float grav : {0.0f, 0.5f, 1.0f, 3.0f}) {
+            for (float stiffness : {5.0f, 150.0f, 320.0f}) {
+                Scene s = makeJiggleScene(0);
+                const Pose rest;
+                const std::vector<Mat4> pw = BoneWorlds(s, rest);
+                JiggleSettings set;
+                set.gravity = grav;
+                set.stiffness = stiffness;
+                PhysicsSim sim;
+                sim.Reset(s, pw, true, true, set);
+                std::vector<Mat4> skin(s.bones.size());
+                for (int i = 0; i < 600 && sim.Step(s, pw, 1, skin); ++i) {}
+                const Vec3 p = skin[3].point(s.bones[3].pos);
+                // The body fully holds the part at rest: gravity, gravity's pull on the equilibrium and the spring's
+                // rest position never drift the chain away from its posed place — only motion does.
+                CHECK(std::fabs(p.y - 0.95f) < 1e-4f);
+                CHECK(std::fabs(p.x - 0.0f) < 1e-4f);
+                CHECK(std::fabs(p.z - 0.12f) < 1e-4f);
+            }
         }
     });
 
@@ -2930,7 +2925,7 @@ void unitTests() {
         }
     });
 
-    test("jiggle: a chain with no valid bones is skipped; a stiff chain hangs less than a loose one", [&makeJiggleScene] {
+    test("jiggle: a chain with no valid bones is skipped; the rest pose settles exactly regardless of chain stiffness", [&makeJiggleScene] {
         using namespace assemble;
         // a jiggle chain whose bones do not exist in the scene: nothing simulates, nothing crashes
         Scene s;
@@ -2945,8 +2940,8 @@ void unitTests() {
         PhysicsSim sim;
         sim.Reset(s, pw, true, true, JiggleSettings{});
         CHECK(sim.jiggleParticleCount() == 0);
-        // a very stiff card hangs less at rest than a very loose one (the static sag respects the settings)
-        auto hang = [&](float stiffness) {
+        // The stiffness of the chain must not move the settled rest pose at all - static sag is not the physics' job (the Sag slider owns it).
+        for (float stiffness : {5.0f, 500.0f, 2000.0f}) {
             Scene s = makeJiggleScene(0);
             const Pose rest;
             const std::vector<Mat4> pw = BoneWorlds(s, rest);
@@ -2956,9 +2951,9 @@ void unitTests() {
             sim.Reset(s, pw, true, true, set);
             std::vector<Mat4> skin(s.bones.size());
             for (int i = 0; i < 1200 && sim.Step(s, pw, 1, skin); ++i) {}
-            return 0.95f - skin[3].point(s.bones[3].pos).y;   // how far below the posed place the tip settled
-        };
-        CHECK(hang(5.0f) > hang(2000.0f));
+            const Vec3 p = skin[3].point(s.bones[3].pos);
+            CHECK(std::fabs(p.y - 0.95f) < 1e-4f);   // settled exactly at the posed place whatever the chain's own stiffness says
+        }
     });
 
     test("jiggle presets: matched, custom and sanitized; derived values stay finite", [] {
@@ -2988,11 +2983,11 @@ void unitTests() {
         CHECK(clean.strength == 0.0f);
         CHECK(clean.simulationHz == 480.0f);
         // derived values: the spring's own oscillation, the damping ratio, the PMX decay and the static sag, all finite
-        CHECK(std::fabs(JiggleAngularFrequency(natural) - std::sqrt(220.0f)) < 1e-3f);
+        CHECK(std::fabs(JiggleAngularFrequency(natural) - std::sqrt(natural.stiffness / natural.mass)) < 1e-3f);
         CHECK(JiggleDampingRatio(natural) > 0.0f && JiggleDampingRatio(natural) < 1.0f);
         CHECK(JigglePmxDamping(natural, 1.0f) > 0.8f && JigglePmxDamping(natural, 1.0f) < 1.0f);
         CHECK(JigglePmxDamping(natural, 0.5f) > JigglePmxDamping(natural, 1.0f));   // the lighter the link, the more it loses per second
-        CHECK(JiggleStaticSagMeters(natural) > 0.0f && JiggleStaticSagMeters(natural) < 0.02f);
+        CHECK(JiggleStaticSagMeters(natural) == 0.0f);   // the body holds the part fully at rest: no gravity sag of its own
         CHECK(std::fabs(JiggleMaxDisplacement(natural, 0) - 0.060f) < 1e-6f);
         CHECK(std::fabs(JiggleMaxDisplacement(natural, 1) - 0.045f) < 1e-6f);
         CHECK(std::fabs(JiggleMaxDisplacement(natural, 2) - 0.055f) < 1e-6f);

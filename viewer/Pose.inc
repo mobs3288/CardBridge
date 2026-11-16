@@ -14,7 +14,7 @@ assemble::Pose BuildPose(const Loaded& L, bool includeSag = true) {
     if (g.aPose) assemble::MakeAPose(L.scene, g.aPoseDeg, p.base);
     // The static preview sags the same way the export does, so the viewer shows the hang even with physics off.
     // A bone the user drags herself keeps its own edit (AddSagPose skips those).
-    if (includeSag) assemble::AddSagPose(L.scene, p, g.jiggleBust, g.jiggleButt, g.jiggle, g.sag);
+    if (includeSag) assemble::AddSagPose(L.scene, p, g.sag);
     // Height: scale everything uniformly about the roots (feet) so the model's standing height is heightCm.
     // A root the user scaled herself keeps that scale multiplied by this factor.
     if (g.baseHeightCm > 1e-4f && g.heightCm > 1e-4f) {

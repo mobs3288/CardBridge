@@ -13,22 +13,23 @@ namespace cardbridge::assemble {
 // 1 = fully follows the simulated chain). `strength` is the master scale of the whole effect, kept as the old jiggle intensity.
 struct JiggleSettings {
     float mass = 1.0f;              // kg, the root link (the links below it taper)
-    float stiffness = 220.0f;       // N/m, the spring that pulls a link back to its posed place
-    float damping = 4.0f;           // N s/m, the velocity the link loses
-    float gravity = 1.0f;           // x 9.81 m/s^2; what the body does not support sags and swings
+    float stiffness = 150.0f;       // N/m, the spring that pulls a link back to its posed place
+    float damping = 10.0f;          // N s/m, the velocity the link loses (Natural: natural frequency ~1.95 Hz, damping ratio ~0.41)
+    float gravity = 1.0f;           // x 9.81 m/s^2; at rest the body fully supports the part (no static sag); gravity only swings it
     float amplitudeVertical = 1.0f;   // how far the links may travel up / down
     float amplitudeHorizontal = 1.0f; // how far they may sway sideways (the visible left / right jiggle)
     float amplitudeDepth = 1.0f;      // how far they may flop forward / back
     float rotationStrength = 1.0f;    // how strongly a bone turns to follow its simulated child
-    float strength = 1.0f;            // master scale of the whole effect (the old --jiggle-intensity)
+    float strength = 1.0f;            // master scale of the whole effect (the old --jiggle-intensity); dynamic only, never the static sag
     float simulationHz = 120.0f;      // fixed simulation rate of the preview (the PMX runs in MMD's own solver)
 };
 
 enum class JigglePreset { Subtle, Natural, Dynamic, Custom };
 
-// The share of the part's weight the body keeps itself (the rest is what sags under gravity). The jiggle solver holds the part by this
-// much, so the settled sag is (1 - kJiggleSupport) * m g / k - a few millimetres at the Natural preset.
-inline constexpr float kJiggleSupport = 0.75f;
+// The share of the part's weight the body keeps itself. It is 1.0: the body fully supports the part at rest, so the physics never
+// adds any static sag of its own - the Sag slider is the ONLY source of resting droop. (The formula is kept for the manifest, which
+// reports the gravity-induced sag as 0 under this model.)
+inline constexpr float kJiggleSupport = 1.0f;
 
 const char* JigglePresetName(JigglePreset preset);
 // Subtle, Natural and Dynamic are tuned on the same physical model, not as arbitrary multipliers.

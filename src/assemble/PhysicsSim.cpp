@@ -12,7 +12,8 @@ namespace cardbridge::assemble {
 namespace {
 
 constexpr float kGravity = 9.81f;
-constexpr float kMaxSpeed = 8.0f;   // m/s, a hard lid so a shake or an extreme setting can never fling a link out of the model
+constexpr float kMaxSpeed = 2.0f;   // m/s, a hard lid so a shove or an extreme setting can neither fling a link out of the model nor carry enough
+                                    // momentum to generate fresh energy each contact (a bust never exceeds roughly a quarter of this in a fast jump)
 
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -148,6 +149,28 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
             chains_.push_back(std::move(chain));
         }
     }
+    // A chain whose links start inside a collider is never pushed out of it at rest — the rest pose is how the character is authored;
+    // physics must not fight its own skin (that pushed the butt sideways and buzzed the spring every substep). Remember those colliders
+    // per chain and skip them in the contact response; the response against every other object is unchanged. Rebuilt against the same
+    // colliders Step uses on every reset (i.e. every pose change).
+    CollectColliders(scene, poseWorld);
+    for (JiggleChain& jc : jiggles_) {
+        const SceneChain& sc = scene.chains[jc.scene];
+        const float radius = std::max(0.004f, sc.radius);
+        jc.skipColliders.assign(colliders_.size(), 0);
+        for (size_t ci = 0; ci < colliders_.size(); ++ci) {
+            const WorldCollider& c = colliders_[ci];
+            for (const JiggleLink& l : jc.links) {
+                const Vec3 ab = {c.b.x - c.a.x, c.b.y - c.a.y, c.b.z - c.a.z};
+                const float len2 = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+                float t = 0.0f;
+                if (len2 > 1e-12f) t = std::max(0.0f, std::min(1.0f, ((l.pos.x - c.a.x) * ab.x + (l.pos.y - c.a.y) * ab.y + (l.pos.z - c.a.z) * ab.z) / len2));
+                const Vec3 q = {c.a.x + ab.x * t, c.a.y + ab.y * t, c.a.z + ab.z * t};
+                const Vec3 d = {l.pos.x - q.x, l.pos.y - q.y, l.pos.z - q.z};
+                if (d.x * d.x + d.y * d.y + d.z * d.z < (c.radius + radius) * (c.radius + radius)) { jc.skipColliders[ci] = 1; break; }
+            }
+        }
+    }
 }
 
 size_t PhysicsSim::particleCount() const {
@@ -185,14 +208,20 @@ void PhysicsSim::Nudge(Vec3 impulse) {
 
 void PhysicsSim::CollectColliders(const Scene& scene, const std::vector<Mat4>& poseWorld) {
     colliders_.clear();
-    // The colliders as the pose carries them: each rides its bone.
+    // The colliders as the pose carries them: each rides its bone. The body's own hit spheres (breast / butt / hip hits) are tagged:
+    // the character's own jiggle chains start inside them, so the jiggle must ignore them (it collides with the arms, hands and
+    // shins instead, and with every other hit sphere).
     for (const auto& c : scene.colliders) {
         if (c.bone < 0 || static_cast<size_t>(c.bone) >= poseWorld.size() || c.inside || c.radius <= 0.0f) continue;
+        const std::string& boneName = scene.bones[static_cast<size_t>(c.bone)].name;
+        const bool bodyOwn = boneName.find("bust") != std::string::npos || boneName.find("siri") != std::string::npos ||
+                             boneName.find("kosi") != std::string::npos || boneName.find("mune") != std::string::npos ||
+                             boneName.find("waist") != std::string::npos;
         const Mat4 m = poseWorld[static_cast<size_t>(c.bone)] * Mat4::TRS(scene.bones[static_cast<size_t>(c.bone)].pos * -1.0f, Quat{}, Vec3{1, 1, 1});
         const Vec3 centre = m.point(c.center);
         const float half = std::max(0.0f, c.height * 0.5f - c.radius);
         const Vec3 axis = normalize(m.dir(c.axis));
-        colliders_.push_back({sub(centre, axis * half), centre + axis * half, c.radius});
+        colliders_.push_back({sub(centre, axis * half), centre + axis * half, c.radius, bodyOwn});
     }
     // The arms are not in the game's collider list, but the breast clipping into them is the classic break:
     // add an upper-arm + forearm capsule per arm so the jiggle particles slide off the arm instead of through it.
@@ -354,10 +383,14 @@ void PhysicsSim::StepJiggle(const Scene& scene, const std::vector<Mat4>& poseWor
             clampAxis(l.pos.y, l.target.y, limitY, l.vel.y);
             clampAxis(l.pos.z, l.target.z, limitZ, l.vel.z);
         }
-        // The body's own links meet the arm colliders too: the breast slides over the arm instead of through it. A link that was pushed
-        // out of a collider loses the velocity component into its surface (position-only pushing keeps the wall from leaking motion back).
-        for (JiggleLink& l : jc.links)
-            for (const auto& c : colliders_) {
+        // The links collide with the arm and hand capsules (the breast slides over them instead of through them) and with the body's other
+        // hit spheres. The colliders the chain starts inside at rest (its own skin, this card's cf_hit_*) are skipped per link chain —
+        // colliding with its own rest pose would push the mesh every substep. A link that was pushed out of a collider loses the velocity
+        // component into its surface completely (inelastic): no energy comes back as a bounce, the slide along the surface is free.
+        auto collideJiggle = [&](JiggleLink& l, const std::vector<char>& skip) {
+            for (size_t ci = 0; ci < colliders_.size(); ++ci) {
+                const WorldCollider& c = colliders_[ci];
+                if (c.bodyOwn || (ci < skip.size() && skip[ci])) continue;
                 const Vec3 before = l.pos;
                 collide(l.pos, radius, c.a, c.b, c.radius);
                 const Vec3 pushed = sub(l.pos, before);
@@ -365,9 +398,13 @@ void PhysicsSim::StepJiggle(const Scene& scene, const std::vector<Mat4>& poseWor
                 if (pl > 1e-9f) {
                     const Vec3 n = pushed * (1.0f / pl);
                     const float vn = l.vel.x * n.x + l.vel.y * n.y + l.vel.z * n.z;
-                    if (vn < 0.0f) l.vel = sub(l.vel, n * vn);
+                    // Kill the into-surface component completely: the contact is inelastic, so no energy comes back as a bounce. The slide
+                    // along the surface is free (the breast slides over an arm), kept damped by the spring elsewhere.
+                    l.vel = sub(l.vel, n * (vn < 0.0f ? vn : 0.0f));
                 }
             }
+        };
+        for (JiggleLink& l : jc.links) collideJiggle(l, jc.skipColliders);
         // Keep every link on its rod, root to tip. The rod is a bilateral distance constraint, so a link whose position was just snapped
         // to the rod loses its radial velocity too - otherwise gravity pumps the link against the rod into a limit cycle that never settles.
         for (JiggleLink& l : jc.links) {
@@ -390,18 +427,7 @@ void PhysicsSim::StepJiggle(const Scene& scene, const std::vector<Mat4>& poseWor
                 l.vel = sub(l.vel, n * vr);
             }
         }
-        for (JiggleLink& l : jc.links)
-            for (const auto& c : colliders_) {
-                const Vec3 before = l.pos;
-                collide(l.pos, radius, c.a, c.b, c.radius);
-                const Vec3 pushed = sub(l.pos, before);
-                const float pl = length(pushed);
-                if (pl > 1e-9f) {
-                    const Vec3 n = pushed * (1.0f / pl);
-                    const float vn = l.vel.x * n.x + l.vel.y * n.y + l.vel.z * n.z;
-                    if (vn < 0.0f) l.vel = sub(l.vel, n * vn);
-                }
-            }
+        for (JiggleLink& l : jc.links) collideJiggle(l, jc.skipColliders);
     }
     UpdateJiggleWorlds(scene, poseWorld);
     for (JiggleChain& jc : jiggles_) {

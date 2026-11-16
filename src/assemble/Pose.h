@@ -73,16 +73,16 @@ void BakeGarmentSettle(Scene& scene);
 
 // How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
 // respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,
-// perky rig hangs almost not at all while a loose one hangs ~25-30 degrees at the default strength. `strength` scales
-// how wide it swings, as the PMX joints do (the old jiggle intensity; strength * 0.5 keeps the default hang).
-float SagTiltRad(bool bust, float jiggleIntensity);
-float SagTiltRad(bool bust, float jiggleIntensity, float stiffness, float elasticity, float gravityScale);
+// perky rig hangs almost not at all while a loose one hangs up to the cap. None of our jiggle settings take part -
+// the Sag slider is the only user-facing control of resting droop.
+float SagTiltRad(bool bust, float stiffness, float elasticity, float gravityScale);
 // Adds that hang to a pose (the viewer calls this so the static preview already sags; the bake above uses the same pose).
 // Bust bones (bust / bnip) droop down-forward; butt bones (siri / kosi) droop down-back (less). Only the root of each
 // side is tilted, so the whole breast hangs as one piece. A side with no body jiggle chain, or with a stiff chain, gets
 // no (or barely any) tilt: the card is left as it is. `sag` scales the hang (1 = the card's own). A bone the user
-// already edited keeps its own edit.
-void AddSagPose(const Scene& scene, Pose& pose, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag = 1.0f);
+// already edited keeps its own edit. Independent of the jiggle switches: disabling the jiggle physics never removes the
+// static sag - the Sag slider is the only source of it.
+void AddSagPose(const Scene& scene, Pose& pose, float sag = 1.0f);
 
 // Dragging a bone in the view. TurnBone: the new local Euler angles (degrees) of `bone`'s edit so that its world orientation turns by `worldTurn`
 // (a rotation matrix about the bone's own position, world axes), whatever its parent and the A-pose do. MoveBone: the new local position edit

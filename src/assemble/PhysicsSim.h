@@ -43,6 +43,8 @@ private:
     struct WorldCollider {
         Vec3 a, b;     // capsule segment ends (equal for a sphere)
         float radius = 0;
+        bool bodyOwn = false;   // the body's own hit spheres (breast / butt / hip / waist): the character's jiggle chains sit inside them,
+                                 // so breast/butt jiggle skips them (colliding with its own rest pose buzzed every substep)
     };
     struct Particle {
         int bone = -1;
@@ -81,6 +83,8 @@ private:
         int sideSign = 0;
         bool asleep = false;
         float stillSeconds = 0.0f;
+        std::vector<char> skipColliders;   // per collider (index into colliders_): 1 when a link starts inside it at reset - the chain
+                                            // is never pushed out of its own rest pose by physics (recomputed on every pose change)
     };
 
     void CollectColliders(const Scene& scene, const std::vector<Mat4>& poseWorld);

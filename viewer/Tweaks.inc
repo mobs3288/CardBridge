@@ -207,8 +207,8 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kHeightCm) { r.v = &g.heightCm; r.def = g.baseHeightCm; r.lo = 100; r.hi = 250; r.step = 1; r.percent = false; r.fmt = "%.0f cm"; return true; }
     if (id == kSag) { r.v = &g.sag; r.def = g.sagDefault; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kJiggleMass) { r.v = &g.jiggle.mass; r.def = 1.0f; r.lo = 0.05f; r.hi = 5.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f kg"; return true; }
-    if (id == kJiggleStiffness) { r.v = &g.jiggle.stiffness; r.def = 220.0f; r.lo = 20.0f; r.hi = 2000.0f; r.step = 5.0f; r.percent = false; r.fmt = "%.0f N/m"; return true; }
-    if (id == kJiggleDamping) { r.v = &g.jiggle.damping; r.def = 4.0f; r.lo = 0.0f; r.hi = 40.0f; r.step = 0.1f; r.percent = false; r.fmt = "%.1f N s/m"; return true; }
+    if (id == kJiggleStiffness) { r.v = &g.jiggle.stiffness; r.def = 150.0f; r.lo = 20.0f; r.hi = 2000.0f; r.step = 5.0f; r.percent = false; r.fmt = "%.0f N/m"; return true; }
+    if (id == kJiggleDamping) { r.v = &g.jiggle.damping; r.def = 10.0f; r.lo = 0.0f; r.hi = 40.0f; r.step = 0.1f; r.percent = false; r.fmt = "%.1f N s/m"; return true; }
     if (id == kJiggleGravity) { r.v = &g.jiggle.gravity; r.def = 1.0f; r.lo = 0.0f; r.hi = 3.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f x"; return true; }
     if (id == kJiggleAmpVertical) { r.v = &g.jiggle.amplitudeVertical; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kJiggleAmpHorizontal) { r.v = &g.jiggle.amplitudeHorizontal; r.def = 1.0f; r.lo = 0.0f; r.hi = 2.0f; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }

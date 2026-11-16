@@ -42,10 +42,10 @@ JiggleSettings JigglePresetSettings(JigglePreset preset) {
     JiggleSettings s;
     switch (preset) {
     case JigglePreset::Subtle:
-        // Firm and well damped: the part moves a little and stops, like a tight sports top.
+        // Firm and well damped: it moves a little and stops, like a tight sports top. Natural frequency ~2.65 Hz, damping ratio ~0.44.
         s.mass = 1.15f;
-        s.stiffness = 360.0f;
-        s.damping = 6.0f;
+        s.stiffness = 320.0f;
+        s.damping = 17.0f;
         s.gravity = 0.9f;
         s.amplitudeVertical = 0.65f;
         s.amplitudeHorizontal = 0.65f;
@@ -54,13 +54,14 @@ JiggleSettings JigglePresetSettings(JigglePreset preset) {
         s.strength = 0.75f;
         break;
     case JigglePreset::Natural:
-        // The defaults in the struct: soft skin that visibly sways sideways and forward, still critically damped enough to stop.
+        // The defaults in the struct: soft skin that visibly sways sideways and forward; damped enough to settle in ~a second.
         break;
     case JigglePreset::Dynamic:
-        // Lighter, softer, livelier: more travel on every axis and a stronger bone follow.
+        // Lighter, softer, livelier, damped just under the critical ratio: more travel on every axis and a stronger bone follow.
+        // Natural frequency ~1.69 Hz, damping ratio ~0.44.
         s.mass = 0.8f;
-        s.stiffness = 150.0f;
-        s.damping = 2.6f;
+        s.stiffness = 90.0f;
+        s.damping = 7.5f;
         s.gravity = 1.15f;
         s.amplitudeVertical = 1.45f;
         s.amplitudeHorizontal = 1.45f;
