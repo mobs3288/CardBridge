@@ -63,6 +63,12 @@ constexpr float kLegFollow = 0.75f;
 // saba's gravity) to every dynamic body, so a loose strand falls to its stop and buzzes on it. A small envelope keeps the authored
 // silhouette - the hairstyle the artist draws IS the hairstyle the user gets - with enough room for subtle secondary motion.
 constexpr float kHairMaxSwing = 0.090f;
+// A strand may keep free dynamics (mode 1) only if its hold spring can physically hold it near the authored pose inside the envelope.
+// MikuMikuDance's 120 Hz solver cannot integrate an arbitrarily stiff spring; a demand (gravity torque / droop) beyond this is not
+// holdable by any spring, and the strand folds onto its limits and shivers. Those chains are pinned to the bone (mode 2) instead: the
+// authored pose is held exactly, the joint envelope still lets the strand swing, and MMD's gravity still drives the rotation physics.
+// Measured: short bangs/strands demand well under 1e3; horn/mane/long-tail ornament chains demand 1e3..4e4.
+constexpr float kHairHoldMaxDemand = 2000.0f;
 
 // The spring a hair joint gets, N m per radian. Sized so the authored pose holds against MikuMikuDance's gravity without
 // resting on the stop (torque from gravity / sag the spring may allow), never below what carries the link's own inertia at a
@@ -184,6 +190,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<char> chainHair;     // the same, per body: hair (it meets nothing either - see the mask section)
     std::vector<int> chainGarment;   // the same, per body: the garment chain it belongs to (-1 otherwise)
     int nextGarmentChainId = 0;
+    std::set<std::vector<int>> exportedSequences;   // bone-index sequences already exported (a card can scan the same DynamicBone twice)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -207,6 +214,16 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         int garmentChainId = -1;   // -1 = not a garment chain
         if (garmentClothChain) garmentChainId = nextGarmentChainId++;
         std::vector<int> bones = PhysicsChainBones(scene, ch);
+        // A card can resolve two items onto the same part (the kimono item scans its DynamicBone components twice), which would export
+        // two identical physics chains on the very same bones — double bodies occupying the same space, fighting the solver. Bone
+        // sequences are unique per chain, so an identical sequence means the same physics is already exported; keep the first.
+        if (bones.size() >= 2) {
+            if (exportedSequences.count(bones)) {
+                std::fprintf(stderr, "skipping duplicate physics chain '%s': identical bone set already exported\n", ch.name.c_str());
+                continue;
+            }
+            exportedSequences.insert(bones);
+        }
         if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
             std::fprintf(stderr, "chain '%s' own=%d raw=[", ch.name.c_str(), ch.characterOwn ? 1 : 0);
             for (int b : ch.bones) std::fprintf(stderr, "%s ", (b >= 0 && static_cast<size_t>(b) < scene.bones.size()) ? scene.bones[static_cast<size_t>(b)].name.c_str() : "?");
@@ -268,6 +285,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         std::map<int, int> bodyOf;   // chain bone -> rigid body
         int jigAnchor = -1;   // a jiggle chain's anchor: a kinematic body on the parent bone, rigid-jointed to the root, like the reference models' torso body
         Vec3 jigAnchorPos;   // the anchor body's authored position (its bone's), the anchor joint's place
+        const size_t firstBodyForChain = model.rigidBodies.size();
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
             if (jigBody && k == 0) {
@@ -368,6 +386,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         float jigRange[3] = {0.0f, 0.0f, 0.0f};
         if (jigBody)
             for (int axis = 0; axis < 3; ++axis) jigRange[axis] = assemble::JiggleJointRange(jiggleSet, jigBust, axis);
+        // A strand is only allowed to keep mode 1 (free dynamics) when its hold spring can physically hold it near the authored pose
+        // inside the envelope. If any joint's gravity torque, divided by the droop it is allowed, exceeds the spring this body can
+        // stably integrate at MMD's 120 Hz, the chain cannot be held at all and it must be pinned to the bone (mode 2, physics with
+        // bone aligned) - the joints keep their envelope and the cloth swings, but the authored pose is never destroyed by gravity.
+        bool chainUnholdable = false;
+        bool debugChains = std::getenv("CARDBRIDGE_DEBUG_CHAINS") != nullptr;
         for (size_t k = 1; k < bones.size(); ++k) {
             const int b = bones[k];
             const Link& self = links[b];
@@ -401,10 +425,17 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 const Vec3 arm = sub(l.centre, self.head);
                 sideways += l.mass * std::sqrt(arm.x * arm.x + arm.z * arm.z);
             }
-            // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
-            // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
             const float arm = length(sub(self.centre, self.head));
             const float own = self.mass * arm * arm + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
+            const float hairDemand = lever * gravity / droop;            // the spring gravity would need to hold this subchain in the envelope
+            // A strand may keep mode 1 (free dynamics) only when its hold spring can hold it. The 120 Hz solver cannot integrate an
+            // arbitrarily stiff spring, so past ~2e4 the strand rings and folds onto its limits. Everything heavier must be pinned to
+            // the bone (mode 2). Short, light strands keep mode 1; long, heavily displaced strands (horns, long tails, wing tips) are
+            // held exactly at the authored pose, swinging only within their envelope.
+            if (hairChain && hairDemand > kHairHoldMaxDemand) chainUnholdable = true;
+            if (debugChains && hairChain) std::fprintf(stderr, "  demand %s j%zu lever=%.1f demand=%.0f -> %s\n", ch.name.c_str(), k, lever, hairDemand, hairDemand > kHairHoldMaxDemand ? "UNHOLDABLE" : "holds");
+            // The spring carries everything below it, but it acts on this one body: a spring stiff enough to hold a long chain makes a light
+            // link ring at hundreds of radians a second, which MMD's solver turns into a permanent shiver. The body's own swing rate is capped.
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
@@ -458,6 +489,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             }
             model.joints.push_back(std::move(j));
         }
+        // The chain cannot be held near its authored pose by any spring this solver can integrate: pin its dynamic bodies to the bone
+        // (mode 2). The bone holds the body at its authored place; rotation is simulated freely inside the envelope.
+        if (hairChain && chainUnholdable) {
+            for (size_t i = firstBodyForChain; i < model.rigidBodies.size(); ++i)
+                if (model.rigidBodies[i].mode == 1) model.rigidBodies[i].mode = 2;
+            if (debugChains) std::fprintf(stderr, "chain '%s': demand beyond solver-safe spring, exported bone-aligned (mode 2)\n", ch.name.c_str());
+        }
     }
 
     // Who collides with whom. A body that starts inside a collider (a skirt over the thigh, a breast bone in the bust sphere, a strand
@@ -498,42 +536,49 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             auto it = groupOf.find(sig);
             if (it != groupOf.end()) group = it->second;
             else {
-                group = std::min(15, 2 + static_cast<int>(groupOf.size()));
+                group = std::min(13, 2 + static_cast<int>(groupOf.size()));   // 14 is reserved for the garment overflow group; 15 belongs to the generated limbs
                 groupOf[sig] = group;
             }
         }
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
     }
-    // The chain collider groups (assigned above for the rest-overlap exclusion). Garment-cloth chains get one group each from the free
-    // pool (skipping the collider groups); hair and jiggle stay in group 1 and are returned to below.
+    // Garment chains get one group each from the free pool (skipping the collider groups); hair and jiggle stay in group 1 and are returned to below.
+    // When the free pool runs out, several garment chains share one fallback group. That is not a license to collide with each other,
+    // and it definitely is not one to collide with oneself: a shared group is just "do not touch anyone in this group" everywhere below.
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
+    // Overflow group: every chain beyond the free pool shares group 14, which is reserved for them (never assigned to colliders).
     std::vector<int> garmentGroup(static_cast<size_t>(nextGarmentChainId), -1);
     {
         int nextGroup = 2;
-        int overflowGroup = -1;   // assigned once the free pool runs out; extra chains share it
+        int overflowGroup = -1;   // assigned once the free pool runs out
         for (int g = 0; g < nextGarmentChainId; ++g) {
-            while (nextGroup <= 14 && (usedGroups.count(nextGroup) || nextGroup == 15)) ++nextGroup;
+            while (nextGroup <= 13 && (usedGroups.count(nextGroup) || nextGroup == 15)) ++nextGroup;
             if (nextGroup <= 14) { garmentGroup[g] = nextGroup; ++nextGroup; }
-            else { if (overflowGroup < 0) overflowGroup = std::min(14, nextGroup - 1); garmentGroup[g] = overflowGroup; }
+            else { garmentGroup[g] = 14; }   // reserved shared overflow group
         }
     }
-    // Which garment chains each game collider overlaps at rest (those chains' groups are excluded from the collider's mask).
-    std::vector<std::set<int>> colliderOverlapChains(colliderCore.size());
+    // Which garment groups each game collider overlaps at rest (those groups are excluded from the collider's mask). Two chains sharing
+    // an overflow group cannot be told apart by Bullet, so any chain an overflow group is excluded wholesale.
+    std::vector<std::set<int>> colliderOverlapGroups(colliderCore.size());
     if (nextGarmentChainId > 0) {
         for (size_t ci = 0; ci < colliderCore.size(); ++ci)
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                 if (chainGarment[bi] < 0) continue;
+                if (garmentGroup[static_cast<size_t>(chainGarment[bi])] < 0) continue;
                 if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin)
-                    colliderOverlapChains[ci].insert(chainGarment[bi]);
+                    colliderOverlapGroups[ci].insert(garmentGroup[static_cast<size_t>(chainGarment[bi])]);
             }
     }
-    // The colliders meet group 1 (hair and jiggle chains) plus every garment chain they do not overlap at rest.
+    // The colliders meet group 1 (hair and jiggle chains) plus every garment group they do not overlap at rest.
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
         uint16_t mask = static_cast<uint16_t>(1u << kPmxGroupChain);
-        for (int g = 0; g < nextGarmentChainId; ++g)
-            if (garmentGroup[g] >= 0 && !colliderOverlapChains[ci].count(g)) mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+        for (int g = 0; g < nextGarmentChainId; ++g) {
+            const int gg = garmentGroup[g];
+            if (gg < 0 || colliderOverlapGroups[ci].count(gg)) continue;   // starts buried in it: excluded for the whole shared group
+            mask |= static_cast<uint16_t>(1u << gg);
+        }
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].mask = mask;
     }
     // The chain bodies' own masks: the collider groups they do not overlap (as before), plus every garment chain they do not overlap
@@ -546,7 +591,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         for (int g = 0; g < nextGarmentChainId; ++g) {
-            if (g == chainGarment[bi] || garmentGroup[g] < 0) continue;   // never its own chain
+            if (garmentGroup[g] < 0 || garmentGroup[g] == garmentGroup[static_cast<size_t>(chainGarment[bi])]) continue;   // never its own group (own chain or the chains it shares the fallback with)
             if (bodyOverlapChains[bi].count(g)) continue;                 // starts overlapping it at rest: passed through
             mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
         }
@@ -567,7 +612,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         constexpr uint8_t kLimbGroup = 15;
         bool hasLimb = false;
         std::vector<int> limbBodies;
-        std::vector<std::set<int>> limbOverlapChains;   // per limb body: the garment chains it overlaps at rest
+        std::vector<std::set<int>> limbOverlapGroups;   // per limb body: the garment groups it overlaps at rest
         auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
         for (const char* side : {"_L", "_R"}) {
             const int shoulder = findBone(std::string("cf_j_shoulder") + side);
@@ -597,18 +642,20 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);   // overwritten below once its garment overlap is known
                 model.rigidBodies.push_back(std::move(rb));
                 limbBodies.push_back(static_cast<int>(model.rigidBodies.size()) - 1);
-                // its garment-chain rest overlap (for the mask below)
+                // its garment-group rest overlap (whole groups cannot be told apart)
                 if (nextGarmentChainId > 0) {
                     std::set<int> ov;
                     const Vec3 limbA = sub(rb.position, axis * (0.5f * (rb.shape == 2 ? rb.size.y : 0.0f)));
                     const Vec3 limbB = rb.position + axis * (0.5f * (rb.shape == 2 ? rb.size.y : 0.0f));
                     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                         if (chainGarment[bi] < 0) continue;
-                        if (SegmentDistance(limbA, limbB, chainCore[bi].a, chainCore[bi].b) < rb.size.x + chainCore[bi].r + margin) ov.insert(chainGarment[bi]);
+                        if (garmentGroup[static_cast<size_t>(chainGarment[bi])] < 0) continue;
+                        if (SegmentDistance(limbA, limbB, chainCore[bi].a, chainCore[bi].b) < rb.size.x + chainCore[bi].r + margin)
+                            ov.insert(garmentGroup[static_cast<size_t>(chainGarment[bi])]);
                     }
-                    limbOverlapChains.push_back(std::move(ov));
+                    limbOverlapGroups.push_back(std::move(ov));
                 } else {
-                    limbOverlapChains.emplace_back();
+                    limbOverlapGroups.emplace_back();
                 }
                 hasLimb = true;
             };
@@ -618,11 +665,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             addSeg(knee, leg03, 0.038f, "shin");
         }
         if (hasLimb) {
-            // The limb colliders meet group 1 (hair and jiggle) plus every garment chain they do not overlap at rest.
+            // The limb colliders meet group 1 (hair and jiggle) plus every garment group they do not overlap at rest (whole groups, like the colliders).
             for (size_t i = 0; i < limbBodies.size(); ++i) {
                 uint16_t mask = static_cast<uint16_t>(1u << kPmxGroupChain);
                 for (int g = 0; g < nextGarmentChainId; ++g)
-                    if (garmentGroup[g] >= 0 && !limbOverlapChains[i].count(g)) mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+                    if (garmentGroup[g] >= 0 && !limbOverlapGroups[i].count(garmentGroup[g])) mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
                 model.rigidBodies[static_cast<size_t>(limbBodies[i])].mask = mask;
             }
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {

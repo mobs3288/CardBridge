@@ -2280,6 +2280,44 @@ void unitTests() {
         // a hair chain keeps free dynamics (mode 1) - the authored hairstyle is the rest pose, driven by the hair physics fix
     });
 
+    test("physics: identical physics chains are exported once (a card can scan the same DynamicBone twice into two items)", [] {
+        assemble::Scene s;
+        s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
+        assemble::SceneChain a;
+        a.name = "skirt A"; a.part = "outfit0.bottom"; a.bones = {1, 2, 3, 4};
+        a.damping = 0.15f; a.elasticity = 0.1f; a.stiffness = 0.8f;
+        assemble::SceneChain b;
+        b.name = "skirt B"; b.part = "outfit0.bottom"; b.bones = {1, 2, 3, 4};   // the same bones again, from the second item scan
+        b.damping = 0.15f; b.elasticity = 0.1f; b.stiffness = 0.8f;
+        s.chains.push_back(a);
+        s.chains.push_back(b);
+        pmx::Model m;
+        for (const auto& bone : s.bones) { pmx::Bone pb; pb.name = bone.name; pb.parent = bone.parent; pb.position = bone.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        CHECK(m.rigidBodies.size() == 4);   // the skirt's own bodies, once - never a duplicate set
+        CHECK(m.joints.size() == 3);        // root->1, 1->2, 2->3, once each
+    });
+
+    test("physics: a long ornament strand that springs cannot hold is exported bone-aligned (mode 2), not folded onto its stops", [] {
+        assemble::Scene s;
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        assemble::ScenePart p;
+        p.id = "outfit0.acc05"; p.group = "Hair"; p.attachNode = "a_n_head";
+        s.parts.push_back(p);
+        // a horn: five x 40 cm is not holdable by any spring the 120 Hz solver can integrate
+        for (int i = 0; i < 5; ++i) s.bones.push_back({"horn" + std::to_string(i), i == 0 ? 0 : i, {0.05f + 0.25f * float(i), 1.15f - 0.05f * float(i), 0.05f + 0.10f * float(i)}, "item"});
+        assemble::SceneChain horn;
+        horn.name = "horn"; horn.part = "outfit0.acc05"; horn.bones = {1, 2, 3, 4, 5};
+        horn.damping = 0.4f; horn.elasticity = 0.1f; horn.stiffness = 0.6f;
+        s.chains.push_back(horn);
+        pmx::Model m;
+        for (const auto& bone : s.bones) { pmx::Bone pb; pb.name = bone.name; pb.parent = bone.parent; pb.position = bone.pos * 12.5f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 12.5f);
+        for (size_t i = 1; i < m.rigidBodies.size(); ++i)
+            CHECK(m.rigidBodies[i].mode == 2);   // pinned to the bone; the authored shape is held exactly
+    });
+
     test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
         using namespace assemble;
         struct Setup { const char* what; float damping, elasticity, stiffness; };

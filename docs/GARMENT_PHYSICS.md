@@ -1,8 +1,37 @@
 # Garment physics for the PMX export — authored drape, stability, and secondary motion
 
 **Status:** implemented and validated offline (see "Validation"); visual check in MikuMikuDance is the remaining step.
-**Stress-test card:** `KK_400633.png` (Tokisaki Kurumi), outfit slot 0 — `cardbridge convert … --outfit 0`.
+**Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
+
+## Update — the systemic pass (garments, hair and accessories together)
+
+After the skirt fix, severe jitter remained in *accessories* as well. Root-caused across six cards; see "Systemic findings" below.
+
+- **Duplicate physics chains** — a card can resolve the *same* DynamicBone item into two items; the identical chain was
+  exported twice on the same bones (Sword-Maiden: the whole skirt twice — 8 identical chain bodies on the same bones, in
+  collision with each other). **Fix:** identical bone-index sequences are exported once.
+- **4-bit collision group overflow shared a group between chains — and every chain set its bit in every other overflow
+  chain's mask**, including its own. Same-chain bodies then collided with themselves (their own links, depth 0 up to
+  0.59 on layered panels). **Fix:** colliders are capped at group 13 (14 reserved for the garment overflow, 15 limbs), and
+  *same group* everywhere is an exclusion (bodies vs bodies, colliders vs bodies, limb colliders vs bodies).
+- **Long hair/ornament strands cannot be held by any spring the 120 Hz solver can integrate.** Horn/mane/long-tail
+  chains demand 1e3..5e4 vs the bangs ~9e2; the export capped hair springs at 280, so those strands fell to their stops and
+  trembled. **Fix:** a demand-based rule — a strand keeps mode 1 ("free dynamics") only while its gravity hold demand is
+  under the measured holdable ceiling (~2000 MMD-units); heavier strands are exported bone-aligned (mode 2): the bone holds
+  the authored pose exactly, joints keep their envelope, strand swings, solver sees a stable system.
+- **Offline replica fixed again:** mode-2 bodies now pinned to their own rest position plus the cumulative shift of their
+  kinematic ancestors (MMD's bone-aligned semantics), not to the simulated parent chain (which made them fan out
+  nonsensically).
+- **Honorable mentions, already in f974745:** garment hold spring; `BakeGarmentSettle` removed; ×1.6 mass removed;
+  garment groups per chain; rest-overlap exclusion everywhere.
+
+Result on the six cards (offline Bullet replica at MMD's 120 Hz): **zero rest-buried-but-colliding pairs on all six**
+(was up to 206), Sword-Maiden worst-case chain from 12.0 to 2.6 peak units/s, Kurumi's standing-still peak from 9.84 to
+3.43 (last-second peak 0.03), Atago to 0.0001 — all skirt/long-hair/ornament chains now hold the authored silhouette.
+
+Remaining known artifacts (small bangs swing settling within ~0.25 units): honest small-strand secondary motion, not
+instability, and not a bug.
 
 ## The two problems this answers
 

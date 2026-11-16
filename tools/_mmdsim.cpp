@@ -210,15 +210,22 @@ int main(int argc, char** argv) {
         }
         world.addConstraint(c);
     }
-    // mode 2 body -> parent body (via its joint,) for bone-aligned positioning of garment cloth in the sim
+    // Mode 2 means "physics with the bone aligned": the body keeps its simulated orientation, but its position is the
+    // bone's, which follows the skeleton (rigidly with its ancestors for a pure shift). Build each mode-2 body's
+    // kinematic-ancestor path in the joint tree, so the sim can translate it by exactly what its kinematic chain was moved.
     std::map<int, int> mode2ParentOf;
     for (const Joint& j : m.joints) if (j.b >= 0 && j.a >= 0 && j.a != j.b) mode2ParentOf[(int)j.b] = (int)j.a;
-    // rest offset of each mode 2 body, expressed in its parent body's LOCAL frame at rest
-    std::map<int, btVector3> mode2RestOffset;
-    for (const auto& [child, parent] : mode2ParentOf) {
-        if (child >= (int)m.bodies.size() || parent >= (int)m.bodies.size()) continue;
-        const btMatrix3x3 parentRot = EulerPmx(m.bodies[parent].rot.x, m.bodies[parent].rot.y, m.bodies[parent].rot.z);
-        mode2RestOffset[child] = parentRot.transpose() * (btVector3(m.bodies[child].pos.x, m.bodies[child].pos.y, m.bodies[child].pos.z) - btVector3(m.bodies[parent].pos.x, m.bodies[parent].pos.y, m.bodies[parent].pos.z));
+    std::map<int, std::vector<int>> mode2KinematicAncestors;   // the mode-0 bodies on the path to the root
+    for (size_t i = 0; i < m.bodies.size(); ++i) {
+        if (m.bodies[i].mode != 2) continue;
+        std::vector<int> path;
+        int p = mode2ParentOf.count((int)i) ? mode2ParentOf.at((int)i) : -1;
+        int guard = (int)m.bodies.size() + 1;
+        while (p >= 0 && guard-- > 0) {
+            if (m.bodies[(size_t)p].mode == 0) path.push_back(p);
+            p = mode2ParentOf.count(p) ? mode2ParentOf[p] : -1;
+        }
+        mode2KinematicAncestors[(int)i] = std::move(path);
     }
 
     // group/mask: bullet's addRigidBody uses (group, mask) as (collisionFilterGroup, collisionFilterMask); saba passes group, mask the same way.
@@ -250,21 +257,16 @@ int main(int argc, char** argv) {
         if (t >= seconds) break;
         if (step % 60 == 0 && std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "step %d t=%.3f\n", step, t);
         world.stepSimulation((float)dt, 1, (float)dt);
-        // mode 2 bodies: the bone (driven by its parent body) holds the body's position; the body keeps its simulated rotation
+        // Mode 2 bodies: the bone (which follows its kinematic chain) holds the body's position; the body keeps its simulated orientation.
         for (size_t i = 0; i < m.bodies.size(); ++i) {
             if (m.bodies[i].mode != 2 || !entries[i].rb) continue;
-            const int childBody = (int)i;
-            const int parentBody = mode2ParentOf.count(childBody) ? mode2ParentOf.at(childBody) : -1;
-            if (parentBody < 0 || mode2RestOffset.count(childBody) == 0) {
-                const btTransform t = entries[i].rb->getWorldTransform();
-                entries[i].rb->setCenterOfMassTransform(btTransform(t.getRotation(), entries[i].start));
-                entries[i].rb->setLinearVelocity(btVector3(0, 0, 0));
-                continue;
-            }
-            const btTransform parentT = entries[parentBody].rb->getWorldTransform();
-            const btVector3 newPos = parentT * mode2RestOffset[childBody];
+            btVector3 pos = entries[i].start;
+            const auto it = mode2KinematicAncestors.find((int)i);
+            if (it != mode2KinematicAncestors.end())
+                for (int anc : it->second)
+                    pos += entries[(size_t)anc].rb->getCenterOfMassPosition() - entries[(size_t)anc].start;
             const btTransform t = entries[i].rb->getWorldTransform();
-            entries[i].rb->setCenterOfMassTransform(btTransform(t.getRotation(), newPos));
+            entries[i].rb->setCenterOfMassTransform(btTransform(t.getRotation(), pos));
             entries[i].rb->setLinearVelocity(btVector3(0, 0, 0));
         }
         // report
