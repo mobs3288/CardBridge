@@ -739,6 +739,37 @@ void unitTests() {
         CHECK(CreateRunsInLinearLight("cf_m_eye_create") && CreateRunsInLinearLight("cf_m_eyewhite_create") && CreateRunsInLinearLight("cf_m_clothesN_create"));
         CHECK(!CreateRunsInLinearLight("cf_m_face_create") && !CreateRunsInLinearLight("cf_m_body_create") && !CreateRunsInLinearLight(""));
     });
+    test("nose line: the overlay stroke is feathered and quietened, RGB untouched, transparent outside is preserved", [] {
+        using assemble::SoftenNoseLineAlpha;
+        const int S = 64;
+        std::vector<uint8_t> img(static_cast<size_t>(S) * S * 4, 0);
+        // A hard black dash, like the authored nose textures: near-full alpha, a hairline edge ramp.
+        for (int y = 18; y < 46; ++y)
+            for (int x = 30; x < 34; ++x) img[(static_cast<size_t>(y) * S + x) * 4 + 3] = 255;
+        const std::vector<uint8_t> before = img;
+        SoftenNoseLineAlpha(img, S, S);
+        long long energy0 = 0, energy1 = 0;
+        bool hit255 = false;
+        for (size_t i = 0; i < img.size(); i += 4) {
+            CHECK(img[i] == before[i] && img[i + 1] == before[i + 1] && img[i + 2] == before[i + 2]);   // RGB untouched
+            energy0 += before[i + 3];
+            energy1 += img[i + 3];
+            hit255 = hit255 || img[i + 3] == 255;
+        }
+        CHECK(!hit255);                                             // the near-opaque dash is gone; the stroke now blends with the skin
+        CHECK(energy1 * 100 > energy0 * 55);                        // the stroke is never erased - still a deliberate, recognisable nose detail
+        CHECK(img[(static_cast<size_t>(32) * S + 6) * 4 + 3] == 0); // a pixel far from the stroke stays transparent
+        // All-transparent input stays all-transparent.
+        std::vector<uint8_t> empty(static_cast<size_t>(S) * S * 4, 0);
+        SoftenNoseLineAlpha(empty, S, S);
+        bool allZero = true;
+        for (uint8_t v : empty) allZero = allZero && v == 0;
+        CHECK(allZero);
+        // Degenerate sizes are no-ops, not crashes.
+        std::vector<uint8_t> tiny;
+        SoftenNoseLineAlpha(tiny, 0, 0);
+        SoftenNoseLineAlpha(img, 0, 0);
+    });
     test("item prefab roots keep their own transform under the node the game parents them to", [] {
         // SetParent(parent, worldPositionStays: false): a hair or accessory root with an offset and scale keeps both.
         const Mat4 parent = Mat4::TRS({1, 2, 3}, Quat{}, {1, 1, 1});

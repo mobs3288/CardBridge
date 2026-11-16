@@ -2074,6 +2074,65 @@ std::shared_ptr<unity::TextureData> ResolveBodyMask(const MaskLookup& lookup, co
     return nullptr;
 }
 
+// A nose line is an overlay the game draws as near-opaque black with a hard alpha edge — an unrelated dark dash on the
+// skin. Feather and quieten it so it reads as a soft shadow in the skin's own hue: alpha blending darkens toward the
+// skin colour underneath, whatever the skin tone or the nose texture's authored style, so RGB keeps the authored black
+// (which is also what the toon_nose shader passes through). Two gaussian taps: a tight one keeps the stroke soft but
+// present, a wide one feathers it out so it sits in the face shading instead of on top of it. Works on any
+// transparent-stroke texture: nothing is baked against a particular resolution, palette or UV layout.
+void SoftenNoseLineAlpha(std::vector<uint8_t>& rgba, int w, int h) {
+    if (w <= 0 || h <= 0 || rgba.size() < static_cast<size_t>(w) * h * 4) return;
+    const int n = w * h;
+    std::vector<float> a(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) a[static_cast<size_t>(i)] = rgba[static_cast<size_t>(i) * 4 + 3] / 255.0f;
+    const float small = std::max(0.8f, static_cast<float>(std::min(w, h)) / 427.0f);   // a thin face, not a smudge
+    const float wide = std::max(2.0f, static_cast<float>(std::min(w, h)) / 128.0f);    // the feather that fuses it to the skin
+    auto blur = [&](const std::vector<float>& src, float sigma) {
+        const int radius = std::max(1, static_cast<int>(sigma * 2.6f + 0.5f));
+        std::vector<float> kernel(static_cast<size_t>(2 * radius + 1));
+        float ksum = 0.0f;
+        for (int i = -radius; i <= radius; ++i) {
+            const float g = std::exp(-0.5f * (static_cast<float>(i) / sigma) * (static_cast<float>(i) / sigma));
+            kernel[static_cast<size_t>(i + radius)] = g;
+            ksum += g;
+        }
+        for (float& k : kernel) k /= ksum;
+        std::vector<float> tmp(static_cast<size_t>(n)), out(static_cast<size_t>(n));
+        for (int y = 0; y < h; ++y) {           // horizontal pass
+            const size_t row = static_cast<size_t>(y) * w;
+            for (int x = 0; x < w; ++x) {
+                float acc = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    const int sx = std::min(w - 1, std::max(0, x + k));
+                    acc += kernel[static_cast<size_t>(k + radius)] * src[row + static_cast<size_t>(sx)];
+                }
+                tmp[row + static_cast<size_t>(x)] = acc;
+            }
+        }
+        for (int x = 0; x < w; ++x) {           // vertical pass
+            for (int y = 0; y < h; ++y) {
+                float acc = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    const int sy = std::min(h - 1, std::max(0, y + k));
+                    acc += kernel[static_cast<size_t>(k + radius)] * tmp[static_cast<size_t>(sy) * w + static_cast<size_t>(x)];
+                }
+                out[static_cast<size_t>(y) * w + static_cast<size_t>(x)] = acc;
+            }
+        }
+        return out;
+    };
+    const std::vector<float> narrow = blur(a, small), feather = blur(a, wide);
+    constexpr float kNarrow = 0.65f, kFeather = 0.5f, kScale = 0.62f, kGamma = 0.6f;   // present, but never an ink dash
+    for (int i = 0; i < n; ++i) {
+        // A gamma lift (order-preserving) keeps authored low-alpha strokes (the wide, faint arcs) recognisable instead of
+        // erasing them together with the black dashes; the near-opaque ones land at ~0.7, not at 1.
+        const float b = std::min(1.0f, std::max(0.0f, narrow[static_cast<size_t>(i)] * kNarrow + feather[static_cast<size_t>(i)] * kFeather));
+        const float v = std::pow(b, kGamma) * kScale;
+        rgba[static_cast<size_t>(i) * 4 + 3] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f)));
+    }
+}
+
+
 void SettleHeels(Scene& scene) { settleHeels(scene); }
 
 bool CreateRunsInLinearLight(const std::string& materialName) {
@@ -2949,6 +3008,17 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     return b.addSceneTexture(out.name, "card (KoiSkinOverlayX)", out.width, out.height, std::move(out.rgba));
                 }
                 if (!tex) return -1;
+                // The nose line: the stock stroke is a hard black dash; feather and quieten it so it reads as a soft shadow on the
+                // skin (see SoftenNoseLineAlpha). RGB keeps the authored black — blending it over the skin is what darkens the skin
+                // toward its own hue, so the fix fits every skin tone and every authored nose texture style.
+                if (rendererName == "cf_O_noseline" && !std::getenv("CARDBRIDGE_NO_NOSE_SOFTEN")) {
+                    unity::TextureData soft = *tex;
+                    SoftenNoseLineAlpha(soft.rgba, soft.width, soft.height);
+                    int idx = b.addSceneTexture(tex->name + "_soft", uf->name(), soft.width, soft.height, std::move(soft.rgba));
+                    scene.textures[static_cast<size_t>(idx)].clamp = tex->wrapMode == 1;   // sampled exactly like its source
+                    scene.textures[static_cast<size_t>(idx)].srgb = tex->colorSpace == 1;
+                    return idx;
+                }
                 // The iris and the white of the eye are drawn through the game's own create shaders (iris: gradient between the two
                 // colours by the gradation mask; white: base and sub colour).
                 const bool isWhite = rendererName == "cf_Ohitomi_L" || rendererName == "cf_Ohitomi_R";

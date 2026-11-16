@@ -73,6 +73,12 @@ struct AssembleOptions {
 // were measured against the game as stored. Checked against the game's own render textures: the iris result was 16/255 off drawn as stored, 1 in linear.
 bool CreateRunsInLinearLight(const std::string& materialName);
 
+// Softens the nose-line overlay stroke the same way the assembly does for the "cf_O_noseline" texture (see the .cpp):
+// two gaussian taps (a tight one keeps the stroke soft but present, a wide one feathers it out into the surrounding skin),
+// RGB untouched. Alpha blending darkens toward the skin hue underneath, whatever the skin tone or the nose texture's
+// authored style, so the same pass works on the stock black strokes and on mods' grey arcs alike. Exposed for tests.
+void SoftenNoseLineAlpha(std::vector<uint8_t>& rgba, int w, int h);
+
 // Where an item prefab's root hangs in the model: the game instantiates the prefab and parents it with
 // SetParent(parent, worldPositionStays: false) (ChaControl.ChangeAccessoryParent for accessories, ChangeHairAsync for hair),
 // so the root keeps its own local position, rotation and scale under the parent. `parent` is the attach or hair node's world
