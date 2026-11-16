@@ -36,13 +36,6 @@ constexpr uint8_t kPmxGroupChain = 1;
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
                 const assemble::JiggleSettings& jiggle = {});
 
-// Skirts and coat tails turn with the legs (called by AddPhysics). A garment chain keeps the authored drape as its equilibrium, so a
-// thigh swung forward can still push the cloth aside; to keep the cloth from clipping into the leg the export ties the chain's root bone
-// to the thigh(s) it hangs over by append rotation (MMD's 付与) — by how far in front of that thigh it hangs; one between the legs follows
-// both, the second leg through the root's own parent bone. Those bones go to deform layer 1 so the leg (and its foot IK) is solved first.
-// Needs the game's leg bones (cf_j_thigh00_L ...) and `model.bones` parallel to `scene.bones`; otherwise it does nothing.
-void AddLegFollow(const assemble::Scene& scene, pmx::Model& model);
-
 // The bones of a chain that get a rigid body: the chain's valid bones without its stubs. A stub is a leaf node that points back up the chain
 // (the skirts' cf_j_sk_xx_05_end sits above its parent): a body spanning to it would stand on its joint upside down and flip over in
 // MikuMikuDance, so the parent stays the last link and its body carries on in the direction the chain came from.

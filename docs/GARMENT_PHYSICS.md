@@ -4,9 +4,22 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
-## Update — the systemic pass (garments, hair and accessories together)
+## Update 2 — the leg-follow append removed (the "straight-tube skirt")
 
-After the skirt fix, severe jitter remained in *accessories* as well. Root-caused across six cards; see "Systemic findings" below.
+After the asymmetric envelope landed, MikuMikuDance still rendered the Kurumi skirt as a narrow, pinned column that did not
+use the card's drape at all — even with no VMD or pose applied, at rest pose, with physics off. Diagnosis, confirmed on the
+export's own numbers (`A-pose` toggled off, FK recomputed from PMX bytes): the exported garment chain roots carried an
+append rotation into the thigh bones (`SkirtBoneL01 → cf_j_thigh00_L` at 75%, `SkirtBoneL07` at 17%, `SkirtBoneM01` at 35%,
+right side mirrored) — MegaMMD applies append-rotation formulas at rest too, so the standing pose started by folding every
+panel root 15–25° inward, and MikuMikuDance then pinned it that way. Cardbridge's own preview ignored the append, so the
+wide flared silhouette rendered perfectly there while the MMD-side file quietly collapsed it. Fix: `AddLegFollow` and the
+`kLegFollow` constant are gone entirely. Garment chains now carry **no append rotation and never promote a bone to deform
+layer 1**. Validation: regression test updated to assert zero appends and zero layer promotions; MikuMikuDance must be
+checked on the next import.
+
+## Systemic findings (garments, hair and accessories together)
+
+After the skirt fix, severe jitter remained in *accessories* as well. Root-caused across six cards:
 
 - **Duplicate physics chains** — a card can resolve the *same* DynamicBone item into two items; the identical chain was
   exported twice on the same bones (Sword-Maiden: the whole skirt twice — 8 identical chain bodies on the same bones, in
@@ -32,6 +45,19 @@ Result on the six cards (offline Bullet replica at MMD's 120 Hz): **zero rest-bu
 
 Remaining known artifacts (small bangs swing settling within ~0.25 units): honest small-strand secondary motion, not
 instability, and not a bug.
+
+## Update 2 — the leg-follow append removed (the "straight-tube skirt")
+
+After the asymmetric envelope landed, MikuMikuDance still rendered the Kurumi skirt as a narrow, pinned column that did not
+use the card's drape at all — even with no VMD or pose applied, at rest pose, with physics off. Diagnosis, confirmed on the
+export's own numbers (A-Pose toggled off, FK recomputed from PMX bytes): the exported garment chain roots carried an
+append rotation into the thigh bones (SkirtBoneL01 → cf_j_thigh00_L at 75%, SkirtBoneL07 at 17%, SkirtBoneM01 at 35%; mirrored
+on the right side) — MikuMikuDance applies append-rotation rules at rest too, so the standing pose started by folding every
+panel root 15–25° inward, and MikuMikuDance then held it there. Cardbridge's own preview ignored the append, so the wide
+flared silhouette rendered perfectly there while the MMD-side file quietly collapsed it. Fix: `AddLegFollow` and the
+`kLegFollow` constant are gone entirely. Garment chains now carry **no append rotation and never promote a bone to deform
+layer 1**. Validation: regression test asserts zero appends across garment chains; MikuMikuDance must be checked on the
+next import.
 
 ## The two problems this answers
 
@@ -116,7 +142,7 @@ Exported (CLI) with the new code, the Kurumi export simulates to:
 
 - `src/export/PmxPhysics.cpp` — garment chains export mode 2; per-joint hold spring; per-chain collision groups;
   overlapping chains excluded; drop the ×1.6 mass mult and `kGarmentMaxBend`-only behaviour.
-- `src/export/PmxPhysics.h` — `AddLegFollow` comment corrected (garments are not "locked"); modes documented.
+- `src/export/PmxPhysics.h` — mode 2 / mode semantics comments record garment behaviour; leg-follow append removed.
 - `src/assemble/Pose.cpp` / `Pose.h` / `cli/main.cpp` — `BakeGarmentSettle` removed entirely.
 - `tests/cardbridge_tests.cpp` — hang-bake test rewritten as the authored-drape regression
   ("the exported garment keeps the authored drape"); mode-2 regression ("garment chain bodies are bone-aligned");

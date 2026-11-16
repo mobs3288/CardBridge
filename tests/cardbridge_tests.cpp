@@ -2220,7 +2220,7 @@ void unitTests() {
         }
     });
 
-    test("physics: garments hanging in front of the thighs turn with the legs, after them; the sides, the back and the hair do not", [] {
+    test("physics: MikuMikuDance does not fold the skirt by append rotation - garments attach to no leg, stay at layer 0", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
         for (int side = 0; side < 2; ++side) {   // the game's leg bones; the toes point to +Z, so that is the front
@@ -2252,15 +2252,12 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        const auto& fl = m.bones[static_cast<size_t>(frontLeft)];
-        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.7f && fl.appendRatio <= 0.75f && fl.layer == 1);
-        CHECK(m.bones[static_cast<size_t>(frontLeft) + 3].layer == 1);   // what hangs from it moves after it too
-        const auto& c = m.bones[static_cast<size_t>(centre)];
-        const auto& ct = m.bones[static_cast<size_t>(centreTop)];
-        CHECK(c.appendParent >= 0 && ct.appendParent >= 0 && c.appendParent != ct.appendParent);   // one leg each
-        CHECK(c.appendRatio > 0.35f && c.appendRatio < 0.5f && std::fabs(c.appendRatio - ct.appendRatio) < 1e-4f && ct.layer == 1);
-        for (int b : {side, back, hair}) CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0 && m.bones[static_cast<size_t>(b)].layer == 0);
-        CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);   // the legs themselves are untouched
+        // MikuMikuDance evaluates append rotations at rest too; an append toward the thigh would fold the skirt into a
+        // tube in the character's standing pose (observed on the Kurumi card). No garment appends the legs at all.
+        for (int b : {frontLeft, centre, centreTop, side, back, hair})
+            CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0);
+        for (size_t i = 0; i < m.bones.size(); ++i)
+            CHECK(m.bones[i].layer == 0);        // no deform-layer promotion off the back of the leg bones either
     });
 
     test("physics: garment chain bodies are bone-aligned (mode 2) - the bone holds the panel; the panel swings around its joints", [] {
