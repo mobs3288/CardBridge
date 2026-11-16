@@ -40,6 +40,7 @@ COLORREF SelActionColor(card::SelectiveAction a) {
     case card::SelectiveAction::Replace:      return RGB(244, 192, 94);
     case card::SelectiveAction::KeepExisting: return RGB(110, 168, 244);
     case card::SelectiveAction::Skip:         return RGB(139, 146, 163);
+    case card::SelectiveAction::AddLayer:     return RGB(196, 120, 250);
     }
     return RGB(139, 146, 163);
 }
@@ -49,6 +50,7 @@ static COLORREF SelActionText(card::SelectiveAction a) {
     case card::SelectiveAction::Replace:      return RGB(84, 60, 18);
     case card::SelectiveAction::KeepExisting: return RGB(18, 52, 84);
     case card::SelectiveAction::Skip:         return RGB(38, 40, 48);
+    case card::SelectiveAction::AddLayer:     return RGB(64, 24, 96);
     }
     return RGB(38, 40, 48);
 }
@@ -94,6 +96,11 @@ std::vector<int> SelComponentParts(const assemble::Scene& scene, int outfit, con
         const std::string& id = scene.parts[i].id;
         if (id == base) { out.push_back(static_cast<int>(i)); continue; }
         if (comp.kind == 0 && comp.slot == 0 && id.rfind(base + ".sub_", 0) == 0) out.push_back(static_cast<int>(i));   // the top's jacket/sailor sub-parts
+        if (comp.kind == 0) {   // the layer grafted on top: "outfitN.<slot>.l<k>" (and its jacket/sailor sub-parts)
+            const size_t llen = base.size();
+            if (id.size() > llen + 3 && id.compare(0, llen, base) == 0 && id[llen] == '.' && id[llen + 1] == 'l')
+                out.push_back(static_cast<int>(i));
+        }
     }
     return out;
 }
@@ -151,6 +158,10 @@ struct SelLayout {
     RECT cancelBtn, applyBtn;
     RECT footer;
     RECT scrollTrack;                  // the list's scrollbar thumb area
+    // the garment layers of the pinned import(s), drawn above the components list while any exist
+    RECT layersCard;                   // where the layers strip is drawn
+    std::vector<RECT> layerRows;       // one row per pinned layer (name + remove button)
+    std::vector<RECT> layerRemove;     // each row's small "x" button
 };
 
 SelLayout SelLay(int W, int H) {
@@ -183,7 +194,28 @@ SelLayout SelLay(int W, int H) {
     const int bodyH = std::max(120, H - footerH - M - bodyTop);
     l.footer = RECT{M, H - footerH, W - M, H};
     const int listW = std::clamp(static_cast<int>(W * 0.46f), 440, 760);
-    l.listCard = RECT{M, bodyTop, M + listW, H - footerH - M + 1};
+    const int pinnedLayers = [&] {
+        int n = 0;
+        for (const ClothingPin& pin : g.clothingPins) if (pin.mode == 3) ++n;
+        return n;
+    }();
+    const int layersH = pinnedLayers > 0 ? 46 : 0;
+    l.layersCard = RECT{M, bodyTop, 0, 0};
+    int layerRow = 0;
+    l.layerRows.clear();
+    l.layerRemove.clear();
+    if (pinnedLayers > 0) {
+        l.layersCard = RECT{M, bodyTop, M + listW, bodyTop + layersH};
+        for (const ClothingPin& pin : g.clothingPins) {
+            if (pin.mode != 3) continue;
+            const int y = l.layersCard.top + 7 + layerRow * 38;
+            l.layerRows.push_back(RECT{l.layersCard.left + 8, y, l.layersCard.right - 34, y + 32});
+            l.layerRemove.push_back(RECT{l.layersCard.right - 28, y + 6, l.layersCard.right - 4, y + 26});
+            ++layerRow;
+        }
+    }
+    const int listTop2 = bodyTop + layersH + (pinnedLayers > 0 ? 8 : 0);
+    l.listCard = RECT{M, listTop2, M + listW, H - footerH - M + 1};
     l.listClip = RECT{l.listCard.left, l.listCard.top, l.listCard.right, l.listCard.bottom};
     l.listTop = l.listCard.top + 34;   // under the "COMPONENTS" heading
     l.scrollTrack = RECT{l.listCard.right - 10, l.listTop, l.listCard.right - 2, l.listCard.bottom - 6};
@@ -241,13 +273,16 @@ int SelListMaxScroll(const SelLayout& l) {
     return std::max(0, SelListContentHeight() - (static_cast<int>(l.listClip.bottom) - l.listTop));
 }
 
-// The action buttons of one row, right-aligned; shared by the drawing and the hit test.
-struct SelActionRects { RECT add, replace, keep, skip; };
-SelActionRects SelActionButtonRects(const SelLayout& l, const RECT& row) {
-    const int w = 44, h = 22, gap = 4;
-    int x = l.listClip.right - 8 - (4 * w + 3 * gap);
+// The action buttons of one row, right-aligned; shared by the drawing and the hit test. Clothes rows carry a
+// fifth button — "Add" the garment into an extra "layer" on top of the outfit, besides whatever the slot already holds.
+struct SelActionRects { RECT addLayer, add, replace, keep, skip; };
+SelActionRects SelActionButtonRects(const SelLayout& l, const RECT& row, bool withAddLayer = false) {
+    const int w = withAddLayer ? 40 : 44, h = 22, gap = 4;
+    const int n = withAddLayer ? 5 : 4;
+    int x = l.listClip.right - 8 - (n * w + (n - 1) * gap);
     const int y = row.top + (row.bottom - row.top - h) / 2;
     SelActionRects r;
+    if (withAddLayer) { r.addLayer = {x, y, x + w, y + h}; x += w + gap; } else r.addLayer = {};
     r.add = {x, y, x + w, y + h}; x += w + gap;
     r.replace = {x, y, x + w, y + h}; x += w + gap;
     r.keep = {x, y, x + w, y + h}; x += w + gap;
@@ -258,6 +293,33 @@ SelActionRects SelActionButtonRects(const SelLayout& l, const RECT& row) {
 
 
 // ==================================================================== building & uploads ========================
+
+// The garment layers the user picked (AddLayer on clothes components), in slot order with stable layer indices.
+// Both the preview assembly and the pinned-import reload build the layers from the same list, so preview == apply.
+std::vector<assemble::AssembleLayerSpec> SelLayersFromDecisions(const std::map<std::string, card::SelectiveAction>& decisions) {
+    std::vector<const card::SelectiveComponent*> picked;
+    for (const SelectiveComp& sc : g.sel.comps) {
+        const auto it = decisions.find(sc.comp.key);
+        const card::SelectiveAction a = it == decisions.end() ? card::SuggestedAction(sc.comp) : it->second;
+        if (a == card::SelectiveAction::AddLayer && sc.comp.kind == 0 && sc.comp.slot >= 0 && sc.comp.slot < 9)
+            picked.push_back(&sc.comp);
+    }
+    std::stable_sort(picked.begin(), picked.end(), [](const card::SelectiveComponent* a, const card::SelectiveComponent* b) { return a->slot < b->slot; });
+    std::vector<assemble::AssembleLayerSpec> out;
+    int index = 1;
+    const std::string base = g.sel.srcName.empty() ? fileio::FileName(g.sel.srcPath) : g.sel.srcName;
+    for (const card::SelectiveComponent* comp : picked) {
+        assemble::AssembleLayerSpec spec;
+        spec.path = g.sel.srcPath;
+        spec.srcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
+        spec.dstOutfit = g.sel.dstOutfit;
+        spec.slots = {comp->slot};
+        spec.name = base + " (layer " + comp->slotName + ")";
+        spec.layerIndex = index++;
+        out.push_back(std::move(spec));
+    }
+    return out;
+}
 
 // The assembly options for a preview scene. `useSource` gives the *source character* its own card's
 // proportions; everything else mirrors what the on-screen character gets (so the proposal matches
@@ -408,9 +470,13 @@ void SelBuildProposal() {
             card::ApplyClothingOptions opt;
             opt.outfit = dstOutfit;
             opt.srcOutfit = srcOutfit;
+            // Layers (AddLayer) never reach the merge — the merge treats them as no-ops — but they must still be
+            // part of the proposed scene, so the preview matches the applied result: assemble with the layers attached.
             const card::SelectiveOutfitReport rep = card::ApplySelectiveOutfitSource(copy, path, opt, decisions);
             applyRep = rep.apply;
-            sc = std::make_shared<assemble::Scene>(assemble::Assemble(copy, *resolver, SelAssembleOptions(dstOutfit, false)));
+            assemble::AssembleOptions ao = SelAssembleOptions(dstOutfit, false);
+            ao.layers = SelLayersFromDecisions(decisions.actions);
+            sc = std::make_shared<assemble::Scene>(assemble::Assemble(copy, *resolver, ao));
         } catch (const std::exception& e) {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
             if (g.sel.session == session && g.sel.proposalGen == gen) {
@@ -874,6 +940,26 @@ void SelTimerFired() {
     SelBuildProposal();
 }
 
+// Remove the pinned layer at `layerIndex` (counted across all pinned layer pins) and reload, restoring the stack below it.
+void SelRemoveLayer(int layerIndex) {
+    if (layerIndex < 0) return;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        int n = -1;
+        for (auto it = g.clothingPins.begin(); it != g.clothingPins.end(); ++it) {
+            if (it->mode != 3) continue;
+            ++n;
+            if (n == layerIndex) {
+                Log("removed layer \"" + it->name + "\" from the import stack", LogKind::Info);
+                g.clothingPins.erase(it);
+                break;
+            }
+        }
+    }
+    // reload the character without the layer
+    StartLoad(g.cardPath, -1, true);
+}
+
 // ==================================================================== open / close ========================
 
 void SelectiveInvalidateView();
@@ -1185,12 +1271,12 @@ enum SelBtn {
     kSelNone = 0,
     kSelRowAdd = 1, kSelRowReplace = 2, kSelRowKeep = 3, kSelRowSkip = 4,
     kSelResetDecisions = 5, kSelAllReplace = 6, kSelAllSkip = 7, kSelCancel = 8, kSelApply = 9,
-    kSelLinkCams = 10, kSelAPose = 11, kSelSrcPrev = 12, kSelSrcNext = 13,
+    kSelLinkCams = 10, kSelAPose = 11, kSelSrcPrev = 12, kSelSrcNext = 13, kSelRowAddLayer = 14,
 };
 
 struct SelHit {
-    int kind;      // 0 nothing, 1 a button, 2 a component row, 3 a row's action button, 4 a viewport, 5 the list scrollbar track
-    int id = 0;     // the button id / the component index / the view index
+    int kind;      // 0 nothing, 1 a button, 2 a component row, 3 a row's action button, 4 a viewport, 5 the list scrollbar track, 6 a pinned-layer's remove button
+    int id = 0;     // the button id / the component index / the view index / the layer row index
     card::SelectiveAction action = card::SelectiveAction::Skip;
 };
 
@@ -1201,12 +1287,16 @@ SelHit SelHitTest(const SelLayout& l, int x, int y) {
     if (g.sel.srcIsCoordinate && PtInRect(&l.srcPrev, p)) return {1, kSelSrcPrev};
     if (g.sel.srcIsCoordinate && PtInRect(&l.srcNext, p)) return {1, kSelSrcNext};
     for (int i = 0; i < 3; ++i) if (PtInRect(&l.views[i], p)) return {4, i};
+    for (size_t ri = 0; ri < l.layerRows.size() && ri < l.layerRemove.size(); ++ri)
+        if (PtInRect(&l.layerRemove[ri], p)) return {6, static_cast<int>(ri)};   // remove that pinned layer
     if (PtInRect(&l.listClip, p)) {
         for (const SelRowRect& rr : SelVisibleRows(l, static_cast<int>(std::lround(g.sel.listPos)))) {
             if (rr.kind != 1) continue;
             const int ci = rr.comp;
+            const bool isClothes = g.sel.comps[static_cast<size_t>(ci)].comp.kind == 0;
             const RECT row{l.listClip.left + 6, rr.top + 1, l.listClip.right - 12, rr.bottom - 1};
-            const SelActionRects rb = SelActionButtonRects(l, row);
+            const SelActionRects rb = SelActionButtonRects(l, row, isClothes);
+            if (isClothes && PtInRect(&rb.addLayer, p)) return {3, ci, card::SelectiveAction::AddLayer};
             if (PtInRect(&rb.add, p)) return {3, ci, card::SelectiveAction::Add};
             if (PtInRect(&rb.replace, p)) return {3, ci, card::SelectiveAction::Replace};
             if (PtInRect(&rb.keep, p)) return {3, ci, card::SelectiveAction::KeepExisting};
@@ -1306,9 +1396,15 @@ void SelMouseDown(int x, int y, bool right, bool middle) {
     }
     if (hit.kind == 3) {   // a row's action button
         SelSetDecision(hit.id, hit.action);
-        g.sel.hoverAction = hit.action == card::SelectiveAction::Add ? kSelRowAdd
+        g.sel.hoverAction = hit.action == card::SelectiveAction::AddLayer ? kSelRowAddLayer
+                           : hit.action == card::SelectiveAction::Add ? kSelRowAdd
                            : hit.action == card::SelectiveAction::Replace ? kSelRowReplace
                            : hit.action == card::SelectiveAction::KeepExisting ? kSelRowKeep : kSelRowSkip;
+        SelectiveInvalidateView();
+        return;
+    }
+    if (hit.kind == 6 && hit.id >= 0) {   // remove a pinned layer
+        SelRemoveLayer(hit.id);
         SelectiveInvalidateView();
         return;
     }
@@ -1370,8 +1466,10 @@ void SelMouseMove(int x, int y) {
     const SelHit hit = SelHitTest(l, x, y);
     int hoverBtn = 0;
     if (hit.kind == 1) hoverBtn = hit.id;
+    else if (hit.kind == 6) hoverBtn = 100 + hit.id;
     else if (hit.kind == 3)
-        hoverBtn = hit.action == card::SelectiveAction::Add ? kSelRowAdd
+        hoverBtn = hit.action == card::SelectiveAction::AddLayer ? kSelRowAddLayer
+                 : hit.action == card::SelectiveAction::Add ? kSelRowAdd
                  : hit.action == card::SelectiveAction::Replace ? kSelRowReplace
                  : hit.action == card::SelectiveAction::KeepExisting ? kSelRowKeep : kSelRowSkip;
     g.sel.hoverAction = hoverBtn;
@@ -1474,13 +1572,17 @@ void SelDumpLayout() {
         const auto& comp = g.sel.comps[i].comp;
         if (comp.category != curCat) { curCat = comp.category; y += 22; }
         const RECT row{l.listClip.left + 6, y, l.listClip.right - 12, y + 40};
-        const SelActionRects rb = SelActionButtonRects(l, row);
-        j["rows"].push_back({{"key", comp.key}, {"y", (row.top + row.bottom) / 2}, {"add", mid(rb.add)}, {"replace", mid(rb.replace)}, {"keep", mid(rb.keep)}, {"skip", mid(rb.skip)}});
+        const SelActionRects rb = SelActionButtonRects(l, row, comp.kind == 0);
+        j["rows"].push_back({{"key", comp.key}, {"y", (row.top + row.bottom) / 2}, {"addLayer", mid(rb.addLayer)}, {"add", mid(rb.add)}, {"replace", mid(rb.replace)}, {"keep", mid(rb.keep)}, {"skip", mid(rb.skip)}});
         y += 40;
     }
     j["ready"] = SelPreviewsReady();
     j["buildingProposal"] = g.sel.buildingProposal;
     j["proposalQueued"] = g.sel.proposalQueued;
+    j["layers"] = nlohmann::json::array();
+    for (const ClothingPin& pin : g.clothingPins)
+        if (pin.mode == 3)
+            j["layers"].push_back({{"name", pin.name}, {"slots", pin.layerSlots}, {"dstOutfit", pin.dstOutfit}});
     std::string s = j.dump();
     if (FILE* f = std::fopen(path, "wb")) { std::fwrite(s.data(), 1, s.size(), f); std::fclose(f); }
 }
@@ -1642,6 +1744,7 @@ void SelDrawLegend(HDC dc, const SelLayout& l) {
         SelDrawLegendChip(dc, x, y, col, label);
         x += 16 + SelTextWidth(SelFontTiny(), label) + 14;
     };
+    chip(SelActionColor(card::SelectiveAction::AddLayer), "Add layer");
     chip(SelActionColor(card::SelectiveAction::Add), "Add");
     chip(SelActionColor(card::SelectiveAction::Replace), "Replace");
     chip(SelActionColor(card::SelectiveAction::KeepExisting), "Keep existing");
@@ -1655,6 +1758,32 @@ void SelDrawLegend(HDC dc, const SelLayout& l) {
     LineTo(dc, l.legend.right, l.legend.top);
     SelectObject(dc, op);
     DeleteObject(p);
+}
+
+// The pinned garment layers (the ones laid on top of the shown outfit): a strip with one row per layer and a remove button.
+// Drawn between the legend and the component list while any layer is pinned. Removing a layer reloads the character.
+void SelDrawLayers(HDC dc, const SelLayout& l) {
+    if (l.layerRows.empty()) return;
+    SelRoundBox(dc, l.layersCard, 8, ui::kCardHi, RGB(40, 46, 64));
+    SelText(dc, SelFontTiny(), ui::kFaint, l.layersCard.left + 8, l.layersCard.top + 5, "LAYERS (top of the outfit, applied in order)");
+    size_t drawn = 0;
+    for (const ClothingPin& pin : g.clothingPins) {
+        if (pin.mode != 3) continue;
+        const size_t i = drawn;
+        if (i >= l.layerRows.size()) break;
+        const RECT row = l.layerRows[i];
+        const RECT xBtn = l.layerRemove[i];
+        const bool hot = g.sel.hoverAction == 100 + static_cast<int>(i);
+        SelRoundBox(dc, row, 8, hot ? RGB(56, 44, 70) : ui::kCard, hot ? RGB(96, 78, 116) : RGB(52, 58, 82));
+        std::string label = pin.name.empty() ? std::string("layer") : pin.name;
+        SelText(dc, g.fontBold, ui::kText, row.left + 8, row.top + 7, "+ " + ClipText(label, 26));
+        SelRoundBox(dc, xBtn, 5, hot ? RGB(80, 36, 36) : RGB(48, 36, 44), hot ? ui::kBad : RGB(58, 44, 54));
+        RECT r{xBtn.left, xBtn.top, xBtn.right, xBtn.bottom};
+        SetTextColor(dc, hot ? RGB(255, 190, 180) : ui::kFaint);
+        SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, L"x", -1, &r, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        ++drawn;
+    }
 }
 
 // The component list's rows, clipped to the list area.
@@ -1701,7 +1830,7 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         DeleteObject(dot); DeleteObject(dotPen);
         // two text lines
         const int tx = row.left + 28;
-        const int textRight = SelActionButtonRects(l, row).add.left - 8;
+        const int textRight = (sc.comp.kind == 0 ? SelActionButtonRects(l, row, true).addLayer.left : SelActionButtonRects(l, row, false).add.left) - 8;
         RECT line1{tx, row.top + 3, textRight, row.top + 20};
         RECT line2{tx, row.top + 20, textRight, row.bottom - 2};
         std::string l1 = sc.comp.label + " - " + (sc.sourceName.empty() ? std::string("?") : sc.sourceName);
@@ -1719,8 +1848,11 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         SelectObject(dc, SelFontTiny());
         DrawTextW(dc, Utf8ToWide(l2).c_str(), -1, &line2, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         // the action buttons
-        const SelActionRects rb = SelActionButtonRects(l, row);
+        const bool isClothes = sc.comp.kind == 0;
+        const SelActionRects rb = SelActionButtonRects(l, row, isClothes);
         const UINT hot = g.sel.hoverAction;
+        if (isClothes) SelDrawActionBtn(dc, rb.addLayer, "Add layer", card::SelectiveAction::AddLayer,
+                                        eff == card::SelectiveAction::AddLayer, hot == kSelRowAddLayer, true);
         SelDrawActionBtn(dc, rb.add, "Add", card::SelectiveAction::Add, eff == card::SelectiveAction::Add, hot == 1, !sc.comp.hasExisting || sc.comp.kind == 1);
         SelDrawActionBtn(dc, rb.replace, "Replace", card::SelectiveAction::Replace, eff == card::SelectiveAction::Replace, hot == 2, sc.comp.hasExisting);
         SelDrawActionBtn(dc, rb.keep, "Keep", card::SelectiveAction::KeepExisting, eff == card::SelectiveAction::KeepExisting, hot == 3, sc.comp.hasExisting);
@@ -1883,6 +2015,7 @@ void SelPaint(HWND hwnd) {
     SelViewportBordersAndChips(dc, l);
     // 2D chrome
     SelDrawLegend(dc, l);
+    SelDrawLayers(dc, l);
     SelDrawComponentList(dc, l);
     SelDrawSummary(dc, l);
     SelDrawFooter(dc, l.footer);
@@ -1969,25 +2102,40 @@ void SelApply() {
     size_t layerCount = 0;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
+        // the layers this apply adds (AddLayer on clothes components), in slot order with stable layer indices
+        const std::vector<assemble::AssembleLayerSpec> specLayers = SelLayersFromDecisions(g.sel.decisions);
+        for (const assemble::AssembleLayerSpec& spec : specLayers) {
+            ClothingPin lp;
+            lp.path = spec.path;
+            lp.name = spec.name;
+            lp.mode = 3;
+            lp.srcOutfit = spec.srcOutfit;
+            lp.dstOutfit = outfit;
+            lp.layerSlots = spec.slots;
+            g.clothingPins.push_back(std::move(lp));
+        }
+        // everything else becomes/extends a normal (mode 2) pinned merge
+        card::SelectiveDecisions merge;
+        for (const auto& [key, action] : g.sel.decisions)
+            if (action != card::SelectiveAction::AddLayer) merge.actions[key] = action;
         ClothingPin pin;
         pin.path = g.sel.srcPath;
         pin.name = (name.empty() ? fileio::FileName(g.sel.srcPath) : name) + " (selective)";
         pin.mode = 2;
         pin.srcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
         pin.dstOutfit = outfit;
-        pin.decisions = g.sel.decisions;
-        // A Selective Import layers onto whatever is pinned before it (on every reload, from disk, in
-        // order): sources from several cards compose into one outfit. Replace All and Coordinate imports
-        // still replace the stack wholesale when they are applied.
+        pin.decisions = merge.actions;
         g.clothingPins.push_back(std::move(pin));
         layerCount = g.clothingPins.size();
     }
+    const size_t layerSpecCount = [&] { size_t n = 0; for (const auto& kv : g.sel.decisions) if (kv.second == card::SelectiveAction::AddLayer) ++n; return n; }();
     const int kept = static_cast<int>(g.sel.decisions.size());
     SelectiveClose();
     StartLoad(g.cardPath, outfit, true);
-    Log("selective import applied to outfit " + std::to_string(outfit + 1) + " (" + std::to_string(kept) + " component choice(s))" +
-        (layerCount > 1 ? "; layer " + std::to_string(layerCount) + " of the imported-clothing stack" : std::string()) +
-        "; in memory only, card not saved", LogKind::Good);
+    Log("selective import applied to outfit " + std::to_string(outfit + 1) + " (" + std::to_string(kept) + " component choice(s))"
+        + (layerSpecCount > 0 ? "; " + std::to_string(layerSpecCount) + " grafted as layer(s)" : std::string())
+        + (layerCount > 1 ? "; layer " + std::to_string(layerCount) + " of the imported-clothing stack" : std::string())
+        + "; in memory only, card not saved", LogKind::Good);
 }
 
 // Reset all decisions to the suggested actions.

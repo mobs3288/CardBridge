@@ -11,6 +11,7 @@
 #include "shape/Shape.h"
 #include "card/Abmx.h"
 #include "card/MaterialEdits.h"
+#include "card/SelectiveImport.h"
 #include "material/MaterialWorkbench.h"
 #include "core/MemoryProbe.h"
 #include "core/MsgPack.h"
@@ -2153,6 +2154,195 @@ Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 
     return parent * Mat4::TRS(position, rotation, scale);
 }
 
+// Grafts one layer scene's clothes parts (a disposable copy assembled with only the chosen slots given the merge)
+// onto the target scene, restating every internal index. Layer garments become ordinary parts whose ids carry a
+// ".l<layerIndex>" suffix (outfit0.top.l2, outfit0.top.sub_a.l2) so the whole pipeline (morphs, PMX material names,
+// coverage, hiding) treats them as separate garments of their own. Bones share by name.
+static void GraftLayerScene(Scene& dst, Scene src, const std::vector<std::string>& slotNames, int layerIndex) {
+    const std::string suffix = ".l" + std::to_string(layerIndex);
+    // ---- bones: share by name; append what the target does not have ---------------------------------------
+    std::map<std::string, int> dstBone;
+    for (size_t i = 0; i < dst.bones.size(); ++i) dstBone.emplace(dst.bones[i].name, static_cast<int>(i));
+    std::vector<int> boneMap(src.bones.size(), -1);
+    std::vector<char> boneDone(src.bones.size(), 0);
+    for (size_t i = 0; i < src.bones.size(); ++i) {
+        const auto it = dstBone.find(src.bones[i].name);
+        if (it != dstBone.end()) { boneMap[i] = it->second; boneDone[i] = 1; }
+    }
+    bool progress = true;
+    while (progress) {   // parents come before children in a prefab hierarchy; iterate to a fixpoint
+        progress = false;
+        for (size_t i = 0; i < src.bones.size(); ++i) {
+            if (boneDone[i]) continue;
+            const SceneBone& b = src.bones[i];
+            if (b.parent >= 0 && !boneDone[static_cast<size_t>(b.parent)]) continue;
+            dst.bones.push_back(b);
+            dst.bones.back().parent = b.parent >= 0 ? boneMap[static_cast<size_t>(b.parent)] : -1;
+            boneMap[i] = static_cast<int>(dst.bones.size()) - 1;
+            boneDone[i] = 1;
+            progress = true;
+        }
+    }
+    for (size_t i = 0; i < src.bones.size(); ++i) {   // a broken subtree: hang off the root rather than invent a hierarchy
+        if (boneDone[i]) continue;
+        SceneBone b = src.bones[i];
+        b.parent = -1;
+        dst.bones.push_back(std::move(b));
+        boneMap[i] = static_cast<int>(dst.bones.size()) - 1;
+    }
+    // ---- which parts do we take? those the layer merge produced -------------------------------------------
+    auto slotOf = [&](const std::string& id) {
+        const size_t dot = id.find('.');
+        if (dot == std::string::npos) return std::string();
+        const size_t dot2 = id.find('.', dot + 1);
+        return id.substr(dot + 1, dot2 == std::string::npos ? std::string::npos : dot2 - dot - 1);
+    };
+    std::map<int, std::string> partIdMap;   // src part index -> dst part id
+    std::map<std::string, std::string> idRemap;   // src id -> dst id (chains and issues need this)
+    for (size_t i = 0; i < src.parts.size(); ++i) {
+        const ScenePart& p = src.parts[i];
+        if (p.underPiece || p.meshes.empty()) continue;
+        const std::string slot = slotOf(p.id);
+        bool wanted = false;
+        for (const std::string& s : slotNames) if (slot == s) { wanted = true; break; }
+        if (!wanted) continue;
+        const std::string newId = p.id + suffix;
+        partIdMap.emplace(static_cast<int>(i), newId);
+        idRemap.emplace(p.id, newId);
+    }
+    // ---- textures deduplicated by content hash (base and layer are built from the same card) --------------
+    std::map<uint64_t, int> texByHash;
+    for (size_t i = 0; i < dst.textures.size(); ++i) texByHash.emplace(dst.textures[i].pixelHash, static_cast<int>(i));
+    auto dstTextureFor = [&](const SceneTexture& t) -> int {
+        const auto it = texByHash.find(t.pixelHash);
+        if (it != texByHash.end()) return it->second;
+        dst.textures.push_back(t);
+        const int idx = static_cast<int>(dst.textures.size()) - 1;
+        texByHash.emplace(t.pixelHash, idx);
+        return idx;
+    };
+    // ---- allocate meshes for the kept parts ----------------------------------------------------------------
+    std::map<int, int> meshMap;      // src mesh -> dst mesh
+    std::map<int, int> materialMap;  // src material -> dst material
+    std::map<int, int> shaderMap;    // src shader -> dst shader
+    for (const auto& kv : partIdMap) {
+        for (int mi : src.parts[static_cast<size_t>(kv.first)].meshes) {
+            if (meshMap.find(mi) != meshMap.end()) continue;
+            SceneMesh nm;
+            nm.name = src.meshes[static_cast<size_t>(mi)].name;
+            nm.reshapable = src.meshes[static_cast<size_t>(mi)].reshapable;
+            meshMap.emplace(mi, static_cast<int>(dst.meshes.size()));
+            dst.meshes.push_back(std::move(nm));
+        }
+    }
+    for (const auto& kv : meshMap) {
+        const SceneMesh& sm = src.meshes[static_cast<size_t>(kv.first)];
+        SceneMesh& nm = dst.meshes[static_cast<size_t>(kv.second)];
+        nm.vertices.resize(sm.vertices.size());
+        for (size_t vi = 0; vi < sm.vertices.size(); ++vi) {
+            SceneVertex v = sm.vertices[vi];
+            for (int k = 0; k < 4; ++k)
+                v.bone[k] = v.bone[k] >= 0 && v.bone[k] < static_cast<int>(boneMap.size()) ? boneMap[static_cast<size_t>(v.bone[k])] : 0;
+            nm.vertices[vi] = std::move(v);
+        }
+        nm.shapes = sm.shapes;   // blend-shape offsets are already in the skinned frame
+        nm.submeshes = sm.submeshes;
+    }
+    // ---- materials, textures, shaders ---------------------------------------------------------------------
+    for (const auto& kv : meshMap) {
+        const SceneMesh& sm = src.meshes[static_cast<size_t>(kv.first)];
+        SceneMesh& nm = dst.meshes[static_cast<size_t>(kv.second)];
+        for (SceneSubmesh& ss : nm.submeshes) {
+            const SceneMaterial& msrc = src.materials[static_cast<size_t>(ss.material)];
+            int dstMat = -1;
+            const auto mit = materialMap.find(ss.material);
+            if (mit != materialMap.end()) {
+                dstMat = mit->second;
+            } else {
+                SceneMaterial mdst = msrc;
+                mdst.texture = msrc.texture >= 0 && msrc.texture < static_cast<int>(src.textures.size())
+                                 ? dstTextureFor(src.textures[static_cast<size_t>(msrc.texture)]) : -1;
+                for (SceneTexBinding& b : mdst.texProps)
+                    if (b.texture >= 0 && b.texture < static_cast<int>(src.textures.size()))
+                        b.texture = dstTextureFor(src.textures[static_cast<size_t>(b.texture)]);
+                if (msrc.shaderIndex >= 0 && msrc.shaderIndex < static_cast<int>(src.shaders.size())) {
+                    auto sit = shaderMap.find(msrc.shaderIndex);
+                    if (sit == shaderMap.end()) {
+                        const SceneShader& ssh = src.shaders[static_cast<size_t>(msrc.shaderIndex)];
+                        int found = -1;
+                        for (size_t si = 0; si < dst.shaders.size(); ++si)
+                            if (dst.shaders[si].name == ssh.name) { found = static_cast<int>(si); break; }
+                        if (found < 0) { dst.shaders.push_back(ssh); found = static_cast<int>(dst.shaders.size()) - 1; }
+                        shaderMap.emplace(msrc.shaderIndex, found);
+                        sit = shaderMap.find(msrc.shaderIndex);
+                    }
+                    mdst.shaderIndex = sit->second;
+                }
+                dstMat = static_cast<int>(dst.materials.size());
+                materialMap.emplace(ss.material, dstMat);
+                dst.materials.push_back(std::move(mdst));
+            }
+            ss.material = dstMat;
+        }
+    }
+    // ---- parts (the id decides everything; mesh back-references fixed afterwards) --------------------------
+    const int dstPartBase = static_cast<int>(dst.parts.size());
+    std::map<int, int> srcMeshToDstPart;   // src mesh -> dst part index
+    for (const auto& kv : partIdMap) {
+        const ScenePart& p = src.parts[static_cast<size_t>(kv.first)];
+        ScenePart part = p;
+        part.id = kv.second;
+        part.label = p.label + " (layer)";
+        part.meshes.clear();
+        part.fromClothing = true;
+        part.underPiece = false;
+        part.coveredBy.clear();
+        part.nudeSwitch = false;
+        part.includeInExport = true;
+        part.visibleInPreview = true;
+        part.startHidden = false;
+        const int dstPart = static_cast<int>(dst.parts.size());
+        dst.parts.push_back(std::move(part));
+        for (int mi : p.meshes) {
+            const auto mit = meshMap.find(mi);
+            if (mit != meshMap.end()) {
+                dst.parts.back().meshes.push_back(mit->second);
+                srcMeshToDstPart[mi] = dstPart;
+            }
+        }
+    }
+    for (const auto& kv : meshMap) {
+        const auto it = srcMeshToDstPart.find(kv.first);
+        if (it != srcMeshToDstPart.end()) dst.meshes[static_cast<size_t>(kv.second)].part = it->second;
+    }
+    // ---- chains and colliders (follow the bone map) --------------------------------------------------------
+    for (const SceneChain& c : src.chains) {
+        const auto it = idRemap.find(c.part);
+        if (it == idRemap.end()) continue;   // only the grafted garments' chains travel
+        SceneChain o;
+        o.name = c.name + suffix;
+        o.part = it->second;
+        o.bones.clear();
+        for (int b : c.bones)
+            o.bones.push_back(b >= 0 && b < static_cast<int>(boneMap.size()) ? boneMap[static_cast<size_t>(b)] : 0);
+        o.damping = c.damping; o.elasticity = c.elasticity; o.stiffness = c.stiffness; o.inert = c.inert;
+        o.boneDamping = c.boneDamping; o.boneElasticity = c.boneElasticity; o.boneStiffness = c.boneStiffness;
+        o.radius = c.radius; o.characterOwn = c.characterOwn; o.gravity = c.gravity; o.force = c.force;
+        dst.chains.push_back(std::move(o));
+    }
+    for (const SceneCollider& c : src.colliders) {
+        SceneCollider o = c;
+        o.bone = o.bone >= 0 && o.bone < static_cast<int>(boneMap.size()) ? boneMap[static_cast<size_t>(o.bone)] : 0;
+        o.name = c.name + suffix;
+        dst.colliders.push_back(std::move(o));
+    }
+    // ---- the warnings about the kept parts travel with them ------------------------------------------------
+    for (const SceneIssue& issue : src.issues) {
+        const auto it = idRemap.find(issue.part);
+        if (it != idRemap.end()) dst.issues.push_back({issue.severity, it->second, issue.message});
+    }
+}
+
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
     Scene scene;
     scene.name = card.displayName();
@@ -3729,6 +3919,63 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     }
     itemsTimer.Stop();
     LogMemory("assemble after items");
+
+    // ---- layered garments: graft one extra outfit on top of the shown outfit ------------------------------
+    // Every layer slot gets its own parts grafted beside the shown outfit's (outfit0.top.l2 next to outfit0.top).
+    // The disposable copy is assembled with only the chosen slots replaced, so the layer graphs against the same
+    // skeleton the target has; nothing about the layer touches the card.
+    if (!opt.layers.empty()) {
+        static const char* slotName[9] = {"top", "bottom", "bra", "shorts", "gloves", "pantyhose", "socks", "shoes_inner", "shoes_outer"};
+        int layerSlotIdx = 0;
+        const int shownOutfit = opt.outfit >= 0 ? opt.outfit
+                              : (card.status.isMap() ? static_cast<int>(card.status.at("coordinateType").asInt()) : 0);
+        for (const AssembleLayerSpec& spec : opt.layers) {
+            if (spec.slots.empty() || spec.path.empty()) continue;
+            if (++layerSlotIdx > 64) break;   // belt and braces
+            std::vector<std::string> slotNames;
+            for (int s : spec.slots) if (s >= 0 && s < 9) slotNames.emplace_back(slotName[s]);
+            if (slotNames.empty()) continue;
+            const std::string layerName = spec.name.empty() ? spec.path : spec.name;
+            log("assembling layer: " + layerName + " (slots " + [&]{ std::string s; for (const auto& n : slotNames) { if (!s.empty()) s += ", "; s += n; } return s; }() + ")");
+            report(0.76 + 0.03 * static_cast<double>(layerSlotIdx), "assembling layer: " + layerName);
+            checkCancel();
+            // the disposable copy: this card with only the layer's slots replaced, everything else kept or skipped
+            card::Card copy = card;
+            const card::ImageSourceKind srcKind = card::DetectImageSource(spec.path);
+            std::vector<card::SelectiveComponent> comps;
+            int mergeOutfit = spec.dstOutfit >= 0 ? spec.dstOutfit : shownOutfit;
+            if (srcKind == card::ImageSourceKind::Coordinate) {
+                card::Card srcCard = card::LoadCard(spec.path);
+                if (!srcCard.supported) throw std::runtime_error("the layer's source card is unsupported: " + srcCard.supportNote);
+                comps = card::EnumerateSelectiveComponents(copy, srcCard, spec.srcOutfit, mergeOutfit);
+            } else {
+                card::ClothingFile cl = card::LoadClothingFile(spec.path);
+                if (!cl.supported) throw std::runtime_error("the layer file is unsupported: " + cl.supportNote);
+                comps = card::EnumerateSelectiveComponents(copy, cl, mergeOutfit);
+            }
+            card::SelectiveDecisions decisions;
+            for (const auto& comp : comps) {
+                bool want = false;
+                if (comp.kind == 0 && comp.slot >= 0 && comp.slot < 9)
+                    for (int s : spec.slots) if (s == comp.slot) { want = true; break; }
+                decisions.actions[comp.key] = want ? card::SelectiveAction::Replace : card::SelectiveAction::Skip;
+            }
+            if (decisions.actions.empty()) { log("layer: nothing to import from the source (no clothes slots)"); continue; }
+            card::ApplyClothingOptions mergeOpt;
+            mergeOpt.outfit = mergeOutfit;
+            mergeOpt.srcOutfit = spec.srcOutfit;
+            card::ApplySelectiveOutfitSource(copy, spec.path, mergeOpt, decisions);
+            // assemble the disposable copy; the graft only takes the layers' parts
+            AssembleOptions layerOpt = opt;
+            layerOpt.layers.clear();
+            layerOpt.outfit = mergeOutfit;
+            Scene layer = Assemble(copy, resolver, layerOpt);
+            // graft; the layer scene is discarded after
+            GraftLayerScene(scene, std::move(layer), slotNames, layerSlotIdx);
+            log("layer grafted: " + layerName);
+        }
+    }
+    LogMemory("assemble after layers");
 
     // A top whose list row says NotBra hides the bra in the game (it would only show through the garment).
     if (topCoversBra)

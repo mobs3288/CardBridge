@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <unordered_map>
 #include <functional>
 #include <map>
 #include <memory>
@@ -783,6 +784,19 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
             if (p.underPiece) under.push_back(pi);
             else if (p.id != "body" && p.id != "head") { others.push_back(pi); if (p.group == "Outfit") outfit.push_back(pi); }
         }
+        std::unordered_map<std::string, size_t> partIndexById;
+        for (size_t pi = 0; pi < scene.parts.size(); ++pi) partIndexById[scene.parts[pi].id] = pi;
+        // A skin piece shows itself in "Take off X" when, after X is gone, no cover remains visible: every cover is X, is not in the
+        // scene, or hides by default (startHidden). A piece covered by two garments (an apron layered over a shirt) hides in both.
+        auto everyCoverHiddenBy = [&](const std::vector<std::string>& covers, size_t removing) {
+            for (const std::string& c : covers) {
+                if (c == scene.parts[removing].id) continue;   // the one being taken off
+                const auto it = partIndexById.find(c);
+                if (it == partIndexById.end()) continue;        // a cover we cannot see anyway
+                if (!scene.parts[it->second].startHidden) return false;   // something still covering
+            }
+            return true;
+        };
         for (size_t pi : under) {
             if (!scene.parts[pi].startHidden) continue;
             pmx::Morph m;
@@ -810,7 +824,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
             m.name = "Take off " + scene.parts[pi].id;
             m.group.emplace_back(h->second, 1.0f);
             for (auto& [ui, mi] : showMorph)
-                if (scene.parts[ui].underPiece && scene.parts[ui].coveredBy.size() == 1 && scene.parts[ui].coveredBy[0] == scene.parts[pi].id) m.group.emplace_back(mi, 1.0f);
+                if (scene.parts[ui].underPiece && everyCoverHiddenBy(scene.parts[ui].coveredBy, pi)) m.group.emplace_back(mi, 1.0f);
             if (m.group.size() > 1) addMorph(std::move(m));   // without skin under it, "Hide" says the same
         }
         if (!outfit.empty()) {

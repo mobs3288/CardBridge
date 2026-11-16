@@ -70,10 +70,12 @@ public static class V {
     public static IntPtr ByClass(string cls) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, l) => {
-            var sb = new System.Text.StringBuilder(256);
-            GetClassNameW(h, sb, 256);
-            if (sb.ToString() == cls) { found = h; return false; }
-            return true;
+            try {
+                var sb = new System.Text.StringBuilder(256);
+                GetClassNameW(h, sb, 256);
+                if (sb.ToString() == cls) { found = h; return false; }
+                return true;
+            } catch { return true; }
         }, IntPtr.Zero);
         return found;
     }
@@ -261,6 +263,37 @@ try {
         Check 'the character reloads after the second import' ($null -ne $lay)
         Check 'two selective layers are pinned' ($lay -and $lay.clothingPins -eq 2) ($(if ($lay) { "layers $($lay.clothingPins)" } else { 'timed out' }))
         Check 'both layers are applied to the character' ($lay -and $lay.clothingApplied -like '* + *') ($(if ($lay) { $lay.clothingApplied } else { 'timed out' }))
+    }
+
+    if (Want 'layer') {
+        # Apply once with a fresh file, setting one clothes slot to Add Layer instead of Replace:
+        # the new garment must land ON TOP of the current clothes slot instead of replacing it.
+        Check 'the selective window reopens for the layer' (Hook 20 20000)
+        Start-Sleep -Milliseconds 1500
+        $sel = [V]::ByClass('CardBridgeSelectiveImport')
+        Check 'the selective window exists for the layer' ($sel -ne [IntPtr]::Zero)
+        if ($sel -ne [IntPtr]::Zero) {
+            $selReady = SelWait $PreviewTimeoutSec
+            Check 'previews become ready (layer)' ($null -ne $selReady) ($(if ($selReady) { "views $($selReady.views.Count) ready" } else { 'timed out' }))
+            if ($selReady) {
+                $row = $selReady.rows | Where-Object { $_.key -eq 'clothes.0' } | Select-Object -First 1
+                Check 'the top row carries an Add Layer button' ($null -ne $row -and $null -ne $row.addLayer)
+                ClickSel $sel $row.addLayer[0] $row.addLayer[1] 500
+                $sel = $null
+                Start-Sleep -Milliseconds 250
+                $selReady = SelWait $PreviewTimeoutSec
+                Check 'rebuild after Add Layer becomes ready' ($null -ne $selReady) ($(if ($selReady) { "layers in plan: $($selReady.plan.layers)" } else { 'timed out' }))
+                if ($selReady) {
+                    ClickSel $sel $selReady.buttons.apply[0] $selReady.buttons.apply[1] 300
+                    Start-Sleep -Seconds 2
+                    $sel = [V]::ByClass('CardBridgeSelectiveImport')
+                    Check 'window closes on the layer apply' ($sel -eq [IntPtr]::Zero)
+                    $lay = WaitFor { param($l) -not $l.state.busy } 180
+                    Check 'the character reloads after the layer apply' ($null -ne $lay)
+                    Check 'the layer is pinned' ($lay -and $lay.layers -and @($lay.layers).Count -ge 1) ($(if ($lay -and $lay.layers) { (@($lay.layers) | ForEach-Object { $_.name }) -join ' | ' } else { 'timed out' }))
+                }
+            }
+        }
     }
 
     if (Want 'cancel') {

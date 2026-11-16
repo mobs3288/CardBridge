@@ -27,6 +27,10 @@ enum class SelectiveAction {
                    // are the same operation (a slot holds one garment)
     KeepExisting,  // keep the character's component; do not import the source's
     Skip,          // do not import the source's component at all
+    AddLayer,      // import the source's clothes component as an EXTRA garment on top of the existing one(s):
+                   // the clothes slot is never vacated or overwritten; the layer rides along for PMX assembly
+                   // (a clothing file still carries one garment per slot, so layers never reach a saved card);
+                   // for accessory components this is not offered (accessories already stack via Add)
 };
 const char* SelectiveActionName(SelectiveAction a);
 
@@ -64,11 +68,11 @@ SelectiveAction ResolveAction(const SelectiveComponent& c, const SelectiveDecisi
 // What a decision set would do, in a fixed order (source order). For the summary line and the
 // commit check: a plan with nothing to import must not touch the character.
 struct SelectivePlan {
-    int replaced = 0, added = 0, kept = 0, skipped = 0;
+    int replaced = 0, added = 0, kept = 0, skipped = 0, layers = 0;
     struct Entry { std::string key, label; SelectiveAction action; };
     std::vector<Entry> entries;
-    bool importsNothing() const { return replaced + added == 0; }
-    int total() const { return replaced + added + kept + skipped; }
+    bool importsNothing() const { return replaced + added + layers == 0; }
+    int total() const { return replaced + added + kept + skipped + layers; }
 };
 
 // Wholesale enumeration of an outfit source against the target's outfit. `outfit` is the target

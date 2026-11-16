@@ -137,6 +137,17 @@ std::string ClothingPathFromUser() {
 void StartExportClothing() {
     std::shared_ptr<Loaded> L = Current();
     if (!L) { Log("open a card first", LogKind::Warn); return; }
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        for (const ClothingPin& pin : g.clothingPins)
+            if (pin.mode == 3) {
+                Log("clothing export refused: a layer is pinned (" + pin.name +
+                    "). A Koikatsu clothes file carries one item per clothes slot, so layered garments cannot travel in it.",
+                    LogKind::Warn);
+                Log("  unpin the layer(s) in the Selective Import window first — the layers stay in the character, none are written or lost, and the rest of the outfit is untouched.", LogKind::Info);
+                return;
+            }
+    }
     if (g.busy || g.exporting.exchange(true)) { Log("still busy; wait for the current job to finish", LogKind::Warn); return; }
     try {
         // "Export clothes" asks first, like a Windows confirm: the outfit's data, and whether to keep hair.

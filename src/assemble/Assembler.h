@@ -16,6 +16,20 @@ namespace cardbridge::assemble {
 // warm pastel salmon-pink). An explicit colour overrides it (see AssembleOptions); w <= 0 keeps the card's own colour.
 inline constexpr Vec4 kDefaultNippleColour{0.992f, 0.655f, 0.592f, 1.0f};
 
+// One layer to build on top of the outfit: a garment source (outfit file, or a Coordinate PNG) the assembly
+// grafts onto the scene after the outfit itself is built. The source is assembled against a disposable copy of
+// the card (ONLY the chosen clothes slots, the rest is discarded), and the parts land in the scene with
+// slot ids like "outfit0.top.l2" so the PMX carries both garments of one slot. The card is never told
+// two garments occupy one slot: the extra garment exists only in the assembled scene.
+struct AssembleLayerSpec {
+    std::string path;          // the source file (outfit file or Coordinate PNG)
+    int srcOutfit = -1;        // coordinate source: which coordinate of the source (-1 = the source's current one)
+    int dstOutfit = -1;        // the outfit slot to layer into (-1 = the shown outfit)
+    std::vector<int> slots;    // clothes slot indices (0..8) whose parts get grafted; empty = none
+    std::string name;          // label shown by logs/UI
+    int layerIndex = 1;        // the suffix for the grafted part ids ("outfit0.top.l1"); must differ between layers of the scene
+};
+
 struct AssembleOptions {
     int outfit = -1;                       // -1: the card's current outfit (Status.coordinateType)
     std::string bodyPrefab = "p_cf_body_00";
@@ -58,6 +72,9 @@ struct AssembleOptions {
                                            // CARDBRIDGE_NO_AUTO_CLOTH=1 disables
     // Optional, non-destructive proportion correction (see Proportions.h). Empty or disabled = faithful pipeline, bit-identical.
     ProportionLayer proportionLayer;
+    // Extra garments layered on top of the outfit (see AssembleLayerSpec): assembled against a disposable copy of this card
+    // and grafted onto the scene. Empty = the classic outfit.
+    std::vector<AssembleLayerSpec> layers;
     // Optional progress sink (the viewer's live log): called from the assembling thread with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative

@@ -286,10 +286,11 @@ struct PropSugItem {
 // coordinate of the source card is imported (-1 = the source's own current outfit).
 struct ClothingPin {
     std::string path, name;                     // the source file and its display label
-    int mode = 0;                                // 0 clothing, 1 coordinate, 2 selective
+    int mode = 0;                                // 0 clothing, 1 coordinate, 2 selective, 3 selective layer (a component grafted on top of the shown outfit)
     int srcOutfit = -1;                          // coordinate sources: which coordinate of the source (-1 = current)
-    int dstOutfit = -1;                          // the outfit slot the layer targets (pinned to the slot on screen at Apply time)
+    int dstOutfit = -1;                          // the outfit slot the layer targets (pinned to the slot on screen at Apply time; -1 = wherever the card is shown)
     std::map<std::string, card::SelectiveAction> decisions;   // mode == 2: the per-component choices
+    std::vector<int> layerSlots;                 // mode == 3: clothes slot indices (0..8) the source contributes as layers
 };
 
 struct App {

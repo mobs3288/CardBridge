@@ -109,6 +109,7 @@ const char* SelectiveActionName(SelectiveAction a) {
     case SelectiveAction::Add:          return "add";
     case SelectiveAction::KeepExisting: return "keep existing";
     case SelectiveAction::Skip:         return "skip";
+    case SelectiveAction::AddLayer:     return "add layer";
     }
     return "?";
 }
@@ -156,6 +157,7 @@ SelectivePlan BuildSelectivePlan(const std::vector<SelectiveComponent>& componen
         case SelectiveAction::Add:          ++plan.added; break;
         case SelectiveAction::KeepExisting: ++plan.kept; break;
         case SelectiveAction::Skip:         ++plan.skipped; break;
+        case SelectiveAction::AddLayer:     ++plan.layers; break;
         }
     }
     return plan;
@@ -187,6 +189,8 @@ ApplyClothingReport ApplySelectiveClothing(Card& card, const ClothingFile& cloth
     std::set<int> importedClothes;
     for (const auto& c : components)
         if (c.kind == 0 && (plan[c.key] == SelectiveAction::Replace || plan[c.key] == SelectiveAction::Add)) importedClothes.insert(c.slot);
+    // AddLayer deliberately merges nothing into the card: the extra garment is grafted onto the assembled
+    // scene by the assembly layer stage (assemble::AssembleOptions::layers) instead; the clothes slot keeps its occupant.
 
     // Hair slots are never touched (a clothing file has no hair; the coordinate keeps the character's).
     {

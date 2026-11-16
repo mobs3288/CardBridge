@@ -594,6 +594,10 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             int layerIndex = 0;
             for (const ClothingPin& pin : clothingPins) {
                 ++layerIndex;
+                if (pin.mode == 3) {   // a graft layer, not a merge: built during assembly, counted here for the label
+                    if (!pin.path.empty()) clothingLabel += (clothingLabel.empty() ? std::string() : " + ") + pin.name + " (layer)";
+                    continue;
+                }
                 bool applyPin = true;
                 if (pin.dstOutfit >= 0) applyPin = pin.dstOutfit == shown && pin.dstOutfit < static_cast<int>(c.outfits.size());
                 if (!applyPin) continue;
@@ -667,6 +671,25 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;
+            {   // the layers of the pinned imports, first to last (slot order so the suffixes stay stable across reloads)
+                std::vector<const ClothingPin*> layerPins;
+                for (const ClothingPin& pin : clothingPins) if (pin.mode == 3) layerPins.push_back(&pin);
+                std::stable_sort(layerPins.begin(), layerPins.end(),
+                                 [](const ClothingPin* a, const ClothingPin* b) { return a->layerSlots.empty() ? 99 : a->layerSlots.front() < (b->layerSlots.empty() ? 99 : b->layerSlots.front()); });
+                ao.layers.clear();
+                int li = 1;
+                for (const ClothingPin* pin : layerPins) {
+                    if (pin->layerSlots.empty()) continue;
+                    assemble::AssembleLayerSpec spec;
+                    spec.path = pin->path;
+                    spec.srcOutfit = pin->srcOutfit;
+                    spec.dstOutfit = shown;
+                    spec.name = pin->name;
+                    spec.slots = pin->layerSlots;
+                    spec.layerIndex = li++;
+                    ao.layers.push_back(std::move(spec));
+                }
+            }
             {   // the sliders: the card's own values unless the user changed them
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
