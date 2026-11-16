@@ -175,6 +175,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<Core> chainCore;   // per moving chain body
     std::vector<int> chainBody;
     std::vector<char> chainJiggle;   // the same, per body: the body's own jiggle (skin, not a strand: it meets no collider)
+    std::vector<char> chainHair;     // the same, per body: hair (it meets nothing either - see the mask section)
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -320,6 +321,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
                 chainJiggle.push_back(jigBody ? 1 : 0);
+                chainHair.push_back(!jigBody && hairChain ? 1 : 0);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
@@ -472,12 +474,18 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
-        if (chainJiggle[bi]) continue;   // jiggle masks are set with the arm colliders below (arm only, never the bust spheres)
+        if (chainJiggle[bi] || chainHair[bi]) continue;   // jiggle masks are set with the arm colliders below; hair meets nothing at all
         uint16_t mask = 0;
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
+    // Hair bodies meet nothing: the game's colliders are sized for flappy cloth and sit inside the strands' drag at rest -
+    // the face-framing locks of an authored shoulder-length style spawn touching or inside the neck / shoulder / chest spheres.
+    // In MikuMikuDance a dynamic body resting against a kinematic one, held off it by a centring spring, gets a corrective impulse
+    // every substep forevs; the strand sits still on its own instead. The authored drape already rests on the shoulders.
+    for (size_t bi = 0; bi < chainBody.size(); ++bi)
+        if (chainHair[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = 0;
     // Generated limb colliders, so cloth and hair slide off arms/hands/shins instead of clipping through them. The strand bodies that
     // start buried inside an arm carry the group unconditionally: with hair held to a few degrees of swing about the authored pose by
     // its joint limits, the arm capsule does useful work as a rest stop under the strands instead of ejecting them (measured better
@@ -524,6 +532,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         if (hasLimb) {
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                 if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kLimbGroup);
+                else if (chainHair[bi]) continue;   // hair met nothing before this line and meets nothing after it
                 else model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask |= static_cast<uint16_t>(1u << kLimbGroup);
             }
         }
