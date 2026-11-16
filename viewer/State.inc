@@ -495,7 +495,7 @@ struct App {
     // Physics preview: the DynamicBone chains simulated live while the switch is on.
     assemble::PhysicsSim sim;
     bool physics = false, physicsMoving = false, physicsKick = false;
-    bool jiggleBust = true, jiggleButt = true;   // the exported PMX's jiggle physics: both on by default so a shake shows bust + butt
+    bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: the bust jiggle is on by default, the butt jiggle is off (the card's butt sway reads as the back of the skirt vibrating; flip in the Look tab or --jiggle-butt)
     assemble::JiggleSettings jiggle;   // the physical settings the preview and the export share (Strength replaces the old jiggle intensity)
     bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height

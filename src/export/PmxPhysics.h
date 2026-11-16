@@ -31,7 +31,7 @@ constexpr uint8_t kPmxGroupChain = 1;
 // three-axis joint whose limits follow the amplitudes (X the forward / back flop, Z the sideways sway, Y a small twist), with
 // springs derived from the same stiffness and mass as the preview. This keeps what the viewer simulates and what
 // MikuMikuDance plays from the same numbers.
-void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = true,
+void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
                 const assemble::JiggleSettings& jiggle = {});
 
 // Skirts and coat tails turn with the legs (called by AddPhysics). Most links of a garment chain are locked to hold its rest shape, so a

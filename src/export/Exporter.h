@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace cardbridge::exporter {
 
@@ -19,7 +20,7 @@ struct ExportOptions {
     bool overwrite = false;
     bool physics = true;           // rigid bodies and joints for hair, skirts and ribbons; false = a rigid PMX with no physics at all
     bool jiggleBust = true;        // breast jiggle physics (the body's own jiggle chains); default on
-    bool jiggleButt = true;        // hip / butt jiggle physics; default on (both bounce in MMD)
+    bool jiggleButt = false;       // hip / butt jiggle physics; default off - the card's butt sway reads as the back of the skirt vibrating. [--jiggle-butt] enables it
     assemble::JiggleSettings jiggle = {};   // the physical breast / hip jiggle settings, shared with the live preview (see assemble/JiggleSettings.h)
     bool mmdNames = true;          // the body bones and the blink morph get MikuMikuDance's standard (Japanese) names, so a motion (VMD) finds them
     bool faceMinusZ = true;        // turn the model half a turn about Y so it faces -Z, where MikuMikuDance puts a PMX's front; false = as built (+Z, Unity)
@@ -94,7 +95,12 @@ struct MmdLook {
     int sphere = 0;              // 0 none, 1 the teeth's roundness (multiply), 2 a soft gloss (add), 3 the hair's ring highlight (add)
     float sphereStrength = 0.0f; // the add spheres' peak
 };
+// `outfitGarment` marks a material of an outfit garment (ScenePart::garment): it keeps the ground shadow and casts into the self-shadow
+// map, but takes no self-shadow (inverted cloth bands where it clips) and gets no edge (back faces pushed through it).
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false);
+// One flag per scene material: it belongs to an outfit garment (ScenePart::garment, or group Outfit in a hand-built scene). The exporter
+// and the viewer's as-exported pass both use this, so the written PMX flags and the preview cannot drift apart.
+std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.
 bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);

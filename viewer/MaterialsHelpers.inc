@@ -598,7 +598,7 @@ void ResetTweak(int id) {
     if (id == kNippleIn) g.tw.nippleInside = false;
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
-    else if (id == kJiggleButt) g.jiggleButt = true;
+    else if (id == kJiggleButt) g.jiggleButt = false;   // reset to the new default (butt jiggle off)
     else if (id == kAutoCloth) g.autoCloth = false;
     else if (id == kTransBrush || id == kTransErase) {
         if (id == kTransBrush) g.transBrush = false; else g.transErase = false;

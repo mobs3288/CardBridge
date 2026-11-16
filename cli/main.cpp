@@ -151,12 +151,16 @@ void usage() {
         "                                            head, hair, the nude-morph skin pieces and footwear are never touched; the corrected count\n"
         "                                            is written to the manifest as issues. CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 also forces\n"
         "                                            it off. ([--fix-garment-intersections] is kept for compatibility: it does nothing now)\n"
-        "             [--no-jiggle-bust] [--no-jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
+        "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
         "                                             [--jiggle-mass F] [--jiggle-stiffness F] [--jiggle-damping F]\n"
         "                                             [--jiggle-gravity F] [--jiggle-amplitude-vertical F]\n"
         "                                             [--jiggle-amplitude-horizontal F] [--jiggle-amplitude-depth F]\n"
         "                                             [--jiggle-rotation-strength F] [--jiggle-strength F] [--jiggle-sim-hz F]\n"
-        "                                             breast and butt jiggle are on by default (both bounce). The jiggle is a real\n"
+        "                                             breast jiggle is on by default. The butt jiggle is OFF by default:\n"
+        "                                             the card's butt sway is large and swings behind the skirt's back panel so\n"
+        "                                             the whole region reads as vibrating. [--jiggle-butt] enables it for a card\n"
+        "                                             that wants it; [--no-jiggle-butt] is accepted and does the same thing (default).\n"
+        "                                             The jiggle is a real\n"
         "                                             mass-spring-damper, one set of physical numbers driving both the preview and\n"
         "                                             the PMX. The preset picks a tuned set (default: natural); the --jiggle-* values\n"
         "                                             override it one by one; 0 amplitude locks that axis and strength scales the\n"
@@ -929,7 +933,7 @@ int cmdConvert(const Args& a) {
         // Settle the body's own jiggle (breast and, when on, hips) under gravity, so the exported and previewed pose shows the
         // bust as it hangs in the game instead of pulled straight out of the chest; the game draw's live sim settles again
         // from there in the viewer / MMD. CARDBRIDGE_NO_SETTLE keeps the rest pose.
-        const bool settleBust = !a.has("no-jiggle-bust"), settleButt = !a.has("no-jiggle-butt");
+        const bool settleBust = !a.has("no-jiggle-bust"), settleButt = a.has("jiggle-butt");   // butt jiggle off by default (the card's butt sway reads as a vibrating skirt)
         const float bustSize = ao.bodyShape.size() > 4 ? ao.bodyShape[4] : 0.5f;
         const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
                                                      : assemble::CardSagDefault(scene, bustSize);
@@ -1078,7 +1082,7 @@ int cmdConvert(const Args& a) {
     eo.correctionLayer = ao.proportionLayer;   // faithful when empty; corrected when --proportions/--normalize-* were given
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
-    eo.jiggleButt = !a.has("no-jiggle-butt");          // default on
+    eo.jiggleButt = a.has("jiggle-butt");             // default off: the card's butt sway reads as the skirt vibrating
     eo.jiggle = jiggle;
     eo.mmdNames = !a.has("no-mmd-names");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;

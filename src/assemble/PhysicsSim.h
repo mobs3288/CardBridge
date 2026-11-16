@@ -20,7 +20,7 @@ public:
     // only when their switch is on (as the PMX export does). `jiggle` drives the mass-spring-damper path; `jiggleOnly` (the static
     // settle, Pose::BakeSettledPhysics) limits the sim to the body's own chains: hair and accessory chains keep their authored
     // pose, which is how the game displays them anyway. `outfitOnly` limits the sim to the clothing and accessory chains.
-    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = true,
+    void Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, bool jiggleBust = true, bool jiggleButt = false,
                const JiggleSettings& jiggle = {}, bool jiggleOnly = false, bool outfitOnly = false, bool fallFully = false);
 
     // Runs `steps` fixed 1/60 s updates (0 only refreshes the output after the anchors moved) and writes the skin matrices of
