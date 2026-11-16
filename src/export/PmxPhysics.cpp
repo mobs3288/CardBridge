@@ -51,11 +51,11 @@ constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay 
 constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs up to 1.0 (Temari); 1.0 makes it settle fully instead of ringing
 constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees). This card's loose skirt physics (stiffness 0.6) exports ±34-47 degrees per link, which MikuMikuDance turns into a flap on every step.
 
-// How much of a leg's turn a garment hanging straight in front of that thigh takes (less as it hangs further round to the side).
-// MikuMikuDance applies append rotation at rest too, so a large rate folds the skirt into a tube in the character's standing pose
-// (observed directly). A modest rate keeps the panel near the thigh through moderate extension; the cloth is never pulled far
-// from its authored drape.
-constexpr float kLegFollow = 0.20f;
+// How much of a leg's turn a garment panel along the thigh takes.
+// MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
+// the panel linking direction: a panel hanging straight down beside the thigh (form-fitting dress) aligns with the
+// thigh and folds with it; a panel angled outward from the hips (wide flare) does not, and the authored silhouette holds.
+constexpr float kLegFollow = 0.85f;
 
 // A strand's travel limit, radians about the joint's swing axes (about 5 degrees). Hair has no gravity in the game (the hair components
 // carry gravity (0, 0, 0) and only a tiny m_Force) but MikuMikuDance applies its own world gravity (98 model units per second squared,
@@ -764,16 +764,23 @@ void AddLegFollow(const assemble::Scene& scene, pmx::Model& model) {
         // A garment hanging over the legs: tied between the knees and a bit above the hips, near the hips, reaching below the hip joints.
         if (r.y < kneeY || r.y > hipY + 0.5f * (hipY - kneeY) || length(flat(sub(r, hips))) > 0.5f * legLen || lowest >= hipY || underLeg(root)) continue;
         if (model.bones[static_cast<size_t>(root)].appendParent >= 0) continue;
-        float rate[2];
+        // For every chain, compute the alignment between the first link's direction and the thigh's direction:
+        // form-fitting panels hang straight beside the thigh (align ~1); wide flares point outward (align ~0).
+        const Vec3 panelDir = sub(pos(bones[1]), pos(bones[0]));
+        const float panelLen = length(panelDir);
         const Vec3 across = normalize(flat(sub(pos(thigh[0]), pos(thigh[1]))));
         const float halfHip = std::max(1e-4f, 0.5f * length(flat(sub(pos(thigh[0]), pos(thigh[1])))));
-        for (int s = 0; s < 2; ++s) {
+        auto rateOne = [&](int s) {
+            const Vec3 thighDir = sub(pos(knee[s]), pos(thigh[s]));
+            const float thighLen = length(thighDir);
+            const float dot = std::fabs(panelDir.x * thighDir.x + panelDir.y * thighDir.y + panelDir.z * thighDir.z);
+            const float align = (panelLen > 1e-5f && thighLen > 1e-5f) ? dot / (panelLen * thighLen) : 1.0f;
+            // How far out from the thigh's center the panel sits: share = 1 at the center line, 0 beyond the outer hip.
             const Vec3 d = flat(sub(r, pos(thigh[s])));
-            const float ahead = length(d) > 1e-5f ? clamp01((d.x * front.x + d.z * front.z) / length(d)) : 0.0f;
-            // In front of the thigh it takes the whole share; the piece between the legs two thirds of each (both thighs reach under it).
             const float share = clamp01(1.0f - std::fabs(d.x * across.x + d.z * across.z) / (3.0f * halfHip));
-            rate[s] = kLegFollow * ahead * share;
-        }
+            return kLegFollow * share * align;
+        };
+        float rate[2] = {rateOne(0), rateOne(1)};
         const int lead = rate[0] >= rate[1] ? 0 : 1;
         if (rate[lead] < 0.05f) continue;
         pmx::Bone& rb = model.bones[static_cast<size_t>(root)];

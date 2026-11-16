@@ -2252,17 +2252,22 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        // The modest rate still pulls the front hang and the centre-of-thighs chain toward the lead leg by append.
+        // The wrap-around panels that hang straight beside either thigh fold-together and append the nearest thigh;
+        // the hair above the waist is exempt.
         const auto& fl = m.bones[static_cast<size_t>(frontLeft)];
-        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.1f && fl.appendRatio <= 0.25f && fl.layer == 1);
+        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.6f && fl.appendRatio <= 1.0f && fl.layer == 1);
         const auto& c = m.bones[static_cast<size_t>(centre)];
         const auto& ct = m.bones[static_cast<size_t>(centreTop)];
-        // Both lead and second legs may be picked as lead; the mode-2 chain appends one leg via the root and, since centreTop
-        // is the only child of the centre chain, the other leg via centreTop.
-        CHECK(c.appendParent >= 0 && (c.appendParent == 1 || c.appendParent == 5) && c.appendRatio > 0.05f && c.appendRatio <= 0.15f);
+        CHECK(c.appendParent >= 0 && (c.appendParent == 1 || c.appendParent == 5) && c.appendRatio > 0.5f);
         CHECK(ct.appendParent >= 0 && (ct.appendParent == 1 || ct.appendParent == 5) && ct.appendParent != c.appendParent && ct.layer == 1);
-        // The extremes we chose not to fold: the sides, the back and the hair and the legs themselves.
-        for (int b : {side, back, hair}) CHECK(m.bones[static_cast<size_t>(b)].appendParent < 0 && m.bones[static_cast<size_t>(b)].layer == 0);
+        // The side-of-thigh front/back panels hang straight down with the thigh, so they also append their thigh side.
+        const auto& sd = m.bones[static_cast<size_t>(side)];
+        const auto& bk = m.bones[static_cast<size_t>(back)];
+        // But they append the nearest (left) leg for this synthetic layout
+        CHECK(sd.appendParent >= 0 && (sd.appendParent == 1 || sd.appendParent == 5) && sd.appendRatio > 0.05f && sd.layer == 1);
+        CHECK(bk.appendParent >= 0 && (bk.appendParent == 1 || bk.appendParent == 5) && bk.appendRatio > 0.5f && bk.layer == 1);
+        // The hair and the legs themselves stay exempt
+        CHECK(m.bones[static_cast<size_t>(hair)].appendParent < 0 && m.bones[static_cast<size_t>(hair)].layer == 0);
         CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);
     });
 
