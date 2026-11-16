@@ -117,6 +117,15 @@ Vec3 PmxRotationFromYAxis(Vec3 axis) {
     return {b, std::atan2(r02, r22), std::atan2(r10, r11)};
 }
 
+// World directions of the joint frame's local axes from its Euler angles (same convention as the sim's EulerPmx: R = Ry(y)*Rx(x)*Rz(z),
+// the columns are the world framings of local X, Y, Z).
+static void EulerAxes(float x, float y, float z, Vec3& X, Vec3& Y, Vec3& Z) {
+    const float cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y), cz = std::cos(z), sz = std::sin(z);
+    X = {cy * cz + sy * sx * sz, cx * sz, -sy * cz + cy * sx * sz};
+    Y = {-cy * sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz};
+    Z = {sy * cx, -sx, cy * cx};
+}
+
 std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble::SceneChain& chain) {
     const int boneCount = static_cast<int>(scene.bones.size());
     std::vector<int> bones;
@@ -465,24 +474,53 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             j.bodyB = bodyOf[b];
             j.position = self.head;
             j.rotation = model.rigidBodies[static_cast<size_t>(bodyOf[b])].rotation;
-            // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
-            // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
-            const bool holds = sideways * gravity / std::max(1e-6f, stiffnessK) < 0.6f * bend;
-            float range = hairChain ? hairBend : (holds ? bend : 0.0f);
-            // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: the spring derived above
-            // already holds the authored drape inside the limits, and a forced lock on top of it pins the panel to the shoulders -
-            // the stiff paper slab. The garment stays a plain hinge inside its bend range with the (now substantial) centring spring.
-            if (garmentChainEarly) range = std::max(range, bend);
             if (jigBody) {
-                // The reference models' breast joints: wide on the flop, moderate on the sway, narrow on the twist, all from the
-                // amplitude and strength settings. A jiggle joint is never droop-locked - locked would mean no jiggle at all, which
-                // is worse than a soft hang - and its spring pulls it back to the rest pose so it bounces like skin.
                 j.rotLower = {-jigRange[0], -jigRange[1], -jigRange[2]};
                 j.rotUpper = {jigRange[0], jigRange[1], jigRange[2]};
                 j.springRot = {jigSpring, jigSpring, jigSpring};
+            } else if (garmentChainEarly) {
+                // A garment panel must hold the card's authored drape: hang direction (where gravity torques it) locked to a small droop,
+                // swing direction wide. The fold axis is whichever local axis aligns with the torque arm x gravity; sign picks which side is hang.
+                // Temari's skirt panels (spring 50, damp 1.0) ride their hang stop the same way; the card's stiffness decides the droop budget.
+                const float flex = kGarmentMaxBend;                        // the wide swing budget (this is what stops the walking buzz)
+                const float pin = std::max(0.03f, std::min(bend, 0.04f + 0.22f * (1.0f - stiffness)));   // hang droop: stiff skirt = ~2°, loose skirt = up to ~15°
+                const Vec3 gForce{0.0f, -gravity, 0.0f};
+                Vec3 arm{links[b].centre.x - self.head.x, links[b].centre.y - self.head.y, links[b].centre.z - self.head.z};
+                Vec3 tw = cross(arm, gForce);                              // horizontal axis perpendicular to the fold plane
+                float twLen = std::sqrt(tw.x * tw.x + tw.y * tw.y + tw.z * tw.z);
+                if (twLen > 1e-6f) { tw.x /= twLen; tw.y /= twLen; tw.z /= twLen; } else { tw = {1.0f, 0.0f, 0.0f}; }
+                Vec3 linkDir{arm.x, arm.y, arm.z};
+                float lLen = std::sqrt(linkDir.x * linkDir.x + linkDir.y * linkDir.y + linkDir.z * linkDir.z);
+                if (lLen > 1e-6f) { linkDir.x /= lLen; linkDir.y /= lLen; linkDir.z /= lLen; } else { linkDir = {0.0f, 1.0f, 0.0f}; }
+                Vec3 bfX, bfY, bfZ;
+                EulerAxes(j.rotation.x, j.rotation.y, j.rotation.z, bfX, bfY, bfZ);
+                const Vec3* bf[3] = {&bfX, &bfY, &bfZ};
+                // Twist axis = the local axis most aligned with the link direction: the panel twists almost not at all (like the game's fixed-axis sway).
+                int twist = 0;
+                float bestTwist = -1.0f;
+                for (int a = 0; a < 3; ++a) {
+                    const float s = std::fabs(bf[a]->x * linkDir.x + bf[a]->y * linkDir.y + bf[a]->z * linkDir.z);
+                    if (s > bestTwist) { bestTwist = s; twist = a; }
+                }
+                float tScore[3] = {std::fabs(bf[0]->x * tw.x + bf[0]->y * tw.y + bf[0]->z * tw.z),
+                                   std::fabs(bf[1]->x * tw.x + bf[1]->y * tw.y + bf[1]->z * tw.z),
+                                   std::fabs(bf[2]->x * tw.x + bf[2]->y * tw.y + bf[2]->z * tw.z)};
+                float twMax = std::max(tScore[0], std::max(tScore[1], tScore[2]));
+                float lo[3], hi[3];
+                for (int a = 0; a < 3; ++a) {
+                    if (a == twist) { lo[a] = -0.1f * flex; hi[a] = 0.1f * flex; continue; }
+                    if (twMax < 1e-4f || tScore[a] < 0.3f * twMax) { lo[a] = -flex; hi[a] = flex; continue; }   // side/other plane: symmetric swing
+                    const float d = bf[a]->x * tw.x + bf[a]->y * tw.y + bf[a]->z * tw.z;   // +rotation increases hang
+                    if (d > 0.0f) { lo[a] = -flex; hi[a] = pin; } else { lo[a] = -pin; hi[a] = flex; }
+                }
+                j.rotLower = {lo[0], lo[1], lo[2]};
+                j.rotUpper = {hi[0], hi[1], hi[2]};
+                j.springRot = {stiffnessK, stiffnessK, stiffnessK};
             } else {
-                // A strand keeps the old shape: the twist nearly locked, the two bends wide. Cloth gets the spring derived above (it
-                // holds the drape); the twist stays narrow, the swings wide.
+                // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
+                // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
+                const bool holds = sideways * gravity / std::max(1e-6f, stiffnessK) < 0.6f * bend;
+                const float range = hairChain ? hairBend : (holds ? bend : 0.0f);
                 j.rotLower = {-range, -0.1f * range, -range};
                 j.rotUpper = {range, 0.1f * range, range};
                 j.springRot = {stiffnessK, stiffnessK, stiffnessK};
