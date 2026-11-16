@@ -2068,7 +2068,7 @@ std::shared_ptr<unity::TextureData> ResolveBodyMask(const MaskLookup& lookup, co
             if (found->width > 4096 || found->height > 4096) { if (whyOut) *whyOut = "body mask '" + maskName + "' decodes to " + std::to_string(found->width) + "x" + std::to_string(found->height) + " - larger than any supported mask"; return nullptr; }
             if (static_cast<int64_t>(found->rgba.size()) != static_cast<int64_t>(found->width) * static_cast<int64_t>(found->height) * 4) { if (whyOut) *whyOut = "body mask '" + maskName + "' decoded buffer size mismatch"; return nullptr; }
             size_t hidden = 0; for (size_t i = 0; i + 3 < found->rgba.size(); i += 4) if (found->rgba[i] < 128) ++hidden;
-            if (!found->rgba.empty() && hidden * 100 >= found->rgba.size() / 4) { if (whyOut) *whyOut = "body mask '" + maskName + "' hides 100% of pixels - either not a body mask, or a full hide"; return nullptr; }
+            if (!found->rgba.empty() && hidden >= found->rgba.size() / 4) { if (whyOut) *whyOut = "body mask '" + maskName + "' hides 100% of pixels - either not a body mask, or a full hide"; return nullptr; }
             return found;
         }
         if (whyOut) *whyOut = "body mask '" + maskName + "' in the bundle is a texture that could not be decoded";
