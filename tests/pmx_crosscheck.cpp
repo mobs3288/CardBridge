@@ -90,16 +90,18 @@ int main(int argc, char** argv) {
     if (j["counts"].contains("rigid_bodies") && j["counts"].value("rigid_bodies", 0) != m.rigidBodies.size()) fail("manifest rigid body count != PMX rigid body count");
     if (j["counts"].contains("joints") && j["counts"].value("joints", 0) != m.joints.size()) fail("manifest joint count != PMX joint count");
     size_t kinematic = 0, moving = 0, badBody = 0, badJoint = 0, badFilter = 0, farBody = 0;
+    bool groupHasMoving[16] = {};
+    for (const auto& rb : m.rigidBodies) if (rb.physicsMode != 0) groupHasMoving[rb.group & 15u] = true;
     for (const auto& rb : m.rigidBodies) {
         if (rb.boneIndex < 0 || rb.boneIndex >= static_cast<int>(m.bones.size()) || rb.shape > 2 || rb.physicsMode > 2 || !(rb.size.x > 0.0f)) { ++badBody; continue; }
         (rb.physicsMode == 0 ? kinematic : moving)++;
         if (rb.physicsMode != 0 && rb.mass <= 0.0f) ++badBody;
-        // chain bodies (group 1) meet colliders (group 0) only; colliders meet chains only; anchors meet nothing
-        // (chains may skip the colliders they overlap at rest, so any mask without the chain bit; colliders sit in groups 0 or 2..15)
-        if (rb.group == 1 && rb.physicsMode != 0 && (rb.nonCollisionMask & 0x0002) != 0) ++badFilter;
-        if (rb.group == 1 && rb.physicsMode == 0 && rb.nonCollisionMask != 0) ++badFilter;
-        if (rb.group != 1 && rb.nonCollisionMask != 0x0002) ++badFilter;
-        if (rb.group == 1 && rb.physicsMode != 0) {
+        // a moving body never meets its own group; colliders meet only groups occupied by moving bodies (plus group 1 by spec)
+        if (rb.physicsMode != 0 && (rb.nonCollisionMask & (1u << (rb.group & 15u))) != 0) ++badFilter;
+        if (rb.physicsMode == 0) {
+            for (unsigned g = 0; g < 16; ++g) if ((rb.nonCollisionMask & (1u << g)) && g != 1 && !groupHasMoving[g]) { ++badFilter; break; }
+        }
+        if (rb.physicsMode != 0) {
             const float reach = (rb.shape == 2 ? 0.5f * rb.size.y : 0.0f) + rb.size.x + 1e-3f;
             const auto d = rb.position - m.bones[static_cast<size_t>(rb.boneIndex)].position;
             if (std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > reach) ++farBody;

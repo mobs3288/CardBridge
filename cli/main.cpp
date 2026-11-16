@@ -938,10 +938,8 @@ int cmdConvert(const Args& a) {
         const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
                                                      : assemble::CardSagDefault(scene, bustSize);
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, jiggle, settleSag);
-        // Drape the outfit's own cloth (capes, kimono sleeves, jacket panels, skirt hems): hangs it the way the game's DynamicBone
-        // settles it at load. Without it the exported PMX starts at the authored pose and every joint locks fighting gravity -
-        // stiff paper cloth, not fabric.
-        assemble::BakeGarmentSettle(scene);
+        // The outfit's cloth (capes, kimono sleeves, jacket panels, skirt hems) keeps the authored drape: the PMX's joints are now
+        // sized to hold the card's rest pose against MMD's world gravity, so no hang is baked into the mesh.
         // Garment-vs-body clipping correction, on by default: a garment vertex buried in the skin is pushed back out along the body's
         // own surface. --no-fix-garment-intersections or CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turn it off.
         const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");

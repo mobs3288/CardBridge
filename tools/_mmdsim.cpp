@@ -33,6 +33,17 @@ static std::string lower(std::string s) {
     return s;
 }
 
+// The PMX rotation convention for rigid bodies and joints: the Euler (x, y, z) angles build R = Ry(y) * Rx(x) * Rz(z),
+// with Y the capsule's axis. This matches the exporter (PmxRotationFromYAxis), the cardbridge validator (capsuleAxis)
+// and Project K's engine loader (BonePhysics::Build). Bullet's setEulerZYX is a different decomposition and must NOT be used.
+static btMatrix3x3 EulerPmx(float x, float y, float z) {
+    const btQuaternion qx(btVector3(1, 0, 0), x);
+    const btQuaternion qy(btVector3(0, 1, 0), y);
+    const btQuaternion qz(btVector3(0, 0, 1), z);
+    btMatrix3x3 m; m.setRotation(qy * qx * qz);
+    return m;
+}
+
 int main(int argc, char** argv) {
     if (std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "start\n");
     if (argc < 2) { std::fprintf(stderr, "usage: mmdsim <file.pmx> [--seconds N] [--shift Sx,Sy,Sz,startT,durT] [--chain F] [--summary] [--limb-all|--limb-deep] [--nocollide]\n"); return 1; }
@@ -42,6 +53,7 @@ int main(int argc, char** argv) {
     double shiftX = 0, shiftY = 0, shiftZ = 0, shiftAt = -1, shiftDur = 0.25;
     const char* chainFilter = nullptr;
     double springScale = 1.0, springAbs = -1.0, dampAbs = -1.0, limitDeg = -1.0, gravY = -98.0;
+    bool noTwistSpring = false;   // zero the Y (twist) angular spring, to isolate its 120 Hz aliasing from the X/Z springs
     bool summaryOnly = false;
     int limbExclude = 0;   // 0 = as written in the file; 1 = drop limb bit for bodies overlapping a limb collider (rest-overlap rule); 2 = only for bodies whose centre is inside a limb collider
     bool noColliders = false;   // drop every collider (every body with a group other than 1): for isolating joint vs collider problems
@@ -56,6 +68,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--spring-abs") && i + 1 < argc) springAbs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--damp") && i + 1 < argc) dampAbs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--limit-deg") && i + 1 < argc) limitDeg = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--notwistspring")) noTwistSpring = true;
         else if (!strcmp(argv[i], "--gravity") && i + 1 < argc) gravY = atof(argv[++i]);
         else if (!strcmp(argv[i], "--shift") && i + 1 < argc) {
             char buf[128]; std::snprintf(buf, sizeof buf, "%s", argv[++i]);
@@ -68,7 +81,7 @@ int main(int argc, char** argv) {
             const RigidBody& rb = m.bodies[i];
             r = rb.size.x;
             if (rb.shape == 2) {
-                btMatrix3x3 rot; rot.setEulerZYX(rb.rot.x, rb.rot.y, rb.rot.z);
+                btMatrix3x3 rot = EulerPmx(rb.rot.x, rb.rot.y, rb.rot.z);
                 const btVector3 axis = rot * btVector3(0, 1, 0);
                 const float half = std::max(0.0f, rb.size.y * 0.5f);
                 a = btVector3(rb.pos.x, rb.pos.y, rb.pos.z) - axis * half;
@@ -140,7 +153,7 @@ int main(int argc, char** argv) {
         btTransform tf;
         tf.setIdentity();
         btMatrix3x3 rot;
-        rot.setEulerZYX(b.rot.x, b.rot.y, b.rot.z);
+        rot = EulerPmx(b.rot.x, b.rot.y, b.rot.z);
         tf.setBasis(rot);
         tf.setOrigin(btVector3(b.pos.x, b.pos.y, b.pos.z));
         ms->t0 = tf;
@@ -165,13 +178,13 @@ int main(int argc, char** argv) {
     for (const Joint& j : m.joints) {
         if (std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "joint %zu a=%zu b=%zu\n", ji, (size_t)j.a, (size_t)j.b);
         ++ji;
-        btMatrix3x3 rotA; rotA.setEulerZYX(m.bodies[j.a].rot.x, m.bodies[j.a].rot.y, m.bodies[j.a].rot.z);
+        btMatrix3x3 rotA = EulerPmx(m.bodies[j.a].rot.x, m.bodies[j.a].rot.y, m.bodies[j.a].rot.z);
         btTransform ta; ta.setIdentity(); ta.setBasis(rotA); ta.setOrigin(btVector3(m.bodies[j.a].pos.x, m.bodies[j.a].pos.y, m.bodies[j.a].pos.z));
-        btMatrix3x3 rotB; rotB.setEulerZYX(m.bodies[j.b].rot.x, m.bodies[j.b].rot.y, m.bodies[j.b].rot.z);
+        btMatrix3x3 rotB = EulerPmx(m.bodies[j.b].rot.x, m.bodies[j.b].rot.y, m.bodies[j.b].rot.z);
         btTransform tb; tb.setIdentity(); tb.setBasis(rotB); tb.setOrigin(btVector3(m.bodies[j.b].pos.x, m.bodies[j.b].pos.y, m.bodies[j.b].pos.z));
         btTransform jointTf; jointTf.setIdentity();
         jointTf.setOrigin(btVector3(j.pos.x, j.pos.y, j.pos.z));
-        btMatrix3x3 jrot; jrot.setEulerZYX(j.rot.x, j.rot.y, j.rot.z);
+        btMatrix3x3 jrot = EulerPmx(j.rot.x, j.rot.y, j.rot.z);
         jointTf.setBasis(jrot);
         btTransform invA = ta.inverse() * jointTf;
         btTransform invB = tb.inverse() * jointTf;
@@ -190,11 +203,22 @@ int main(int argc, char** argv) {
         const btScalar sp[6] = {j.springMove.x, j.springMove.y, j.springMove.z, j.springRot.x, j.springRot.y, j.springRot.z};
         for (int axis = 0; axis < 6; ++axis) {
             btScalar k = sp[axis];
+            if (axis == 4 && noTwistSpring) k = 0.0f;
             if (axis >= 3 && (springAbs >= 0 || springScale != 1.0)) k = (springAbs >= 0 ? (btScalar)springAbs : k) * (btScalar)springScale;
             if (axis == 2 || axis == 5) k = -k;
             if (sp[axis] != 0 || (axis >= 3 && springAbs >= 0)) { c->enableSpring(axis, true); c->setStiffness(axis, k); }
         }
         world.addConstraint(c);
+    }
+    // mode 2 body -> parent body (via its joint,) for bone-aligned positioning of garment cloth in the sim
+    std::map<int, int> mode2ParentOf;
+    for (const Joint& j : m.joints) if (j.b >= 0 && j.a >= 0 && j.a != j.b) mode2ParentOf[(int)j.b] = (int)j.a;
+    // rest offset of each mode 2 body, expressed in its parent body's LOCAL frame at rest
+    std::map<int, btVector3> mode2RestOffset;
+    for (const auto& [child, parent] : mode2ParentOf) {
+        if (child >= (int)m.bodies.size() || parent >= (int)m.bodies.size()) continue;
+        const btMatrix3x3 parentRot = EulerPmx(m.bodies[parent].rot.x, m.bodies[parent].rot.y, m.bodies[parent].rot.z);
+        mode2RestOffset[child] = parentRot.transpose() * (btVector3(m.bodies[child].pos.x, m.bodies[child].pos.y, m.bodies[child].pos.z) - btVector3(m.bodies[parent].pos.x, m.bodies[parent].pos.y, m.bodies[parent].pos.z));
     }
 
     // group/mask: bullet's addRigidBody uses (group, mask) as (collisionFilterGroup, collisionFilterMask); saba passes group, mask the same way.
@@ -226,6 +250,23 @@ int main(int argc, char** argv) {
         if (t >= seconds) break;
         if (step % 60 == 0 && std::getenv("MMDSIM_TRACE")) std::fprintf(stderr, "step %d t=%.3f\n", step, t);
         world.stepSimulation((float)dt, 1, (float)dt);
+        // mode 2 bodies: the bone (driven by its parent body) holds the body's position; the body keeps its simulated rotation
+        for (size_t i = 0; i < m.bodies.size(); ++i) {
+            if (m.bodies[i].mode != 2 || !entries[i].rb) continue;
+            const int childBody = (int)i;
+            const int parentBody = mode2ParentOf.count(childBody) ? mode2ParentOf.at(childBody) : -1;
+            if (parentBody < 0 || mode2RestOffset.count(childBody) == 0) {
+                const btTransform t = entries[i].rb->getWorldTransform();
+                entries[i].rb->setCenterOfMassTransform(btTransform(t.getRotation(), entries[i].start));
+                entries[i].rb->setLinearVelocity(btVector3(0, 0, 0));
+                continue;
+            }
+            const btTransform parentT = entries[parentBody].rb->getWorldTransform();
+            const btVector3 newPos = parentT * mode2RestOffset[childBody];
+            const btTransform t = entries[i].rb->getWorldTransform();
+            entries[i].rb->setCenterOfMassTransform(btTransform(t.getRotation(), newPos));
+            entries[i].rb->setLinearVelocity(btVector3(0, 0, 0));
+        }
         // report
         double speedMax = 0.0;
         for (size_t i = 0; i < m.bodies.size(); ++i) if (m.bodies[i].mode != 0 && entries[i].rb) {

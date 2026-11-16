@@ -653,16 +653,13 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
             const float d = l > 1e-6f ? (axis.x * want.x + axis.y * want.y + axis.z * want.z) / l : 1.0f;
             if (d < 0.999f) out.push_back(who + ": the capsule does not follow its bone (cos " + std::to_string(d) + ")");
         }
-        if (b.group != exporter::kPmxGroupChain) {
-            if (b.mode != 0) out.push_back(who + ": a collider that moves");
-            if (!bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a collider that does not meet chains");
-            if ((b.mask & ~(1u << exporter::kPmxGroupChain)) != 0) out.push_back(who + ": a collider that meets more than chains");
-        } else if (b.mode != 0) {
-            if (bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
-            // it meets only colliders it does not already overlap: a body that starts inside one is thrown out of it, and the model with it
+        if (b.mode != 0) {
+            if (bit(b.mask, b.group)) out.push_back(who + ": a chain body that meets its own group (mask " + std::to_string(b.mask) + ")");
+            if (b.group == exporter::kPmxGroupChain && bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
+            // it meets only kinematic bodies it does not already overlap: a body that starts inside one is thrown out of it, and the model with it
             for (size_t k = 0; k < m.bodies.size(); ++k) {
                 const auto& c = m.bodies[k];
-                if (c.group == exporter::kPmxGroupChain || !bit(b.mask, c.group)) continue;
+                if (c.mode != 0 || !bit(b.mask, c.group)) continue;   // only kinematic bodies can shove a body out of its rest place
                 auto core = [](const pmxread::RigidBody& x, Vec3& p, Vec3& q) {
                     const pmxread::V3 ax = capsuleAxis(x.rot);
                     const float h = x.shape == 2 ? 0.5f * x.size.y : 0.0f;
@@ -674,8 +671,21 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
                 core(c, c0, c1);
                 if (exporter::SegmentDistance(a0, a1, c0, c1) < b.size.x + c.size.x) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts inside it");
             }
-        } else if (b.mask != 0) {
-            out.push_back(who + ": an anchor that collides");
+        } else {
+            // a collider: every bit it sets must point at a group occupied by at least one moving body (group 1 may be empty in synthetic scenes)
+            for (int g = 0; g < 16; ++g) {
+                if (!bit(b.mask, g)) continue;
+                if (g == exporter::kPmxGroupChain) continue;
+                bool used = false;
+                for (size_t k = 0; k < m.bodies.size(); ++k) if (m.bodies[k].mode != 0 && m.bodies[k].group == g) { used = true; break; }
+                if (!used) out.push_back(who + ": a collider that meets group " + std::to_string(g) + " with nothing in it");
+            }
+            if (b.group == exporter::kPmxGroupChain && b.mask != 0x0002 && b.mask != 0) out.push_back(who + ": an anchor that collides");
+            if (b.group != exporter::kPmxGroupChain && (b.mask & (1u << exporter::kPmxGroupChain)) == 0) {
+                bool meetsSomething = false;
+                for (int g = 2; g < 16; ++g) if (bit(b.mask, g)) { meetsSomething = true; break; }
+                if (!meetsSomething) out.push_back(who + ": a collider that meets no chain");
+            }
         }
     }
     std::vector<std::vector<int>> linked(m.bodies.size());
@@ -693,10 +703,12 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         const float reach = bb.shape == 2 ? 0.5f * bb.size.y + bb.size.x : bb.size.x;
         if (lengthOf(j.pos - bb.pos) > reach + 1e-3f) out.push_back("joint " + std::to_string(i) + ": far from its second body");
     }
-    // every moving body is tied to a kinematic one through joints
+    // every moving body is tied to a kinematic one through joints: seeds are the kinematic bodies whose group holds a moving body (chain roots and jiggle anchors)
+    std::vector<char> groupHasMoving(16, 0);
+    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode != 0) groupHasMoving[static_cast<size_t>(m.bodies[static_cast<size_t>(i)].group) & 15u] = 1;
     std::vector<char> reached(m.bodies.size(), 0);
     std::vector<int> stack;
-    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode == 0 && m.bodies[static_cast<size_t>(i)].group == exporter::kPmxGroupChain) { reached[static_cast<size_t>(i)] = 1; stack.push_back(i); }
+    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode == 0 && groupHasMoving[static_cast<size_t>(m.bodies[static_cast<size_t>(i)].group) & 15u]) { reached[static_cast<size_t>(i)] = 1; stack.push_back(i); }
     while (!stack.empty()) {
         const int at = stack.back();
         stack.pop_back();
@@ -2251,6 +2263,23 @@ void unitTests() {
         CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);   // the legs themselves are untouched
     });
 
+    test("physics: garment chain bodies are bone-aligned (mode 2) - the bone holds the panel; the panel swings around its joints", [] {
+        assemble::Scene s;
+        s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
+        assemble::SceneChain cloth;
+        cloth.name = "cloth"; cloth.part = "outfit0.top"; cloth.bones = {1, 2, 3, 4};
+        cloth.damping = 0.15f; cloth.elasticity = 0.1f; cloth.stiffness = 0.8f;
+        s.chains.push_back(cloth);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        CHECK(m.rigidBodies.size() == 4);      // one per bone (garment cloth has no extra anchor body; only jiggle does)
+        for (size_t i = 0; i < m.rigidBodies.size(); ++i)
+            CHECK(m.rigidBodies[i].mode == (i == 0 ? 0 : 2));   // root follows the bone; the rest are bone-aligned (physics with bone aligned)
+        // a hair chain keeps free dynamics (mode 1) - the authored hairstyle is the rest pose, driven by the hair physics fix
+    });
+
     test("physics: the exported spring numbers settle like the DynamicBone sim and do not explode", [] {
         using namespace assemble;
         struct Setup { const char* what; float damping, elasticity, stiffness; };
@@ -2452,10 +2481,10 @@ void unitTests() {
         }
     });
 
-    test("hair: the garment hang bake drops cloth under world gravity but never the hair (the authored hairstyle is the rest pose)", [] {
+    test("physics: the exported garment keeps the authored drape — hold springs sized per joint, never a forced lock, no hang bake", [] {
         assemble::Scene s;
         s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
-        // a fanned back / front strand and a fanned cloth panel, both angled out sideways so the bake has work to do
+        // a fanned back / front strand and a fanned cloth panel
         for (int i = 0; i < 4; ++i) s.bones.push_back({"h" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f - 0.01f * float(i), 0.0f}, "item"});
         for (int i = 0; i < 4; ++i) s.bones.push_back({"c" + std::to_string(i), i == 0 ? 0 : i + 4, {0.1f * float(i) + 0.4f, 1.2f - 0.01f * float(i), 0.3f}, "item"});
         assemble::ScenePart hairPart;
@@ -2474,11 +2503,20 @@ void unitTests() {
         s.chains.push_back(cloth);
         const Vec3 hair1 = s.bones[1].pos, hair4 = s.bones[4].pos;
         const Vec3 cloth8 = s.bones[8].pos;
-        assemble::BakeGarmentSettle(s);
-        CHECK(s.bones[1].pos.x == hair1.x && s.bones[1].pos.y == hair1.y && s.bones[1].pos.z == hair1.z);   // hair: exactly where it was authored
+        // No hang is ever baked into the scene by the export: the authored rest pose is what leaves the assembler.
+        CHECK(s.bones[1].pos.x == hair1.x && s.bones[1].pos.y == hair1.y && s.bones[1].pos.z == hair1.z);
         CHECK(s.bones[4].pos.x == hair4.x && s.bones[4].pos.y == hair4.y && s.bones[4].pos.z == hair4.z);
-        const float clothDrop = std::fabs(s.bones[8].pos.y - cloth8.y) + std::fabs(s.bones[8].pos.x - cloth8.x);
-        CHECK(clothDrop > 1e-3f);   // the cloth panel fell toward its hanging drape
+        CHECK(s.bones[8].pos.x == cloth8.x && s.bones[8].pos.y == cloth8.y && s.bones[8].pos.z == cloth8.z);
+        // The export gives every cloth joint a hold spring sized from its own subchain (never the old flat 5.0, never a lock).
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f);
+        std::vector<float> clothSprings;
+        for (const auto& j : m.joints)
+            if (j.name.rfind("cloth", 0) == 0) { CHECK(j.rotUpper.x > 0.0f); clothSprings.push_back(j.springRot.x); }
+        CHECK(clothSprings.size() == 3);
+        for (float k : clothSprings) CHECK(k > 200.0f);                    // hold springs from subchain torque, not the old flat 5.0
+        CHECK(clothSprings[0] > clothSprings[1] && clothSprings[1] > clothSprings[2]);   // root spring carries the most (the sizing sees the whole subchain)
     });
 
     test("pmx writer: IK bones come back through the independent reader", [] {

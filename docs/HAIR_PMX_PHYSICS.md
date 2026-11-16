@@ -81,18 +81,15 @@ collider (load-time strands keep their support; collisions are **not** disabled)
 
 `SceneChainIsHair(scene, chain)` — the shared predicate (head sockets or the Hair group; never the body's own jiggle).
 
-### `src/assemble/Pose.cpp`
+### `src/assemble/Pose.cpp` — superseded
 
-`BakeGarmentSettle` (the pass that bakes MMD's gravity into the cloth's rest pose) now **skips hair chains**.
-The pass is correct for cloth but wrong for hair: the hair components carry no gravity in the game, so their
-authored drape is the rest pose; folding them to the gravity pole collapsed the face-framing strands into the
-chest and destroyed the hairstyle (found and fixed while validating — see "Validation").
+`BakeGarmentSettle` (the pass that baked MMD's world gravity into the cloth's rest pose) was removed in the
+garment-physics redesign: the exported PMX's rest pose must stay the card's authored drape, and the joint springs carry
+the authored pose in MikuMikuDance instead. See `docs/GARMENT_PHYSICS.md`.
 
 ### `src/assemble/Pose.cpp`, `src/assemble/PhysicsSim.{cpp,h}`, and the garment side of `src/export/PmxPhysics.cpp`
 
-These contain **uncommitted work-in-progress by a parallel session in the same working tree** (the skirt / garment
-rest-pose bake and the garment joint-spring sizing). They are not part of this fix; they are built and validated
-together with it (see "Co-work in the same file"). Nothing there was reverted or rewritten.
+These held the parallel session's work-in-progress at the time of the hair fix (the garment rest-pose bake and the garment joint-spring sizing). Both were resolved in the garment-physics redesign described in `docs/GARMENT_PHYSICS.md`, superseding the interim state recorded here.
 
 ### `tests/cardbridge_tests.cpp` — regression tests (3 new)
 

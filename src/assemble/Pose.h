@@ -65,11 +65,9 @@ float CardSagDefault(const Scene& scene, float bustSize = 0.5f);
 // simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The physics comes from the same
 // `jiggle` the export writes as the joint swing limits; `sag` scales the static hang (1 = the card's own, 0 = none, 2 = double).
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag = 1.0f);
-// Dangles the outfit's own DynamicBone chains (the garments' cascades - capes, jacket panels, kimonos, waist cloth, skirts) into their
-// resting drape, the way the game settles them at load, so the exported PMX starts at equilibrium instead of at the authored pose with
-// gravity fighting the joints from the first frame. The mesh hangs on the bones (BakeSkin), colliders keep it out of the body.
-// Hair and the body's own jiggle chains keep their pose.
-void BakeGarmentSettle(Scene& scene);
+// The world-gravity hang bake for the outfit's cloth was removed: the exported PMX's rest pose must stay the card's authored
+// drape, and the joint springs are sized to hold it (see PmxPhysics.cpp). Stretching the mesh into a hang made the authored
+// silhouette unrecoverable and the joint springs could not hold it anyway. `BakeGarmentSettle` no longer exists.
 
 // How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
 // respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,

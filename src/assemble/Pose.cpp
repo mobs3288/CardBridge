@@ -12,10 +12,6 @@ namespace cardbridge::assemble {
 
 namespace {
 
-// The per-frame gravity displacement the garment settle bakes with, at 60 Hz: g * dt^2. MMD applies its own world gravity at load;
-// the settle uses it so the exported rest pose is the pose that gravity will actually hold (see BakeGarmentSettle).
-constexpr float kGarmentHangGravity = 9.81f * (1.0f / 60.0f) * (1.0f / 60.0f);
-
 Quat mul(Quat a, Quat b) {
     return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
             a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
@@ -406,47 +402,6 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const Ji
         AddSagPose(scene, droop, sag);
         if (!droop.empty()) BakeSkin(scene, SkinMatrices(scene, droop));
     }
-}
-
-void BakeGarmentSettle(Scene& scene) {
-    if (scene.bones.empty()) return;
-    // MikuMikuDance applies its own world gravity to every dynamic garment body at load. The cards' cloth components carry essentially
-    // none (m_Gravity and m_Force are ~0 for the skirts) - in game the authored pose is held by a position spring, not by physics -
-    // so the pose the export was handed is not an equilibrium under the gravity the PMX will see. The chain therefore wakes up at a
-    // pose it must fall from: a forward fold at load, and the fold feeds a ring that reads as a permanent shiver. Simulate the gravity
-    // MikuMikuDance applies instead, and bake the hanging pose (as BakeSettledPhysics does for the bust): the exported PMX then starts
-    // at equilibrium - no load-time scatter, no ring to damp. Hair and the body's own jiggle chains keep their pose.
-    // Set CARDBRIDGE_NO_GARMENT_SETTLE to keep the authored pose.
-    if (std::getenv("CARDBRIDGE_NO_GARMENT_SETTLE")) return;
-    Scene simScene = scene;   // a copy: the export must not mutate the card's own physics component values
-    for (SceneChain& c : simScene.chains) {
-        if (c.part.rfind("outfit", 0) != 0) continue;
-        // Hair is not cloth: the hair components carry no gravity in the game, so their authored drape is the pose the game
-        // shows and the artist drew; dropping it to the gravity pole collapses the face-framing strands into the chest.
-        // (The comment above says hair keeps its pose; keep it.)
-        if (SceneChainIsHair(simScene, c)) continue;
-        c.elasticity = 0.0f;   // no spring holding the authored pose; the settle exists to find the pose gravity leaves us
-        c.stiffness = 0.0f;    // no envelope clamp either (it would hold the chain as close to rest as elasticity does)
-        c.gravity = {0.0f, -kGarmentHangGravity, 0.0f};   // per-frame gravity displacement at 60 Hz (g * dt^2), like MMD's world gravity
-        c.force = {0.0f, 0.0f, 0.0f};
-    }
-    const Pose rest;
-    const std::vector<Mat4> poseWorld = BoneWorlds(simScene, rest);
-    PhysicsSim sim;
-    sim.Reset(simScene, poseWorld, false, false, JiggleSettings{}, false, true, /*fallFully=*/true);   // outfit chains only; the jiggle switches do not apply to cloth
-    if (sim.empty()) return;
-    std::vector<Mat4> skin = SkinMatrices(simScene, rest);
-    if (std::getenv("CARDBRIDGE_DEBUG_GARMENT_SETTLE")) {
-        bool any = false;
-        for (const auto& ch : scene.chains) {
-            if (ch.part.rfind("outfit", 0) != 0 || ch.bones.size() < 2) continue;
-            if (!any) { std::fprintf(stderr, "garment settle: chains ["); any = true; }
-            std::fprintf(stderr, "%s ", ch.name.c_str());
-        }
-        if (any) std::fprintf(stderr, "]\n");
-    }
-    for (int step = 0; step < 900 && sim.Step(simScene, poseWorld, 1, skin); ++step) {}
-    BakeSkin(scene, skin);
 }
 
 // How far the bust / butt hangs at rest, radians. The hang comes from the card's own DynamicBone chain parameters only (a stiff,

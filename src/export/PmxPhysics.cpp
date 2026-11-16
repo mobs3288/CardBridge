@@ -38,12 +38,18 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
 constexpr float kMaxBodySwing = 15.0f;
 
-// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia, not a paper slab and not a feather: the
-// authored drape is baked to MikuMikuDance's world-gravity hang (BakeGarmentSettle), so the joint spring never carries a static torque -
-// it only resists motion, the way cloth resists being swung. The spring is capped at the single-body swing rate like every strand, and
-// the weight comes from the raised per-link mass plus heavy linear/angular damping.
-constexpr float kGarmentMassScale = 1.6f;      // cloth has real inertia: per-link mass is scaled up (gravity response is untouched; the swing against animation is heavier)
-constexpr float kGarmentMassCap = 4.0f;        // ... but never past this, to keep the collider/body mass ratios sane
+// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia, not a paper slab and not a
+// feather. The authored drape IS the preferred resting equilibrium: the joints carry springs sized so gravity torque
+// cannot fold the chain away from it (per joint, from that joint's own subchain — see AddPhysics), so the rest pose the
+// card ships is the pose MikuMikuDance holds. Gravity still acts on every body: it is what produces the cloth's secondary
+// motion, weighs the swing during animation, and settles the cloth after a jump — it just cannot push the equilibrium
+// out of the joint envelope. (Previously the export baked a world-gravity hang into the rest pose and then kept the joints
+// lax against it, which is what flattened wide skirts.)
+constexpr float kGarmentHoldDroop = 0.005f;      // rad per joint of droop at full hang; the spring is sized so gravity alone droops at most this much
+constexpr float kGarmentHoldSpringMin = 50.0f;   // a leaf with nothing under it still gets a usable spring
+constexpr float kGarmentHoldSpringMax = 500000.0f;   // solver-stable ceiling at 120 Hz (a 1e6 spring was measured stable); heavier garments droop slightly more instead of ringing
+constexpr float kGarmentMassScale = 1.0f;        // cloth mass is len/scale*10 like the rest of the system; no arbitrary inflation
+constexpr float kGarmentMassCap = 4.0f;          // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
 constexpr float kGarmentMaxDamping = 0.95f;    // ... and capped below 1 so it still settles
 constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees). This card's loose skirt physics (stiffness 0.6) exports ±34-47 degrees per link, which MikuMikuDance turns into a flap on every step.
@@ -176,6 +182,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<int> chainBody;
     std::vector<char> chainJiggle;   // the same, per body: the body's own jiggle (skin, not a strand: it meets no collider)
     std::vector<char> chainHair;     // the same, per body: hair (it meets nothing either - see the mask section)
+    std::vector<int> chainGarment;   // the same, per body: the garment chain it belongs to (-1 otherwise)
+    int nextGarmentChainId = 0;
 
     for (const auto& ch : scene.chains) {
         if (ch.bones.size() < 2) continue;
@@ -194,6 +202,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             jigSide = assemble::BoneSideSign(scene.bones[static_cast<size_t>(ch.bones[0])].name);
         }
         const bool hairChain = !jigBody && assemble::SceneChainIsHair(scene, ch);   // imported / base hair: the authored hairstyle is the resting shape
+        // A garment-cloth chain (an outfit chain: capes, jacket panels, kimonos, waist cloth, skirt hems).
+        const bool garmentClothChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
+        int garmentChainId = -1;   // -1 = not a garment chain
+        if (garmentClothChain) garmentChainId = nextGarmentChainId++;
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
             std::fprintf(stderr, "chain '%s' own=%d raw=[", ch.name.c_str(), ch.characterOwn ? 1 : 0);
@@ -315,13 +327,17 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // The root follows its bone and collides with nothing: it is what the chain hangs from. (A moving root on a HAIR chain, in
             // MMD's "physics with the bone aligned" mode, fed back into the bone below it and shook the whole model.) The jiggle bodies
             // are the reference models' breast bodies instead: every one is that mode, the body following its bone with physics on top.
-            rb.mode = jigBody ? 2 : (k == 0 ? 0 : 1);
+            // Garment chains (skirts, capes, kimonos) use the same bone-aligned mode: the bone holds the panel at its authored place and
+            // MMD simulates the rotation only. The cloth swings around its joints, responds to colliders and has real inertia, but the
+            // silhouette stays the one the artist drew instead of collapsing to a hanging cone under MMD's gravity.
+            rb.mode = jigBody || (k > 0 && garmentClothChain) ? 2 : (k == 0 ? 0 : 1);
             if (k == 0 && !jigBody) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
                 chainJiggle.push_back(jigBody ? 1 : 0);
                 chainHair.push_back(!jigBody && hairChain ? 1 : 0);
+                chainGarment.push_back(garmentClothChain ? garmentChainId : -1);
                 chainCore.push_back({sub(l.centre, l.unit * (0.5f * l.cylinder)), l.centre + l.unit * (0.5f * l.cylinder), l.radius});
             }
             model.rigidBodies.push_back(std::move(rb));
@@ -391,9 +407,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float own = self.mass * arm * arm + capsuleInertiaAcross(self.mass, self.radius, self.cylinder);
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
-            // A garment rests at the world-gravity hang (baked at export), so the spring carries no static torque at rest: it exists to damp
-            // motion, and the strand cap (own * 15^2) is both stable in MikuMikuDance's solver and generous for that job. The pre-hang
-            // export needed a much harder spring to hold the authored lean off its stop limit, which made the solver pump the joint.
+            // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
+            // alone droops the link by at most kGarmentHoldDroop. The spring scales automatically with chain dimensions, per-link masses and
+            // what hangs below this joint — a small skirt gets a light spring, a long layered one a strong one; the equilibrium is the
+            // authored pose and the joint limits stay far above it, never engaged in normal use.
+            const bool garmentChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
+            if (garmentChain) {
+                const float holdK = lever * kMmdWorldGravity / kGarmentHoldDroop;
+                stiffnessK = std::clamp(std::max(std::max(inertia * omega * omega, holdK), kGarmentHoldSpringMin), kGarmentHoldSpringMin, kGarmentHoldSpringMax);
+            }
             if (hairChain) {
                 // MikuMikuDance applies its own world gravity; the game's hair components carry none, so the elastic mapping bottoms
                 // out and the spring cannot hold the strand. Size it from gravity torque instead: the torque of every link hanging
@@ -419,7 +441,6 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // The outfit's cloth (capes, jacket panels, kimonos, waist cloth, skirt hems) must never be locked: the spring derived above
             // already holds the authored drape inside the limits, and a forced lock on top of it pins the panel to the shoulders -
             // the stiff paper slab. The garment stays a plain hinge inside its bend range with the (now substantial) centring spring.
-            const bool garmentChain = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
             if (garmentChain) range = std::max(range, bend);
             if (jigBody) {
                 // The reference models' breast joints: wide on the flop, moderate on the sway, narrow on the twist, all from the
@@ -445,13 +466,27 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     // of whose colliders it overlaps. Group 0 (overlaps nothing) is met by every body; at most kPmxMaxColliderGroups groups, the last one
     // takes any signature beyond them (so it excludes the union). The one exception is a jiggle body: it is the body itself, not a strand,
     // so its own bust / hip hit spheres would shove it for ever (the shiver at rest) — below it meets the generated arm colliders only.
-    // A garment chain gets the same rule, not an exemption: an export's cloth can only start at its authored pose (the viewer does not
-    // drape it), and a skirt authored over the thighs starts buried. Keeping the colliders it overlaps launches the whole skirt outward
-    // at load — the hips come out bigger than the authored mesh, which no amount of tuning in the viewer's preview shows. The cloth still
-    // meets every collider it does not overlap at rest; the colliders it is buried in are passed through instead, which is what the
-    // authored rest pose means. The garment settle can place the cloth touching the body at export; until it runs in every export path,
-    // the rest-overlap exclusion is the only spawn-safe start for cloth authored over the body.
+    // A garment chain gets the same rule: an export's cloth can only start at its authored pose, and a layered skirt authored overlapping
+    // itself starts buried — bodies of one garment chain never meet that chain's bodies at all, and chains that overlap at rest never meet
+    // either. The cloth still meets every collider it does not overlap at rest, the limbs, and every garment chain it does not overlap at
+    // rest, which is what stops neighbouring skirt panels interpenetrating during motion.
+    // This uses per-chain groups for the garments (2..14, skipping the groups the colliders took); when the garments outnumber the free
+    // groups the extras share one group, which conservatively disables their collisions against each other, never against the body.
     const float margin = 0.02f * scale;
+    // Garment-vs-garment rest overlap, per body: the set of other garment chains whose bodies it starts inside/against.
+    std::vector<std::set<int>> bodyOverlapChains(chainBody.size());
+    if (nextGarmentChainId > 0) {
+        for (size_t a = 0; a < chainBody.size(); ++a) {
+            if (chainGarment[a] < 0) continue;
+            for (size_t b = a + 1; b < chainBody.size(); ++b) {
+                if (chainGarment[b] < 0 || chainGarment[b] == chainGarment[a]) continue;
+                if (SegmentDistance(chainCore[a].a, chainCore[a].b, chainCore[b].a, chainCore[b].b) < chainCore[a].r + chainCore[b].r + margin) {
+                    bodyOverlapChains[a].insert(chainGarment[b]);
+                    bodyOverlapChains[b].insert(chainGarment[a]);
+                }
+            }
+        }
+    }
     std::map<std::vector<int>, int> groupOf;   // overlapped bodies -> collider group
     std::vector<std::set<int>> overlapped(16);
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
@@ -470,14 +505,51 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
     }
-    // The chain collider groups (assigned above for the rest-overlap exclusion).
+    // The chain collider groups (assigned above for the rest-overlap exclusion). Garment-cloth chains get one group each from the free
+    // pool (skipping the collider groups); hair and jiggle stay in group 1 and are returned to below.
     std::set<int> usedGroups = {0};
     for (const auto& [sig, group] : groupOf) usedGroups.insert(group);
+    std::vector<int> garmentGroup(static_cast<size_t>(nextGarmentChainId), -1);
+    {
+        int nextGroup = 2;
+        int overflowGroup = -1;   // assigned once the free pool runs out; extra chains share it
+        for (int g = 0; g < nextGarmentChainId; ++g) {
+            while (nextGroup <= 14 && (usedGroups.count(nextGroup) || nextGroup == 15)) ++nextGroup;
+            if (nextGroup <= 14) { garmentGroup[g] = nextGroup; ++nextGroup; }
+            else { if (overflowGroup < 0) overflowGroup = std::min(14, nextGroup - 1); garmentGroup[g] = overflowGroup; }
+        }
+    }
+    // Which garment chains each game collider overlaps at rest (those chains' groups are excluded from the collider's mask).
+    std::vector<std::set<int>> colliderOverlapChains(colliderCore.size());
+    if (nextGarmentChainId > 0) {
+        for (size_t ci = 0; ci < colliderCore.size(); ++ci)
+            for (size_t bi = 0; bi < chainBody.size(); ++bi) {
+                if (chainGarment[bi] < 0) continue;
+                if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin)
+                    colliderOverlapChains[ci].insert(chainGarment[bi]);
+            }
+    }
+    // The colliders meet group 1 (hair and jiggle chains) plus every garment chain they do not overlap at rest.
+    for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
+        uint16_t mask = static_cast<uint16_t>(1u << kPmxGroupChain);
+        for (int g = 0; g < nextGarmentChainId; ++g)
+            if (garmentGroup[g] >= 0 && !colliderOverlapChains[ci].count(g)) mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+        model.rigidBodies[static_cast<size_t>(colliderBody[ci])].mask = mask;
+    }
+    // The chain bodies' own masks: the collider groups they do not overlap (as before), plus every garment chain they do not overlap
+    // at rest (their own chain is never met), plus the limbs (below). Hair meets nothing; jiggle meets the limbs only.
     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
         if (chainJiggle[bi] || chainHair[bi]) continue;   // jiggle masks are set with the arm colliders below; hair meets nothing at all
+        const int cg = chainGarment[bi] >= 0 ? garmentGroup[static_cast<size_t>(chainGarment[bi])] : -1;
+        if (cg >= 0) model.rigidBodies[static_cast<size_t>(chainBody[bi])].group = static_cast<uint8_t>(cg);
         uint16_t mask = 0;
         for (int g : usedGroups)
             if (!overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) mask |= static_cast<uint16_t>(1u << g);
+        for (int g = 0; g < nextGarmentChainId; ++g) {
+            if (g == chainGarment[bi] || garmentGroup[g] < 0) continue;   // never its own chain
+            if (bodyOverlapChains[bi].count(g)) continue;                 // starts overlapping it at rest: passed through
+            mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+        }
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
     // Hair bodies meet nothing: the game's colliders are sized for flappy cloth and sit inside the strands' drag at rest -
@@ -494,6 +566,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     {
         constexpr uint8_t kLimbGroup = 15;
         bool hasLimb = false;
+        std::vector<int> limbBodies;
+        std::vector<std::set<int>> limbOverlapChains;   // per limb body: the garment chains it overlaps at rest
         auto findBone = [&](const std::string& name) { return scene.boneIndex(name); };
         for (const char* side : {"_L", "_R"}) {
             const int shoulder = findBone(std::string("cf_j_shoulder") + side);
@@ -514,14 +588,28 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 rb.name = std::string("limb collider ") + side + " " + what;
                 rb.bone = a;
                 rb.group = kLimbGroup;
-                rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);
                 rb.mode = 0;
                 rb.shape = (len3d - 2.0f * radius * scale) > 1e-4f ? 2 : 0;
                 rb.size = {radius * scale, std::max(0.0f, len3d - 2.0f * radius * scale), 0};
                 rb.position = (pa + pb) * 0.5f;
                 if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(axis);
                 rb.mass = 1.0f;
+                rb.mask = static_cast<uint16_t>(1u << kPmxGroupChain);   // overwritten below once its garment overlap is known
                 model.rigidBodies.push_back(std::move(rb));
+                limbBodies.push_back(static_cast<int>(model.rigidBodies.size()) - 1);
+                // its garment-chain rest overlap (for the mask below)
+                if (nextGarmentChainId > 0) {
+                    std::set<int> ov;
+                    const Vec3 limbA = sub(rb.position, axis * (0.5f * (rb.shape == 2 ? rb.size.y : 0.0f)));
+                    const Vec3 limbB = rb.position + axis * (0.5f * (rb.shape == 2 ? rb.size.y : 0.0f));
+                    for (size_t bi = 0; bi < chainBody.size(); ++bi) {
+                        if (chainGarment[bi] < 0) continue;
+                        if (SegmentDistance(limbA, limbB, chainCore[bi].a, chainCore[bi].b) < rb.size.x + chainCore[bi].r + margin) ov.insert(chainGarment[bi]);
+                    }
+                    limbOverlapChains.push_back(std::move(ov));
+                } else {
+                    limbOverlapChains.emplace_back();
+                }
                 hasLimb = true;
             };
             addSeg(shoulder, arm, 0.040f, "upper");
@@ -530,6 +618,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             addSeg(knee, leg03, 0.038f, "shin");
         }
         if (hasLimb) {
+            // The limb colliders meet group 1 (hair and jiggle) plus every garment chain they do not overlap at rest.
+            for (size_t i = 0; i < limbBodies.size(); ++i) {
+                uint16_t mask = static_cast<uint16_t>(1u << kPmxGroupChain);
+                for (int g = 0; g < nextGarmentChainId; ++g)
+                    if (garmentGroup[g] >= 0 && !limbOverlapChains[i].count(g)) mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+                model.rigidBodies[static_cast<size_t>(limbBodies[i])].mask = mask;
+            }
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                 if (chainJiggle[bi]) model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = static_cast<uint16_t>(1u << kLimbGroup);
                 else if (chainHair[bi]) continue;   // hair met nothing before this line and meets nothing after it
