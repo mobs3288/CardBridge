@@ -32,6 +32,11 @@ public:
     // the jiggle bones interpolated between the last two substeps. This is the frame-rate-independent path the viewer uses.
     bool Advance(const Scene& scene, const std::vector<Mat4>& poseWorld, double seconds, std::vector<Mat4>& skin);
 
+    // Snaps the outfit cloth's chain bones to a tiny fixed distance off the skin, both directions: pull a too-distant particle in to the
+    // clearance, push a too-close one out to it. The cloth ends up hugging the skin silhouette (the authored straight-then-hanging pose)
+    // instead of floating beside it or slicing into it. The skin matrices are re-derived after the pass; hair keeps its own rest rules.
+    void PushOutsideBody(const Scene& scene);
+
     // Gives every particle a push (a velocity, model units per update), to see the chains swing without moving a bone.
     void Nudge(Vec3 impulse);
 

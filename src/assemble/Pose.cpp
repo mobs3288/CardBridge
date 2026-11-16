@@ -446,6 +446,12 @@ void BakeGarmentSettle(Scene& scene) {
         if (any) std::fprintf(stderr, "]\n");
     }
     for (int step = 0; step < 900 && sim.Step(simScene, poseWorld, 1, skin); ++step) {}
+    // The vertical hang alone leaves the panels hanging in air beside (and around) the legs - a bell flare from the authored pose.
+    // Snap the cloth onto the skin silhouette so the garment starts hugging the body, like the game's cloth rests on the legs.
+    // Opt-in: CARDBRIDGE_CLOTH_SNAP=1 enables the snap (it can show body-skin poke-through on garments whose panels are dragged
+    // across the body). The default build keeps full clearance and accepts the authored flare as-is.
+    if (std::getenv("CARDBRIDGE_CLOTH_SNAP")) sim.PushOutsideBody(simScene);   // outfit chains only; snap to ~1.2 cm off the skin, both directions
+    sim.Step(simScene, poseWorld, 0, skin);   // refresh the skin matrices from the pushed particles
     BakeSkin(scene, skin);
 }
 

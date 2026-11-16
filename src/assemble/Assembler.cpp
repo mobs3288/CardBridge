@@ -2266,6 +2266,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     sc.radius = c.radius * wscale;
                     sc.height = c.height * wscale;
                     sc.inside = c.inside;
+                    // The collider radii stay 1:1 with the card's hit spheres. Reducing them toward the skin drags the cloth INTO the body
+                    // mesh where the capsule model is thinner than the body itself (the buttocks), poking body skin through the garment.
+                    // The cloth reaches the skin through the settle snap instead (PushOutsideBody), which moves each particle to a fixed
+                    // clearance off the skin silhouette and never crosses it.
                     if (sc.bone >= 0) scene.colliders.push_back(sc);
                 }
                 if (std::getenv("CARDBRIDGE_DEBUG_DB")) {
