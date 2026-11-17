@@ -2525,7 +2525,7 @@ void unitTests() {
         {   // a chest-mounted accessory (a_n_bust) is not hair: the garment envelope applies (kGarmentSwing = 0.10 rad per link)
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
             CHECK(m.joints.size() == 3);
-            const float clothBend = 0.10f;   // kGarmentSwing: small deliberate budget, never capped by the card's stiffness
+            const float clothBend = 0.05f;   // kGarmentSwing: near-zero budget (~3 degrees), follows the bones not gravity
             for (const auto& j : m.joints) {
                 float widest = 0.0f;
                 for (int a = 0; a < 3; ++a) {
@@ -2534,7 +2534,7 @@ void unitTests() {
                     widest = std::max(widest, std::max(-lo[a], hi[a]));
                 }
                 // swing axes sit at kGarmentSwing, the roll axis on kGarmentTwist
-                CHECK(widest == 0.10f || widest == 0.15f);
+                CHECK(widest == 0.05f || widest == 0.15f);
             }
         }
     });
@@ -2589,8 +2589,7 @@ void unitTests() {
             clothSprings.push_back(j.springRot.x);
         }
         CHECK(joints == 3);
-        // the flat 0.10 rad per-link sway budget — small enough that the authored drape is never opened into the curtain shape
-        const float expect[3] = {0.10f, 0.10f, 0.10f};
+        // the 0.05 rad per-link near-zero swing budget — the authored silhouette is the pose at all times
         int jointIdx = 0;
         for (const auto& j : m.joints) {
             if (j.name.rfind("cloth", 0) != 0) continue;
@@ -2601,7 +2600,7 @@ void unitTests() {
                 widest = std::max(widest, std::max(-lo[a], hi[a]));
             }
             // the hang axis stays pinned at zero; the swing axes sit at kGarmentSwing, the roll axis at kGarmentTwist
-            CHECK(widest == 0.10f || widest == 0.15f);
+            CHECK(widest == 0.05f || widest == 0.15f);
             ++jointIdx;
         }
         for (float k : clothSprings) CHECK(k > 0.0f);                        // the card's elasticity carries the centring spring (omega = 60*sqrt(elasticity))

@@ -4,6 +4,21 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 10 — physics that follows the bones, not gravity (`(65)`)
+
+The author's direction: the skirt must hold the authored shape at all times and feel alive —
+"the shape is the same but it has physics while maintaining the shape." In MikuMikuDance the only
+ways to do that are (a) kinematic bodies (physics off — that is `(63)`, the static build) or (b) dynamic bodies
+bound to the skeleton with a near-zero swing budget. `(65)` is (b): bone-aligned (mode 2) bodies, the one-sided stop
+welding the hang axis to the bind angle, and the per-link swing envelope cut from 0.10
+(`kGarmentSwing`) to **0.05 rad** (~3°) on every swing axis. The spring stays the card's own
+(`omega = 60·sqrt(elasticity)`), damping heavy (kGarmentMinDamping 0.85 — no ring). The panel can no longer be
+pulled open by gravity or by a thigh except by the smallest angular amount; the silhouette is invariant.
+The price, stated plainly: MikuMikuDance has no "skinned cloth tracked to the outline with real dynamics" mode — the
+small sway you might notice IS the physics. If it feels identical to `(63)`, that is because it nearly is: the only
+visible motion the physics can produce without moving the silhouette is this small. There is no third option in PMX
+short of adding a dedicated secondary-motion bone layer.
+
 ## Update 9 — the drape is welded at rest, swaying only gently in motion
 
 `(64)` is the build the author asked for: the skirt at rest is the exact bind-pose silhouette (the one-sided stop welds the

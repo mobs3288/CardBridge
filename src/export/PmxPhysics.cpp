@@ -49,9 +49,10 @@ constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs
 // The panel's roll about its own long axis is kept near-rigid, like a Koikatsu DynamicBone m_FreezeAxis sway.
 constexpr float kGarmentTwist = 0.15f;           // rad
 
-// The garment swing envelope, deliberately small: the authored silhouette IS the rest pose (the one-sided stop on the hang axis
-// welds the panel there), and only a gentle swing remains for motion — never the 0.5+ rad curtain-and-flag flop that showed the undies.
-constexpr float kGarmentSwing = 0.10f;           // rad per link, about every swing axis
+// The garment swing envelope, deliberately near-zero: the authored silhouette IS the pose at all times. The panels track the
+// skeleton (bone-aligned bodies, one-sided stop pinned at the authored angle), gravity no longer shapes the skirt, and only the
+// smallest possible motion is left for cloth to feel alive. Follows the bones, not gravity.
+constexpr float kGarmentSwing = 0.05f;           // rad per link, about every swing axis (~3 degrees)
 
 // How much of a leg's turn a garment panel along the thigh takes.
 // MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
@@ -457,6 +458,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // back - omega = 60*sqrt(elasticity) rad/s - so the cloth behaves exactly like the card, not like a tuned spring of ours.
             if (garmentChainEarly) {
                 stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
+                // the card's elasticity; the envelope is the cap that keeps the shape
             }
             if (hairChain) {
                 // MikuMikuDance applies its own world gravity; the game's hair components carry none, so the elastic mapping bottoms
