@@ -34,7 +34,6 @@
 #include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
-#include "export/GarmentSway.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
@@ -2226,7 +2225,7 @@ void unitTests() {
         }
     });
 
-    test("physics: garment chains are not simulated on the skirt itself; a separate sway layer carries the physics", [] {
+    test("physics: an outfit chain is simulated like any other dynamic chain — one body per valid bone, joints between consecutive bodies", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
         for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
@@ -2241,56 +2240,16 @@ void unitTests() {
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         pmx::Vertex pv;
         pv.position = {0, 9.0f, 0};
-        pv.bone[0] = 4;        // skinned to 'sk3', the hem-side panel
+        pv.bone[0] = 4;
         pv.weight[0] = 1.0f;
         m.vertices.push_back(pv);
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.empty());   // the skirt's own chain produces nothing at all - no drape, no gravity
-        CHECK(m.joints.empty());
-        exporter::AddGarmentSway(s, m, 10.0f);
-        // one sway bone per chain bone, childed at the same rest pose, invisible to the skeleton
-        CHECK(m.bones.size() == 9);
-        for (size_t i = 0; i < 4; ++i) {
-            const pmx::Bone& sway = m.bones[5 + i];
-            CHECK(sway.name == "sk" + std::to_string(i) + " sway");
-            CHECK(sway.parent == static_cast<int>(i + 1));
-            CHECK(sway.position.x == m.bones[i + 1].position.x && sway.position.y == m.bones[i + 1].position.y);
-            CHECK(sway.flags == 0x0006);
-        }
-        // bodies: a kinematic anchor on the skirt root bone (index 1 — the scene bone itself, not a sway bone) + a dynamic body per sway link
-        CHECK(m.rigidBodies.size() == 5);
-        CHECK(m.rigidBodies[0].bone == 1);
-        for (size_t i = 1; i < m.rigidBodies.size(); ++i) CHECK(m.rigidBodies[i].bone == static_cast<int>(5 + (i - 1)));
-        for (size_t i = 0; i < m.rigidBodies.size(); ++i) {
-            CHECK(m.rigidBodies[i].group == 1);
-            CHECK(m.rigidBodies[i].mask == 0);
-        }
-        CHECK(m.rigidBodies[0].mode == 0);   // the anchor, welded to the skirt root bone
-        for (size_t i = 1; i < 5; ++i) CHECK(m.rigidBodies[i].mode == 1);
-        // joints: the anchor joint (zero translation range, the whole panel pivots at the waist) plus consecutive sway bodies
-        CHECK(m.joints.size() == 4);
-        for (const auto& j : m.joints) {
+        CHECK(m.rigidBodies.size() == 4);      // one body per bone
+        CHECK(m.joints.size() == 3);           // joints between consecutive bodies
+        CHECK(m.rigidBodies[0].mode == 0);     // the root is welded to its bone
+        for (size_t i = 1; i < m.rigidBodies.size(); ++i) CHECK(m.rigidBodies[i].mode == 1);
+        for (const auto& j : m.joints)
             CHECK(j.springRot.x > 0.0f && j.springRot.x == j.springRot.y && j.springRot.y == j.springRot.z);
-            CHECK(j.moveLower.x == 0.0f && j.moveUpper.x == 0.0f);   // linked-translation-rigid, like Bullet's 6-DOF with zero limits
-            const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
-            const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
-            int pins = 0;
-            for (int a = 0; a < 3; ++a) if (lo[a] == 0.0f || hi[a] == 0.0f) ++pins;
-            CHECK(pins >= 1);   // the fold axis carries a zero on the gravity side
-        }
-        // the vertex gave half of its skirt share to the matching sway bone
-        {
-            const pmx::Vertex& nv = m.vertices[0];
-            float skirtW = 0.0f, swayW = 0.0f, total = 0.0f;
-            for (int k = 0; k < 4; ++k) {
-                total += nv.weight[k];
-                if (nv.bone[k] == 4) skirtW += nv.weight[k];
-                if (nv.bone[k] == 8) swayW += nv.weight[k];   // sk3's sway bone
-            }
-            CHECK(std::fabs(total - 1.0f) < 1e-6f);
-            CHECK(std::fabs(skirtW - 0.50f) < 1e-6f);
-            CHECK(std::fabs(swayW - 0.50f) < 1e-6f);
-        }
         // everything the exporter's own reader insists on, still holds
         m.indices = {0, 0, 0};
         pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
@@ -2490,7 +2449,7 @@ void unitTests() {
         CHECK(!assemble::SceneChainIsHair(s, ch));
     });
 
-    test("physics: a hair strand chain keeps a small envelope with a strong centering spring and heavy damping; outfit chains are not simulated", [] {
+    test("physics: a hair strand chain keeps a small envelope with a strong centering spring and heavy damping", [] {
         auto make = [&](const char* id, const char* group, const char* attach) {
             assemble::Scene s;
             s.bones.push_back({"cf_J_FaceUp_ty", -1, {0, 1.2f, 0}, "rig"});
@@ -2530,10 +2489,10 @@ void unitTests() {
             const pmx::Model m = exportPhysics(make("hair.back", "Hair", ""));
             for (const auto& j : m.joints) CHECK(j.rotUpper.x <= 0.0901f);
         }
-        {   // a chest-mounted accessory (a_n_bust) is not hair: outfit chains are never simulated at all now
+        {   // a chest-mounted accessory (a_n_bust) is not hair: it is simulated like any other chain, with the garment envelope
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
-            CHECK(m.joints.empty());
-            CHECK(m.rigidBodies.empty());
+            CHECK(m.joints.size() == 3);
+            CHECK(m.rigidBodies.size() == 4);
         }
     });
 
