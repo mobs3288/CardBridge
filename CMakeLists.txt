@@ -91,6 +91,7 @@ add_library(cardbridge_core STATIC
     src/assemble/JiggleSettings.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
+    src/export/GarmentSway.cpp
     src/export/PmxIk.cpp
     src/export/MmdNames.cpp
     src/export/MorphCatalog.cpp

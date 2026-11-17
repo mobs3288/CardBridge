@@ -34,6 +34,7 @@
 #include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
+#include "export/GarmentSway.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/ShaderLayer.h"
@@ -2225,7 +2226,7 @@ void unitTests() {
         }
     });
 
-    test("physics: garment chains are never simulated - outfit chains add no bodies or joints", [] {
+    test("physics: garment chains are not simulated on the skirt itself; a separate sway layer carries the physics", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
         for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
@@ -2238,9 +2239,60 @@ void unitTests() {
         s.chains.push_back(cloth);
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        pmx::Vertex pv;
+        pv.position = {0, 9.0f, 0};
+        pv.bone[0] = 4;        // skinned to 'sk3', the hem-side panel
+        pv.weight[0] = 1.0f;
+        m.vertices.push_back(pv);
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.empty());   // the skirt is authored, following its bones — nothing pulls on it
+        CHECK(m.rigidBodies.empty());   // the skirt's own chain produces nothing at all - no drape, no gravity
         CHECK(m.joints.empty());
+        exporter::AddGarmentSway(s, m, 10.0f);
+        // one sway bone per chain bone, childed at the same rest pose, invisible to the skeleton
+        CHECK(m.bones.size() == 9);
+        for (size_t i = 0; i < 4; ++i) {
+            const pmx::Bone& sway = m.bones[5 + i];
+            CHECK(sway.name == "sk" + std::to_string(i) + " sway");
+            CHECK(sway.parent == static_cast<int>(i + 1));
+            CHECK(sway.position.x == m.bones[i + 1].position.x && sway.position.y == m.bones[i + 1].position.y);
+            CHECK(sway.flags == 0x0006);
+        }
+        // bodies: a kinematic root (mode 0) and dynamic links (mode 1), all in group 1, meeting nothing
+        CHECK(m.rigidBodies.size() == 4);
+        for (size_t i = 0; i < m.rigidBodies.size(); ++i) {
+            CHECK(m.rigidBodies[i].group == 1);
+            CHECK(m.rigidBodies[i].mask == 0);
+            CHECK(m.rigidBodies[i].mode == (i == 0 ? 0 : 1));
+            CHECK(m.rigidBodies[i].bone == static_cast<int>(5 + i));
+        }
+        // joints only between consecutive sway bodies, one-sided on the fold axis, nothing that opens the flare
+        CHECK(m.joints.size() == 3);
+        for (const auto& j : m.joints) {
+            CHECK(j.springRot.x > 0.0f && j.springRot.x == j.springRot.y && j.springRot.y == j.springRot.z);
+            const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
+            const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
+            int pins = 0;
+            for (int a = 0; a < 3; ++a) if (lo[a] == 0.0f || hi[a] == 0.0f) ++pins;
+            CHECK(pins >= 1);   // the fold axis carries a zero on the gravity side
+        }
+        // the vertex gave 28% of its skirt share to the matching sway bone
+        {
+            const pmx::Vertex& nv = m.vertices[0];
+            float skirtW = 0.0f, swayW = 0.0f, total = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                total += nv.weight[k];
+                if (nv.bone[k] == 4) skirtW += nv.weight[k];
+                if (nv.bone[k] == 8) swayW += nv.weight[k];   // sk3's sway bone
+            }
+            CHECK(std::fabs(total - 1.0f) < 1e-6f);
+            CHECK(std::fabs(skirtW - 0.72f) < 1e-6f);
+            CHECK(std::fabs(swayW - 0.28f) < 1e-6f);
+        }
+        // everything the exporter's own reader insists on, still holds
+        m.indices = {0, 0, 0};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        const pmxread::Model back = readPmx(pmx::WritePmx(m));
+        CHECK(pmxPhysicsFindings(back).empty());
     });
 
     test("physics: identical physics chains are exported once (a card can scan the same DynamicBone twice into two items)", [] {

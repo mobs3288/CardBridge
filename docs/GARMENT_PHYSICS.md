@@ -4,6 +4,28 @@
 chains export no physics bodies or joints at all — the skirt is skinned to the authored bones exactly as the card authors it.
 This document is kept as the design log for the record.
 
+## Update 12 — secondary-motion sway bones: physics that follows the skirt bone, not gravity
+
+`(67)` implements the author's request — "preserve this (the exact viewer drape) and just apply the physics to it…
+not a full drape like a curtain… its pull to the gravity understand?" The export keeps the base skirt chain untouched (no physics bodies or
+joints on the skirt bones themselves, as decided in Update 11) and adds a separate **sway layer** on top:
+
+- Every outfit DynamicBone chain (skirts, capes, kimono panels — never the body's jiggle, never hair) gets one
+  `<bone> sway` bone per chain bone, childed at the same rest position, flagged rotatable/translatable but not visible.
+- Every vertex skinned to a skirt bone gives up `kGarmentSwayMix` (0.28) of its share to the matching sway bone.
+- Physics acts on the sway layer only: the chain root is a kinematic (mode 0) body (the hair-chain pattern), later
+  links are light dynamic bodies (mode 1, mass 0.05, damping 0.9) in group 1 with an **empty collision mask** — they
+  never push or shove anything.
+- Each link joint pins its fold axis on the **gravity side at exactly zero** (opening only on the outward kick side,
+  `kGarmentSwayFlex` = 0.14 rad, twist 0.08), so the wide authored flare is the pose at every frame: it cannot droop,
+  cannot sag to gravity, cannot open into the curtain fold, and in motion only kicks outward and micro-flutters.
+- The hold spring is sized from the card's own elasticity (`omega = 60·sqrt(elasticity)`, capped at 15 rad/s so MMD's
+  120 Hz solver stays clean).
+
+Frame 0 and the deep hip-motion frames (570/750) are 1:1 with the viewer; the physics is present and alive but can never
+unmake the authored shape. If the flutter reads as too subtle or too strong, the knobs are `kGarmentSwayMix`,
+`kGarmentSwayFlex` in `src/export/GarmentSway.cpp`, and `kGarmentSwayOmegaCap`.
+
 ## Update 11 — garment physics is deleted from the export
 
 After repeated live review in MikuMikuDance (back panel vibrating/opening and clipping, the drape never matching the viewer), the author
