@@ -13,14 +13,13 @@ joints on the skirt bones themselves, as decided in Update 11) and adds a separa
 - Every outfit DynamicBone chain (skirts, capes, kimono panels — never the body's jiggle, never hair) gets one
   `<bone> sway` bone per chain bone, childed at the same rest position, flagged rotatable/translatable but not visible.
 - Every vertex skinned to a skirt bone gives up `kGarmentSwayMix` (0.28) of its share to the matching sway bone.
-- Physics acts on the sway layer only: the chain root is a kinematic (mode 0) body (the hair-chain pattern), later
-  links are light dynamic bodies (mode 1, mass 0.05, damping 0.9) in group 1 with an **empty collision mask** — they
-  never push or shove anything.
+- The whole sway chain is one soft pendulum from a kinematic anchor on the skirt root bone: translation zero-range at the anchor joint, rotation enveloped like every link — so the ENTIRE panel lags the hip with delay and swings as one piece, like a real skirt, not just the hem.
+- Physics acts on the sway layer only: the anchor body is kinematic (mode 0, group 1, empty mask), every link is a light dynamic body (mode 1, mass 0.10, damping 0.85) and every link, the root included, is free to rotate within its fold envelope.
 - Each link joint pins its fold axis on the **gravity side at exactly zero** (opening only on the outward kick side,
-  `kGarmentSwayFlex` = 0.14 rad, twist 0.08), so the wide authored flare is the pose at every frame: it cannot droop,
-  cannot sag to gravity, cannot open into the curtain fold, and in motion only kicks outward and micro-flutters.
-- The hold spring is sized from the card's own elasticity (`omega = 60·sqrt(elasticity)`, capped at 15 rad/s so MMD's
-  120 Hz solver stays clean).
+  `kGarmentSwayFlex` = 0.32 rad, twist 0.14), so the wide authored flare is the pose at every frame: it cannot droop,
+  cannot sag to gravity, cannot open into the curtain fold, and in motion only kicks outward and sloshes.
+- The hold spring is sized from the card's own elasticity (`omega = 60·sqrt(elasticity)`, capped at a deliberately soft 5 rad/s)
+  — a soft spring is what makes cloth slosh instead of snapping back; the gravity side of the fold axis stays pinned at zero regardless.
 
 Frame 0 and the deep hip-motion frames (570/750) are 1:1 with the viewer; the physics is present and alive but can never
 unmake the authored shape. If the flutter reads as too subtle or too strong, the knobs are `kGarmentSwayMix`,

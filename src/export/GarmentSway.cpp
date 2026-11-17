@@ -52,6 +52,7 @@ struct SwayChain {
     std::vector<int> bodyOfSway;           // pmx index of the rigid body attached to the sway bone
     std::vector<Vec3> head;                // model units
     std::vector<float> radius, segmentLen;
+    int anchorBody = -1;                   // the kinematic anchor on the skirt root bone
 };
 } // namespace
 
@@ -109,10 +110,27 @@ void AddGarmentSway(const assemble::Scene& scene, pmx::Model& model, float scale
         }
     }
 
-    // Bodies: the chain root (k == 0) is a kinematic (mode 0) body welded to the first sway bone — exactly the hair chain pattern — and
-    // every later sway bone gets a dynamic (mode 1) body. Everything is in group 1 with an EMPTY mask: the sway bodies never push or
-    // shove anything; they answer only to their own joint springs.
+    // Bodies: a kinematic (mode 0) ANCHOR on the skirt root bone — welded to the skeleton, unreachable by gravity — plus a dynamic (mode 1)
+    // body per sway bone, including the root of the sway chain, so the whole skirt swings as one pendulum from the hips with delay, exactly
+    // like a real skirt. Everything is in group 1 with an EMPTY mask: the sway bodies never push or shove anything; they answer only to
+    // their own joint springs.
     for (auto& sc : chains) {
+        {
+            pmx::RigidBody anchor;
+            anchor.name = sc.chain->name + " sway anchor";
+            anchor.nameEn = anchor.name;
+            anchor.bone = sc.bones[0];
+            anchor.group = 1;      // like a hair chain's root body: the reachability audit and the solver both treat it as part of the chains
+            anchor.mask = 0;       // meets nothing: kinematic and inert, only the joints carry anything
+            anchor.mode = 0;
+            anchor.shape = 0;       // sphere
+            anchor.size = {sc.radius[0] * 1.5f, 0, 0};
+            anchor.position = sc.head[0];
+            anchor.mass = 1.0f;
+            anchor.moveDamping = anchor.rotDamping = 0.0f;
+            sc.anchorBody = static_cast<int>(model.rigidBodies.size());
+            model.rigidBodies.push_back(std::move(anchor));
+        }
         for (size_t i = 0; i < sc.bones.size(); ++i) {
             const int b = sc.bones[i];
             Vec3 dir = (i + 1 < sc.bones.size())
@@ -127,51 +145,55 @@ void AddGarmentSway(const assemble::Scene& scene, pmx::Model& model, float scale
             rb.bone = sc.sway[i];
             rb.group = 1;
             rb.mask = 0;
-            rb.mode = i == 0 ? 0 : 1;
+            rb.mode = 1;
             const float cyl = std::max(0.0f, len - 2.0f * sc.radius[i]);
             rb.shape = cyl > 1e-5f ? 2 : 0;
             rb.size = {sc.radius[i], (rb.shape == 2 ? cyl : 0.0f), 0};
             rb.position = sc.head[i] + dir * (len * 0.5f);
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(dir);
-            rb.mass = i == 0 ? 1.0f : 0.10f;   // the root is kinematic; the links are cloth with real inertia
-            rb.moveDamping = rb.rotDamping = i == 0 ? 0.0f : 0.85f;
+            rb.mass = 0.10f;   // cloth with real inertia; light enough for the soft spring to slosh
+            rb.moveDamping = rb.rotDamping = 0.85f;
             rb.friction = 0.0f;
             sc.bodyOfSway.push_back(static_cast<int>(model.rigidBodies.size()));
             model.rigidBodies.push_back(std::move(rb));
         }
     }
 
-    // Joints: none for the root (it IS the skirt's root, welded by being kinematic, like a hair root). Each link joint between consecutive
-    // sway bodies pins its fold axis on the gravity side at zero (extra range = 0 on that side only), allows a small flex on the rest with
-    // a one-sided hold spring sized from the card's own elasticity (capped so MMD's 120 Hz solver stays clean).
+    // Joints: the root joint connects the anchor to the sway root — translation rigid (zero range), rotation same one-sided fold envelope as the
+    // links so the WHOLE panel lags the hip as one piece, exactly like a real skirt swings from the waist with delay. Each link joint below pins
+    // its fold axis on the gravity side at zero, allows a one-sided flex on the rest with a soft hold spring sized from the card's own
+    // elasticity (capped so MMD's 120 Hz solver stays clean). A soft spring is what makes cloth slosh instead of snapping back.
     for (auto& sc : chains) {
         const size_t n = sc.bones.size();
         const float elasticity = clampF(sc.chain->elasticity, 0.005f, 1.0f);
         const float omega = std::min(kGarmentSwayOmegaCap, 60.0f * std::sqrt(elasticity));
         const float gForce = 9.8f * scale;
 
-        for (size_t k = 1; k < n; ++k) {
+        for (size_t k = 0; k < n; ++k) {
             pmx::Joint j;
-            j.bodyA = sc.bodyOfSway[k - 1];
+            j.bodyA = k == 0 ? sc.anchorBody : sc.bodyOfSway[k - 1];
             j.bodyB = sc.bodyOfSway[k];
             j.position = sc.head[k];
             j.rotation = model.rigidBodies[static_cast<size_t>(j.bodyB)].rotation;
             j.name = sc.chain->name + " sway " + std::to_string(k);
             j.nameEn = j.name;
-            // Inertia of everything below this joint (the last links are light and short, so this stays small).
+            if (k == 0) { j.moveLower = {0, 0, 0}; j.moveUpper = {0, 0, 0}; }
+            // Inertia of everything below this joint (the last links are the lightest, but every link carries real cloth inertia).
             float inertia = 0.0f;
+            const Vec3 pivot = (k == 0) ? sc.head[0] : sc.head[k - 1];
             for (size_t d = k; d < n; ++d) {
-                const Vec3 arm = {sc.head[d].x - sc.head[k - 1].x, sc.head[d].y - sc.head[k - 1].y, sc.head[d].z - sc.head[k - 1].z};
+                const Vec3 arm = {sc.head[d].x - pivot.x, sc.head[d].y - pivot.y, sc.head[d].z - pivot.z};
                 const float r2 = arm.x * arm.x + arm.y * arm.y + arm.z * arm.z;
-                inertia += 0.05f * r2 + 0.05f * sc.radius[d] * sc.radius[d];
+                inertia += 0.10f * r2 + 0.10f * sc.radius[d] * sc.radius[d];
             }
             const float bend = clampF(omega * omega * inertia, 0.0f, 2500.0f);   // the hold spring, stiffness units
             // Fold axis: the horizontal axis perpendicular to the link and gravity (arm x g). The axis most aligned with it gets the one-sided stop.
-            const Vec3 arm = {sc.head[k].x - sc.head[k - 1].x, sc.head[k].y - sc.head[k - 1].y, sc.head[k].z - sc.head[k - 1].z};
+            const Vec3 seg = (k == 0 && n >= 2) ? Vec3{sc.head[1].x - sc.head[0].x, sc.head[1].y - sc.head[0].y, sc.head[1].z - sc.head[0].z}
+                                                 : Vec3{sc.head[k].x - sc.head[k - 1].x, sc.head[k].y - sc.head[k - 1].y, sc.head[k].z - sc.head[k - 1].z};
             Vec3 g = {0.0f, -gForce, 0.0f};
-            Vec3 tw = cross3(arm, g);
+            Vec3 tw = cross3(seg, g);
             tw = normalizeSafe(tw, {1, 0, 0});
-            Vec3 linkDir = normalizeSafe(arm, {0, -1, 0});
+            Vec3 linkDir = normalizeSafe(seg, {0, -1, 0});
             Vec3 bfX, bfY, bfZ;
             EulerAxes(j.rotation.x, j.rotation.y, j.rotation.z, bfX, bfY, bfZ);
             const Vec3* bf[3] = {&bfX, &bfY, &bfZ};

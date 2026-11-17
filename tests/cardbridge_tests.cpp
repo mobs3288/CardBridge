@@ -2257,18 +2257,21 @@ void unitTests() {
             CHECK(sway.position.x == m.bones[i + 1].position.x && sway.position.y == m.bones[i + 1].position.y);
             CHECK(sway.flags == 0x0006);
         }
-        // bodies: a kinematic root (mode 0) and dynamic links (mode 1), all in group 1, meeting nothing
-        CHECK(m.rigidBodies.size() == 4);
+        // bodies: a kinematic anchor on the skirt root bone (index 1 — the scene bone itself, not a sway bone) + a dynamic body per sway link
+        CHECK(m.rigidBodies.size() == 5);
+        CHECK(m.rigidBodies[0].bone == 1);
+        for (size_t i = 1; i < m.rigidBodies.size(); ++i) CHECK(m.rigidBodies[i].bone == static_cast<int>(5 + (i - 1)));
         for (size_t i = 0; i < m.rigidBodies.size(); ++i) {
             CHECK(m.rigidBodies[i].group == 1);
             CHECK(m.rigidBodies[i].mask == 0);
-            CHECK(m.rigidBodies[i].mode == (i == 0 ? 0 : 1));
-            CHECK(m.rigidBodies[i].bone == static_cast<int>(5 + i));
         }
-        // joints only between consecutive sway bodies, one-sided on the fold axis, nothing that opens the flare
-        CHECK(m.joints.size() == 3);
+        CHECK(m.rigidBodies[0].mode == 0);   // the anchor, welded to the skirt root bone
+        for (size_t i = 1; i < 5; ++i) CHECK(m.rigidBodies[i].mode == 1);
+        // joints: the anchor joint (zero translation range, the whole panel pivots at the waist) plus consecutive sway bodies
+        CHECK(m.joints.size() == 4);
         for (const auto& j : m.joints) {
             CHECK(j.springRot.x > 0.0f && j.springRot.x == j.springRot.y && j.springRot.y == j.springRot.z);
+            CHECK(j.moveLower.x == 0.0f && j.moveUpper.x == 0.0f);   // linked-translation-rigid, like Bullet's 6-DOF with zero limits
             const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
             const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
             int pins = 0;
