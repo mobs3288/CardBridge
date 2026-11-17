@@ -13,16 +13,17 @@ namespace cardbridge::exporter {
 
 // How much of every skirt-bone influence moves into its sway bone. The skirt bone itself keeps the remaining share,
 // so at rest the mesh renders exactly as authored and any flutter is a small secondary rotation on top.
-static constexpr float kGarmentSwayMix = 0.28f;
+static constexpr float kGarmentSwayMix = 0.50f;
 
 // The per-link envelope of a sway joint, radians: the fold axis can only open on the anti-gravity side (the kick up),
 // never droop; the rest are symmetric budgets around the rest pose.
-static constexpr float kGarmentSwayFlex = 0.14f;
-static constexpr float kGarmentSwayTwist = 0.08f;
+static constexpr float kGarmentSwayFlex = 0.32f;
+static constexpr float kGarmentSwayTwist = 0.14f;
 
-// Physics safety: the hold spring is sized from the card's own elasticity, capped in the same way a Koikatsu DynamicBone
-// spring is expressed (60 * sqrt(elasticity) rad/s), and MikuMikuDance's 120 Hz solver stays clean at or below this rate.
-static constexpr float kGarmentSwayOmegaCap = 15.0f;
+// Physics safety: the hold spring is sized from the card's own elasticity, capped so MikuMikuDance's 120 Hz solver stays clean — but the
+// cap is low on purpose: a pendulum barely moves if its spring is stiff relative to the base's acceleration. A skirt sloshes like a skirt
+// only when its restoring spring is soft (a low omega), with the gravity side of the fold axis pinned at exactly zero so it still never droops.
+static constexpr float kGarmentSwayOmegaCap = 5.0f;
 
 static Vec3 normalizeSafe(Vec3 v, Vec3 fallback) {
     const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -132,8 +133,8 @@ void AddGarmentSway(const assemble::Scene& scene, pmx::Model& model, float scale
             rb.size = {sc.radius[i], (rb.shape == 2 ? cyl : 0.0f), 0};
             rb.position = sc.head[i] + dir * (len * 0.5f);
             if (rb.shape == 2) rb.rotation = PmxRotationFromYAxis(dir);
-            rb.mass = i == 0 ? 1.0f : 0.05f;   // the root is kinematic; the links are light cloth
-            rb.moveDamping = rb.rotDamping = i == 0 ? 0.0f : 0.9f;
+            rb.mass = i == 0 ? 1.0f : 0.10f;   // the root is kinematic; the links are cloth with real inertia
+            rb.moveDamping = rb.rotDamping = i == 0 ? 0.0f : 0.85f;
             rb.friction = 0.0f;
             sc.bodyOfSway.push_back(static_cast<int>(model.rigidBodies.size()));
             model.rigidBodies.push_back(std::move(rb));

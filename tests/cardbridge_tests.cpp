@@ -2275,7 +2275,7 @@ void unitTests() {
             for (int a = 0; a < 3; ++a) if (lo[a] == 0.0f || hi[a] == 0.0f) ++pins;
             CHECK(pins >= 1);   // the fold axis carries a zero on the gravity side
         }
-        // the vertex gave 28% of its skirt share to the matching sway bone
+        // the vertex gave half of its skirt share to the matching sway bone
         {
             const pmx::Vertex& nv = m.vertices[0];
             float skirtW = 0.0f, swayW = 0.0f, total = 0.0f;
@@ -2285,8 +2285,8 @@ void unitTests() {
                 if (nv.bone[k] == 8) swayW += nv.weight[k];   // sk3's sway bone
             }
             CHECK(std::fabs(total - 1.0f) < 1e-6f);
-            CHECK(std::fabs(skirtW - 0.72f) < 1e-6f);
-            CHECK(std::fabs(swayW - 0.28f) < 1e-6f);
+            CHECK(std::fabs(skirtW - 0.50f) < 1e-6f);
+            CHECK(std::fabs(swayW - 0.50f) < 1e-6f);
         }
         // everything the exporter's own reader insists on, still holds
         m.indices = {0, 0, 0};
