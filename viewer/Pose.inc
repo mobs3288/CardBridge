@@ -690,6 +690,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     ao.layers.push_back(std::move(spec));
                 }
             }
+            bool originalGarment = true;   // Look tab: the card's own garment vertices; off = the clipping correction runs on this scene too
             {   // the sliders: the card's own values unless the user changed them
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 if (!keepTweaks || g.tw.bodyCard.empty()) {
@@ -719,6 +720,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 ao.skinShadeWidth = g.tw.skinShadeWidth;
                 ao.skinAo = g.tw.skinAo;
                 ao.autoCloth = g.autoCloth;
+                originalGarment = g.originalGarment;
                 if (std::fabs(g.tw.areola - g.tw.areolaCard) > 1e-4f) ao.areolaSize = g.tw.areola;
                 ao.proportionLayer = ProportionLayerNow();
             }
@@ -730,6 +732,12 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             ao.cancelled = [] { return ProgCancelled(); };
             if (ProgCancelled()) throw Cancelled{};
             out->scene = assemble::Assemble(c, *g.resolver, ao);
+            if (!originalGarment) {
+                // The viewer's own copy of the export's clipping correction: the preview shows exactly the garment the PMX carries.
+                const auto fix = assemble::FixGarmentIntersections(out->scene);
+                Log("  garment intersection fix: " + std::to_string(fix.verticesMoved) +
+                    " vertex(es) moved out of the body (Original garment is off)");
+            }
             if (ProgCancelled()) throw Cancelled{};
             ProgSet(0.97, "counting triangles");
             out->outfits = static_cast<int>(c.outfits.size());

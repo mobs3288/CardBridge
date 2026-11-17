@@ -445,6 +445,9 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kSag, "Sag", "Jiggle"});
         rows.push_back({0, kAutoCloth, "Auto cloth (added bones + physics where parts have none; reloads the card)", "Auto cloth"});
         rows.push_back({2, kAutoCloth, "Auto cloth: sleeves / wings / tails", "Auto cloth"});
+        rows.push_back({0, kOriginalGarment, "Garments", "Garments"});
+        rows.push_back({2, kOriginalGarment, "Original garment: the card's own drape (no vertex fix)", "Garments"});
+        rows.push_back({4, 0, "off: garment vertices that pierce the body are pushed out (preview and export)", "Garments"});
         rows.push_back({0, -1, "Shader layers (on top of the game's shaders)", "Shader layers"});
         if (g.layerDefs.empty()) rows.push_back({4, 0, "none found: put .hlsl files in the layers folder", "Shader layers"});
         for (size_t i = 0; i < g.layerDefs.size(); ++i)
@@ -548,6 +551,7 @@ bool TweakChanged(int id) {
     if (id == kJiggleBust) return g.jiggleBust;
     if (id == kJiggleButt) return g.jiggleButt;
     if (id == kAutoCloth) return g.autoCloth;
+    if (id == kOriginalGarment) return g.originalGarment;   // the switch shows ON by default (like the A-pose switch)
     if (id == kTransBrush) return g.transBrush;
     if (id == kTransErase) return g.transErase;
     if (id == kNipplePink) return !g.tw.pinkNipples;
@@ -600,6 +604,7 @@ void ResetTweak(int id) {
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = false;   // reset to the new default (butt jiggle off)
     else if (id == kAutoCloth) g.autoCloth = false;
+    else if (id == kOriginalGarment) g.originalGarment = true;
     else if (id == kTransBrush || id == kTransErase) {
         if (id == kTransBrush) g.transBrush = false; else g.transErase = false;
         TransSwitchChanged(id);   // the toggle reverts the bake at once (the paint is kept)

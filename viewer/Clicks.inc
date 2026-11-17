@@ -89,6 +89,12 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         ScheduleApplyTweaks();
         return;
     }
+    if (row.kind == 2 && row.id == kOriginalGarment) {
+        if (right) ResetTweak(row.id); else g.originalGarment = !g.originalGarment;
+        Log(row.label + ": " + (g.originalGarment ? "on" : "off") + " (reloads the card)");
+        ScheduleApplyTweaks();
+        return;
+    }
     if (row.kind == 2 && row.id == kNipplePink) {
         if (right) ResetTweak(row.id); else g.tw.pinkNipples = !g.tw.pinkNipples;
         Log(row.label + ": " + (g.tw.pinkNipples ? "on" : "off"));

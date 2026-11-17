@@ -145,12 +145,13 @@ void usage() {
         "             [--auto-cloth]                  opt-in: synthesize loose chains for hanging cloth missing authored physics\n"
         "                                            (disabled by default: synthesised chains were collapsing cloth onto the body;\n"
         "                                            --no-auto-cloth / CARDBRIDGE_NO_AUTO_CLOTH=1 keep it off)\n"
-        "             [--no-fix-garment-intersections]  turn the garment-vs-body clipping correction OFF (it is ON by default). The correction\n"
+        "             [--fix-garment-intersections]   turn the garment-vs-body clipping correction ON (it is OFF by default: the export keeps\n"
+        "                                            the card's own garment vertices, exactly the drape the viewer shows). The correction\n"
         "                                            pushes any garment vertex that pierces the body back out along the body's own surface by\n"
         "                                            its own penetration depth (plus a small clearance); the silhouette is preserved. Body,\n"
         "                                            head, hair, the nude-morph skin pieces and footwear are never touched; the corrected count\n"
-        "                                            is written to the manifest as issues. CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 also forces\n"
-        "                                            it off. ([--fix-garment-intersections] is kept for compatibility: it does nothing now)\n"
+        "                                            is written to the manifest as issues. CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1 also turns\n"
+        "                                            it on; =0 forces it off. ([--no-fix-garment-intersections] is kept for compatibility: the default)\n"
         "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
         "                                             [--jiggle-mass F] [--jiggle-stiffness F] [--jiggle-damping F]\n"
         "                                             [--jiggle-gravity F] [--jiggle-amplitude-vertical F]\n"
@@ -940,11 +941,14 @@ int cmdConvert(const Args& a) {
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, jiggle, settleSag);
         // The outfit's cloth (capes, kimono sleeves, jacket panels, skirt hems) keeps the authored drape: the PMX's joints are now
         // sized to hold the card's rest pose against MMD's world gravity, so no hang is baked into the mesh.
-        // Garment-vs-body clipping correction, on by default: a garment vertex buried in the skin is pushed back out along the body's
-        // own surface. --no-fix-garment-intersections or CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turn it off.
+        // Garment-vs-body clipping correction, OFF by default: the export carries the card's own garment vertices, exactly the drape
+        // the viewer shows. --fix-garment-intersections (or CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1) pushes a garment vertex buried in
+        // the skin back out along the body's own surface; =0 forces it off.
         const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");
-        const bool fixOff = a.has("no-fix-garment-intersections") || (fixEnv && std::string(fixEnv) == "0");
-        if (!fixOff)
+        bool fixGarments = a.has("fix-garment-intersections");
+        if (a.has("no-fix-garment-intersections")) fixGarments = false;
+        if (fixEnv && *fixEnv) fixGarments = std::string(fixEnv) != "0";
+        if (fixGarments)
             assemble::FixGarmentIntersections(scene);
     }
     poseTimer.Stop();

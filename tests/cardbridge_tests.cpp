@@ -7548,6 +7548,10 @@ void meshTests() {
         // the per-bone locals were re-derived from the moved positions (only slots with weight are rewritten; zero-weight slots keep the fixture's values)
         for (int k = 0; k < 4; ++k)
             if (s.meshes[clothMesh].vertices[0].weight[k] > 0.0f) CHECK(s.meshes[clothMesh].vertices[0].local[k].y == s.meshes[clothMesh].vertices[0].pos.y);
+        // running it again is a no-op: the preview corrects at rest and the export corrects after the pose bake, so the second
+        // pass keeps the scene the viewer showed (the fix projects onto the clearance band; it never creeps outward)
+        const auto repeat = FixGarmentIntersections(s);
+        CHECK(repeat.verticesMoved == 0);
         // the summary issue was raised and names the part
         bool named = false;
         for (const auto& is : s.issues) named = named || (is.part == "outfit0.top" && is.message.find("garment intersection correction") != std::string::npos);

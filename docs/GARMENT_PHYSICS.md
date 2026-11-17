@@ -4,6 +4,21 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 3 — "Original garment" is the default: the PMX carries the card's own drape
+
+The garment-vs-body clipping correction (`FixGarmentIntersections`) used to run on every export. It rewrites garment
+vertices that sit inside the skin, which can visibly change a tight garment's authored drape — and the viewer never ran
+it, so the exported PMX could differ from the preview. It is now **off by default**: the export keeps the card's own
+garment vertices, exactly the drape the viewer shows.
+
+- **CLI:** `--fix-garment-intersections` turns it on. `--no-fix-garment-intersections` (now the default) and
+  `CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0` keep it off; `CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1` turns it on.
+- **Viewer:** Look tab → **Garments → Original garment** is ON by default. Turning it off runs the correction on the
+  preview scene (a reload) and on the export after the pose bake, so the preview and the PMX carry the same corrected
+  garment. The switch is a pipeline setting, not a card tweak: it is not saved as a card edit.
+- **Idempotent:** a second pass on a corrected scene moves nothing. The preview corrects at rest; the export copy from
+  the preview is corrected again after the pose bake, which only catches vertices the pose newly buried.
+
 ## Update 2 — the leg-follow append removed (the "straight-tube skirt")
 
 After the asymmetric envelope landed, MikuMikuDance still rendered the Kurumi skirt as a narrow, pinned column that did not

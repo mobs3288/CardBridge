@@ -21,6 +21,8 @@ void StartExport() {
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
     const assemble::JiggleSettings jiggle = g.jiggle;   // the physical settings the preview used, shared with the PMX
     const float sag = g.sag;
+    const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");   // 0 forces the fix off (the function also honours it); anything else turns it on
+    const bool originalGarment = (fixEnv && *fixEnv) ? std::string(fixEnv) == "0" : g.originalGarment;
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
     const assemble::ProportionLayer correctionLayer = ProportionLayerNow();   // the layer the scene on screen was re-shaped with
     if (!correctionLayer.empty() && correctionLayer.enabled)
@@ -30,7 +32,7 @@ void StartExport() {
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, pose, matCopy, matSha, correctionLayer, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -39,8 +41,10 @@ void StartExport() {
             if (ProgCancelled()) throw Cancelled{};
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggle, sag);   // the bust/hips as they hang under gravity
-            // garment-vs-body clipping correction (on by default; CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turns it off)
-            if (const char* env = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS"); !env || std::string(env) != "0")
+            // garment-vs-body clipping correction: the Look tab's "Original garment" switch (on = the card's own vertices,
+            // exactly the preview; off = push garment vertices that pierce the body out of it). Runs after the pose bake,
+            // as in the CLI; the scene copy from the preview may already carry the rest-pose correction, which is idempotent.
+            if (!originalGarment)
                 assemble::FixGarmentIntersections(scene);
             exporter::ApplyPartStateForExport(scene, hiddenNow);   // hidden items leave the PMX entirely (meshes, chains and their own bones); the preview is the viewer, 1:1
             if (matCopy.IsDirty()) material::ReportUnsupported(scene, matCopy);   // unsupported workbench fields are reported, never silently dropped

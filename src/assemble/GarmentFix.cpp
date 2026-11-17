@@ -11,8 +11,9 @@
 //
 // Exclusions (documented, by role rather than by asset name): the body itself, the hidden "under pieces"
 // (the skin kept for the nude morphs), footwear (a shoe encloses the foot), the Head and the Hair group.
-// The pass is on by default (every supported card benefits automatically); CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0
-// keeps it off even for a caller that enables it on purpose.
+// The pass is opt-in and OFF by default: the export keeps the card's own garment vertices, exactly the drape the viewer
+// shows. The CLI turns it on with --fix-garment-intersections, the viewer with its "Original garment" switch, and
+// CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 keeps it off even for a caller that enables it on purpose.
 
 #include "assemble/Assembler.h"
 
@@ -213,7 +214,8 @@ GarmentFixStats FixGarmentIntersections(Scene& scene, float clearance) {
                 const float dist = std::sqrt(bestDistSq);
                 // a vertex deep inside the body is far from the surface; only a parity test can tell it from the air outside
                 const bool inside = pointInsideBody(v.pos, body);
-                if (dist >= clearance && !inside) continue;   // outside with clearance to spare
+                // outside with clearance to spare; a corrected vertex lands exactly on the band, so float error must not move it again
+                if (dist >= clearance - 1e-5f && !inside) continue;
                 Vec3 dir;
                 if (inside) {
                     dir = bestTri->n;                          // straight out of the body along the surface

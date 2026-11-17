@@ -131,8 +131,9 @@ struct GarmentFixStats {
 // - bone weights, UVs, topology, blend shapes, every vertex further than the clearance from the skin - is bit-identical.
 // The silhouette is preserved up to the penetration depth itself; it is the minimal correction possible. Exclusions,
 // documented: the body itself, the hidden "under pieces" (skin kept for the nude morphs), footwear (a shoe encloses the
-// foot by design), and anything in the Head or Hair groups. The pass is ON by default (the CLI and the viewer's PMX export run
-// it); CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 keeps it off everywhere. Diagnostics: one issue per part that had vertices
+// foot by design), and anything in the Head or Hair groups. The pass is OFF by default (the export carries the card's own
+// garment vertices); --fix-garment-intersections and the viewer's "Original garment" switch turn it on, and
+// CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 keeps it off everywhere. Diagnostics: one issue per part that had vertices
 // moved (count + largest move), one summary issue, and the counts in the return value for the caller's manifest. A scene
 // without a body part is left untouched (stats all zero).
 GarmentFixStats FixGarmentIntersections(Scene& scene, float clearance = 0.002f);

@@ -226,6 +226,7 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
                kTransStrength = 214, kTransSize = 215,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kAutoCloth = 306,
+              kOriginalGarment = 309,
               kJiggleMass = 320, kJiggleStiffness = 321, kJiggleDamping = 322, kJiggleGravity = 323,
               kJiggleAmpVertical = 324, kJiggleAmpHorizontal = 325, kJiggleAmpDepth = 326,
               kJiggleRotation = 327, kJiggleStrength = 328, kJiggleSimHz = 329, kJigglePreset = 330,
@@ -499,6 +500,7 @@ struct App {
     bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: the bust jiggle is on by default, the butt jiggle is off (the card's butt sway reads as the back of the skirt vibrating; flip in the Look tab or --jiggle-butt)
     assemble::JiggleSettings jiggle;   // the physical settings the preview and the export share (Strength replaces the old jiggle intensity)
     bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
+    bool originalGarment = true;                  // Look tab: keep the card's own garment vertices, the drape exactly as the viewer shows it (no vertex fix); off = run the clipping correction in the preview and the export
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size
