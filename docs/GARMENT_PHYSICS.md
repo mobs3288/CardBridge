@@ -17,42 +17,6 @@ wide flared silhouette rendered perfectly there while the MMD-side file quietly 
 layer 1**. Validation: regression test updated to assert zero appends and zero layer promotions; MikuMikuDance must be
 checked on the next import.
 
-## Update 3 — the garment settle bake re-landed, bound to the card's own sim (2026-11-17)
-
-The old `BakeGarmentSettle` baked MikuMikuDance's world gravity into the rest pose and collapsed the authored flare, so it was
-removed. The request now is the opposite: the PMX must show **the drape Koikatsu shows** — which is the DynamicBone equilibrium
-of the card's own settings (per-chain gravity/force, elasticity, stiffness) plus the colliders (the legs push the panels out).
-That equilibrium is exactly what the cardbridge Outfit Preview renders; MikuMikuDance's plain 9.8 m/s² world gravity is not.
-
-`BakeGarmentSettle` therefore came back bound to the **card's** sim, not MMD's: `PhysicsSim::Reset(...)` with `outfitOnly=true`,
-`fallFully=false` (the rest pose is presumed to hang under the card's own gravity, so the gravity component of the rest pose is
-not applied), colliders on — the identical particle update the Outfit Preview runs. The settled skin is baked into the rest pose
-(vertices, normals, bone positions, colliders) the same way the bust settle is baked, **before** the garment-intersection fix.
-Hair chains and the body's jiggle chains are never touched. `CARDBRIDGE_NO_GARMENT_SETTLE=1` keeps the authored pose;
-`CARDBRIDGE_DEBUG_GARMENT_SETTLE=1` prints per-chain movement.
-
-Measured on Kurumi (`KK_400633.png`, outfit 0, exported 2026-11-17): **the bake moves nothing** — `1 steps, max outfit bone move
-0.0000 m, moved=no`. The authored pose *is* Kurumi's Koikatsu equilibrium, and `_____________preview.png` (the assembled scene
-the PMX carries) shows the wide flared skirt. So for this card the export is byte-identical in silhouette to before the change;
-mode 2 pins the bodies to the baked bone positions and the asymmetric envelope bounds per-link droop to `pin` (Kurumi: ~2.3°), so
-MikuMikuDance cannot collapse the flare to a straight column at rest either. What the bake *does* change are cards whose skirt
-panels are authored **buried in the thighs** (e.g. the purple/white wrap-dress card): the panels are pushed out to the leg
-capsules at rest — the same equilibrium Koikatsu shows at load, and the same reason the Outfit Preview looks flared there.
-
-Tests: `outfit settle: BakeGarmentSettle bakes the collider-pushed drape into the rest pose; hair untouched; opt-out respected`
-(synthetic buried-panel scene; asserts the garment panels leave the capsule, the hair chain is bitwise unmoved, and
-`CARDBRIDGE_NO_GARMENT_SETTLE=1` keeps the authored pose).
-
-Residuals:
-
-- **Kurumi in MikuMikuDance must be checked against a fresh export** (desktop folder `时崎狂三 (10)`); older folders predate the
-  asymmetric envelope and this bake. If MMD still renders a narrower silhouette than the preview for a card whose preview/PMX
-  disagree, the difference is physics-at-load behaviour of the 120 Hz solver, not the rest pose — compare with the preview image
-  in the export folder.
-- The bake encodes a *static* equilibrium. Panels that flare only under motion (inertial swing-out) are still MMD's to produce.
-- Falling further than the card's own elasticity allows is not possible by design — that is the card behaving, not the bake
-  choosing for it.
-
 ## Systemic findings (garments, hair and accessories together)
 
 After the skirt fix, severe jitter remained in *accessories* as well. Root-caused across six cards:

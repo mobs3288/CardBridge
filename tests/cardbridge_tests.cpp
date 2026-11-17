@@ -2564,47 +2564,6 @@ void unitTests() {
         for (float k : clothSprings) CHECK(k == 50.0f);                     // the MikuMikuDance reference cloth spring (flat 50)
     });
 
-    test("outfit settle: BakeGarmentSettle bakes the collider-pushed drape into the rest pose; hair untouched; opt-out respected", [] {
-        auto build = [] {
-            assemble::Scene s;
-            s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
-            for (int i = 0; i < 4; ++i) s.bones.push_back({"s" + std::to_string(i), i == 0 ? 0 : i, {0.05f, 0.95f - 0.15f * float(i), 0}, "item"});
-            for (int i = 0; i < 4; ++i) s.bones.push_back({"h" + std::to_string(i), i == 0 ? 0 : i + 4, {0.05f, 0.95f - 0.15f * float(i), 0.05f}, "item"});
-            assemble::ScenePart outfit; outfit.id = "outfit0.top"; outfit.group = "Outfit"; s.parts.push_back(outfit);
-            assemble::ScenePart hair; hair.id = "hair.back"; hair.group = "Hair"; s.parts.push_back(hair);
-            assemble::SceneChain garment;
-            garment.name = "garment"; garment.part = outfit.id; garment.bones = {1, 2, 3, 4};
-            // Free particles under zero force: only the leg collider can move the panels (a straight hang buried in the capsule).
-            garment.damping = 0.0f; garment.elasticity = 0.0f; garment.stiffness = 0.0f;
-            s.chains.push_back(garment);
-            assemble::SceneChain hairChain;
-            hairChain.name = "hair"; hairChain.part = hair.id; hairChain.bones = {5, 6, 7, 8};
-            hairChain.damping = 0.0f; hairChain.elasticity = 0.0f; hairChain.stiffness = 0.0f;
-            s.chains.push_back(hairChain);
-            assemble::SceneCollider leg;
-            leg.name = "leg"; leg.bone = 0; leg.center = {0, 0.8f, 0}; leg.axis = {0, 1, 0}; leg.radius = 0.2f; leg.height = 0.6f;
-            s.colliders.push_back(leg);
-            return s;
-        };
-        assemble::Scene s = build();
-        const float hairX = s.bones[5].pos.x, hairTipX = s.bones[8].pos.x;
-        assemble::BakeGarmentSettle(s);
-        // the garment panels are pushed out of the leg capsule (the flare the game's settle produces)
-        CHECK(s.bones[2].pos.x > 0.1f);
-        CHECK(s.bones[3].pos.x > 0.1f);
-        CHECK(s.bones[4].pos.x > 0.05f);
-        // the hair chain is not the outfit: it keeps the authored rest pose exactly
-        CHECK(std::fabs(s.bones[5].pos.x - hairX) < 1e-8f);
-        CHECK(std::fabs(s.bones[8].pos.x - hairTipX) < 1e-8f);
-        // the opt-out keeps the authored pose instead of baking anything
-        assemble::Scene skipped = build();
-        _putenv("CARDBRIDGE_NO_GARMENT_SETTLE=1");
-        assemble::BakeGarmentSettle(skipped);
-        _putenv("CARDBRIDGE_NO_GARMENT_SETTLE=");
-        CHECK(skipped.bones[2].pos.x == 0.05f);
-        CHECK(skipped.bones[4].pos.x == 0.05f);
-    });
-
     test("pmx writer: IK bones come back through the independent reader", [] {
         pmx::Model m;
         m.name = "t";

@@ -65,14 +65,9 @@ float CardSagDefault(const Scene& scene, float bustSize = 0.5f);
 // simulated with gravity until it hangs, and the settled skin is baked into the vertices like any pose. The physics comes from the same
 // `jiggle` the export writes as the joint swing limits; `sag` scales the static hang (1 = the card's own, 0 = none, 2 = double).
 void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const JiggleSettings& jiggle, float sag = 1.0f);
-
-// The outfit's cloth (capes, kimono sleeves, jacket panels, skirt hems) settled into the scene's rest pose: the chains are run with the
-// card's own DynamicBone settings — the same particle sim the Outfit Preview runs, with the same gravity/force, elasticity, stiffness
-// and colliders (the legs push the panels out) — and the settled skin is baked in like any pose. MikuMikuDance renders exactly this
-// drape at rest, and the exported joints hold it there (mode 2 in PmxPhysics pins the bodies to these positions; the hang-stop
-// envelope never droops past it). Unlike the removed world-gravity hang bake this never applies MikuMikuDance's gravity: only the
-// card's own settings settle out. `CARDBRIDGE_NO_GARMENT_SETTLE=1` keeps the authored pose; `CARDBRIDGE_DEBUG_GARMENT_SETTLE=1` prints it.
-void BakeGarmentSettle(Scene& scene);
+// The world-gravity hang bake for the outfit's cloth was removed: the exported PMX's rest pose must stay the card's authored
+// drape, and the joint springs are sized to hold it (see PmxPhysics.cpp). Stretching the mesh into a hang made the authored
+// silhouette unrecoverable and the joint springs could not hold it anyway. `BakeGarmentSettle` no longer exists.
 
 // How far the bust / butt hangs at rest, radians (shared by the bake above and the viewer preview below). The hang
 // respects the card: it comes from the card's own body jiggle chains (stiffness / elasticity / gravity), so a stiff,
