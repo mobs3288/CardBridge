@@ -656,7 +656,10 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         if (b.mode != 0) {
             if (bit(b.mask, b.group)) out.push_back(who + ": a chain body that meets its own group (mask " + std::to_string(b.mask) + ")");
             if (b.group == exporter::kPmxGroupChain && bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
-            // it meets only kinematic bodies it does not already overlap: a body that starts inside one is thrown out of it, and the model with it
+            // it meets only kinematic bodies it does not bury itself in: a body that starts merely in CONTACT with one (the draped
+            // garment resting on a thigh) is meant to collide - the force keeps it off - and only a body buried deeper than the
+            // exporter's rest allowance is thrown out of it. Keep the number in step with kRestContactAllow in PmxPhysics.cpp.
+            const float kRestContactAllow = 0.12f;
             for (size_t k = 0; k < m.bodies.size(); ++k) {
                 const auto& c = m.bodies[k];
                 if (c.mode != 0 || !bit(b.mask, c.group)) continue;   // only kinematic bodies can shove a body out of its rest place
@@ -669,7 +672,7 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
                 Vec3 a0, a1, c0, c1;
                 core(b, a0, a1);
                 core(c, c0, c1);
-                if (exporter::SegmentDistance(a0, a1, c0, c1) < b.size.x + c.size.x) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts inside it");
+                if (exporter::SegmentDistance(a0, a1, c0, c1) < b.size.x + c.size.x - kRestContactAllow) out.push_back(who + ": it may meet collider " + std::to_string(k) + " '" + c.name + "' but starts inside it");
             }
         } else {
             // a collider: every bit it sets must point at a group occupied by at least one moving body (group 1 may be empty in synthetic scenes)
@@ -2521,9 +2524,11 @@ void unitTests() {
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
             CHECK(m.joints.size() == 3);
             for (const auto& j : m.joints) {
-                CHECK(j.rotUpper.x > 0.3f);   // the wide garment bend for stiffness 0.1
-                CHECK(j.rotUpper.x <= 0.6f + 1e-6f);
+                CHECK(j.rotUpper.x > 0.3f);                  // the wide garment envelope applies
+                CHECK(j.rotUpper.x <= 1.15f + 1e-6f);        // the top link's opening budget (was the flat 0.6 cap)
             }
+            CHECK(m.joints[0].rotUpper.x > m.joints[1].rotUpper.x);   // the envelope eases from the hip yoke to the tip
+            CHECK(m.joints[1].rotUpper.x > m.joints[2].rotUpper.x);
         }
     });
 
@@ -2555,8 +2560,8 @@ void unitTests() {
         CHECK(s.bones[8].pos.x == cloth8.x && s.bones[8].pos.y == cloth8.y && s.bones[8].pos.z == cloth8.z);
         // The export gives every cloth joint a hold spring sized from its own subchain (never the old flat 5.0), and the
         // envelope that actually carries the drape: the hang axis (the one gravity torques) is locked to zero range, so a
-        // bone-aligned chain cannot droop away from the card's rest pose; the swing axis keeps the full ±0.40 rad budget
-        // (kGarmentMaxBend) and the twist axis stays nearly rigid.
+        // bone-aligned chain cannot droop away from the card's rest pose; the swing axes keep the per-link budget (the top
+        // link about 66 degrees, easing toward the tip) and the twist axis stays nearly rigid.
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
@@ -2574,10 +2579,23 @@ void unitTests() {
                 widest = std::max(widest, std::max(-lo[a], hi[a]));
             }
             CHECK(hangStops == 1);                                  // the hang side: gravity cannot droop the panel
-            CHECK(std::fabs(widest - 0.40f) < 1e-6f);                // the swing axis: the full kGarmentMaxBend budget
             clothSprings.push_back(j.springRot.x);
         }
         CHECK(joints == 3);
+        // the per-link envelope, widest at the hip yoke and easing to the hem
+        const float expect[3] = {1.15f, 0.93f, 0.71f};
+        int jointIdx = 0;
+        for (const auto& j : m.joints) {
+            if (j.name.rfind("cloth", 0) != 0) continue;
+            float widest = 0.0f;
+            for (int a = 0; a < 3; ++a) {
+                const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
+                const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
+                widest = std::max(widest, std::max(-lo[a], hi[a]));
+            }
+            CHECK(std::fabs(widest - expect[jointIdx]) < 1e-6f);
+            ++jointIdx;
+        }
         for (float k : clothSprings) CHECK(k == 50.0f);                     // the MikuMikuDance reference cloth spring (flat 50)
     });
 

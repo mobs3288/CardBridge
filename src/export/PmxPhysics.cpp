@@ -49,7 +49,15 @@ constexpr float kGarmentMassScale = 1.0f;        // cloth mass is len/scale*10 l
 constexpr float kGarmentMassCap = 4.0f;          // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
 constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs up to 1.0 (Temari); 1.0 makes it settle fully instead of ringing
-constexpr float kGarmentMaxBend = 0.40f;       // rad per link a garment may swing (about 23 degrees). This card's loose skirt physics (stiffness 0.6) exports ±34-47 degrees per link, which MikuMikuDance turns into a flap on every step.
+// Per-link swing budget for a garment panel, radians, decreasing from the hip yoke to the hem — like the reference cloth models'
+// per-ring envelope (the top rings of the skirt swing ±55-90 degrees, the hem ±10-20). This was a flat 0.40 (23 degrees) for every
+// link, which is far too small for the panel to fold out of a swinging thigh's path: the thigh simply passes through it. The fold
+// (gravity) direction is capped at the authored angle (see the joint builder); this is the opening-side budget and the symmetric budget
+// of the other swing plane, decreasing the same way per link.
+constexpr float kGarmentLinkFlex = 1.15f;        // rad, the top link (at the hip yoke)
+constexpr float kGarmentLinkFlexDrop = 0.22f;    // rad per link below the top one
+constexpr float kGarmentMinLinkFlex = 0.40f;     // rad, never less than the old flat budget for the hem links
+constexpr float kGarmentTwist = 0.15f;           // rad, the panel's roll about its own long axis (almost rigid)
 
 // How much of a leg's turn a garment panel along the thigh takes.
 // MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
@@ -413,8 +421,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // Garment cloth: short of a generous swing budget the panel slams its stop on every step (it parks there while the bone rotates
             // under it and rattles). The card's own envelope is honoured as a floor only via the global cap; MikuMikuDance's own cloth swings
             // within ±30-46 degrees. The bone-aligned body holds the silhouette, so the envelope only budgets swing here.
+            // Per-link garment budget, like the reference cloth models' per-ring envelope: the hip yoke's links swing the most so the panel
+            // can fold out of a swinging thigh's path, the hem the least (it only trims the silhouette).
+            const float garmentFlex = std::max(kGarmentMinLinkFlex, kGarmentLinkFlex - kGarmentLinkFlexDrop * static_cast<float>(k - 1));
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : garmentChainEarly ? kGarmentMaxBend
+                                       : garmentChainEarly ? garmentFlex
                                        : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
@@ -488,7 +499,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 // budget visibly narrowed a skirt away from the card's authored pose (measured offline: 18 degrees per link settled;
                 // 0 degrees with gravity off). The swing axis keeps the full budget, so the panel still answers a step; the twist axis
                 // stays nearly rigid; at rest the PMX matches the viewer exactly.
-                const float flex = kGarmentMaxBend;                        // the wide swing budget (this is what stops the walking buzz)
+                const float flex = bend;                                    // the per-link budget, like the reference cloth models' per-ring envelope (link 1 ≈ 66 degrees, link 5 ≈ 23)
                 const float pin = 0.0f;                                    // hang droop: none, the authored drape is the rest pose
                 const Vec3 gForce{0.0f, -gravity, 0.0f};
                 Vec3 arm{links[b].centre.x - self.head.x, links[b].centre.y - self.head.y, links[b].centre.z - self.head.z};
@@ -514,7 +525,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 float twMax = std::max(tScore[0], std::max(tScore[1], tScore[2]));
                 float lo[3], hi[3];
                 for (int a = 0; a < 3; ++a) {
-                    if (a == twist) { lo[a] = -0.1f * flex; hi[a] = 0.1f * flex; continue; }
+                    if (a == twist) { lo[a] = -kGarmentTwist; hi[a] = kGarmentTwist; continue; }
                     if (twMax < 1e-4f || tScore[a] < 0.3f * twMax) { lo[a] = -flex; hi[a] = flex; continue; }   // side/other plane: symmetric swing
                     const float d = bf[a]->x * tw.x + bf[a]->y * tw.y + bf[a]->z * tw.z;   // +rotation increases hang
                     if (d > 0.0f) { lo[a] = -flex; hi[a] = pin; } else { lo[a] = -pin; hi[a] = flex; }
@@ -555,6 +566,13 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     // This uses per-chain groups for the garments (2..14, skipping the groups the colliders took); when the garments outnumber the free
     // groups the extras share one group, which conservatively disables their collisions against each other, never against the body.
     const float margin = 0.02f * scale;
+    // A cloth body that merely STARTS IN CONTACT with a kinematic collider (the draped skirt resting on the thigh and hip hit spheres) is not
+    // the buried case that frame 0 would eject: the pose is authored, the joint stops hold it there, and the contact force only keeps the cloth
+    // off the collider. Excluding contact-level pairs is what left exported skirts with no leg collision at all - the thigh passed straight
+    // through them. Garment-vs-garment stays conservative (both bodies are dynamic), but garment-vs-kinematic-collider only excludes bodies
+    // BURIED DEEPER than this at rest. Keep the number in step with kRestContactAllow in tests/cardbridge_tests.cpp.
+    constexpr float kRestContactAllow = 0.12f;   // model units of penetration tolerated at rest before a garment body loses its collider
+    const float burialAllow = kRestContactAllow;
     // Garment-vs-garment rest overlap, per body: the set of other garment chains whose bodies it starts inside/against.
     std::vector<std::set<int>> bodyOverlapChains(chainBody.size());
     if (nextGarmentChainId > 0) {
@@ -574,7 +592,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     for (size_t ci = 0; ci < colliderCore.size(); ++ci) {
         std::vector<int> sig;
         for (size_t bi = 0; bi < chainCore.size(); ++bi)
-            if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin) sig.push_back(static_cast<int>(bi));
+            if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r - burialAllow) sig.push_back(static_cast<int>(bi));
         int group = 0;
         if (!sig.empty()) {
             auto it = groupOf.find(sig);
@@ -586,6 +604,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         }
         model.rigidBodies[static_cast<size_t>(colliderBody[ci])].group = static_cast<uint8_t>(group);
         overlapped[static_cast<size_t>(group)].insert(sig.begin(), sig.end());
+        if (std::getenv("CARDBRIDGE_DEBUG_MASK") && group != 0) {
+            std::fprintf(stderr, "collider %zu -> group %d sig[", ci, group);
+            for (int bi : sig) std::fprintf(stderr, "%d ", bi);
+            std::fprintf(stderr, "]\n");
+        }
     }
     // Garment chains get one group each from the free pool (skipping the collider groups); hair and jiggle stay in group 1 and are returned to below.
     // When the free pool runs out, several garment chains share one fallback group. That is not a license to collide with each other,
@@ -596,7 +619,6 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     std::vector<int> garmentGroup(static_cast<size_t>(nextGarmentChainId), -1);
     {
         int nextGroup = 2;
-        int overflowGroup = -1;   // assigned once the free pool runs out
         for (int g = 0; g < nextGarmentChainId; ++g) {
             while (nextGroup <= 13 && (usedGroups.count(nextGroup) || nextGroup == 15)) ++nextGroup;
             if (nextGroup <= 14) { garmentGroup[g] = nextGroup; ++nextGroup; }
@@ -611,7 +633,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                 if (chainGarment[bi] < 0) continue;
                 if (garmentGroup[static_cast<size_t>(chainGarment[bi])] < 0) continue;
-                if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r + margin)
+                if (SegmentDistance(colliderCore[ci].a, colliderCore[ci].b, chainCore[bi].a, chainCore[bi].b) < colliderCore[ci].r + chainCore[bi].r - burialAllow)
                     colliderOverlapGroups[ci].insert(garmentGroup[static_cast<size_t>(chainGarment[bi])]);
             }
     }
@@ -638,6 +660,11 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             if (garmentGroup[g] < 0 || garmentGroup[g] == garmentGroup[static_cast<size_t>(chainGarment[bi])]) continue;   // never its own group (own chain or the chains it shares the fallback with)
             if (bodyOverlapChains[bi].count(g)) continue;                 // starts overlapping it at rest: passed through
             mask |= static_cast<uint16_t>(1u << garmentGroup[g]);
+        }
+        if (std::getenv("CARDBRIDGE_DEBUG_MASK") && chainGarment[bi] >= 0) {
+            std::fprintf(stderr, "garment body bi=%zu pmx=%d chain=%d mask=%04x excluded[", bi, chainBody[bi], chainGarment[bi], mask);
+            for (int g : usedGroups) if (overlapped[static_cast<size_t>(g)].count(static_cast<int>(bi))) std::fprintf(stderr, "grp%d ", g);
+            std::fprintf(stderr, "]\n");
         }
         model.rigidBodies[static_cast<size_t>(chainBody[bi])].mask = mask;
     }
@@ -694,7 +721,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                     for (size_t bi = 0; bi < chainBody.size(); ++bi) {
                         if (chainGarment[bi] < 0) continue;
                         if (garmentGroup[static_cast<size_t>(chainGarment[bi])] < 0) continue;
-                        if (SegmentDistance(limbA, limbB, chainCore[bi].a, chainCore[bi].b) < rb.size.x + chainCore[bi].r + margin)
+                        if (SegmentDistance(limbA, limbB, chainCore[bi].a, chainCore[bi].b) < rb.size.x + chainCore[bi].r - burialAllow)
                             ov.insert(garmentGroup[static_cast<size_t>(chainGarment[bi])]);
                     }
                     limbOverlapGroups.push_back(std::move(ov));
