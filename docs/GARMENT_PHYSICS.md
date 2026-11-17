@@ -4,6 +4,25 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 5 — the skirt collides with the legs, and can fold out of their path
+
+Two defects left the exported skirt unable to follow a leg:
+
+1. **No cloth-vs-leg collision at all.** The contact-level exclusion dropped every skirt body that starts touching a collider
+   (any drape authored to rest on the thighs is dropped), so the thigh passed straight through the front and side panels. The
+   exclusion now applies only to bodies *buried deeper* than a rest allowance (`kRestContactAllow` = 0.12 model units, in step
+   with the test suite's `kRestContactAllow`), so a panel resting on a hit sphere keeps its collision. Garment-vs-garment and
+   hair stays at the contact level, and the rest allowance is in Model units; see `src/export/PmxPhysics.cpp`.
+2. **A 23-degree flat swing budget.** The flat `kGarmentMaxBend` (0.40 rad) per link could not fold a panel out of a swinging
+   thigh's path. The swing budget now **decreases from the hip yoke to the hem** (1.15 / 0.93 / 0.71 / 0.49 / 0.40 rad, like the
+   reference cloth models' per-ring envelope); the twist axis stays nearly rigid (`kGarmentTwist`, ±0.15 rad); the hang side is
+   still a zero stop at the authored angle, so the rest drape in the PMX is exactly the drape the viewer shows — only the motion
+   budget changed, never the rest pose.
+
+Measured in the offline replica (`tools/_mmdsim.cpp`, rebuilt against bullet, mode-2 bodies held to the bone): at rest every
+skirt chain sits at the authored pose with 0.000 displacement; the exported masks include every hip/thigh collider group the
+card ships; MikuMikuDance is the visual acceptance test, with the model already loaded for the user's leg-spread check.
+
 ## Update 4 — the garment hang side is a zero stop
 
 The PMX's garment joints used to allow a small asymmetric droop on their hang side (`pin` = 0.04 + 0.22·(1 − stiffness)
@@ -12,7 +31,8 @@ gravity, so whatever range the stop allows becomes droop. The hang side is now *
 panel out of its authored orientation, so the rest drape in the PMX is exactly the drape the viewer shows. The other
 axes are untouched — the swing axis keeps the full `kGarmentMaxBend` (±0.40 rad) budget and the twist axis its ±0.04 —
 so a step still moves the panels, on the axis that does not narrow the silhouette. No card-specific numbers: every
-garment chain gets the same treatment and the spring stays the flat 50 of the reference cloth.
+garment chain gets the same treatment and the spring stays the flat 50 of the reference cloth. The per-link swing budget
+is described in Update 5 (it replaced the flat `kGarmentMaxBend`).
 
 **Tool fix that came out of this:** `tools/_mmdsim.cpp` negated the Z-axis joint spring for every joint. That is saba's
 **PMD** rule; its **PMX** path (`MMDJoint::CreateJoint(const PMXJoint&, …)`) writes every spring unmodified. Applied to a
@@ -147,7 +167,8 @@ in `docs/HAIR_PMX_PHYSICS.md` validated them in that mode.
 
 ### B. The joint spring, envelope, mass and damping are sized from the card's own physics, not from a global constant
 
-- **Envelope** stays `2·asin(1−stiffness)` per link (the card's own stiffness), capped at `kGarmentMaxBend = 0.40 rad`.
+- **Envelope** stays `2·asin(1−stiffness)` per link for ordinary strands (the card's own stiffness), capped at
+  `kGarmentMaxBend = 0.40 rad`; garment chains use the per-link envelope of Update 5 instead.
   The Kurumi outfit has stiffness ~0.975 → a ±2.9° envelope per link; that is the card's own answer for a rigid skirt.
 - **Hold spring** (the centring spring that pulls back toward the authored pose) is sized from the subchain torque it
   must hold: `K = lever·g / droop`, evaluated per joint per link length and mass, with
