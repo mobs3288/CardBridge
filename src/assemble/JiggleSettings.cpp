@@ -31,6 +31,8 @@ float FiniteOr(float value, float fallback) { return std::isfinite(value) ? valu
 const char* JigglePresetName(JigglePreset preset) {
     switch (preset) {
     case JigglePreset::Subtle: return "Subtle";
+    case JigglePreset::VerySubtle: return "Very Subtle";
+    case JigglePreset::VeryVerySubtle: return "Very Very Subtle";
     case JigglePreset::Natural: return "Natural";
     case JigglePreset::Dynamic: return "Dynamic";
     case JigglePreset::Custom: return "Custom";
@@ -52,6 +54,30 @@ JiggleSettings JigglePresetSettings(JigglePreset preset) {
         s.amplitudeDepth = 0.65f;
         s.rotationStrength = 0.65f;
         s.strength = 0.75f;
+        break;
+    case JigglePreset::VerySubtle:
+        // Still firmer: barely any travel, half the amplitude, like underwear under athletic wear. Natural frequency ~3.12 Hz, damping ratio ~0.47.
+        s.mass = 1.3f;
+        s.stiffness = 500.0f;
+        s.damping = 24.0f;
+        s.gravity = 0.88f;
+        s.amplitudeVertical = 0.4f;
+        s.amplitudeHorizontal = 0.4f;
+        s.amplitudeDepth = 0.4f;
+        s.rotationStrength = 0.4f;
+        s.strength = 0.5f;
+        break;
+    case JigglePreset::VeryVerySubtle:
+        // Almost invisible: a top that does not visibly move in motion. Natural frequency ~3.62 Hz, damping ratio ~0.49.
+        s.mass = 1.45f;
+        s.stiffness = 750.0f;
+        s.damping = 32.0f;
+        s.gravity = 0.85f;
+        s.amplitudeVertical = 0.2f;
+        s.amplitudeHorizontal = 0.2f;
+        s.amplitudeDepth = 0.2f;
+        s.rotationStrength = 0.2f;
+        s.strength = 0.25f;
         break;
     case JigglePreset::Natural:
         // The defaults in the struct: soft skin that visibly sways sideways and forward; damped enough to settle in ~a second.
@@ -76,7 +102,7 @@ JiggleSettings JigglePresetSettings(JigglePreset preset) {
 }
 
 JigglePreset MatchJigglePreset(const JiggleSettings& s) {
-    for (JigglePreset preset : {JigglePreset::Subtle, JigglePreset::Natural, JigglePreset::Dynamic}) {
+    for (JigglePreset preset : {JigglePreset::Subtle, JigglePreset::VerySubtle, JigglePreset::VeryVerySubtle, JigglePreset::Natural, JigglePreset::Dynamic}) {
         const JiggleSettings p = JigglePresetSettings(preset);
         if (NearlyEqual(s.mass, p.mass) && NearlyEqual(s.stiffness, p.stiffness) && NearlyEqual(s.damping, p.damping) &&
             NearlyEqual(s.gravity, p.gravity) && NearlyEqual(s.amplitudeVertical, p.amplitudeVertical) &&

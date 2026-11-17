@@ -3160,6 +3160,8 @@ void unitTests() {
         const JiggleSettings natural;   // the Natural preset is the struct default
         CHECK(MatchJigglePreset(natural) == JigglePreset::Natural);
         CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::Subtle)) == JigglePreset::Subtle);
+        CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::VerySubtle)) == JigglePreset::VerySubtle);
+        CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::VeryVerySubtle)) == JigglePreset::VeryVerySubtle);
         CHECK(MatchJigglePreset(JigglePresetSettings(JigglePreset::Dynamic)) == JigglePreset::Dynamic);
         JiggleSettings tweaked = natural;
         tweaked.damping += 0.5f;

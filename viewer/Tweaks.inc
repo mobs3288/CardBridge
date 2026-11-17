@@ -274,10 +274,11 @@ const char* const kBustBandLabels[kBustBandCount] = {"65", "70", "75", "80", "85
 const char* const kBustCupLabels[kBustCupCount] = {"AA", "A", "B", "C", "D", "E", "F", "G"};
 constexpr float kNippleSizeMm[4] = {-4.0f, 0.0f, 4.0f, 8.0f};   // out/in offsets per preset; the card default is 0
 const char* const kNippleSizeLabels[4] = {"S", "M", "L", "XL"};
-const char* const kJigglePresetLabels[3] = {"Subtle", "Natural", "Dynamic"};
+// The five presets; the first is the tightest (a sports top), the last is the most lively.
+const char* const kJigglePresetLabels[5] = {"Subtle", "Very Subtle", "V.V. Subtle", "Natural", "Dynamic"};
 
-int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 3 : 0; }
-int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 62 : 32; }
+int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 5 : 0; }
+int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 70 : 32; }
 int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset ? 6 : 2; }
 RECT PresetChipRect(int rowId, int i, int y) {
     const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
@@ -320,8 +321,10 @@ int ActivePresetChip(int rowId) {
     if (rowId == kJigglePreset) {
         switch (assemble::MatchJigglePreset(g.jiggle)) {
         case assemble::JigglePreset::Subtle: return 0;
-        case assemble::JigglePreset::Natural: return 1;
-        case assemble::JigglePreset::Dynamic: return 2;
+        case assemble::JigglePreset::VerySubtle: return 1;
+        case assemble::JigglePreset::VeryVerySubtle: return 2;
+        case assemble::JigglePreset::Natural: return 3;
+        case assemble::JigglePreset::Dynamic: return 4;
         default: return -1;   // Custom: no chip is "it"
         }
     }
@@ -331,7 +334,7 @@ const char* PresetChipText(int rowId, int i) {
     if (rowId == kBustBand && i >= 0 && i < kBustBandCount) return kBustBandLabels[i];
     if (rowId == kBustCup && i >= 0 && i < kBustCupCount) return kBustCupLabels[i];
     if (rowId == kNippleSize && i >= 0 && i < 4) return kNippleSizeLabels[i];
-    if (rowId == kJigglePreset && i >= 0 && i < 3) return kJigglePresetLabels[i];
+    if (rowId == kJigglePreset && i >= 0 && i < 5) return kJigglePresetLabels[i];
     return "";
 }
 void ApplyPresetChip(int rowId, int chip) {
@@ -362,7 +365,7 @@ void ApplyPresetChip(int rowId, int chip) {
         return;
     }
     if (rowId == kJigglePreset) {
-        chip = std::clamp(chip, 0, 2);
+        chip = std::clamp(chip, 0, 4);
         // The preset replaces the whole set; the switches (breast / butt) stay as they are.
         g.jiggle = assemble::JigglePresetSettings(static_cast<assemble::JigglePreset>(chip));
         char msg[64];

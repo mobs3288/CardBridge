@@ -152,7 +152,7 @@ void usage() {
         "                                            head, hair, the nude-morph skin pieces and footwear are never touched; the corrected count\n"
         "                                            is written to the manifest as issues. CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=1 also turns\n"
         "                                            it on; =0 forces it off. ([--no-fix-garment-intersections] is kept for compatibility: the default)\n"
-        "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-preset subtle|natural|dynamic] [--sag F]\n"
+        "             [--no-jiggle-bust] [--jiggle-butt] [--jiggle-preset subtle|very-subtle|very-very-subtle|natural|dynamic] [--sag F]\n"
         "                                             [--jiggle-mass F] [--jiggle-stiffness F] [--jiggle-damping F]\n"
         "                                             [--jiggle-gravity F] [--jiggle-amplitude-vertical F]\n"
         "                                             [--jiggle-amplitude-horizontal F] [--jiggle-amplitude-depth F]\n"
@@ -224,17 +224,19 @@ std::string normalizeSlashes(std::string s) {
     return s;
 }
 
-// The breast / hip jiggle settings: --jiggle-preset (subtle|natural|dynamic) picks a tuned set of real physical parameters, and
-// the --jiggle-* values override it one by one. --jiggle-intensity is the old name for --jiggle-strength. Everything is clamped
-// to ranges the fixed-step solver and the PMX exporter can handle. False with `error` when the preset name is wrong.
+// The breast / hip jiggle settings: --jiggle-preset picks a tuned set of real physical parameters, and the --jiggle-*
+// values override it one by one. --jiggle-intensity is the old name for --jiggle-strength. Everything is clamped to ranges
+// the fixed-step solver and the PMX exporter can handle. False with `error` when the preset name is wrong.
 bool JiggleFromArgs(const Args& a, assemble::JiggleSettings& out, std::string& error) {
     assemble::JiggleSettings s;
     if (a.opt.count("jiggle-preset")) {
         const std::string preset = a.get("jiggle-preset");
         if (preset == "subtle") s = assemble::JigglePresetSettings(assemble::JigglePreset::Subtle);
+        else if (preset == "very-subtle" || preset == "verysubtle") s = assemble::JigglePresetSettings(assemble::JigglePreset::VerySubtle);
+        else if (preset == "very-very-subtle" || preset == "veryverysubtle" || preset == "very-very") s = assemble::JigglePresetSettings(assemble::JigglePreset::VeryVerySubtle);
         else if (preset == "natural") s = assemble::JigglePresetSettings(assemble::JigglePreset::Natural);
         else if (preset == "dynamic") s = assemble::JigglePresetSettings(assemble::JigglePreset::Dynamic);
-        else { error = "unknown --jiggle-preset '" + preset + "' (subtle|natural|dynamic)"; return false; }
+        else { error = "unknown --jiggle-preset '" + preset + "' (subtle|very-subtle|very-very-subtle|natural|dynamic)"; return false; }
     }
     auto num = [&a, &s](const char* key, float assemble::JiggleSettings::*member) {
         const auto it = a.opt.find(key);

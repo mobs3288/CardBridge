@@ -24,7 +24,7 @@ struct JiggleSettings {
     float simulationHz = 120.0f;      // fixed simulation rate of the preview (the PMX runs in MMD's own solver)
 };
 
-enum class JigglePreset { Subtle, Natural, Dynamic, Custom };
+enum class JigglePreset { Subtle, VerySubtle, VeryVerySubtle, Natural, Dynamic, Custom };
 
 // The share of the part's weight the body keeps itself. It is 1.0: the body fully supports the part at rest, so the physics never
 // adds any static sag of its own - the Sag slider is the ONLY source of resting droop. (The formula is kept for the manifest, which
