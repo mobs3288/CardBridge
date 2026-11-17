@@ -404,6 +404,58 @@ void BakeSettledPhysics(Scene& scene, bool jiggleBust, bool jiggleButt, const Ji
     }
 }
 
+// Settles the outfit's cloth chains with the card's own DynamicBone settings — the same particle sim the Outfit Preview runs — and
+// bakes the settled skin in as the rest pose, so the exported PMX shows the Koikatsu drape by construction. Unlike the removed
+// world-gravity hang bake this never applies MikuMikuDance's gravity: the rest pose already hangs under the card's own gravity, so
+// only the residual the game's sim settles (mainly the colliders pushing the panels off the legs) is baked. Hair and the body's own
+// jiggle chains are untouched.
+void BakeGarmentSettle(Scene& scene) {
+    if (scene.bones.empty()) return;
+    if (std::getenv("CARDBRIDGE_NO_GARMENT_SETTLE")) {
+        std::fprintf(stderr, "  garment settle: skipped (CARDBRIDGE_NO_GARMENT_SETTLE)\n");
+        return;
+    }
+    const Pose rest;
+    const std::vector<Mat4> poseWorld = BoneWorlds(scene, rest);
+    PhysicsSim sim;
+    sim.Reset(scene, poseWorld, true, false, JiggleSettings{}, /*jiggleOnly*/ false, /*outfitOnly*/ true, /*fallFully*/ false);
+    if (sim.empty()) {
+        std::fprintf(stderr, "  garment settle: no outfit chains to settle\n");
+        return;
+    }
+    std::vector<Mat4> skin = SkinMatrices(scene, rest);
+    bool anyMoved = false;
+    int ran = 0;
+    for (int step = 0; step < 600; ++step) {
+        ++ran;
+        const bool moved = sim.Step(scene, poseWorld, 1, skin);
+        anyMoved = anyMoved || moved;
+        if (!moved) break;
+    }
+    float maxMove = 0.0f;
+    for (size_t i = 0; i < poseWorld.size() && i < skin.size(); ++i) {
+        const Vec3 a = poseWorld[i].translation(), b = skin[i].point(scene.bones[i].pos);
+        const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > maxMove) maxMove = d;
+    }
+    if (anyMoved) BakeSkin(scene, skin);
+    if (std::getenv("CARDBRIDGE_DEBUG_GARMENT_SETTLE")) {
+        for (const auto& ch : scene.chains) {
+            if (ch.part.rfind("outfit", 0) != 0) continue;
+            std::fprintf(stderr, "  garment settle chain %s bones", ch.name.c_str());
+            for (int b : ch.bones) {
+                if (b < 0 || static_cast<size_t>(b) >= poseWorld.size() || static_cast<size_t>(b) >= skin.size()) continue;
+                const Vec3 a = poseWorld[static_cast<size_t>(b)].translation();
+                const Vec3 c = skin[static_cast<size_t>(b)].point(scene.bones[static_cast<size_t>(b)].pos);
+                std::fprintf(stderr, " [%s move(%.3f %.3f %.3f)]", scene.bones[static_cast<size_t>(b)].name.c_str(), c.x - a.x, c.y - a.y, c.z - a.z);
+            }
+            std::fprintf(stderr, "\n");
+        }
+    }
+    std::fprintf(stderr, "  garment settle: %d steps, max outfit bone move %.4f m, moved=%s\n", ran, maxMove, anyMoved ? "yes" : "no");
+}
+
 // How far the bust / butt hangs at rest, radians. The hang comes from the card's own DynamicBone chain parameters only (a stiff,
 // perky card scarcely hangs), never from any of our jiggle settings: the Sag slider is the only user-facing control of static sag,
 // and no jiggle parameter may touch it.

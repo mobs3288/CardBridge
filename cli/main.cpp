@@ -938,8 +938,10 @@ int cmdConvert(const Args& a) {
         const float settleSag = a.opt.count("sag") ? static_cast<float>(std::atof(a.get("sag").c_str()))
                                                      : assemble::CardSagDefault(scene, bustSize);
         assemble::BakeSettledPhysics(scene, settleBust, settleButt, jiggle, settleSag);
-        // The outfit's cloth (capes, kimono sleeves, jacket panels, skirt hems) keeps the authored drape: the PMX's joints are now
-        // sized to hold the card's rest pose against MMD's world gravity, so no hang is baked into the mesh.
+        // The outfit's cloth (capes, kimono sleeves, jacket panels, skirt hems): settle it with the card's own DynamicBone settings —
+        // the same sim the Outfit Preview runs, colliders pushing the panels off the legs included — and bake that into the rest pose,
+        // so MikuMikuDance shows the Koikatsu drape by construction. CARDBRIDGE_NO_GARMENT_SETTLE=1 keeps the authored pose.
+        assemble::BakeGarmentSettle(scene);
         // Garment-vs-body clipping correction, on by default: a garment vertex buried in the skin is pushed back out along the body's
         // own surface. --no-fix-garment-intersections or CARDBRIDGE_FIX_GARMENT_INTERSECTIONS=0 turn it off.
         const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");
