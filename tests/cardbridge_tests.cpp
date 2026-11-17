@@ -2522,14 +2522,15 @@ void unitTests() {
             const pmx::Model m = exportPhysics(make("hair.back", "Hair", ""));
             for (const auto& j : m.joints) CHECK(j.rotUpper.x <= 0.0901f);
         }
-        {   // a chest-mounted accessory (a_n_bust) is not hair: the wide garment envelope applies
+        {   // a chest-mounted accessory (a_n_bust) is not hair: the envelope follows the card's own stiffness (2*asin(1-stiffness))
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
             CHECK(m.joints.size() == 3);
+            const float clothBend = 2.0f * std::asin(1.0f - 0.1f);   // the card's stiffness 0.1 drives the envelope: ~2.24 rad
             for (const auto& j : m.joints) {
                 CHECK(j.rotUpper.x > 0.3f);                  // the wide garment envelope applies
-                CHECK(j.rotUpper.x <= 0.40f + 1e-6f);        // the flat per-link budget (restorable by design)
+                CHECK(j.rotUpper.x <= clothBend + 1e-6f);    // the card's own stiffness, uncapped
             }
-            for (const auto& j : m.joints) CHECK(std::fabs(j.rotUpper.x - 0.40f) < 1e-6f);   // flat envelope, every link
+            for (const auto& j : m.joints) CHECK(std::fabs(j.rotUpper.x - clothBend) < 1e-6f);   // stiffness-driven envelope, every link
         }
     });
 
@@ -2583,8 +2584,8 @@ void unitTests() {
             clothSprings.push_back(j.springRot.x);
         }
         CHECK(joints == 3);
-        // the per-link envelope, widest at the hip yoke and easing to the hem
-        const float expect[3] = {0.40f, 0.40f, 0.40f};
+        // the envelope follows the card's own stiffness (chain stiffness 0.8 -> 2*asin(0.2) = 0.4027 rad)
+        const float expect[3] = {2.0f * std::asin(0.2f), 2.0f * std::asin(0.2f), 2.0f * std::asin(0.2f)};
         int jointIdx = 0;
         for (const auto& j : m.joints) {
             if (j.name.rfind("cloth", 0) != 0) continue;
@@ -2597,7 +2598,7 @@ void unitTests() {
             CHECK(std::fabs(widest - expect[jointIdx]) < 1e-6f);
             ++jointIdx;
         }
-        for (float k : clothSprings) CHECK(k == 0.0f);                        // garment spring: none (stop + gravity only, like the reference cloth)
+        for (float k : clothSprings) CHECK(k > 0.0f);                        // the card's elasticity carries the centring spring (omega = 60*sqrt(elasticity))
     });
 
     test("pmx writer: IK bones come back through the independent reader", [] {

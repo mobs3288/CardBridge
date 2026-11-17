@@ -4,22 +4,19 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
-## Update 7 — the swing envelope is flat and modest again
+## Update 8 — the garment physics is the card's own, verbatim
 
-The per-link widening (1.15 rad at the yoke easing to 0.40 at the hem) let the skirt peel open in deep hip-motion frames — the back
-panel flung up and showed the undies. The envelope is back to a **flat 0.40 rad per link** with the one-sided stop and the leg
-collision unchanged: the authored drape is held at rest, the skirt sways with the body, never flings open, and collision keeps the
-thighs out of the cloth. If a deeper fold still needs a bigger dodge the per-link taper can be re-introduced per link rather than
-raising the whole budget.
+The export no longer caps the cloth's envelope or forces its centring spring to zero. Everything from the card's
+DynamicBone components is now carried through unmodified:
 
-## Update 6 — garment joints carry zero centring spring
-
-The flat 50 spring on every garment joint was retained from the reference cloth convention. It is now **zero**
-(`kGarmentClothSpring = 0.0f`, like the reference cloth models' garment joints): the authored drape is held by the
-one-sided stop and gravity alone, so there is no spring fighting the stop to feed a spring-vs-stop buzz during motion
-(the back skirt panel was the most visible case in MMD). The silhouette is still carried by the envelope stops and the
-bone-aligned (mode-2) bodies; hair keeps its spring; the audit now accepts a zero (but not a negative or NaN) rotation
-spring, and the test expectation moved from flat 50 to zero.
+- **Envelope**: the card's own stiffness drives the joint limits, uncapped — `2·asin(1 - stiffness)` per link (this
+  card's stiffness 0.6 gives ~47° of fold per link). No cap of ours on the swing budget; the card authors the cloth.
+- **Spring**: `omega = 60·sqrt(elasticity)` rad/s (this card's elasticity 0.1 → ~19 rad/s), expressed exactly as a Koikatsu
+  DynamicBone pulls a particle back, with no flat 50 reference-spring of ours anywhere in the garment joints.
+- **Unchanged from earlier updates**: the bind pose is the inter-load rest pose (the one-sided stop on the hang axis caps
+  gravity — option A of the author's decision), the hip/thigh collider collision, and the leg-follow append remain.
+  The viewer at frame 0 remains 1:1 with the export, and in deep hip motions the card's own physics decides how open the
+  panels get.
 
 ## Update 5 — the skirt collides with the legs, and can fold out of their path
 

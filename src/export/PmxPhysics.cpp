@@ -38,32 +38,16 @@ struct Core { Vec3 a, b; float r = 0.0f; };
 // The fastest a single link may swing on its joint's spring, radians a second (the solver is stable well below half its step rate).
 constexpr float kMaxBodySwing = 15.0f;
 
-// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia. MikuMikuDance's own cloth chains
-// (the reference models) run a modest centring spring (50) with heavy damping (up to 1.0), and the joint ENVELOPE is what holds
-// the shape: the spring only smooths the swing, it never has to hold gravity alone. A spring stiff enough to hold the chain to
-// anything like the authored pose would be un-integrable at MMD's 120 Hz (1.5 samples per cycle) and shivers. So garment joints
-// carry a flat 50 spring and dampers that go up to 1.0, matching the reference models. The silhouette is carried by the
-// card's-own-stiffness envelope (plus bone-aligned mode 2). Gravity still acts on every body: it produces the cloth's swing.
-// The garment centring spring. Zero, not the flat 50 of the reference cloth: the authored drape is held by the one-sided
-// stop and gravity alone (like the reference cloth models, whose garment joints carry springRot = 0), so there is nothing for
-// the panel to fight against the stop - and no spring-vs-stop buzz during motion. The 5-link chain stays at the authored pose
-// at rest and swings open only when something (a thigh) pushes it.
-constexpr float kGarmentClothSpring = 0.0f;
+// A garment (an outfit chain: capes, kimono panels, skirt hems) is fabric with real inertia. The panel is held by the UNCAPPED
+// card's own stiffness envelope (plus bone-aligned mode 2) and the joints' one-sided stop on the hang axis; gravity still acts on
+// every body and produces the cloth's swing. The card's elasticity feeds the swing axis, so stiff cloth stays put and loose cloth
+// sways like it does in the game.
 constexpr float kGarmentMassScale = 1.0f;        // cloth mass is len/scale*10 like the rest of the system; no arbitrary inflation
 constexpr float kGarmentMassCap = 4.0f;          // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
 constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs up to 1.0 (Temari); 1.0 makes it settle fully instead of ringing
-// Per-link swing budget for a garment panel, radians, decreasing from the hip yoke to the hem — like the reference cloth models'
-// per-ring envelope (the top rings of the skirt swing ±55-90 degrees, the hem ±10-20). This was a flat 0.40 (23 degrees) for every
-// link, which is far too small for the panel to fold out of a swinging thigh's path: the thigh simply passes through it. The fold
-// (gravity) direction is capped at the authored angle (see the joint builder); this is the opening-side budget and the symmetric budget
-// of the other swing plane, decreasing the same way per link.
-constexpr float kGarmentLinkFlex = 0.40f;        // rad, flat swing budget per link — back to the modest flat envelope after the per-link widening let the skirt peel open in deep hip motions (undie showed)
-constexpr float kGarmentLinkFlexDrop = 0.0f;     // rad per link below the top one — flat
-constexpr float kGarmentMinLinkFlex = 0.40f;     // rad, the same flat budget for every link
-constexpr float kGarmentTwist = 0.15f;           // rad, the panel's roll about its own long axis (almost rigid)
-
-// The spring at the stop is gone (see kGarmentClothSpring): with the modest envelope there is nothing for the spring to fight.
+// The panel's roll about its own long axis is kept near-rigid, like a Koikatsu DynamicBone m_FreezeAxis sway.
+constexpr float kGarmentTwist = 0.15f;           // rad
 
 // How much of a leg's turn a garment panel along the thigh takes.
 // MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
@@ -247,10 +231,9 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             exportedSequences.insert(bones);
         }
         if (std::getenv("CARDBRIDGE_DEBUG_CHAINS")) {
-            std::fprintf(stderr, "chain '%s' own=%d raw=[", ch.name.c_str(), ch.characterOwn ? 1 : 0);
+            std::fprintf(stderr, "chain '%s' own=%d damp=%.3f elas=%.3f stiff=%.3f inert=%.3f rad=%.3f grav=(%.2f %.2f %.2f) bones[", ch.name.c_str(), ch.characterOwn ? 1 : 0,
+                         ch.damping, ch.elasticity, ch.stiffness, ch.inert, ch.radius, ch.gravity.x, ch.gravity.y, ch.gravity.z);
             for (int b : ch.bones) std::fprintf(stderr, "%s ", (b >= 0 && static_cast<size_t>(b) < scene.bones.size()) ? scene.bones[static_cast<size_t>(b)].name.c_str() : "?");
-            std::fprintf(stderr, "] pruned=[");
-            for (int b : bones) std::fprintf(stderr, "%s ", scene.bones[static_cast<size_t>(b)].name.c_str());
             std::fprintf(stderr, "]\n");
         }
         if (bones.size() < 2) continue;
@@ -423,15 +406,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
             // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
+            // Garment cloth: the card's own stiffness drives the envelope (stiffness 0.6 on this picture is a ~47 degree fold per link —
+            // the game's own simulation, unchanged, is the whole point of "full from Koikatsu"). No cap of ours on the swing budget:
+            // MikuMikuDance turns the card's values into the same shape the game does, and the fold stays one-sided via the hang pin below.
             const bool garmentChainEarly = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
-            // Garment cloth: short of a generous swing budget the panel slams its stop on every step (it parks there while the bone rotates
-            // under it and rattles). The card's own envelope is honoured as a floor only via the global cap; MikuMikuDance's own cloth swings
-            // within ±30-46 degrees. The bone-aligned body holds the silhouette, so the envelope only budgets swing here.
-            // Per-link garment budget, like the reference cloth models' per-ring envelope: the hip yoke's links swing the most so the panel
-            // can fold out of a swinging thigh's path, the hem the least (it only trims the silhouette).
-            const float garmentFlex = std::max(kGarmentMinLinkFlex, kGarmentLinkFlex - kGarmentLinkFlexDrop * static_cast<float>(k - 1));
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : garmentChainEarly ? garmentFlex
+                                       : garmentChainEarly ? 2.0f * std::asin(clamp01(1.0f - stiffness))   // the card's own number, uncapped
                                        : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.
@@ -469,11 +449,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
-            // Note: the garment centring spring is zero (see kGarmentClothSpring).
+            // Note: the garment spring is the card's elasticity, expressed in the same way a Koikatsu DynamicBone pulls a particle
+            // back - omega = 60*sqrt(elasticity) rad/s - so the cloth behaves exactly like the card, not like a tuned spring of ours.
             if (garmentChainEarly) {
-                // Zero like the reference cloth: the centring spring carries no role here - the silhouette is carried by the
-                // envelope (the limit stops) and the bone-aligned bodies, and any spring at all only feeds the stop-and-buzz.
-                stiffnessK = kGarmentClothSpring;
+                stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             }
             if (hairChain) {
                 // MikuMikuDance applies its own world gravity; the game's hair components carry none, so the elastic mapping bottoms
@@ -505,7 +484,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 // budget visibly narrowed a skirt away from the card's authored pose (measured offline: 18 degrees per link settled;
                 // 0 degrees with gravity off). The swing axis keeps the full budget, so the panel still answers a step; the twist axis
                 // stays nearly rigid; at rest the PMX matches the viewer exactly.
-                const float flex = bend;                                    // the per-link budget, like the reference cloth models' per-ring envelope (link 1 ≈ 66 degrees, link 5 ≈ 23)
+                const float flex = bend;                                    // the card's own stiffness envelope (stiffness 0.6 -> ~47 degrees of fold)
                 const float pin = 0.0f;                                    // hang droop: none, the authored drape is the rest pose
                 const Vec3 gForce{0.0f, -gravity, 0.0f};
                 Vec3 arm{links[b].centre.x - self.head.x, links[b].centre.y - self.head.y, links[b].centre.z - self.head.z};
