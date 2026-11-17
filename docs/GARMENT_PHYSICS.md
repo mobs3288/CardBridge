@@ -4,6 +4,15 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 6 — garment joints carry zero centring spring
+
+The flat 50 spring on every garment joint was retained from the reference cloth convention. It is now **zero**
+(`kGarmentClothSpring = 0.0f`, like the reference cloth models' garment joints): the authored drape is held by the
+one-sided stop and gravity alone, so there is no spring fighting the stop to feed a spring-vs-stop buzz during motion
+(the back skirt panel was the most visible case in MMD). The silhouette is still carried by the envelope stops and the
+bone-aligned (mode-2) bodies; hair keeps its spring; the audit now accepts a zero (but not a negative or NaN) rotation
+spring, and the test expectation moved from flat 50 to zero.
+
 ## Update 5 — the skirt collides with the legs, and can fold out of their path
 
 Two defects left the exported skirt unable to follow a leg:
@@ -31,8 +40,8 @@ gravity, so whatever range the stop allows becomes droop. The hang side is now *
 panel out of its authored orientation, so the rest drape in the PMX is exactly the drape the viewer shows. The other
 axes are untouched — the swing axis keeps the full `kGarmentMaxBend` (±0.40 rad) budget and the twist axis its ±0.04 —
 so a step still moves the panels, on the axis that does not narrow the silhouette. No card-specific numbers: every
-garment chain gets the same treatment and the spring stays the flat 50 of the reference cloth. The per-link swing budget
-is described in Update 5 (it replaced the flat `kGarmentMaxBend`).
+garment chain gets the same treatment. The centring spring was later set to zero — see Update 6; the per-link swing
+budget is described in Update 5 (it replaced the flat `kGarmentMaxBend`).
 
 **Tool fix that came out of this:** `tools/_mmdsim.cpp` negated the Z-axis joint spring for every joint. That is saba's
 **PMD** rule; its **PMX** path (`MMDJoint::CreateJoint(const PMXJoint&, …)`) writes every spring unmodified. Applied to a

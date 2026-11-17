@@ -44,7 +44,11 @@ constexpr float kMaxBodySwing = 15.0f;
 // anything like the authored pose would be un-integrable at MMD's 120 Hz (1.5 samples per cycle) and shivers. So garment joints
 // carry a flat 50 spring and dampers that go up to 1.0, matching the reference models. The silhouette is carried by the
 // card's-own-stiffness envelope (plus bone-aligned mode 2). Gravity still acts on every body: it produces the cloth's swing.
-constexpr float kGarmentClothSpring = 50.0f;     // flat spring, MikuMikuDance reference cloth (Temari, TDA)
+// The garment centring spring. Zero, not the flat 50 of the reference cloth: the authored drape is held by the one-sided
+// stop and gravity alone (like the reference cloth models, whose garment joints carry springRot = 0), so there is nothing for
+// the panel to fight against the stop - and no spring-vs-stop buzz during motion. The 5-link chain stays at the authored pose
+// at rest and swings open only when something (a thigh) pushes it.
+constexpr float kGarmentClothSpring = 0.0f;
 constexpr float kGarmentMassScale = 1.0f;        // cloth mass is len/scale*10 like the rest of the system; no arbitrary inflation
 constexpr float kGarmentMassCap = 4.0f;          // ... but never past this, to keep the collider/body mass ratios sane
 constexpr float kGarmentMinDamping = 0.85f;    // angular/linear velocity decay per second (Bullet: v *= (1 - d)^dt), heavy enough that the cloth carries visibly
@@ -463,10 +467,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             const float capK = own * kMaxBodySwing * kMaxBodySwing;
             float stiffnessK = std::min(std::max(inertia * omega * omega, lever * gravity / droop), capK);
             // A garment (an outfit chain) keeps the authored drape as the equilibrium: size the spring so gravity torque about this joint
-            // Note: the garment centring spring is the flat 50 (MikuMikuDance reference) - see kGarmentClothSpring.
+            // Note: the garment centring spring is zero (see kGarmentClothSpring).
             if (garmentChainEarly) {
-                // Flat 50 like MMD's own cloth: the centring spring is for swing smoothing only, not for holding the drape.
-                // The silhouette is carried by the envelope (the limit stops) and the bone-aligned bodies, never by this spring.
+                // Zero like the reference cloth: the centring spring carries no role here - the silhouette is carried by the
+                // envelope (the limit stops) and the bone-aligned bodies, and any spring at all only feeds the stop-and-buzz.
                 stiffnessK = kGarmentClothSpring;
             }
             if (hairChain) {

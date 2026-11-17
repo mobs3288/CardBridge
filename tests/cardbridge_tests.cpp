@@ -698,9 +698,11 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         linked[static_cast<size_t>(j.a)].push_back(j.b);
         linked[static_cast<size_t>(j.b)].push_back(j.a);
         if (j.type != 0) out.push_back("joint " + std::to_string(i) + ": not a spring 6-DOF joint");
+        // A zero spring is a legitimate intentional design (garment joints hold the drape with stops + gravity only);
+        // what we must reject is a negative or NaN spring
         for (float l : {j.rotLower.x, j.rotLower.y, j.rotLower.z}) if (!(l <= 0)) out.push_back("joint " + std::to_string(i) + ": a lower rotation limit above 0");
         for (float u : {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z}) if (!(u >= 0)) out.push_back("joint " + std::to_string(i) + ": an upper rotation limit below 0");
-        if (!(j.springRot.x > 0 && j.springRot.y > 0 && j.springRot.z > 0)) out.push_back("joint " + std::to_string(i) + ": no rotation spring");
+        for (float s : {j.springRot.x, j.springRot.y, j.springRot.z}) if (!(s >= 0) || std::isnan(s)) out.push_back("joint " + std::to_string(i) + ": a rotation spring that is negative or NaN");
         // the joint stands where the second body meets the first: on or near the second body
         const auto& bb = m.bodies[static_cast<size_t>(j.b)];
         const float reach = bb.shape == 2 ? 0.5f * bb.size.y + bb.size.x : bb.size.x;
@@ -2596,7 +2598,7 @@ void unitTests() {
             CHECK(std::fabs(widest - expect[jointIdx]) < 1e-6f);
             ++jointIdx;
         }
-        for (float k : clothSprings) CHECK(k == 50.0f);                     // the MikuMikuDance reference cloth spring (flat 50)
+        for (float k : clothSprings) CHECK(k == 0.0f);                        // garment spring: none (stop + gravity only, like the reference cloth)
     });
 
     test("pmx writer: IK bones come back through the independent reader", [] {
