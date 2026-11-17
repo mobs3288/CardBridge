@@ -4,6 +4,14 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 7 — the swing envelope is flat and modest again
+
+The per-link widening (1.15 rad at the yoke easing to 0.40 at the hem) let the skirt peel open in deep hip-motion frames — the back
+panel flung up and showed the undies. The envelope is back to a **flat 0.40 rad per link** with the one-sided stop and the leg
+collision unchanged: the authored drape is held at rest, the skirt sways with the body, never flings open, and collision keeps the
+thighs out of the cloth. If a deeper fold still needs a bigger dodge the per-link taper can be re-introduced per link rather than
+raising the whole budget.
+
 ## Update 6 — garment joints carry zero centring spring
 
 The flat 50 spring on every garment joint was retained from the reference cloth convention. It is now **zero**

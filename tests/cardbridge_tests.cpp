@@ -2527,10 +2527,9 @@ void unitTests() {
             CHECK(m.joints.size() == 3);
             for (const auto& j : m.joints) {
                 CHECK(j.rotUpper.x > 0.3f);                  // the wide garment envelope applies
-                CHECK(j.rotUpper.x <= 1.15f + 1e-6f);        // the top link's opening budget (was the flat 0.6 cap)
+                CHECK(j.rotUpper.x <= 0.40f + 1e-6f);        // the flat per-link budget (restorable by design)
             }
-            CHECK(m.joints[0].rotUpper.x > m.joints[1].rotUpper.x);   // the envelope eases from the hip yoke to the tip
-            CHECK(m.joints[1].rotUpper.x > m.joints[2].rotUpper.x);
+            for (const auto& j : m.joints) CHECK(std::fabs(j.rotUpper.x - 0.40f) < 1e-6f);   // flat envelope, every link
         }
     });
 
@@ -2585,7 +2584,7 @@ void unitTests() {
         }
         CHECK(joints == 3);
         // the per-link envelope, widest at the hip yoke and easing to the hem
-        const float expect[3] = {1.15f, 0.93f, 0.71f};
+        const float expect[3] = {0.40f, 0.40f, 0.40f};
         int jointIdx = 0;
         for (const auto& j : m.joints) {
             if (j.name.rfind("cloth", 0) != 0) continue;

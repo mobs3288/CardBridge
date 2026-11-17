@@ -58,10 +58,12 @@ constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs
 // link, which is far too small for the panel to fold out of a swinging thigh's path: the thigh simply passes through it. The fold
 // (gravity) direction is capped at the authored angle (see the joint builder); this is the opening-side budget and the symmetric budget
 // of the other swing plane, decreasing the same way per link.
-constexpr float kGarmentLinkFlex = 1.15f;        // rad, the top link (at the hip yoke)
-constexpr float kGarmentLinkFlexDrop = 0.22f;    // rad per link below the top one
-constexpr float kGarmentMinLinkFlex = 0.40f;     // rad, never less than the old flat budget for the hem links
+constexpr float kGarmentLinkFlex = 0.40f;        // rad, flat swing budget per link — back to the modest flat envelope after the per-link widening let the skirt peel open in deep hip motions (undie showed)
+constexpr float kGarmentLinkFlexDrop = 0.0f;     // rad per link below the top one — flat
+constexpr float kGarmentMinLinkFlex = 0.40f;     // rad, the same flat budget for every link
 constexpr float kGarmentTwist = 0.15f;           // rad, the panel's roll about its own long axis (almost rigid)
+
+// The spring at the stop is gone (see kGarmentClothSpring): with the modest envelope there is nothing for the spring to fight.
 
 // How much of a leg's turn a garment panel along the thigh takes.
 // MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
