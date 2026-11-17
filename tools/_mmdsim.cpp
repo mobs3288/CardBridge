@@ -199,13 +199,14 @@ int main(int argc, char** argv) {
             c->setAngularLowerLimit(btVector3(-rad, -yrad, -rad));
             c->setAngularUpperLimit(btVector3(rad, yrad, rad));
         }
-        // saba's enableSpring/setStiffness (including its sign flip on the Z angular spring, index 5)
+        // saba's enableSpring/setStiffness. Its PMD path negates the Z spring; its PMX path (what CardBridge exports)
+        // sets every axis unmodified. Applying the PMD rule to a PMX model turned every +Z spring negative - a
+        // destabilizing spring that drives cloth to its Z limit - so the flip is gone.
         const btScalar sp[6] = {j.springMove.x, j.springMove.y, j.springMove.z, j.springRot.x, j.springRot.y, j.springRot.z};
         for (int axis = 0; axis < 6; ++axis) {
             btScalar k = sp[axis];
             if (axis == 4 && noTwistSpring) k = 0.0f;
             if (axis >= 3 && (springAbs >= 0 || springScale != 1.0)) k = (springAbs >= 0 ? (btScalar)springAbs : k) * (btScalar)springScale;
-            if (axis == 2 || axis == 5) k = -k;
             if (sp[axis] != 0 || (axis >= 3 && springAbs >= 0)) { c->enableSpring(axis, true); c->setStiffness(axis, k); }
         }
         world.addConstraint(c);

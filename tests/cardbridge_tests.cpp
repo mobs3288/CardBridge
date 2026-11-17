@@ -2553,14 +2553,31 @@ void unitTests() {
         CHECK(s.bones[1].pos.x == hair1.x && s.bones[1].pos.y == hair1.y && s.bones[1].pos.z == hair1.z);
         CHECK(s.bones[4].pos.x == hair4.x && s.bones[4].pos.y == hair4.y && s.bones[4].pos.z == hair4.z);
         CHECK(s.bones[8].pos.x == cloth8.x && s.bones[8].pos.y == cloth8.y && s.bones[8].pos.z == cloth8.z);
-        // The export gives every cloth joint a hold spring sized from its own subchain (never the old flat 5.0, never a lock).
+        // The export gives every cloth joint a hold spring sized from its own subchain (never the old flat 5.0), and the
+        // envelope that actually carries the drape: the hang axis (the one gravity torques) is locked to zero range, so a
+        // bone-aligned chain cannot droop away from the card's rest pose; the swing axis keeps the full ±0.40 rad budget
+        // (kGarmentMaxBend) and the twist axis stays nearly rigid.
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
         std::vector<float> clothSprings;
-        for (const auto& j : m.joints)
-            if (j.name.rfind("cloth", 0) == 0) { CHECK(j.rotUpper.x > 0.0f); clothSprings.push_back(j.springRot.x); }
-        CHECK(clothSprings.size() == 3);
+        int joints = 0;
+        for (const auto& j : m.joints) {
+            if (j.name.rfind("cloth", 0) != 0) continue;
+            ++joints;
+            const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
+            const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
+            int hangStops = 0;   // axes whose hang side is a zero stop
+            float widest = 0.0f;
+            for (int a = 0; a < 3; ++a) {
+                if (lo[a] == 0.0f || hi[a] == 0.0f) ++hangStops;
+                widest = std::max(widest, std::max(-lo[a], hi[a]));
+            }
+            CHECK(hangStops == 1);                                  // the hang side: gravity cannot droop the panel
+            CHECK(std::fabs(widest - 0.40f) < 1e-6f);                // the swing axis: the full kGarmentMaxBend budget
+            clothSprings.push_back(j.springRot.x);
+        }
+        CHECK(joints == 3);
         for (float k : clothSprings) CHECK(k == 50.0f);                     // the MikuMikuDance reference cloth spring (flat 50)
     });
 

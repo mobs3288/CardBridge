@@ -4,6 +4,23 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 4 — the garment hang side is a zero stop
+
+The PMX's garment joints used to allow a small asymmetric droop on their hang side (`pin` = 0.04 + 0.22·(1 − stiffness)
+rad, clamped to 4–13°). In a mode-2 (bone-aligned) chain nothing but that joint stop stands between a panel and MMD's
+gravity, so whatever range the stop allows becomes droop. The hang side is now **zero range**: gravity cannot rotate a
+panel out of its authored orientation, so the rest drape in the PMX is exactly the drape the viewer shows. The other
+axes are untouched — the swing axis keeps the full `kGarmentMaxBend` (±0.40 rad) budget and the twist axis its ±0.04 —
+so a step still moves the panels, on the axis that does not narrow the silhouette. No card-specific numbers: every
+garment chain gets the same treatment and the spring stays the flat 50 of the reference cloth.
+
+**Tool fix that came out of this:** `tools/_mmdsim.cpp` negated the Z-axis joint spring for every joint. That is saba's
+**PMD** rule; its **PMX** path (`MMDJoint::CreateJoint(const PMXJoint&, …)`) writes every spring unmodified. Applied to a
+PMX export the negation turns every +Z centring spring into a destabilising one and drives bodies to their Z limit —
+which is why an earlier reading showed the skirt settling 18° off the rest pose. With the flip removed, both the old and
+the new export hold the skirt within ~1° of rest (5 s, saba's model), so this change is a guarantee against droop in any
+implementation that takes the range, not the explanation of the mismatch still being reported in MikuMikuDance.
+
 ## Update 3 — "Original garment" is the default: the PMX carries the card's own drape
 
 The garment-vs-body clipping correction (`FixGarmentIntersections`) used to run on every export. It rewrites garment

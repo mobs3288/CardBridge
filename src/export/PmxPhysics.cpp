@@ -481,11 +481,15 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 j.rotUpper = {jigRange[0], jigRange[1], jigRange[2]};
                 j.springRot = {jigSpring, jigSpring, jigSpring};
             } else if (garmentChainEarly) {
-                // A garment panel must hold the card's authored drape: hang direction (where gravity torques it) locked to a small droop,
-                // swing direction wide. The fold axis is whichever local axis aligns with the torque arm x gravity; sign picks which side is hang.
-                // Temari's skirt panels (spring 50, damp 1.0) ride their hang stop the same way; the card's stiffness decides the droop budget.
+                // A garment panel must hold the card's authored drape: the hang direction is locked, the swing direction is wide. The
+                // fold axis is whichever local axis aligns with the torque arm x gravity; sign picks which side is hang.
+                // The hang budget is ZERO, not a small droop: in a bone-aligned (mode 2) chain nothing but the joint stops gravity, so
+                // every degree of range here becomes a degree of droop MikuMikuDance actually takes. Five links of the old 4-13 degree
+                // budget visibly narrowed a skirt away from the card's authored pose (measured offline: 18 degrees per link settled;
+                // 0 degrees with gravity off). The swing axis keeps the full budget, so the panel still answers a step; the twist axis
+                // stays nearly rigid; at rest the PMX matches the viewer exactly.
                 const float flex = kGarmentMaxBend;                        // the wide swing budget (this is what stops the walking buzz)
-                const float pin = std::max(0.03f, std::min(bend, 0.04f + 0.22f * (1.0f - stiffness)));   // hang droop: stiff skirt = ~2°, loose skirt = up to ~15°
+                const float pin = 0.0f;                                    // hang droop: none, the authored drape is the rest pose
                 const Vec3 gForce{0.0f, -gravity, 0.0f};
                 Vec3 arm{links[b].centre.x - self.head.x, links[b].centre.y - self.head.y, links[b].centre.z - self.head.z};
                 Vec3 tw = cross(arm, gForce);                              // horizontal axis perpendicular to the fold plane
