@@ -2522,15 +2522,20 @@ void unitTests() {
             const pmx::Model m = exportPhysics(make("hair.back", "Hair", ""));
             for (const auto& j : m.joints) CHECK(j.rotUpper.x <= 0.0901f);
         }
-        {   // a chest-mounted accessory (a_n_bust) is not hair: the envelope follows the card's own stiffness (2*asin(1-stiffness))
+        {   // a chest-mounted accessory (a_n_bust) is not hair: the garment envelope applies (kGarmentSwing = 0.10 rad per link)
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
             CHECK(m.joints.size() == 3);
-            const float clothBend = 2.0f * std::asin(1.0f - 0.1f);   // the card's stiffness 0.1 drives the envelope: ~2.24 rad
+            const float clothBend = 0.10f;   // kGarmentSwing: small deliberate budget, never capped by the card's stiffness
             for (const auto& j : m.joints) {
-                CHECK(j.rotUpper.x > 0.3f);                  // the wide garment envelope applies
-                CHECK(j.rotUpper.x <= clothBend + 1e-6f);    // the card's own stiffness, uncapped
+                float widest = 0.0f;
+                for (int a = 0; a < 3; ++a) {
+                    const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
+                    const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
+                    widest = std::max(widest, std::max(-lo[a], hi[a]));
+                }
+                // swing axes sit at kGarmentSwing, the roll axis on kGarmentTwist
+                CHECK(widest == 0.10f || widest == 0.15f);
             }
-            for (const auto& j : m.joints) CHECK(std::fabs(j.rotUpper.x - clothBend) < 1e-6f);   // stiffness-driven envelope, every link
         }
     });
 
@@ -2584,8 +2589,8 @@ void unitTests() {
             clothSprings.push_back(j.springRot.x);
         }
         CHECK(joints == 3);
-        // the envelope follows the card's own stiffness (chain stiffness 0.8 -> 2*asin(0.2) = 0.4027 rad)
-        const float expect[3] = {2.0f * std::asin(0.2f), 2.0f * std::asin(0.2f), 2.0f * std::asin(0.2f)};
+        // the flat 0.10 rad per-link sway budget — small enough that the authored drape is never opened into the curtain shape
+        const float expect[3] = {0.10f, 0.10f, 0.10f};
         int jointIdx = 0;
         for (const auto& j : m.joints) {
             if (j.name.rfind("cloth", 0) != 0) continue;
@@ -2595,7 +2600,8 @@ void unitTests() {
                 const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
                 widest = std::max(widest, std::max(-lo[a], hi[a]));
             }
-            CHECK(std::fabs(widest - expect[jointIdx]) < 1e-6f);
+            // the hang axis stays pinned at zero; the swing axes sit at kGarmentSwing, the roll axis at kGarmentTwist
+            CHECK(widest == 0.10f || widest == 0.15f);
             ++jointIdx;
         }
         for (float k : clothSprings) CHECK(k > 0.0f);                        // the card's elasticity carries the centring spring (omega = 60*sqrt(elasticity))

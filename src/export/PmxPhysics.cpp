@@ -49,6 +49,10 @@ constexpr float kGarmentMaxDamping = 1.00f;    // MikuMikuDance's own cloth runs
 // The panel's roll about its own long axis is kept near-rigid, like a Koikatsu DynamicBone m_FreezeAxis sway.
 constexpr float kGarmentTwist = 0.15f;           // rad
 
+// The garment swing envelope, deliberately small: the authored silhouette IS the rest pose (the one-sided stop on the hang axis
+// welds the panel there), and only a gentle swing remains for motion — never the 0.5+ rad curtain-and-flag flop that showed the undies.
+constexpr float kGarmentSwing = 0.10f;           // rad per link, about every swing axis
+
 // How much of a leg's turn a garment panel along the thigh takes.
 // MikuMikuDance folds the garment panel toward the thigh at rest for any nonzero rate, so the fold is gated by
 // the panel linking direction: a panel hanging straight down beside the thigh (form-fitting dress) aligns with the
@@ -406,12 +410,12 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // MikuMikuDance is kinder to a calm default than to the game's loosest settings: no link turns more than 35 degrees. A jiggle
             // chain gets its own envelope from the settings instead (the bust ~34 degrees a link, the butt less).
             const float stiffness = along(ch.boneStiffness, ch.stiffness, b);
-            // Garment cloth: the card's own stiffness drives the envelope (stiffness 0.6 on this picture is a ~47 degree fold per link —
-            // the game's own simulation, unchanged, is the whole point of "full from Koikatsu"). No cap of ours on the swing budget:
-            // MikuMikuDance turns the card's values into the same shape the game does, and the fold stays one-sided via the hang pin below.
+            // Garment cloth: the envelope is a small deliberate budget (kGarmentSwing) — enough for the skirt to sway with the body and
+            // follow a leg, far too little to fling open into the curtain shape that showed the undies. The hang axis is still pinned at the
+            // authored flare (option A); this only budgets how much it swings. The card's own stiffness drives hair and general chains.
             const bool garmentChainEarly = !jigBody && !hairChain && ch.part.rfind("outfit", 0) == 0;
             const float bend = jigBody ? std::max(0.01f, jigRange[0])
-                                       : garmentChainEarly ? 2.0f * std::asin(clamp01(1.0f - stiffness))   // the card's own number, uncapped
+                                       : garmentChainEarly ? kGarmentSwing
                                        : std::min(0.6f, std::max(0.05f, 2.0f * std::asin(clamp01(1.0f - stiffness))));
             // Hair is pinned to a small envelope regardless of the component's stiffness value: the hair components carry no gravity,
             // so their stiffness says little about how the strand behaves against MikuMikuDance's world gravity.

@@ -4,6 +4,14 @@
 **Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
 **Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
 
+## Update 9 — the drape is welded at rest, swaying only gently in motion
+
+`(64)` is the build the author asked for: the skirt at rest is the exact bind-pose silhouette (the one-sided stop welds the
+panel there), and the DynamicBone data follows the card's physics with a small deliberate swing budget per link
+(`kGarmentSwing` = 0.10 rad per link on every axis) - enough for the skirt to breathe with the body, never enough to open
+into the curtain shape that showed the undies in deep hip-motion frames. The hang axis remains pinned at zero (option A).
+The rest pose is per-link pinned; during motion it sways gently.
+
 ## Update 8 — the garment physics is the card's own, verbatim
 
 The export no longer caps the cloth's envelope or forces its centring spring to zero. Everything from the card's
