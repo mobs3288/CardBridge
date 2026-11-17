@@ -656,9 +656,9 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         if (b.mode != 0) {
             if (bit(b.mask, b.group)) out.push_back(who + ": a chain body that meets its own group (mask " + std::to_string(b.mask) + ")");
             if (b.group == exporter::kPmxGroupChain && bit(b.mask, exporter::kPmxGroupChain)) out.push_back(who + ": a chain body that meets chains (mask " + std::to_string(b.mask) + ")");
-            // it meets only kinematic bodies it does not bury itself in: a body that starts merely in CONTACT with one (the draped
-            // garment resting on a thigh) is meant to collide - the force keeps it off - and only a body buried deeper than the
-            // exporter's rest allowance is thrown out of it. Keep the number in step with kRestContactAllow in PmxPhysics.cpp.
+            // it meets only kinematic bodies it does not bury itself in: a body that starts merely in CONTACT with one is meant to collide
+            // - the force keeps it off - and only a body buried deeper than the exporter's rest allowance is thrown out of it. Keep the
+            // number in step with kRestContactAllow in PmxPhysics.cpp.
             const float kRestContactAllow = 0.12f;
             for (size_t k = 0; k < m.bodies.size(); ++k) {
                 const auto& c = m.bodies[k];
@@ -698,7 +698,7 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         linked[static_cast<size_t>(j.a)].push_back(j.b);
         linked[static_cast<size_t>(j.b)].push_back(j.a);
         if (j.type != 0) out.push_back("joint " + std::to_string(i) + ": not a spring 6-DOF joint");
-        // A zero spring is a legitimate intentional design (garment joints hold the drape with stops + gravity only);
+        // A zero spring is a legitimate intentional design (hair joints may hold the pose with a zero centring spring);
         // what we must reject is a negative or NaN spring
         for (float l : {j.rotLower.x, j.rotLower.y, j.rotLower.z}) if (!(l <= 0)) out.push_back("joint " + std::to_string(i) + ": a lower rotation limit above 0");
         for (float u : {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z}) if (!(u >= 0)) out.push_back("joint " + std::to_string(i) + ": an upper rotation limit below 0");
@@ -2225,61 +2225,13 @@ void unitTests() {
         }
     });
 
-    test("physics: garments in front of the thighs take a modest append to the lead leg (20% folded, not 75%)", [] {
-        assemble::Scene s;
-        s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
-        for (int side = 0; side < 2; ++side) {   // the game's leg bones; the toes point to +Z, so that is the front
-            const std::string n = side == 0 ? "L" : "R";
-            const float x = side == 0 ? 0.1f : -0.1f;
-            const int t = static_cast<int>(s.bones.size());
-            s.bones.push_back({"cf_j_thigh00_" + n, 0, {x, 0.9f, 0}, "rig"});
-            s.bones.push_back({"cf_j_leg01_" + n, t, {x, 0.5f, 0}, "rig"});
-            s.bones.push_back({"cf_j_foot_" + n, t + 1, {x, 0.1f, 0}, "rig"});
-            s.bones.push_back({"cf_j_toes_" + n, t + 2, {x, 0.05f, 0.1f}, "rig"});
-        }
-        auto addChain = [&](const std::string& name, int parent, Vec3 top) {
-            assemble::SceneChain ch;
-            ch.name = name;
-            for (int i = 0; i < 4; ++i) {
-                ch.bones.push_back(static_cast<int>(s.bones.size()));
-                s.bones.push_back({name + std::to_string(i), i == 0 ? parent : ch.bones[static_cast<size_t>(i) - 1], {top.x, top.y - 0.15f * float(i), top.z}, "item"});
-            }
-            s.chains.push_back(ch);
-            return ch.bones[0];
-        };
-        const int frontLeft = addChain("frontL", 0, {0.1f, 1.0f, 0.15f});
-        const int centreTop = static_cast<int>(s.bones.size());
-        s.bones.push_back({"centre_top", 0, {0, 1.0f, 0.15f}, "item"});   // carries the centre chain alone
-        const int centre = addChain("centre", centreTop, {0, 1.0f, 0.15f});
-        const int side = addChain("side", 0, {0.25f, 1.0f, 0});
-        const int back = addChain("back", 0, {0.1f, 1.0f, -0.15f});
-        const int hair = addChain("hair", 0, {0, 1.5f, -0.1f});
-        pmx::Model m;
-        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
-        exporter::AddPhysics(s, m, 10.0f);
-        // The wrap-around panels that hang straight beside either thigh fold-together and append the nearest thigh;
-        // the hair above the waist is exempt.
-        const auto& fl = m.bones[static_cast<size_t>(frontLeft)];
-        CHECK(fl.appendParent == 1 && fl.appendRatio > 0.6f && fl.appendRatio <= 1.0f && fl.layer == 1);
-        const auto& c = m.bones[static_cast<size_t>(centre)];
-        const auto& ct = m.bones[static_cast<size_t>(centreTop)];
-        CHECK(c.appendParent >= 0 && (c.appendParent == 1 || c.appendParent == 5) && c.appendRatio > 0.5f);
-        CHECK(ct.appendParent >= 0 && (ct.appendParent == 1 || ct.appendParent == 5) && ct.appendParent != c.appendParent && ct.layer == 1);
-        // The side-of-thigh front/back panels hang straight down with the thigh, so they also append their thigh side.
-        const auto& sd = m.bones[static_cast<size_t>(side)];
-        const auto& bk = m.bones[static_cast<size_t>(back)];
-        // But they append the nearest (left) leg for this synthetic layout
-        CHECK(sd.appendParent >= 0 && (sd.appendParent == 1 || sd.appendParent == 5) && sd.appendRatio > 0.05f && sd.layer == 1);
-        CHECK(bk.appendParent >= 0 && (bk.appendParent == 1 || bk.appendParent == 5) && bk.appendRatio > 0.5f && bk.layer == 1);
-        // The hair and the legs themselves stay exempt
-        CHECK(m.bones[static_cast<size_t>(hair)].appendParent < 0 && m.bones[static_cast<size_t>(hair)].layer == 0);
-        CHECK(m.bones[1].layer == 0 && m.bones[1].appendParent < 0);
-    });
-
-    test("physics: garment chain bodies are bone-aligned (mode 2) - the bone holds the panel; the panel swings around its joints", [] {
+    test("physics: garment chains are never simulated - outfit chains add no bodies or joints", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
         for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
+        assemble::ScenePart clothPart;
+        clothPart.id = "outfit0.top"; clothPart.group = "Outfit"; clothPart.attachNode = "";
+        s.parts.push_back(clothPart);
         assemble::SceneChain cloth;
         cloth.name = "cloth"; cloth.part = "outfit0.top"; cloth.bones = {1, 2, 3, 4};
         cloth.damping = 0.15f; cloth.elasticity = 0.1f; cloth.stiffness = 0.8f;
@@ -2287,28 +2239,29 @@ void unitTests() {
         pmx::Model m;
         for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.size() == 4);      // one per bone (garment cloth has no extra anchor body; only jiggle does)
-        for (size_t i = 0; i < m.rigidBodies.size(); ++i)
-            CHECK(m.rigidBodies[i].mode == (i == 0 ? 0 : 2));   // root follows the bone; the rest are bone-aligned (physics with bone aligned)
-        // a hair chain keeps free dynamics (mode 1) - the authored hairstyle is the rest pose, driven by the hair physics fix
+        CHECK(m.rigidBodies.empty());   // the skirt is authored, following its bones — nothing pulls on it
+        CHECK(m.joints.empty());
     });
 
     test("physics: identical physics chains are exported once (a card can scan the same DynamicBone twice into two items)", [] {
         assemble::Scene s;
-        s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
-        for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.0f, 1.0f - 0.15f * float(i), 0.0f}, "item"});
+        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
+        for (int i = 0; i < 4; ++i) s.bones.push_back({"sk" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f - 0.02f * float(i), 0.0f}, "item"});
+        assemble::ScenePart hairPart;
+        hairPart.id = "hair.back"; hairPart.group = "Hair"; hairPart.attachNode = "";
+        s.parts.push_back(hairPart);
         assemble::SceneChain a;
-        a.name = "skirt A"; a.part = "outfit0.bottom"; a.bones = {1, 2, 3, 4};
-        a.damping = 0.15f; a.elasticity = 0.1f; a.stiffness = 0.8f;
+        a.name = "long hair A"; a.part = "hair.back"; a.bones = {1, 2, 3, 4};
+        a.damping = 0.2f; a.elasticity = 0.2f; a.stiffness = 0.1f;
         assemble::SceneChain b;
-        b.name = "skirt B"; b.part = "outfit0.bottom"; b.bones = {1, 2, 3, 4};   // the same bones again, from the second item scan
-        b.damping = 0.15f; b.elasticity = 0.1f; b.stiffness = 0.8f;
+        b.name = "long hair B"; b.part = "hair.back"; b.bones = {1, 2, 3, 4};   // the same bones again, from the second item scan
+        b.damping = 0.2f; b.elasticity = 0.2f; b.stiffness = 0.1f;
         s.chains.push_back(a);
         s.chains.push_back(b);
         pmx::Model m;
         for (const auto& bone : s.bones) { pmx::Bone pb; pb.name = bone.name; pb.parent = bone.parent; pb.position = bone.pos * 10.0f; m.bones.push_back(pb); }
         exporter::AddPhysics(s, m, 10.0f);
-        CHECK(m.rigidBodies.size() == 4);   // the skirt's own bodies, once - never a duplicate set
+        CHECK(m.rigidBodies.size() == 4);   // the strand's own bodies, once - never a duplicate set
         CHECK(m.joints.size() == 3);        // root->1, 1->2, 2->3, once each
     });
 
@@ -2482,7 +2435,7 @@ void unitTests() {
         CHECK(!assemble::SceneChainIsHair(s, ch));
     });
 
-    test("physics: a hair strand chain keeps a small envelope with a strong centering spring and heavy damping; cloth keeps its own treatment", [] {
+    test("physics: a hair strand chain keeps a small envelope with a strong centering spring and heavy damping; outfit chains are not simulated", [] {
         auto make = [&](const char* id, const char* group, const char* attach) {
             assemble::Scene s;
             s.bones.push_back({"cf_J_FaceUp_ty", -1, {0, 1.2f, 0}, "rig"});
@@ -2522,88 +2475,11 @@ void unitTests() {
             const pmx::Model m = exportPhysics(make("hair.back", "Hair", ""));
             for (const auto& j : m.joints) CHECK(j.rotUpper.x <= 0.0901f);
         }
-        {   // a chest-mounted accessory (a_n_bust) is not hair: the garment envelope applies (kGarmentSwing = 0.10 rad per link)
+        {   // a chest-mounted accessory (a_n_bust) is not hair: outfit chains are never simulated at all now
             const pmx::Model m = exportPhysics(make("outfit0.acc03", "Outfit", "a_n_bust"));
-            CHECK(m.joints.size() == 3);
-            const float clothBend = 0.05f;   // kGarmentSwing: near-zero budget (~3 degrees), follows the bones not gravity
-            for (const auto& j : m.joints) {
-                float widest = 0.0f;
-                for (int a = 0; a < 3; ++a) {
-                    const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
-                    const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
-                    widest = std::max(widest, std::max(-lo[a], hi[a]));
-                }
-                // swing axes sit at kGarmentSwing, the roll axis on kGarmentTwist
-                CHECK(widest == 0.05f || widest == 0.15f);
-            }
+            CHECK(m.joints.empty());
+            CHECK(m.rigidBodies.empty());
         }
-    });
-
-    test("physics: the exported garment keeps the authored drape — hold springs sized per joint, never a forced lock, no hang bake", [] {
-        assemble::Scene s;
-        s.bones.push_back({"head", -1, {0, 1.2f, 0}, "rig"});
-        // a fanned back / front strand and a fanned cloth panel
-        for (int i = 0; i < 4; ++i) s.bones.push_back({"h" + std::to_string(i), i == 0 ? 0 : i, {0.1f * float(i), 1.2f - 0.01f * float(i), 0.0f}, "item"});
-        for (int i = 0; i < 4; ++i) s.bones.push_back({"c" + std::to_string(i), i == 0 ? 0 : i + 4, {0.1f * float(i) + 0.4f, 1.2f - 0.01f * float(i), 0.3f}, "item"});
-        assemble::ScenePart hairPart;
-        hairPart.id = "outfit0.acc00"; hairPart.group = "Outfit"; hairPart.attachNode = "a_n_headside";
-        s.parts.push_back(hairPart);
-        assemble::ScenePart clothPart;
-        clothPart.id = "outfit0.top"; clothPart.group = "Outfit"; clothPart.attachNode = "";
-        s.parts.push_back(clothPart);
-        assemble::SceneChain hair;
-        hair.name = "hair"; hair.part = hairPart.id; hair.bones = {1, 2, 3, 4};
-        hair.damping = 0.2f; hair.elasticity = 0.2f; hair.stiffness = 0.1f;
-        s.chains.push_back(hair);
-        assemble::SceneChain cloth;
-        cloth.name = "cloth"; cloth.part = clothPart.id; cloth.bones = {5, 6, 7, 8};
-        cloth.damping = 0.15f; cloth.elasticity = 0.1f; cloth.stiffness = 0.8f;
-        s.chains.push_back(cloth);
-        const Vec3 hair1 = s.bones[1].pos, hair4 = s.bones[4].pos;
-        const Vec3 cloth8 = s.bones[8].pos;
-        // No hang is ever baked into the scene by the export: the authored rest pose is what leaves the assembler.
-        CHECK(s.bones[1].pos.x == hair1.x && s.bones[1].pos.y == hair1.y && s.bones[1].pos.z == hair1.z);
-        CHECK(s.bones[4].pos.x == hair4.x && s.bones[4].pos.y == hair4.y && s.bones[4].pos.z == hair4.z);
-        CHECK(s.bones[8].pos.x == cloth8.x && s.bones[8].pos.y == cloth8.y && s.bones[8].pos.z == cloth8.z);
-        // The export gives every cloth joint a hold spring sized from its own subchain (never the old flat 5.0), and the
-        // envelope that actually carries the drape: the hang axis (the one gravity torques) is locked to zero range, so a
-        // bone-aligned chain cannot droop away from the card's rest pose; the swing axes keep the per-link budget (the top
-        // link about 66 degrees, easing toward the tip) and the twist axis stays nearly rigid.
-        pmx::Model m;
-        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
-        exporter::AddPhysics(s, m, 10.0f);
-        std::vector<float> clothSprings;
-        int joints = 0;
-        for (const auto& j : m.joints) {
-            if (j.name.rfind("cloth", 0) != 0) continue;
-            ++joints;
-            const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
-            const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
-            int hangStops = 0;   // axes whose hang side is a zero stop
-            float widest = 0.0f;
-            for (int a = 0; a < 3; ++a) {
-                if (lo[a] == 0.0f || hi[a] == 0.0f) ++hangStops;
-                widest = std::max(widest, std::max(-lo[a], hi[a]));
-            }
-            CHECK(hangStops == 1);                                  // the hang side: gravity cannot droop the panel
-            clothSprings.push_back(j.springRot.x);
-        }
-        CHECK(joints == 3);
-        // the 0.05 rad per-link near-zero swing budget — the authored silhouette is the pose at all times
-        int jointIdx = 0;
-        for (const auto& j : m.joints) {
-            if (j.name.rfind("cloth", 0) != 0) continue;
-            float widest = 0.0f;
-            for (int a = 0; a < 3; ++a) {
-                const float lo[3] = {j.rotLower.x, j.rotLower.y, j.rotLower.z};
-                const float hi[3] = {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z};
-                widest = std::max(widest, std::max(-lo[a], hi[a]));
-            }
-            // the hang axis stays pinned at zero; the swing axes sit at kGarmentSwing, the roll axis at kGarmentTwist
-            CHECK(widest == 0.05f || widest == 0.15f);
-            ++jointIdx;
-        }
-        for (float k : clothSprings) CHECK(k > 0.0f);                        // the card's elasticity carries the centring spring (omega = 60*sqrt(elasticity))
     });
 
     test("pmx writer: IK bones come back through the independent reader", [] {

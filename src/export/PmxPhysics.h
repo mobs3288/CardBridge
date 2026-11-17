@@ -20,9 +20,11 @@ namespace cardbridge::exporter {
 // outward for ever and it would shiver at rest.
 constexpr uint8_t kPmxGroupChain = 1;
 
-// Physics for the PMX: every DynamicBone chain of the scene (hair, skirts, ribbons; the body's own breast / hip jiggle chains when their switch is on) becomes one capsule body per
+// Physics for the PMX: every DynamicBone chain of the scene (hair and other non-outfit chains; the body's own breast / hip jiggle chains when their switch is on) becomes one capsule body per
 // chain bone, the root following its bone (kinematic) and the rest free, joined by 6-DOF spring joints at the bones' heads, and every body
 // collider becomes a kinematic capsule or sphere the chains collide with. Positions are scaled by `scale` like the rest of the model.
+// Outfit chains (skirts, capes, kimono panels, skirt hems) are never simulated: the skirt exports as the card's authored
+// drape and only follows its bones. (Koikatsu garment physics was removed by the author's decision — see docs/GARMENT_PHYSICS.md.)
 //
 // The mapping from the game's parameters follows what the particle update does: damping becomes the bodies' damping rates (the same
 // decay a second), elasticity the swing rate of each joint's spring (stiffness = inertia of everything below it * rate^2, never more than
@@ -35,12 +37,6 @@ constexpr uint8_t kPmxGroupChain = 1;
 // MikuMikuDance plays from the same numbers.
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
                 const assemble::JiggleSettings& jiggle = {});
-
-// Garment chains — skirts, capes, kimono panels, skirt hems — may follow the thighs through an append bone (MikuMikuDance's 付与).
-// The append rate is deliberately modest (kLegFollow = 0.20f), not the 75% of the original AddLegFollow (observed to fold the
-// standing pose into a pinned tube in MikuMikuDance, since append evaluation applies at rest). With a modest rate the chain
-// still pulls itself near the thigh during moderate extension but follows the authored drape far more closely.
-void AddLegFollow(const assemble::Scene& scene, pmx::Model& model);
 
 // The bones of a chain that get a rigid body: the chain's valid bones without its stubs. A stub is a leaf node that points back up the chain
 // (the skirts' cf_j_sk_xx_05_end sits above its parent): a body spanning to it would stand on its joint upside down and flip over in

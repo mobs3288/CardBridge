@@ -1,8 +1,23 @@
 # Garment physics for the PMX export — authored drape, stability, and secondary motion
 
-**Status:** implemented and validated offline (see "Validation"); visual check in MikuMikuDance is the remaining step.
-**Stress-test cards:** `KK_400633.png` (Tokisaki Kurumi), plus `KK_015975` (Sword-Maiden), `KK_397110` (Kimono), `KK_233518` (Atago), `KK_160423` (Satou Sakie), `KK_400577` (simple control), outfit slot 0.
-**Companion to:** `docs/HAIR_PMX_PHYSICS.md` (the hair-side fix).
+**Status:** the garment physics described below was REMOVED from the export by the author's decision (Update 11). Outfit DynamicBone
+chains export no physics bodies or joints at all — the skirt is skinned to the authored bones exactly as the card authors it.
+This document is kept as the design log for the record.
+
+## Update 11 — garment physics is deleted from the export
+
+After repeated live review in MikuMikuDance (back panel vibrating/opening and clipping, the drape never matching the viewer), the author
+ordered the garment physics removed outright:
+
+- Outfit DynamicBone chains (skirts, capes, kimono panels, skirt hems — anything whose part starts with `outfit` and is not the body's
+  own jiggle and not a hair chain) add **no rigid bodies and no joints** to the exported PMX. The mesh is skinned to the authored bones;
+  nothing simulates on it; the skirt is the card's own drape at every frame, exactly like the viewer (the `(63)` behaviour), while hair,
+  accessories and the bust/butt jiggle keep their physics unchanged.
+- Removed with it: `kGarmentMassScale/-Cap/-MinDamping/-MaxDamping/-Twist/-Swing`, the garment branches of the envelope/spring/joint builders,
+  the garment group/mask machinery in the collider pass (per-chain collision groups and overflow group 14) and the `AddLegFollow` append-bone
+  pass. Colliders meet group 1, limbs meet group 1 + the jiggle, hair meets nothing, general (non-outfit, non-hair) chains are unchanged.
+- The exported PMX matches the viewer 1:1 at every frame now, with zero physics invention; any "alive" motion has to come from a new
+  mechanism, not from the deleted code.
 
 ## Update 10 — physics that follows the bones, not gravity (`(65)`)
 
