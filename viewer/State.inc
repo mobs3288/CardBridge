@@ -157,6 +157,12 @@ struct SelView {
     std::vector<char> hidden;                  // effective hidden parts for this view's scene
     std::atomic<int> state{0};              // 0 idle, 1 building, 2 ready, 3 failed
     std::string error;
+    // build progress (the workers report; WM_PAINT draws it — views 1 and 2 show the bar while assembling)
+    std::atomic<double> progFrac{-1.0};     // <0: nothing deterministic yet (indeterminate marquee)
+    std::atomic<uint64_t> progTicks{0};     // phase counter for the indeterminate/marquee animation
+    std::atomic<uint64_t> progPostedMs{0};  // throttles WM_SEL_FRAME posts between progress events (10 Hz)
+    std::mutex progMtx;                     // guards progStage
+    std::string progStage;
     std::vector<std::vector<int>> compParts;   // per component index: scene part indices (parallel to comps)
     std::vector<Mat4> previewSkin;             // views 1 and 2: the shared A-pose's skin matrices (empty = rest pose)
     std::map<std::string, int> placedAcc;      // source accessory key -> merged slot (where each chosen accessory landed)

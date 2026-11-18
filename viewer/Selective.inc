@@ -20,6 +20,7 @@
 
 constexpr wchar_t kSelClassName[] = L"CardBridgeSelectiveImport";
 constexpr UINT_PTR kSelBuildTimer = 3;   // the 250 ms debounce that rebuilds the proposed scene
+constexpr UINT_PTR kSelResizeTimer = 4;  // 250 ms without a resize → re-render the three viewports at the new size
 
 // Forward declarations (the input handlers reach these before their definitions appear):
 card::SelectiveDecisions SelDecisionsNow();
@@ -179,12 +180,15 @@ SelLayout SelLay(int W, int H) {
     }
     l.linkBtn = RECT{W - 236, 8, W - 128, 34};
     l.aposeBtn = RECT{W - 120, 8, W - 12, 34};
-    // Viewports: three square-ish panels with a caption bar on top of each
+    // Viewports: three square-ish panels with a caption bar on top of each.
     const int gap = 10;
-    const int viewH = std::clamp(static_cast<int>(H * 0.47f), 200, 430);
-    const int vw = (W - 2 * M - 2 * gap) / 3;
+    const int viewH = std::clamp(static_cast<int>(H * 0.47f), 210, 520);
+    int vw = (W - 2 * M - 2 * gap) / 3;
+    vw = std::min(vw, static_cast<int>(viewH * 1.55f));   // don't stretch the pictures at very wide windows
+    const int viewsW = 3 * vw + 2 * gap;
+    const int viewsX = std::max(M, (W - viewsW) / 2);
     for (int i = 0; i < 3; ++i) {
-        l.views[i] = RECT{M + i * (vw + gap), headerH, M + i * (vw + gap) + vw, headerH + viewH};
+        l.views[i] = RECT{viewsX + i * (vw + gap), headerH, viewsX + i * (vw + gap) + vw, headerH + viewH};
         l.viewTitle[i] = RECT{l.views[i].left + 8, l.views[i].top + 6, l.views[i].left + 8 + 200, l.views[i].top + 26};
     }
     const int legendTop = headerH + viewH + 8;
@@ -329,6 +333,32 @@ std::vector<assemble::AssembleLayerSpec> SelLayersFromDecisions(const std::map<s
     return out;
 }
 
+// ==================================================================== progress reporting =====
+// Assemble reports determinate progress at sub-item stage granularity (items, masks, create
+// materials, finish). SelSetProgress is cheap — atomic stores plus a throttled WM_SEL_FRAME
+// post so the view's placeholder card repaints at ~7 Hz; nothing here blocks the assembly.
+static void SelSetProgress(int view, double frac, const std::string& stage) {
+    SelView& v = g.sel.views[view];
+    v.progFrac.store(frac >= 0.0 ? frac : -1.0, std::memory_order_relaxed);
+    ++v.progTicks;
+    if (!stage.empty()) { std::lock_guard<std::mutex> lk(v.progMtx); v.progStage = stage; }
+    const uint64_t now = GetTickCount64();
+    uint64_t last = v.progPostedMs.load(std::memory_order_relaxed);
+    if (now - last >= 150 || frac >= 1.0) {
+        if (v.progPostedMs.compare_exchange_strong(last, now, std::memory_order_relaxed))
+            if (HWND h = g.sel.hwnd) PostMessageW(h, WM_SEL_FRAME, 0, 0);
+    }
+}
+static void SelProgressReset(int view, const std::string& stage) {
+    SelView& v = g.sel.views[view];
+    v.progFrac.store(-1.0, std::memory_order_relaxed);
+    v.progTicks.store(0, std::memory_order_relaxed);
+    { std::lock_guard<std::mutex> lk(v.progMtx); v.progStage = stage; }
+}
+static void SelHookAssemblyProgress(assemble::AssembleOptions& ao, int view) {
+    ao.progress = [view](double frac, const std::string& stage) { SelSetProgress(view, frac, stage); };
+}
+
 // The assembly options for a preview scene. `useSource` gives the *source character* its own card's
 // proportions; everything else mirrors what the on-screen character gets (so the proposal matches
 // what the user would see after the import).
@@ -362,6 +392,7 @@ assemble::AssembleOptions SelAssembleOptions(int outfit, bool useSource) {
 // selGpuMu is a leaf around the device calls only, so the render worker and the paint path stay lock-brief.
 void SelUploadScene(int view, int session) {
     SelView& v = g.sel.views[view];
+    SelSetProgress(view, -1.0, "uploading Direct3D picture ...");
     std::shared_ptr<const assemble::Scene> scene;
     std::shared_ptr<exporter::GpuView> dev;
     exporter::GpuOptions go;
@@ -412,6 +443,7 @@ void SelBuildImported() {
     SelView& v = g.sel.views[1];
     // identical inputs → identical result; cache key doesn't depend on decisions at all
     const std::string importedKey = std::string(srcCoord ? "1c|" : "1|") + g.cardPath + '>' + path + '|' + std::to_string(dstOutfit) + '|' + std::to_string(srcOutfit);
+    SelProgressReset(1, srcCoord ? "assembling the source character ..." : "assembling the merged outfit ...");
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         if (auto hit = g.sel.importedCache.find(importedKey); hit != g.sel.importedCache.end()) {
@@ -438,7 +470,9 @@ void SelBuildImported() {
                 card::Card src = card::LoadCard(path);
                 if (!src.supported) throw std::runtime_error(src.supportNote);
                 const int n = srcOutfit >= 0 && static_cast<size_t>(srcOutfit) < src.outfits.size() ? srcOutfit : 0;
-                sc = std::make_shared<assemble::Scene>(assemble::Assemble(src, *resolver, SelAssembleOptions(n, true)));
+                assemble::AssembleOptions aoi = SelAssembleOptions(n, true);
+                SelHookAssemblyProgress(aoi, 1);
+                sc = std::make_shared<assemble::Scene>(assemble::Assemble(src, *resolver, aoi));
             } else {
                 if (!L) throw std::runtime_error("the loaded character is gone");
                 card::Card copy = L->card;
@@ -446,7 +480,9 @@ void SelBuildImported() {
                 opt.outfit = dstOutfit;
                 const card::OutfitSourceReport rep = card::ApplyOutfitSource(copy, path, opt);   // whole-outfit merge, in memory only
                 applyRep = rep.apply;
-                sc = std::make_shared<assemble::Scene>(assemble::Assemble(copy, *resolver, SelAssembleOptions(dstOutfit, false)));
+                assemble::AssembleOptions aoi = SelAssembleOptions(dstOutfit, false);
+                SelHookAssemblyProgress(aoi, 1);
+                sc = std::make_shared<assemble::Scene>(assemble::Assemble(copy, *resolver, aoi));
             }
         } catch (const std::exception& e) {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -478,6 +514,7 @@ void SelBuildProposal() {
     const card::SelectiveDecisions decisions{g.sel.decisions};
     const std::string sessionKey = SelEffectiveKey(decisions.actions, g.cardPath, path, dstOutfit, srcOutfit, srcCoord);
     const int session = g.sel.session;
+    SelProgressReset(2, "assembling the proposed look ...");
     SelView& v = g.sel.views[2];
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -514,6 +551,7 @@ void SelBuildProposal() {
             applyRep = rep.apply;
             assemble::AssembleOptions ao = SelAssembleOptions(dstOutfit, false);
             ao.layers = SelLayersFromDecisions(decisions.actions);
+            SelHookAssemblyProgress(ao, 2);
             sc = std::make_shared<assemble::Scene>(assemble::Assemble(copy, *resolver, ao));
         } catch (const std::exception& e) {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -804,9 +842,12 @@ void SelDrawFrame(int view, HDC dc, const RECT& rect) {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         state = v.state;
     }
+    SetBkMode(dc, TRANSPARENT);
     HFONT f = state == 3 ? g.fontBold : g.fontUi;
     const COLORREF c = state == 3 ? ui::kBad : ui::kSub;
-    const char* line1 = state == 3 ? "preview failed" : "assembling preview ...";
+    const char* line1 = state == 3 ? "preview failed" : (state == 0 ? "queued ..." : "assembling preview ...");
+    SelectObject(dc, f);
+    SetTextColor(dc, c);
     TextOutW(dc, inner.left, inner.top, Utf8ToWide(line1).c_str(), static_cast<int>(strlen(line1)));
     if (state == 3) {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -816,11 +857,68 @@ void SelDrawFrame(int view, HDC dc, const RECT& rect) {
             SetTextColor(dc, ui::kSub);
             DrawTextW(dc, msg.c_str(), -1, &clip, DT_WORDBREAK | DT_END_ELLIPSIS);
         }
-    } else if (state == 1) {
+        return;
+    }
+    // stage line
+    std::string stage;
+    { std::lock_guard<std::mutex> lk(v.progMtx); stage = v.progStage; }
+    if (!stage.empty()) {
+        SelectObject(dc, g.fontSmall);
         SetTextColor(dc, ui::kDim);
-        RECT spin{inner.left, inner.top + 22, inner.right, inner.bottom};
-        std::wstring msg = Utf8ToWide("the game's shaders and textures are uploaded; this happens once per preview");
-        DrawTextW(dc, msg.c_str(), -1, &spin, DT_WORDBREAK | DT_END_ELLIPSIS);
+        RECT clip{inner.left, inner.top + 24, inner.right, inner.top + 44};
+        DrawTextW(dc, Utf8ToWide(stage).c_str(), -1, &clip, DT_SINGLELINE | DT_END_ELLIPSIS | DT_LEFT);
+    }
+    // progress bar
+    const double frac = v.progFrac.load(std::memory_order_relaxed);
+    const int barX = inner.left, barW = std::clamp<int>(inner.right - inner.left, 80, 230);
+    const int barH = 10, barY = inner.top + 54;
+    const RECT bar{barX, barY, barX + barW, barY + barH};
+    HBRUSH track = CreateSolidBrush(ui::kCardHi);
+    HPEN barPen = CreatePen(PS_SOLID, 1, ui::kCardHi);
+    HGDIOBJ ob = SelectObject(dc, track), op = SelectObject(dc, barPen);
+    RoundRect(dc, bar.left, bar.top, bar.right, bar.bottom, barH, barH);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    DeleteObject(track); DeleteObject(barPen);
+    if (frac >= 0.0) {
+        const int fill = static_cast<int>((barW - 2) * frac);
+        if (fill > 0) {
+            HBRUSH accent = CreateSolidBrush(ui::kAccent);
+            HGDIOBJ ob2 = SelectObject(dc, accent);
+            HPEN ap = CreatePen(PS_SOLID, 1, ui::kAccent);
+            HGDIOBJ op2 = SelectObject(dc, ap);
+            const RECT fr{barX + 1, barY + 1, barX + 1 + fill, barY + barH - 1};
+            RoundRect(dc, fr.left, fr.top, fr.right, fr.bottom, barH - 2, barH - 2);
+            SelectObject(dc, ob2); SelectObject(dc, op2);
+            DeleteObject(accent); DeleteObject(ap);
+        }
+        char pct[16];
+        std::snprintf(pct, sizeof pct, "%d %%", static_cast<int>(frac * 100.0 + 0.5));
+        SelectObject(dc, g.fontSmall);
+        SetTextColor(dc, ui::kSub);
+        SetBkMode(dc, TRANSPARENT);
+        RECT prc{barX, barY + barH + 5, barX + barW, barY + barH + 24};
+        std::wstring pctw = Utf8ToWide(pct);
+        DrawTextW(dc, pctw.c_str(), -1, &prc, DT_RIGHT | DT_SINGLELINE);
+    } else {
+        // indeterminate: a chunk slides along the track until the assembly starts reporting fractions
+        const int slide = static_cast<int>((GetTickCount64() / 12) % static_cast<uint64_t>(barW + 80)) - 40;
+        const int chunkW = 64;
+        int cL = barX + slide, cR = cL + chunkW;
+        if (cL < barX + 1) cL = barX + 1;
+        if (cR > barX + barW - 1) cR = barX + barW - 1;
+        if (cR > cL) {
+            HBRUSH accent = CreateSolidBrush(ui::kAccent);
+            HGDIOBJ ob2 = SelectObject(dc, accent);
+            HPEN ap = CreatePen(PS_SOLID, 1, ui::kAccent);
+            HGDIOBJ op2 = SelectObject(dc, ap);
+            RoundRect(dc, cL, barY + 1, cR, barY + barH - 1, barH - 2, barH - 2);
+            SelectObject(dc, ob2); SelectObject(dc, op2);
+            DeleteObject(accent); DeleteObject(ap);
+        }
+        SelectObject(dc, g.fontSmall);
+        SetTextColor(dc, ui::kDim);
+        RECT prc{barX, barY + barH + 5, barX + barW, barY + barH + 24};
+        DrawTextW(dc, L"...", -1, &prc, DT_RIGHT | DT_SINGLELINE);
     }
 }
 
@@ -1690,7 +1788,19 @@ LRESULT CALLBACK SelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_PAINT: SelPaint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;   // everything is drawn in WM_PAINT
-    case WM_SIZE: InvalidateRect(hwnd, nullptr, FALSE); return 0;
+    case WM_SIZE:
+        // the 3D pictures render at the view rect's size, so a resize means all three views owe a picture;
+        // a debounced timer keeps the drag itself fluid and only re-renders once it settles
+        for (int i = 0; i < 3; ++i) g.sel.views[i].dirty = true;
+        KillTimer(hwnd, kSelResizeTimer);
+        SetTimer(hwnd, kSelResizeTimer, 250, nullptr);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+        mmi->ptMinTrackSize = {1020, 630};   // below this the list and the summary column cannot breathe
+        return 0;
+    }
     case WM_TEST:
         if (std::getenv("CARDBRIDGE_TEST_HOOKS")) {
             if (wp == 1) { SelApply(); return 0; }
@@ -1704,6 +1814,7 @@ LRESULT CALLBACK SelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY: SelectiveClose(); return 0;
     case WM_TIMER:
         if (wp == kSelBuildTimer) { SelTimerFired(); return 0; }
+        if (wp == kSelResizeTimer) { KillTimer(hwnd, kSelResizeTimer); SelectiveInvalidateView(); return 0; }
         return 0;
     case WM_SEL_FRAME:   // the render worker produced fresh pictures; repaint (a plain blit of the cache)
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -2031,24 +2142,28 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
         DrawTextW(dc, Utf8ToWide(note).c_str(), -1, &tx, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
         flowY += 42;
     }
+    // the validation banner (or the dim counterpart line): drawn only when it fits in the free flow area
+    // above the button rows; at short heights the buttons take the space and the banner simply doesn't draw
     SelRecomputeValidation();
-    const RECT vb{l.sumCard.left + 12, flowY, l.sumCard.right - 12, flowY + 36};
-    if (!g.sel.validation.empty()) {
-        SelRoundBox(dc, vb, 6, g.sel.validationError ? RGB(58, 28, 28) : RGB(28, 48, 34), g.sel.validationError ? ui::kBad : ui::kGood);
-        RECT tx{vb.left + 8, vb.top + 3, vb.right - 8, vb.bottom - 3};
-        SetTextColor(dc, g.sel.validationError ? RGB(255, 170, 160) : RGB(140, 230, 165));
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, SelFontTiny());
-        DrawTextW(dc, Utf8ToWide(g.sel.validation).c_str(), -1, &tx, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-    } else {
-        SelRoundBox(dc, vb, 6, RGB(26, 38, 30), ui::kGood);
-        SelText(dc, SelFontTiny(), RGB(140, 230, 165), vb.left + 10, vb.top + 10, "everything resolves - ready to apply");
+    if (flowY + 36 <= flowMax) {
+        const RECT vb{l.sumCard.left + 12, flowY, l.sumCard.right - 12, flowY + 36};
+        if (!g.sel.validation.empty()) {
+            SelRoundBox(dc, vb, 6, g.sel.validationError ? RGB(58, 28, 28) : RGB(28, 48, 34), g.sel.validationError ? ui::kBad : ui::kGood);
+            RECT tx{vb.left + 8, vb.top + 3, vb.right - 8, vb.bottom - 3};
+            SetTextColor(dc, g.sel.validationError ? RGB(255, 170, 160) : RGB(140, 230, 165));
+            SetBkMode(dc, TRANSPARENT);
+            SelectObject(dc, SelFontTiny());
+            DrawTextW(dc, Utf8ToWide(g.sel.validation).c_str(), -1, &tx, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+        } else {
+            SelRoundBox(dc, vb, 6, RGB(26, 38, 30), ui::kGood);
+            SelText(dc, SelFontTiny(), RGB(140, 230, 165), vb.left + 10, vb.top + 10, "everything resolves - ready to apply");
+        }
+        flowY = vb.bottom + 8;
     }
-    flowY = vb.bottom + 8;
     // footer line: what does not have a counterpart
     int keptNoCounterpart = 0;
     for (const auto& sc : g.sel.comps) if (!sc.comp.hasExisting && card::ResolveAction(sc.comp, SelDecisionsNow()) == card::SelectiveAction::Skip) ++keptNoCounterpart;
-    if (keptNoCounterpart > 0) {
+    if (keptNoCounterpart > 0 && flowY + 32 <= flowMax) {
         const RECT ir{l.sumCard.left + 12, flowY, l.sumCard.right - 12, flowY + 32};
         RECT tx{ir.left, ir.top, ir.right, ir.bottom};
         SetTextColor(dc, ui::kDim);
