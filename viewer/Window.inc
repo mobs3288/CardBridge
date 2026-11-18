@@ -558,6 +558,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (L) {
             Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
         }
+        // Default the viewport to the "as exported" (MMD look) view — the same image the PMX export produces.
+        // The bake runs in the background; WM_EXP_READY switches the view on once it is ready. X (the MMD button) toggles back.
+        if (L && g.gpu.ready()) ToggleAsExported();
         // The exported PMX's morphs, for the Morphs tab (all weights at 0 on a fresh character)
         {   // a new character: the cached optimized scenes and the applied export setting belonged to the previous one; the preset stays as a preference
             g.opt.applied = OptApplied{};
