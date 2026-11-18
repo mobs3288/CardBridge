@@ -88,9 +88,11 @@ int g_failed = 0, g_run = 0, g_skipped = 0;
 
 void test(const char* name, const std::function<void()>& f) {
     std::printf("[ RUN  ] %s\n", name);
+    std::fflush(stdout);                              // a crashing test must name itself in the log
     int before = g_failed;
     try { f(); } catch (const std::exception& e) { ++g_failed; std::printf("  FAIL exception: %s\n", e.what()); }
     std::printf("[ %s ] %s\n", g_failed == before ? " OK " : "FAIL", name);
+    std::fflush(stdout);
 }
 
 std::string env(const char* k) { const char* v = std::getenv(k); return v ? v : ""; }
