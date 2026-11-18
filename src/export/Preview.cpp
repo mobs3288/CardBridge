@@ -1,4 +1,4 @@
-#include "export/Preview.h"
+﻿#include "export/Preview.h"
 #include "export/Exporter.h"
 #include "material/MaterialWorkbench.h"
 #include "export/Translucency.h"
@@ -83,7 +83,7 @@ bool ShaderWritesDepth(const assemble::Scene& scene, const assemble::SceneMateri
 }
 
 // A material the game composites in its transparent queue (queue >= 2500): the face's paint layers (eye white, iris, brow, eyelines,
-// nose line — their closeness is meaningless, the queue order is what keeps the iris over the white), an authored translucency shader
+// nose line â€” their closeness is meaningless, the queue order is what keeps the iris over the white), an authored translucency shader
 // or an alpha-blend shader like Shader Forge/main_alpha (Transparent+40): the material blends over what is behind it, in queue order.
 // The software renderers and the GPU view draw these after the depth-writing materials, alpha-blended.
 bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
@@ -282,8 +282,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
                     if (mat.hidden) continue;
                     if (static_cast<size_t>(mesh.submeshes[si].material) < linings.size() &&
-                    (linings[static_cast<size_t>(mesh.submeshes[si].material)] == kLiningOutward ||
-                     linings[static_cast<size_t>(mesh.submeshes[si].material)] == kLiningInward)) continue;
+                    IsInteriorLining(linings[static_cast<size_t>(mesh.submeshes[si].material)])) continue;
                     items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
@@ -512,7 +511,7 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
 
 // One resolved texture binding per texture register: computed on the first sample of that register and reused for the rest of this
 // MatTextures' life (one material's bake pass). Without it every sample re-ran a linear scan of the program's texture table and of the
-// material's and scene's texture bindings, with a string compare each — millions of compares per 1024x1024 bake.
+// material's and scene's texture bindings, with a string compare each â€” millions of compares per 1024x1024 bake.
 struct Binding {
     const std::string* name = nullptr;   // points into the (stable) program table
     int sceneTex = -1;                   // index into Scene::textures; -1 = no binding (shader default)
@@ -630,8 +629,8 @@ namespace {
 
 struct PsIn { float r[8][4]; };
 
-// Index into Scene::textures of the material's normal map binding — any texProp whose name contains "normal"
-// (the game uses _NormalMap and friends) — or -1. Used by the fallback lighting to shade from the map.
+// Index into Scene::textures of the material's normal map binding â€” any texProp whose name contains "normal"
+// (the game uses _NormalMap and friends) â€” or -1. Used by the fallback lighting to shade from the map.
 // Per-vertex tangents from the UV layout (the shaders build their normal-map frame from them).
 std::vector<Vec3> ComputeTangents(const assemble::SceneMesh& m) {
     std::vector<Vec3> tan(m.vertices.size(), Vec3{0, 0, 0});
@@ -752,7 +751,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 // A co-located lining faces into its garment: culled from every view this renderer can produce.
                 const int mi2 = static_cast<int>(mesh.submeshes[si].material);
                 if (mi2 >= 0 && static_cast<size_t>(mi2) < linings.size() &&
-                    (linings[static_cast<size_t>(mi2)] == kLiningOutward || linings[static_cast<size_t>(mi2)] == kLiningInward)) continue;
+                    IsInteriorLining(linings[static_cast<size_t>(mi2)])) continue;
                 jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
             }
         }
@@ -898,7 +897,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                                 r = g = bl = 0.07f;   // dark charcoal edges over the light background
                                 al = 1.0f;
                             } else {
-                                continue;   // no fill — only the edges
+                                continue;   // no fill â€” only the edges
                             }
                         } else if (diag && opt.mode != ViewMode::BaseColor) {
                             const Vec3& na = mesh.vertices[i0].normal, &nb = mesh.vertices[i1].normal, &nc = mesh.vertices[i2].normal;
@@ -1369,7 +1368,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
         // Translucent materials are baked like any other: the bake preserves the shader's alpha (the game's authored opacity is its
-        // output alpha), so the PMX shows what the game shows for them — shaded, colour-graded, with the material's own toon ramp.
+        // output alpha), so the PMX shows what the game shows for them â€” shaded, colour-graded, with the material's own toon ramp.
         // Keeping the raw texture here instead dropped the shader's whole look (the card's studio-alpha shell drew a flat charcoal
         // sheet over the graded bake beneath it, and the main_alpha stockings/gloves showed without the game's shading or grading).
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
@@ -1654,7 +1653,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
 // The create-job cache: (shader + inputs) -> the placeholder's pixels. The jobs are deterministic (same card, same result),
 // so an outfit switch or a reload in the viewer re-uses the previous run instead of running the game's shaders again.
 // The key carries the shader blob hash, the job's size and linear flag, every property, every bound texture by its content
-// hash, the globals, and the overlay's hash � everything the SM4 can read. Bounded at 512 MB (LRU).
+// hash, the globals, and the overlay's hash ï¿½ everything the SM4 can read. Bounded at 512 MB (LRU).
 namespace {
 using CreateCacheEntry = std::pair<std::string, std::shared_ptr<const std::vector<uint8_t>>>;
 std::mutex createCacheMu;

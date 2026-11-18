@@ -20,6 +20,9 @@ constexpr char kLiningNone = 0;
 constexpr char kLiningOutward = 1;
 constexpr char kLiningInward = 2;
 constexpr char kLiningAmbiguous = 3;
+// The two interior verdicts: a twin wound the opposite way to its opaque sibling (the interior lining as
+// authored) or wound the same way (the cover, flipped at export). Both face into the garment.
+constexpr bool IsInteriorLining(char code) { return code == kLiningOutward || code == kLiningInward; }
 
 
 struct ExportOptions {

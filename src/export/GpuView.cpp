@@ -1672,11 +1672,16 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     }
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
-                    // The PMX writes an interior lining inside-out (ColocatedLinings): the plain view draws it inside-out too,
-                    // so the outer layer shows through exactly as MikuMikuDance shows it.
-                    const bool innerLining = !I.linings.empty() && static_cast<size_t>(gs.material) < I.linings.size() && I.linings[static_cast<size_t>(gs.material)] == kLiningOutward;
+                    // A co-located interior lining faces into its garment: the plain view draws the same-wound case inside-out (as the
+                    // PMX writes it) and the authored-inward case is culled from outside the same way. Interior linings never use CULL_NONE,
+                    // so the opaque layer wins the outside view in every mode; from inside the garment the lining shows instead.
+                    const char liningCode = !I.linings.empty() && static_cast<size_t>(gs.material) < I.linings.size() ? I.linings[static_cast<size_t>(gs.material)] : kLiningNone;
+                    const bool innerLiningOut = liningCode == kLiningOutward;
+                    const bool innerLining = IsInteriorLining(liningCode);
                     // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
-                    ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : (innerLining && I.rasterCullFront ? I.rasterCullFront : I.rasterCull));
+                    ctx->RSSetState(innerLiningOut && I.rasterCullFront ? I.rasterCullFront
+                                                                     : innerLining                  ? I.rasterCull
+                                                                     : (twoSided || !I.rasterCull   ? I.raster : I.rasterCull));
                     // Viewport diagnostics GPU path (ADR-003/ADR-008): one runtime-compiled shader instead of the game's shaders.
                     // Lit stays on the path below; every other mode draws here, game shaders unused.
                     if (I.diagMode != static_cast<int>(ViewMode::Lit)) {
@@ -1704,7 +1709,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                             ctx->VSSetShader(I.diagVs, nullptr, 0);
                             ctx->PSSetShader(I.diagPs, nullptr, 0);
                             ctx->VSSetConstantBuffers(0, 1, &I.diagCb); ctx->PSSetConstantBuffers(0, 1, &I.diagCb);
-                            ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : (innerLining && I.rasterCullFront ? I.rasterCullFront : I.rasterCull)));
+                            ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (innerLiningOut && I.rasterCullFront ? I.rasterCullFront : (innerLining ? I.rasterCull : (twoSided || !I.rasterCull ? I.raster : I.rasterCull))));
                             const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                             const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
                             ctx->PSSetShaderResources(0, 1, &ft->srv);
