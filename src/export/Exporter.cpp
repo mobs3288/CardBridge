@@ -201,7 +201,7 @@ bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& 
     return total > 0 && reversed * 5 > total;   // over a fifth wound against the normals: a co-located inner layer
 }
 
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment) {
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment, bool innerLayer_) {
     MmdLook look;
     look.diffuse = mat.diffuse;
     if (mat.hidden) {   // the shader leaves nothing behind in the game: MikuMikuDance draws nothing either
@@ -288,6 +288,9 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     if (tooth) look.sphere = 1;
     else if (!mat.bakedLit && !overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
     else if (!mat.bakedLit && !overlay && !lens && !skin && gloss * 0.25f >= 0.02f) { look.sphere = 2; look.sphereStrength = std::min(0.25f, gloss * 0.25f); }
+    // A co-located lining layer is drawn inside-out in the PMX (its triangles are reversed at export): force single-sided
+    // so it is culled from outside and never covers the outer layer. From inside the garment it is the interior lining.
+    if (innerLayer_) look.drawFlags &= ~0x01;
     return look;
 }
 
@@ -302,6 +305,58 @@ std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene) {
         }
     }
     return garment;
+}
+
+// An opaque submesh and a translucent one cover the same surface (a large share of triangles share a centroid) inside one mesh: the
+// game's "studio" shell pattern — the translucent sibling was authored as the other's lining. The lining is not meant to win the
+// outside view; it is exported with its triangles reversed and single-sided, so it draws only as the garment's interior (white coat,
+// dark lining) instead of covering the outer layer with its colour.
+std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
+    std::vector<char> lining(scene.materials.size(), 0);
+    struct Key {
+        int64_t x = 0, y = 0, z = 0;
+        bool operator<(const Key& o) const { return x < o.x || (x == o.x && (y < o.y || (y == o.y && z < o.z))); }
+        bool operator==(const Key& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    for (const auto& mesh : scene.meshes) {
+        struct Sub {
+            int material = -1;
+            std::vector<Key> keys;
+        };
+        std::vector<Sub> subs;
+        for (const auto& sm : mesh.submeshes) {
+            Sub s;
+            s.material = sm.material;
+            s.keys.reserve(sm.indices.size() / 3);
+            const auto& V = mesh.vertices;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const auto& a = V[sm.indices[i]].pos, &b = V[sm.indices[i + 1]].pos, &c = V[sm.indices[i + 2]].pos;
+                s.keys.push_back({std::llround((a.x + b.x + c.x) / 3.0 * 1000.0), std::llround((a.y + b.y + c.y) / 3.0 * 1000.0),
+                                  std::llround((a.z + b.z + c.z) / 3.0 * 1000.0)});
+            }
+            std::sort(s.keys.begin(), s.keys.end());
+            subs.push_back(std::move(s));
+        }
+        for (size_t i = 0; i < subs.size(); ++i) {
+            for (size_t j = i + 1; j < subs.size(); ++j) {
+                if (subs[i].material == subs[j].material || subs[i].keys.size() != subs[j].keys.size() || subs[i].keys.size() < 40) continue;
+                size_t common = 0;
+                auto ia = subs[i].keys.begin(), ib = subs[i].keys.end(), ja = subs[j].keys.begin(), jb = subs[j].keys.end();
+                while (ia != ib && ja != jb) {
+                    if (*ia < *ja) ++ia;
+                    else if (*ja < *ia) ++ja;
+                    else { ++common; ++ia; ++ja; }
+                }
+                if (common * 10 < subs[i].keys.size() * 8) continue;   // fewer than 80% shared: not a co-located pair
+                const auto& ma = scene.materials[static_cast<size_t>(subs[i].material)];
+                const auto& mb = scene.materials[static_cast<size_t>(subs[j].material)];
+                const bool aTr = ma.translucent || ma.alpha, bTr = mb.translucent || mb.alpha;
+                if (aTr == bTr) continue;   // exactly one translucent sibling: it is the lining
+                lining[static_cast<size_t>(aTr ? subs[i].material : subs[j].material)] = 1;
+            }
+        }
+    }
+    return lining;
 }
 
 assemble::SceneTexture MmdSphereImage(const MmdLook& look) {
@@ -623,6 +678,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     }
     int meshOrdinal = 0;
     const std::vector<char> garmentMaterials = MmdGarmentMaterials(scene);
+    const std::vector<char> linings = ColocatedLinings(scene);
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         checkCancel();
         const auto& part = scene.parts[pi];
@@ -658,7 +714,8 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                 pm.nameEn = pm.name;
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
                 const bool garment = static_cast<size_t>(sm.material) < garmentMaterials.size() && garmentMaterials[static_cast<size_t>(sm.material)] != 0;
-                const MmdLook look = MmdMaterialLook(scene, mat, garment);
+                const bool lining = static_cast<size_t>(sm.material) < linings.size() && linings[static_cast<size_t>(sm.material)] != 0;
+                const MmdLook look = MmdMaterialLook(scene, mat, garment, lining);
                 pm.diffuse = look.diffuse;
                 pm.ambient = look.ambient;
                 pm.specular = look.specular;
@@ -724,7 +781,15 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                 baseAlpha.push_back(pm.diffuse.w);
                 if (part.startHidden) { pm.diffuse.w = 0.0f; pm.edgeColor.w = 0.0f; }   // the morphs bring it back
                 pm.indexCount = static_cast<uint32_t>(sm.indices.size());
-                for (uint32_t idx : sm.indices) model.indices.push_back(base + idx);
+                if (lining) {   // the interior twin faces into the garment: reversed winding, culled from outside (see ColocatedLinings)
+                    for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) {
+                        model.indices.push_back(base + sm.indices[t]);
+                        model.indices.push_back(base + sm.indices[t + 2]);
+                        model.indices.push_back(base + sm.indices[t + 1]);
+                    }
+                } else {
+                    for (uint32_t idx : sm.indices) model.indices.push_back(base + idx);
+                }
                 model.materials.push_back(std::move(pm));
             }
             ++meshOrdinal;

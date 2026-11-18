@@ -1,4 +1,5 @@
 #include "export/Preview.h"
+#include "export/Exporter.h"
 #include "material/MaterialWorkbench.h"
 #include "export/Translucency.h"
 
@@ -270,6 +271,8 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
         std::vector<Proj> proj(scene.meshes.size());
         std::vector<char> projDone(scene.meshes.size(), 0);
         struct Item { int mi, sub, queue; bool overlay; };
+        // Co-located translucent twins of an opaque layer: interior linings, never visible from outside (the PMX writes them inside-out).
+        const std::vector<char> linings = ColocatedLinings(scene);
         std::vector<Item> items;
         for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
             if (!visible(pi)) continue;
@@ -278,6 +281,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                 for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
                     if (mat.hidden) continue;
+                    if (static_cast<size_t>(mesh.submeshes[si].material) < linings.size() && linings[static_cast<size_t>(mesh.submeshes[si].material)]) continue;
                     items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
@@ -393,6 +397,10 @@ struct ViewState {
     std::vector<bool> built;
     std::mutex mipMutex;   // mip chains are built lazily inside threaded shaders: build+sample must not race
     std::vector<std::unique_ptr<ShaderRuntime>> shaders;   // per Scene::shaders
+    // Per scene: materials that are a co-located translucent twin of an opaque one (a garment's lining); culled from every
+    // outside view, matching the PMX (drawn inside-out). Cached here so the interactive view's per-frame cost stays flat.
+    const assemble::Scene* liningsScene = nullptr;
+    std::vector<char> linings;
 };
 
 namespace {
@@ -725,6 +733,12 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
     std::vector<VM> vms(scene.meshes.size());
     struct Job { int mi, sub, queue; bool overlay, highlight; };
     std::vector<Job> jobs;
+    if (st.liningsScene != &scene) {
+        // Co-located translucent twins of an opaque layer: interior linings, never visible from outside (the PMX writes them inside-out).
+        st.liningsScene = &scene;
+        st.linings = ColocatedLinings(scene);
+    }
+    const std::vector<char>& linings = st.linings;
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         if (!visible(pi)) continue;
         const bool highlight = static_cast<int>(pi) == opt.highlightPart;
@@ -733,6 +747,9 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                 const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
                 if (mat.hidden) continue;
+                // A co-located lining faces into its garment: culled from every view this renderer can produce.
+                const int mi2 = static_cast<int>(mesh.submeshes[si].material);
+                if (mi2 >= 0 && static_cast<size_t>(mi2) < linings.size() && linings[static_cast<size_t>(mi2)]) continue;
                 jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
             }
         }

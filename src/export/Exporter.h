@@ -97,10 +97,16 @@ struct MmdLook {
 };
 // `outfitGarment` marks a material of an outfit garment (ScenePart::garment): it keeps the ground shadow and casts into the self-shadow
 // map, but takes no self-shadow (inverted cloth bands where it clips) and gets no edge (back faces pushed through it).
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false);
+// `innerLayer` marks a co-located translucent twin of an opaque layer (its lining): single-sided, facing the garment's
+// interior, never visible from outside.
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, bool innerLayer = false);
 // One flag per scene material: it belongs to an outfit garment (ScenePart::garment, or group Outfit in a hand-built scene). The exporter
 // and the viewer's as-exported pass both use this, so the written PMX flags and the preview cannot drift apart.
 std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
+// One flag per scene material: it is the translucent, co-located twin of an opaque material in the same mesh (the
+// base layer and its "studio" lining share every triangle for practical purposes). Such a layer is authored as the
+// garment's interior; it is exported with its triangles reversed and single-sided, so it renders only as the lining.
+std::vector<char> ColocatedLinings(const assemble::Scene& scene);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.
 bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);

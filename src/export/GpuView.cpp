@@ -127,6 +127,7 @@ struct GpuView::Impl {
     ID3D11SamplerState* samplerClamp = nullptr;
     ID3D11RasterizerState* raster = nullptr;
     ID3D11RasterizerState* rasterCull = nullptr;   // back faces culled: what the game and MikuMikuDance do for a single-sided material
+    ID3D11RasterizerState* rasterCullFront = nullptr;   // front faces culled: a co-located lining faced into its garment (the PMX writes it inside-out)
     ID3D11DepthStencilState* depth = nullptr;
     ID3D11DepthStencilState* depthOverlay = nullptr;          // depth test without write, for the highlight tint
     ID3D11DepthStencilState* depthOverlayWrite = nullptr;     // depth test+write with the overlay's LEqual, for the game's ZWrite-on transparent materials
@@ -145,6 +146,7 @@ struct GpuView::Impl {
     int lastW = 0, lastH = 0;
     bool plain = false;                          // see GpuView::SetPlain
     std::vector<MmdLook> looks;                  // plain mode: each scene material as the PMX writes it (made on the first plain Render)
+    std::vector<char> linings;                   // plain mode: per scene material, this one faces into its garment (as the PMX writes it inside-out)
     std::vector<char> cutout;                    // per scene material: cut to a shape by its texture (HasCutout), so no outline ring
     std::map<std::string, GpuTex> spheres;       // plain mode: the looks' sphere maps, by MmdSphereImage name
     std::vector<ID3D11ShaderResourceView*> lookSphere;   // per look: its sphere map's view (owned by `spheres`), null for none
@@ -598,7 +600,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         benchQueries = false; benchPending = false; benchLastMs = -1.0;
         Clear();
         Rel(samplerWrap); Rel(samplerClamp);
-        Rel(raster); Rel(rasterCull);
+        Rel(raster); Rel(rasterCull); Rel(rasterCullFront);
         Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite);
         Rel(blend); Rel(blendOverlay);
         for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); }
@@ -1168,6 +1170,8 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     I.dev->CreateRasterizerState(&rd, &I.raster);
     rd.CullMode = D3D11_CULL_BACK; rd.FrontCounterClockwise = FALSE;   // Unity's convention: a face toward the camera winds clockwise on screen
     I.dev->CreateRasterizerState(&rd, &I.rasterCull);
+    rd.CullMode = D3D11_CULL_FRONT;   // the PMX writes an interior lining inside-out, so the plain view draws it inside-out too
+    I.dev->CreateRasterizerState(&rd, &I.rasterCullFront);
     D3D11_DEPTH_STENCIL_DESC dd{};
     dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
     I.dev->CreateDepthStencilState(&dd, &I.depth);
@@ -1543,10 +1547,12 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
             // The PMX's garment pass is a property of the part, not of the material: ask the exporter for the same per-material map it
             // writes the PMX from, so the as-exported view and the file cannot drift apart.
             const std::vector<char> garment = MmdGarmentMaterials(scene);
+            I.linings = ColocatedLinings(scene);
+            const std::vector<char>& lining = I.linings;
             I.looks.clear();
             for (size_t i = 0; i < scene.materials.size(); ++i) {
                 const auto& m = scene.materials[i];
-                I.looks.push_back(MmdMaterialLook(scene, m, garment[i] != 0));
+                I.looks.push_back(MmdMaterialLook(scene, m, garment[i] != 0, lining[i] != 0));
                 if (I.looks.back().sphere == 0) continue;
                 const assemble::SceneTexture t = MmdSphereImage(I.looks.back());
                 if (!I.spheres.count(t.name)) I.MakeTexture(t.width, t.height, t.rgba.data(), I.spheres[t.name], false, LinearLight());
@@ -1665,9 +1671,12 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         ctx->OMSetBlendState(I.blend, bf, 0xFFFFFFFFu);
                     }
                     const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
-                    // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
-                    ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : I.rasterCull);
+                    // The PMX writes an interior lining inside-out (ColocatedLinings): the plain view draws it inside-out too,
+                    // so the outer layer shows through exactly as MikuMikuDance shows it.
+                    const bool innerLining = !I.linings.empty() && static_cast<size_t>(gs.material) < I.linings.size() && I.linings[static_cast<size_t>(gs.material)] != 0;
+                    // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
+                    ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : (innerLining && I.rasterCullFront ? I.rasterCullFront : I.rasterCull));
                     // Viewport diagnostics GPU path (ADR-003/ADR-008): one runtime-compiled shader instead of the game's shaders.
                     // Lit stays on the path below; every other mode draws here, game shaders unused.
                     if (I.diagMode != static_cast<int>(ViewMode::Lit)) {
@@ -1695,7 +1704,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                             ctx->VSSetShader(I.diagVs, nullptr, 0);
                             ctx->PSSetShader(I.diagPs, nullptr, 0);
                             ctx->VSSetConstantBuffers(0, 1, &I.diagCb); ctx->PSSetConstantBuffers(0, 1, &I.diagCb);
-                            ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : I.rasterCull));
+                            ctx->RSSetState(I.diagMode == static_cast<int>(ViewMode::Wireframe) && I.wireRs ? I.wireRs : (twoSided || !I.rasterCull ? I.raster : (innerLining && I.rasterCullFront ? I.rasterCullFront : I.rasterCull)));
                             const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                             const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
                             ctx->PSSetShaderResources(0, 1, &ft->srv);
