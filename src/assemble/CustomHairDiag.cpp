@@ -28,15 +28,18 @@ CustomRigVerdict AnalyzeImportedRig(const ImportedRigReport& r) {
     // A custom skeleton: the item carries bones the shared rig does not know. That is the reliable,
     // name-independent signature of an imported item (a game's own rig, whatever it calls its bones).
     // Scale alone does not count, because the game bakes scale into some vanilla prefabs on purpose.
-    const bool scaledRoot = std::fabs(1.0f - r.rootScale) > 0.01f;
+    // A head-attached skinned custom skeleton IS hair-like, whether or not it carries DynamicBone chains:
+    // that distinction (chains or no chains) only changes the physics report, not what the item is.
     v.importedRig = r.customBones > 0 && r.skinnedMeshes > 0;
-    v.hairLike = v.importedRig && r.chains > 0 && (IsHeadAttachNode(r.attachNode) || r.group == "Hair");
+    v.hairLike = v.importedRig && (IsHeadAttachNode(r.attachNode) || r.group == "Hair");
     if (!v.importedRig) return v;   // an ordinary item: nothing to say
+    const bool scaledRoot = std::fabs(1.0f - r.rootScale) > 0.01f;
 
     // What is this item.
-    if (v.hairLike) v.headline = "imported custom-skeleton hair: skinned to " + std::to_string(r.customBones) +
-                                 " of its own bones, " + std::to_string(r.chains) + " DynamicBone chain(s)";
-    else v.headline = "imported custom-skeleton item: skinned to " + std::to_string(r.customBones) + " of its own bones";
+    if (v.hairLike) {
+        if (r.chains == 0) v.headline = "imported custom-skeleton hair: skinned to " + std::to_string(r.customBones) + " of its own bones, no DynamicBone chains (rigid as authored)";
+        else v.headline = "imported custom-skeleton hair: skinned to " + std::to_string(r.customBones) + " of its own bones, " + std::to_string(r.chains) + " DynamicBone chain(s)";
+    } else v.headline = "imported custom-skeleton item: skinned to " + std::to_string(r.customBones) + " of its own bones";
 
     // Where it hangs from.
     if (r.group == "Hair")

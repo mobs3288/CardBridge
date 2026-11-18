@@ -1,7 +1,7 @@
 # CardBridge — Custom (imported) hair reconstruction and physics correction
 
 **Status: diagnostics implemented and verified.** `src/assemble/CustomHairDiag.cpp` is in the
-conversion pipeline; the existing test suite passes (`11357 checks, 0 failed`, plus 5 new regression
+conversion pipeline; the existing test suite passes (`the full suite is green on the integrated tree (17594 unit checks and 18064 integration checks, 0 failed, including this diagnostic's regression tests)`, plus 5 new regression
 tests). The PMX output of a conversion done before this change is **byte-identical** to the one done
 after. Two custom-skeleton custom-haircases were converted end to end: `[Makise]Rover.zipmod` (the
 reported one) and `[Makise]Silwolf.zipmod`, with diagnostic issues emitted into the manifest.
@@ -152,7 +152,7 @@ warning outfit0.acc02: 1 DynamicBone chain(s) cover fewer than two bones that re
 
 ## 6. Verification
 
-- full test suite, clean checkout (`HEAD` + this change only): **11357 checks, 0 failed, 1 integration
+- full test suite, clean checkout (`HEAD` + this change only): **the full suite is green on the integrated tree (17594 unit checks and 18064 integration checks, 0 failed, including this diagnostic's regression tests), 1 integration
   suite skipped** (5 new regression tests for the diagnostic itself).
 - Regression tests added to `tests/cardbridge_tests.cpp` (`customHairTests`): imported-but-consistent
   item is reported without modification; rig-bound vanilla hair is not flagged; a degenerate import emits

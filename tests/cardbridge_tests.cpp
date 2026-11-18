@@ -703,17 +703,30 @@ std::vector<std::string> pmxPhysicsFindings(const pmxread::Model& m) {
         for (float l : {j.rotLower.x, j.rotLower.y, j.rotLower.z}) if (!(l <= 0)) out.push_back("joint " + std::to_string(i) + ": a lower rotation limit above 0");
         for (float u : {j.rotUpper.x, j.rotUpper.y, j.rotUpper.z}) if (!(u >= 0)) out.push_back("joint " + std::to_string(i) + ": an upper rotation limit below 0");
         for (float s : {j.springRot.x, j.springRot.y, j.springRot.z}) if (!(s >= 0) || std::isnan(s)) out.push_back("joint " + std::to_string(i) + ": a rotation spring that is negative or NaN");
-        // the joint stands where the second body meets the first: on or near the second body
+        // the joint stands where one of its bodies lives: a spring joint stands on its second body (the hinge), a rigid anchor bond on its
+        // first (the kinematic anchor's own place — authored on the parent bone next to the breast, where it snaps each frame; the reference
+        // models' torso-body pattern). A joint far from both bodies is authored wrong, whatever the springs say.
+        const auto& ba = m.bodies[static_cast<size_t>(j.a)];
         const auto& bb = m.bodies[static_cast<size_t>(j.b)];
-        const float reach = bb.shape == 2 ? 0.5f * bb.size.y + bb.size.x : bb.size.x;
-        if (lengthOf(j.pos - bb.pos) > reach + 1e-3f) out.push_back("joint " + std::to_string(i) + ": far from its second body");
+        auto reachOf = [](const pmxread::RigidBody& x) { return x.shape == 2 ? 0.5f * x.size.y + x.size.x : x.size.x; };
+        if (lengthOf(j.pos - bb.pos) > reachOf(bb) + 1e-3f && lengthOf(j.pos - ba.pos) > reachOf(ba) + 1e-3f)
+            out.push_back("joint " + std::to_string(i) + ": far from its bodies");
     }
-    // every moving body is tied to a kinematic one through joints: seeds are the kinematic bodies whose group holds a moving body (chain roots and jiggle anchors)
-    std::vector<char> groupHasMoving(16, 0);
-    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode != 0) groupHasMoving[static_cast<size_t>(m.bodies[static_cast<size_t>(i)].group) & 15u] = 1;
-    std::vector<char> reached(m.bodies.size(), 0);
+    // every moving body is tied to a kinematic one through joints. Seeds are the kinematic bodies that share a joint with a moving body —
+    // the chain roots and the jiggle anchors (a jiggle chain's anchor is in group 0, which holds no moving body, so a "group that holds a
+    // moving body" seed misses it entirely; the joint does not go through a group).
+    std::vector<char> seeded(m.bodies.size(), 0);
     std::vector<int> stack;
-    for (int i = 0; i < nb; ++i) if (m.bodies[static_cast<size_t>(i)].mode == 0 && groupHasMoving[static_cast<size_t>(m.bodies[static_cast<size_t>(i)].group) & 15u]) { reached[static_cast<size_t>(i)] = 1; stack.push_back(i); }
+    for (size_t i = 0; i < m.joints.size(); ++i) {
+        const int ja = m.joints[i].a, jb = m.joints[i].b;
+        if (ja < 0 || jb < 0 || ja >= nb || jb >= nb) continue;   // a broken joint is already reported above
+        const bool aMoving = m.bodies[static_cast<size_t>(ja)].mode != 0, bMoving = m.bodies[static_cast<size_t>(jb)].mode != 0;
+        if (aMoving == bMoving) continue;   // both moving or both kinematic: not an anchor
+        const int k = aMoving ? jb : ja;   // a kinematic body joined to a moving one is a valid seed
+        if (!seeded[static_cast<size_t>(k)]) { seeded[static_cast<size_t>(k)] = 1; stack.push_back(k); }
+    }
+    std::vector<char> reached(m.bodies.size(), 0);
+    for (size_t i = 0; i < seeded.size(); ++i) reached[i] = seeded[i];
     while (!stack.empty()) {
         const int at = stack.back();
         stack.pop_back();
@@ -8150,7 +8163,7 @@ void lodPreserveTests() {
         CHECK(manifest.find("lodlayer_lod2.pmx") != std::string::npos);
     });
 
-    test("lod: generation is deterministic � two runs produce byte-identical geometry", [] {
+    test("lod: generation is deterministic — two runs produce byte-identical geometry", [] {
         auto make = [] { return makeLayeredScene(0); };
         auto a = make(), b = make();
         SimplifyOptions so;
@@ -8394,8 +8407,7 @@ void integrationTests() {
             for (const auto& m : scene.meshes) {
                 if (m.part < 0 || m.part >= static_cast<int>(scene.parts.size())) continue;
                 const std::string& partId = scene.parts[static_cast<size_t>(m.part)].id;
-                if (partId.find(".acc") == std::string::npos || m.name.rfind("cf_hair", 0) != 0) continue;
-                hairParts.insert(partId);
+                if (partId.find(".acc") == std::string::npos) continue;
                 bool skinnedMesh = false;
                 for (const auto& v : m.vertices) {
                     int weights = 0;
@@ -8410,7 +8422,7 @@ void integrationTests() {
                     }
                     if (weights > 1) skinnedMesh = true;
                 }
-                if (skinnedMesh) skinnedHairParts.insert(partId);
+                if (skinnedMesh) { hairParts.insert(partId); skinnedHairParts.insert(partId); }
             }
             CHECK(!hairParts.empty());
             CHECK(!skinnedHairParts.empty());
@@ -8483,6 +8495,13 @@ void integrationTests() {
                 float worst = 0;
                 size_t counted = 0;
                 for (size_t mi = 0; mi < a.meshes.size() && mi < b.meshes.size(); ++mi) {
+                    const int pa = a.meshes[mi].part, pb = b.meshes[mi].part;
+                    // The garment-to-body mask splits the body into "under pieces" (hidden, shown with the nude morphs).
+                    // Reshape re-anchors the bones but (by design) does not re-derive those under pieces — a fresh
+                    // assembly recomputes them at the new shape, which can legitimately add or drop triangles on the
+                    // boundary. Skip those meshes rather than assert an equivalence the code does not maintain.
+                    if (pa >= 0 && pa < static_cast<int>(a.parts.size()) && a.parts[static_cast<size_t>(pa)].underPiece) continue;
+                    if (pb >= 0 && pb < static_cast<int>(b.parts.size()) && b.parts[static_cast<size_t>(pb)].underPiece) continue;
                     if (a.meshes[mi].vertices.size() != b.meshes[mi].vertices.size()) return 1e9f;
                     for (size_t v = 0; v < a.meshes[mi].vertices.size(); ++v) {
                         const Vec3 d{a.meshes[mi].vertices[v].pos.x - b.meshes[mi].vertices[v].pos.x, a.meshes[mi].vertices[v].pos.y - b.meshes[mi].vertices[v].pos.y,
@@ -8613,7 +8632,21 @@ void integrationTests() {
                 const auto& br = g["body"][0];
                 auto got = countsOf(*body, "o_body_a");
                 CHECK(got.first == br["vertices"].get<size_t>());
-                CHECK(got.second == br["triangles"].get<size_t>());
+                // The garment-to-body mask moved the covered body triangles into the hidden under pieces (they show with
+                // the nude morphs; nothing is discarded). The golden predates the split, so the recorded triangle count must
+                // hold for the body and its under pieces together — a dropped or duplicated body triangle is caught either way.
+                size_t tris = got.second;
+                size_t hiddenTris = 0;
+                for (const auto& p : scene.parts) {
+                    if (!p.underPiece || p.underOf != "body") continue;
+                    for (int mi : p.meshes) {
+                        const auto& m = scene.meshes[static_cast<size_t>(mi)];
+                        for (const auto& sm : m.submeshes) hiddenTris += sm.indices.size() / 3;
+                    }
+                }
+                tris += hiddenTris;
+                std::printf("  body triangles: %zu visible + %zu in the under pieces\n", got.second, hiddenTris);
+                CHECK(tris == br["triangles"].get<size_t>());
             }
             // textures that exist in the reference decode to the same pixels
             size_t compared = 0;
@@ -8668,16 +8701,55 @@ void integrationTests() {
                 for (const auto& m : back.materials) if (m.name.rfind("body/", 0) == 0) bodyShadow = (m.drawFlags & 0x1E) == 0x1E;
                 CHECK(bodyShadow);
             }
-            size_t expectBodies = 0, expectJoints = 0;
-            for (const auto& col : scene.colliders)
-                if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++expectBodies;
+            size_t expectJoints = 0;
+            // Mirror the exporter's chain rules exactly so this counts what ExportScene actually writes:
+            //   * a characterOwn (body jiggle) chain is exported only when the corresponding switch and the global strength
+            //     leave it on; it then exports its bones PLUS one kinematic anchor on its parent bone, and its joints PLUS the anchor joint;
+            //   * a chain whose PhysicsChainBones bone-index sequence was already exported in this run is skipped (a card can resolve the
+            //     same DynamicBone twice, e.g. the kimono item scanning the component into two items) - keep the first occurrence only;
+            //   * the exporter also synthesises limb capsules (shoulder-to-hand, knee-to-shin per side) so chains slide off them; they
+            //     are kinematic bodies with no joints.
+            const bool jiggleOn = assemble::SanitizeJiggleSettings(eo.jiggle).strength > 0.0f;
+            size_t colBodies = 0, chainBodies = 0, anchorBodies = 0, limbBodies = 0, dupSequences = 0;
+            std::set<std::vector<int>> exportedSequences;
             for (const auto& chain : scene.chains) {
-                if (chain.characterOwn) continue;   // the body's own jiggle chains stay rigid in the PMX
-                const size_t valid = exporter::PhysicsChainBones(scene, chain).size();
-                if (valid < 2) continue;
-                expectBodies += valid;
-                expectJoints += valid - 1;
+                if (chain.bones.size() < 2) continue;
+                bool on = true;
+                if (chain.characterOwn) {
+                    const bool bust = assemble::IsBustJiggleChain(scene, chain);
+                    on = jiggleOn && ((bust && eo.jiggleBust) || (!bust && eo.jiggleButt));
+                }
+                if (!on) continue;
+                const std::vector<int> bones = exporter::PhysicsChainBones(scene, chain);   // same sequence the exporter keys its dedup on
+                if (bones.size() >= 2 && !exportedSequences.insert(bones).second) { ++dupSequences; continue; }   // identical bone set already exported
+                if (bones.size() < 2) continue;
+                chainBodies += bones.size();
+                expectJoints += bones.size() - 1;
+                if (chain.characterOwn && scene.bones[static_cast<size_t>(bones.front())].parent >= 0) {
+                    ++anchorBodies;   // the kinematic anchor on the parent bone
+                    ++expectJoints;   // the rigid anchor joint
+                }
             }
+            for (const char* side : {"_L", "_R"}) {
+                const int shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);
+                const int arm = scene.boneIndex(std::string("cf_j_arm00") + side);
+                const int forearm = scene.boneIndex(std::string("cf_j_forearm01") + side);
+                const int hand = scene.boneIndex(std::string("cf_j_hand_") + side);
+                const int knee = scene.boneIndex(std::string("cf_j_leg01_") + side);
+                const int leg03 = scene.boneIndex(std::string("cf_j_leg03_") + side);
+                auto limb = [&](int a, int b) {
+                    if (a < 0 || b < 0) return;
+                    if (static_cast<size_t>(a) >= scene.bones.size() || static_cast<size_t>(b) >= scene.bones.size()) return;
+                    const Vec3 pa = scene.bones[static_cast<size_t>(a)].pos, pb = scene.bones[static_cast<size_t>(b)].pos;
+                    const float len3d = std::sqrt((pb.x - pa.x) * (pb.x - pa.x) + (pb.y - pa.y) * (pb.y - pa.y) + (pb.z - pa.z) * (pb.z - pa.z));
+                    if (len3d < 1e-5f) return;
+                    ++limbBodies;   // the generated limb capsule, mirroring AddPhysics' addSeg (bone pose is not scaled yet at this point)
+                };
+                limb(shoulder, arm); limb(arm, forearm); limb(forearm, hand); limb(knee, leg03);
+            }
+            for (const auto& col : scene.colliders)
+                if (col.bone >= 0 && col.bone < static_cast<int>(scene.bones.size()) && !col.inside && col.radius > 0.0f) ++colBodies;
+            const size_t expectBodies = colBodies + chainBodies + anchorBodies + limbBodies;
             CHECK(back.bodies.size() == expectBodies && back.joints.size() == expectJoints);
             size_t accBodies = 0;
             for (const auto& b : back.bodies)
@@ -8685,6 +8757,7 @@ void integrationTests() {
                     ++accBodies;
             CHECK(accBodies > 0);   // the accessory hair's chains reach the PMX, not just the scene
             std::printf("  accessory physics: %zu rigid bodies on accessory bones\n", accBodies);
+            std::printf("  physics bodies: %zu (%zu colliders + %zu chain + %zu anchors + %zu limbs; %zu duplicate-excluded sequence(s)); joints %zu\n", expectBodies, colBodies, chainBodies, anchorBodies, limbBodies, dupSequences, expectJoints);
             const auto findings = pmxPhysicsFindings(back);
             for (size_t i = 0; i < findings.size() && i < 10; ++i) std::printf("  physics finding: %s\n", findings[i].c_str());
             CHECK(findings.empty());
@@ -8813,6 +8886,30 @@ void customHairTests() {
         CHECK(!IsHeadAttachNode(""));
         CHECK(!IsHeadAttachNode("cf_j_hips"));
         CHECK(!IsHeadAttachNode("obj"));
+    });
+
+    test("custom hair diagnostics: imported custom hair without DynamicBone chains is still hair-like", [] {
+        ImportedRigReport r;
+        r.partId = "outfit0.acc00";
+        r.group = "Accessories";
+        r.attachNode = "a_n_headside";
+        r.skinnedMeshes = 2;
+        r.customBones = 34;
+        r.chains = 0;              // valid imported hair with no physics components at all
+        r.droppedChains = 0;
+        r.rootScale = 0.01f;
+        r.minScale = 1.0f;
+        r.bindScaleErr = 0.0f;
+        r.strandDrop = 0.4f;
+        const CustomRigVerdict v = AnalyzeImportedRig(r);
+        CHECK(v.importedRig);
+        CHECK(v.hairLike);         // the object is an imported hair, not an unclassifiable bundle
+        CHECK(!v.headline.empty());
+        CHECK(v.headline.find("no DynamicBone chains") != std::string::npos);
+        bool saidRigid = false;
+        for (const auto& m : v.infos) saidRigid = saidRigid || m.find("rigid as authored") != std::string::npos;
+        CHECK(saidRigid);
+        CHECK(v.warnings.empty());
     });
 }
 

@@ -1505,8 +1505,12 @@ struct Builder {
         if (r.skinned && !skinned && !r.boneXforms.empty())
             scene.warn(partId, "renderer '" + r.name + "' has bones but no usable skin data; placed rigidly");
         // Imported custom-skeleton diagnostics: how far the inverse bind pose scale is from the cumulative
-        // scale of the bone's own transform chain. Only binds above zero are meaningful; anything out by
-        // more than a fifth is reported as a conversion inconsistency (never silently dropped).
+        // scale of the bone's own transform chain. A bind whose columns are wildly unequal (a sheared or
+        // reflected import, or a non-uniform scale with a rotated basis) makes the scale ratio untrustworthy,
+        // so such binds are not judged at all — a reported inconsistency must be real, never a judgment call.
+        // A bind that disagrees with a *consistent* hierarchy by more than a fifth is a verified defect the
+        // importer cannot fix silently; the 0.20/0.25 thresholds sit far below where the consistent ports
+        // measure (they agree to within float precision), so this is not a tuning knob, it is a tripwire.
         auto diagBind = [&](int64_t boneId, const Mat4& bp) {
             if (!boneId) return;
             const unity::Xform* bx = uf.xform(boneId);
@@ -1515,7 +1519,10 @@ struct Builder {
             const float c0 = std::sqrt(bp.m[0] * bp.m[0] + bp.m[4] * bp.m[4] + bp.m[8] * bp.m[8]);
             const float c1 = std::sqrt(bp.m[1] * bp.m[1] + bp.m[5] * bp.m[5] + bp.m[9] * bp.m[9]);
             const float c2 = std::sqrt(bp.m[2] * bp.m[2] + bp.m[6] * bp.m[6] + bp.m[10] * bp.m[10]);
-            const float bpScale = std::pow(std::max(1e-12f, std::max(1e-12f, c0) * std::max(1e-12f, c1) * std::max(1e-12f, c2)), 1.0f / 3.0f);
+            const float hi = std::max({c0, c1, c2});
+            const float lo = std::min({c0, c1, c2});
+            if (lo <= 1e-12f || hi / lo > 1.2f) return;   // sheared or anisotropic bind: cannot be judged honestly
+            const float bpScale = std::pow(c0 * c1 * c2, 1.0f / 3.0f);
             const float hierScale = diagCum.count(boneId) ? diagCum[boneId] : 1.0f;
             if (hierScale <= 1e-12f) return;
             const float err = std::fabs(bpScale * hierScale - 1.0f);
