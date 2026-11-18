@@ -298,6 +298,7 @@ static std::string SelEffectiveKey(const std::map<std::string, card::SelectiveAc
                                    int dstOutfit, int srcOutfit, bool srcCoord);
 static void SelProposalCacheClear();
 static void SelProposalCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene);
+static void SelImportedCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene);
 
 // ==================================================================== building & uploads ========================
 
@@ -409,9 +410,23 @@ void SelBuildImported() {
     const int dstOutfit = g.sel.dstOutfit;
     const int session = g.sel.session;
     SelView& v = g.sel.views[1];
+    // identical inputs → identical result; cache key doesn't depend on decisions at all
+    const std::string importedKey = std::string(srcCoord ? "1c|" : "1|") + g.cardPath + '>' + path + '|' + std::to_string(dstOutfit) + '|' + std::to_string(srcOutfit);
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (auto hit = g.sel.importedCache.find(importedKey); hit != g.sel.importedCache.end()) {
+            v.scene = hit->second;
+            v.placedAcc.clear();
+            v.state = 1;   // upload sets it to ready
+            v.error.clear();
+            SelUploadScene(1, session);
+            if (g.sel.hwnd) PostMessageW(g.sel.hwnd, WM_SEL_READY, 0, static_cast<LPARAM>(session));
+            return;
+        }
+    }
     v.state = 1;
     v.error.clear();
-    std::thread([path, srcCoord, srcOutfit, dstOutfit, session] {
+    std::thread([path, srcCoord, srcOutfit, dstOutfit, session, importedKey] {
         std::shared_ptr<Loaded> L;
         std::shared_ptr<resolve::Resolver> resolver;
         { std::lock_guard<std::recursive_mutex> lk(g.mu); L = g.loaded; resolver = g.resolver; }
@@ -448,6 +463,7 @@ void SelBuildImported() {
             g.sel.views[1].scene = sc;
             g.sel.views[1].placedAcc = std::move(applyRep.placedAccessorySlots);
         }
+        SelImportedCachePut(importedKey, sc);
         SelUploadScene(1, session);
         if (HWND h = g.sel.hwnd) PostMessageW(h, WM_SEL_READY, 0, session);
     }).detach();
@@ -553,6 +569,8 @@ static void SelProposalCacheClear() {
     std::lock_guard<std::recursive_mutex> lk(g.mu);
     g.sel.proposalCache.clear();
     g.sel.proposalCacheLru.clear();
+    g.sel.importedCache.clear();
+    g.sel.importedCacheLru.clear();
 }
 static void SelProposalCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene) {
     std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -562,6 +580,16 @@ static void SelProposalCachePut(const std::string& k, std::shared_ptr<assemble::
     while (g.sel.proposalCacheLru.size() > 4) {
         g.sel.proposalCache.erase(g.sel.proposalCacheLru.front());
         g.sel.proposalCacheLru.erase(g.sel.proposalCacheLru.begin());
+    }
+}
+static void SelImportedCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    if (g.sel.importedCache.count(k)) return;
+    g.sel.importedCache[k] = std::move(scene);
+    g.sel.importedCacheLru.push_back(k);
+    while (g.sel.importedCacheLru.size() > 2) {   // the imported scene is ~30 MB; keep only a couple of recent sources
+        g.sel.importedCache.erase(g.sel.importedCacheLru.front());
+        g.sel.importedCacheLru.erase(g.sel.importedCacheLru.begin());
     }
 }
 

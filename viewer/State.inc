@@ -210,6 +210,8 @@ struct SelectiveState {
     std::string proposalKey;            // canonical key of the last queued decision set (sentinel "\x01" = never): unchanged toggles skip the rebuild
     std::map<std::string, std::shared_ptr<assemble::Scene>> proposalCache;   // the assembled scene per effective key, so revisiting an earlier choice is instant
     std::vector<std::string> proposalCacheLru;
+    std::map<std::string, std::shared_ptr<assemble::Scene>> importedCache;   // the imported (view 1) scene per source+outfit — identical regardless of decisions
+    std::vector<std::string> importedCacheLru;
     // validation for the Apply button (recomputed at paint; error text blocks Apply)
     std::string validation;             // empty = apply is fine
     bool validationError = false;
