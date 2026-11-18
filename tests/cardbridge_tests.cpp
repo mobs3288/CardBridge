@@ -7920,6 +7920,55 @@ void integrationTests() {
         std::printf("[ SKIP ] integration tests (set CARDBRIDGE_TEST_LIBRARY / _MODS / _CARD)\n");
         return;
     }
+    test("layer import: the layered garment follows the same rig bones as the base outfit", [&] {
+        const std::string srcEnvStr = env("CARDBRIDGE_TEST_LAYER_SRC");
+        if (srcEnvStr.empty()) { ++g_skipped; std::printf("[ SKIP ] no CARDBRIDGE_TEST_LAYER_SRC\n"); return; }
+        const std::string sourcePath = srcEnvStr;
+        card::Card c = card::LoadCard(cardPath);
+        CHECK(c.supported);
+        std::vector<std::string> issues;
+        resolve::ModIndex mi = resolve::ModIndex::Build(mods, env("CARDBRIDGE_TEST_MODCACHE"), &issues);
+        for (const std::string& w : issues) std::printf("  mods: %s\n", w.c_str());
+        resolve::ListTable lists;
+        lists.loadBaseGame(library::AbdataRoot(lib), &issues);
+        for (const std::string& w : issues) std::printf("  lists: %s\n", w.c_str());
+        resolve::Resolver resolver(mi, lists, library::AbdataRoot(lib));
+        assemble::AssembleOptions plain;
+        plain.outfit = 1;   // the outfit on screen (the school uniform)
+        assemble::Scene plainScene = assemble::Assemble(c, resolver, plain);
+        for (const auto& is : plainScene.issues) if (is.severity == "error") std::printf("  plain: %s\n", is.message.c_str());
+
+        // the layered assembly: the same card, the apron as an AddLayer top on top of the shown outfit
+        card::Card copy = c;
+        assemble::AssembleOptions withLayer;
+        withLayer.outfit = 1;
+        assemble::AssembleLayerSpec spec;
+        spec.path = sourcePath;
+        spec.dstOutfit = 1;
+        spec.name = "apron";
+        spec.slots = {0};   // the top slot
+        spec.layerIndex = 1;
+        withLayer.layers.push_back(std::move(spec));
+        assemble::Scene layerScene = assemble::Assemble(copy, resolver, withLayer);
+        std::printf("  layer scene: %zu bones, %zu parts\n", layerScene.bones.size(), layerScene.parts.size());
+        std::map<std::string, float> plainPos, layerPos;
+        for (const auto& b : plainScene.bones) plainPos[b.name] = b.pos.y;
+        for (const auto& b : layerScene.bones) layerPos[b.name] = b.pos.y;
+        size_t shared = 0, mismatch = 0;
+        double maxDelta = 0.0;
+        std::string worst;
+        for (const auto& [name, y] : plainPos) {
+            const auto it = layerPos.find(name);
+            if (it == layerPos.end()) continue;
+            ++shared;
+            const double delta = std::fabs(static_cast<double>(it->second) - static_cast<double>(y));
+            if (delta > 1e-4) { ++mismatch; if (delta > maxDelta) { maxDelta = delta; worst = name; } }
+        }
+        std::printf("  shared bones: %zu, mismatched: %zu, max delta %.6f (worst %s)\n", shared, mismatch, maxDelta, worst.c_str());
+        CHECK(shared > 100);
+        CHECK(mismatch == 0);   // the layer assembly still shares every bone of the base skeleton — otherwise the garment hangs off a different frame
+        return;
+    });
     test("card -> PMX end to end", [&] {
         card::Card c = card::LoadCard(cardPath);
         CHECK(c.supported);

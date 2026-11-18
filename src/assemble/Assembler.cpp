@@ -2170,13 +2170,28 @@ static void GraftLayerScene(Scene& dst, Scene src, const std::vector<std::string
         if (it != dstBone.end()) { boneMap[i] = it->second; boneDone[i] = 1; }
     }
     bool progress = true;
+    // An appended bone keeps its place relative to its parent, not its absolute world from the layer scene:
+    // the layer's rig may be shaped differently from the shown character's (the source's ABMX merge), and
+    // an absolute copy would glue the garment to the source's frame — offset from the body it must follow.
+    auto reanchor = [&](const SceneBone& b, int parentIdx) {
+        SceneBone nb = b;
+        if (parentIdx >= 0 && parentIdx < static_cast<int>(dst.bones.size()) && b.parent >= 0 && static_cast<size_t>(b.parent) < src.bones.size()) {
+            const SceneBone& ps = src.bones[static_cast<size_t>(b.parent)];
+            nb.world = dst.bones[static_cast<size_t>(parentIdx)].world * inverse(ps.world) * b.world;
+            nb.pos = nb.world.translation();
+        }
+        return nb;
+    };
     while (progress) {   // parents come before children in a prefab hierarchy; iterate to a fixpoint
         progress = false;
         for (size_t i = 0; i < src.bones.size(); ++i) {
             if (boneDone[i]) continue;
             const SceneBone& b = src.bones[i];
             if (b.parent >= 0 && !boneDone[static_cast<size_t>(b.parent)]) continue;
-            dst.bones.push_back(b);
+            if (b.parent >= 0)
+                dst.bones.push_back(reanchor(b, boneMap[static_cast<size_t>(b.parent)]));
+            else
+                dst.bones.push_back(b);
             dst.bones.back().parent = b.parent >= 0 ? boneMap[static_cast<size_t>(b.parent)] : -1;
             boneMap[i] = static_cast<int>(dst.bones.size()) - 1;
             boneDone[i] = 1;
@@ -2250,7 +2265,6 @@ static void GraftLayerScene(Scene& dst, Scene src, const std::vector<std::string
     }
     // ---- materials, textures, shaders ---------------------------------------------------------------------
     for (const auto& kv : meshMap) {
-        const SceneMesh& sm = src.meshes[static_cast<size_t>(kv.first)];
         SceneMesh& nm = dst.meshes[static_cast<size_t>(kv.second)];
         for (SceneSubmesh& ss : nm.submeshes) {
             const SceneMaterial& msrc = src.materials[static_cast<size_t>(ss.material)];
@@ -2286,7 +2300,6 @@ static void GraftLayerScene(Scene& dst, Scene src, const std::vector<std::string
         }
     }
     // ---- parts (the id decides everything; mesh back-references fixed afterwards) --------------------------
-    const int dstPartBase = static_cast<int>(dst.parts.size());
     std::map<int, int> srcMeshToDstPart;   // src mesh -> dst part index
     for (const auto& kv : partIdMap) {
         const ScenePart& p = src.parts[static_cast<size_t>(kv.first)];
