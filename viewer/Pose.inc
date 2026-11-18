@@ -381,6 +381,11 @@ bool ReshapeNow(bool final) {
     }
     const double t0 = NowMs();
     if (!assemble::Reshape(L->scene, L->card, *g.resolver, ao)) return false;
+    {   // the shape changed — any cached preview proposal built against the old rest pose is invalid
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        g.sel.proposalCache.clear();
+        g.sel.proposalCacheLru.clear();
+    }
     if (!solving) RebuildMorphDelta();   // the shape offsets moved with the bones (and the rest pose); the accumulated morph offsets move with them
     UpdateBodyMeasurements();            // the scene holds the new rest pose; cheap enough for every reshape
     const double t1 = NowMs();
@@ -578,6 +583,11 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             // and the new one being built.
             if (g.resolver) g.resolver->clearCaches();
             Log("reading the card container");
+            {   // the loaded character changes — any cached proposal was built against a different card/outfit and is invalid now
+                std::lock_guard<std::recursive_mutex> lk(g.mu);
+                g.sel.proposalCache.clear();
+                g.sel.proposalCacheLru.clear();
+            }
             card::Card c = card::LoadCard(path);
             if (!c.supported) throw std::runtime_error(c.supportNote);
             // The card's current coordinate when none is asked for; an

@@ -207,6 +207,9 @@ struct SelectiveState {
     int proposalGen = 0;                // requests outstanding for the proposed scene (generation counter)
     bool proposalQueued = false;        // a rebuild is pending the debounce
     bool buildingProposal = false;      // a proposal worker is running
+    std::string proposalKey;            // canonical key of the last queued decision set (sentinel "\x01" = never): unchanged toggles skip the rebuild
+    std::map<std::string, std::shared_ptr<assemble::Scene>> proposalCache;   // the assembled scene per effective key, so revisiting an earlier choice is instant
+    std::vector<std::string> proposalCacheLru;
     // validation for the Apply button (recomputed at paint; error text blocks Apply)
     std::string validation;             // empty = apply is fine
     bool validationError = false;

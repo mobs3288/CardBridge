@@ -292,6 +292,13 @@ SelActionRects SelActionButtonRects(const SelLayout& l, const RECT& row, bool wi
 
 
 
+// forward declarations for the proposal cache helpers (defined with the rest of the cache code below)
+static std::string SelEffectiveKey(const std::map<std::string, card::SelectiveAction>& d,
+                                   const std::string& cardPath, const std::string& src,
+                                   int dstOutfit, int srcOutfit, bool srcCoord);
+static void SelProposalCacheClear();
+static void SelProposalCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene);
+
 // ==================================================================== building & uploads ========================
 
 // The garment layers the user picked (AddLayer on clothes components), in slot order with stable layer indices.
@@ -449,15 +456,30 @@ void SelBuildImported() {
 // Builds view 2 — the proposed character: the loaded card with only the user's chosen components merged in.
 void SelBuildProposal() {
     const std::string path = g.sel.srcPath;
+    const bool srcCoord = g.sel.srcIsCoordinate;
     const int dstOutfit = g.sel.dstOutfit;
     const int srcOutfit = g.sel.srcOutfit;
-    const int gen = ++g.sel.proposalGen;
-    const int session = g.sel.session;
     const card::SelectiveDecisions decisions{g.sel.decisions};
+    const std::string sessionKey = SelEffectiveKey(decisions.actions, g.cardPath, path, dstOutfit, srcOutfit, srcCoord);
+    const int session = g.sel.session;
     SelView& v = g.sel.views[2];
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (auto hit = g.sel.proposalCache.find(sessionKey); hit != g.sel.proposalCache.end()) {
+            ++g.sel.proposalGen;   // any previously queued worker for a different key went stale... (it cannot have finished; discard its result)
+            v.scene = hit->second;
+            v.placedAcc.clear();
+            v.state = 1;           // upload sets it to ready
+            v.error.clear();
+            SelUploadScene(2, session);
+            if (g.sel.hwnd) PostMessageW(g.sel.hwnd, WM_SEL_READY, 1, static_cast<LPARAM>(session));
+            return;
+        }
+    }
+    const int gen = ++g.sel.proposalGen;
     v.state = 1;
     v.error.clear();
-    std::thread([path, dstOutfit, srcOutfit, gen, session, decisions] {
+    std::thread([path, dstOutfit, srcOutfit, gen, session, decisions, sessionKey] {
         std::shared_ptr<Loaded> L;
         std::shared_ptr<resolve::Resolver> resolver;
         { std::lock_guard<std::recursive_mutex> lk(g.mu); L = g.loaded; resolver = g.resolver; }
@@ -493,6 +515,7 @@ void SelBuildProposal() {
             g.sel.views[2].scene = sc;
             g.sel.views[2].placedAcc = std::move(applyRep.placedAccessorySlots);
         }
+        SelProposalCachePut(sessionKey, sc);
         SelUploadScene(2, session);
         {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -502,9 +525,56 @@ void SelBuildProposal() {
     }).detach();
 }
 
-// The 250 ms debounce between a decision change and the rebuild.
+// ==================================================================== proposal caching =====
+// The proposed scene is cached per effective decision set, so revisiting an earlier choice
+// (e.g. flipping a slot back to a state the user already committed to) is instant instead of
+// another full assembly. Keep/Skip merge nothing and Add lands the same item in the slot as
+// Replace — only Replace/Add (merged) and AddLayer (grafted) actually move geometry.
+static std::string SelEffectiveKey(const std::map<std::string, card::SelectiveAction>& d,
+                                   const std::string& cardPath, const std::string& src,
+                                   int dstOutfit, int srcOutfit, bool srcCoord) {
+    std::string key = cardPath;
+    key += '>' + src;
+    key += '|' + std::to_string(dstOutfit);
+    key += "|c" + std::to_string(srcCoord ? srcOutfit : -1);
+    for (const auto& [k, a] : d) {
+        char c = 0;
+        if (a == card::SelectiveAction::Replace || a == card::SelectiveAction::Add) c = 'R';
+        else if (a == card::SelectiveAction::AddLayer) c = 'L';
+        if (!c) continue;
+        key += '|';
+        key += k;
+        key += ':';
+        key += c;
+    }
+    return key;
+}
+static void SelProposalCacheClear() {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    g.sel.proposalCache.clear();
+    g.sel.proposalCacheLru.clear();
+}
+static void SelProposalCachePut(const std::string& k, std::shared_ptr<assemble::Scene> scene) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    if (g.sel.proposalCache.count(k)) return;   // already there; a fresher duplicate upload is harmless
+    g.sel.proposalCache[k] = std::move(scene);
+    g.sel.proposalCacheLru.push_back(k);
+    while (g.sel.proposalCacheLru.size() > 4) {
+        g.sel.proposalCache.erase(g.sel.proposalCacheLru.front());
+        g.sel.proposalCacheLru.erase(g.sel.proposalCacheLru.begin());
+    }
+}
+
+// The 250 ms debounce between a decision change and the rebuild — skipped entirely when the effective
+// inputs are unchanged (every decision becomes a no-op or lands in a slot whose effect matches).
 void SelQueueProposal() {
     if (!g.sel.open) return;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        const std::string eff = SelEffectiveKey(g.sel.decisions, g.cardPath, g.sel.srcPath, g.sel.dstOutfit, g.sel.srcOutfit, g.sel.srcIsCoordinate);
+        if (g.sel.proposalKey == eff) return;   // already built (or queued) for this exact merge
+        g.sel.proposalKey = eff;
+    }
     g.sel.proposalQueued = true;
     SetTimer(g.sel.hwnd, kSelBuildTimer, 250, nullptr);
 }
@@ -1107,6 +1177,7 @@ void SelectiveOpen(const std::string& path) {
         SelTeardownPreview();         // release any previous preview completely before building a new one
         g.sel.session += 1;          // fresh window; any stale build from a previous one is ignored
         g.sel.open = true;
+        g.sel.proposalKey = "\x01";   // sentinel: no proposal ever built for this session
         g.sel.srcPath = path;
         g.sel.srcIsCoordinate = srcCoord;
         g.sel.srcName = srcName;
