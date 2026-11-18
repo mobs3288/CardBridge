@@ -1,6 +1,7 @@
 #include "export/Exporter.h"
 #include "core/Timing.h"
 #include "mesh/Simplify.h"
+#include "mesh/Occlusion.h"
 
 #include "core/FileIo.h"
 #include "core/Version.h"
@@ -1034,6 +1035,11 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     const std::string stem0 = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
     const float requested = std::clamp(opt.simplifyPercent, 0.0f, 95.0f) / 100.0f;
+    // The occlusion map is the same for the main reduction and every LOD pass of this export: compute it once.
+    const bool anyReduce = (requested > 0.0f) || std::any_of(opt.lodTargets.begin(), opt.lodTargets.end(),
+        [](const ExportOptions::LodTarget& t) { return t.remaining < 1.0f; });
+    const mesh::CoverageResult exportCoverage = anyReduce ? mesh::ComputeSceneCoverage(scene) : mesh::CoverageResult{};
+    const mesh::CoverageResult* coverageArg = anyReduce ? &exportCoverage : nullptr;
     std::shared_ptr<assemble::Scene> eff;   // the model this export writes; null when it is the original
     if (requested > 0.0f) {
         mesh::SimplifyOptions so;
@@ -1042,7 +1048,8 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         mesh::SceneSimplifyStats st;
         eff = mesh::SimplifyScene(scene, requested, so, st,
             opt.progress ? std::function<void(float, const std::string&)>([&opt](float f, const std::string& s) { opt.progress(f * 0.45, "simplifying: " + s); })
-                         : std::function<void(float, const std::string&)>{});
+                         : std::function<void(float, const std::string&)>{},
+             coverageArg);
         for (const auto& w : st.warnings) log("warning: " + w);
         if (!eff) { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; throw FormatError("simplification failed"); }
         log("simplified for export: " + std::to_string(st.originalTriangles) + " -> " + std::to_string(st.resultTriangles) + " triangles");
@@ -1070,8 +1077,10 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             so.maxReduction = 1.0f - remaining;
             so.cancelled = opt.cancelled;
             mesh::SceneSimplifyStats st;
-            auto lod = mesh::SimplifyScene(scene, so.maxReduction, so, st, nullptr);
+            auto lod = mesh::SimplifyScene(scene, so.maxReduction, so, st, nullptr, coverageArg);
             for (const auto& w : st.warnings) log("warning (" + target.label + "): " + w);
+            if (st.occludedFacesDropped > 0)
+                log(target.label + ": " + std::to_string(st.occludedFacesDropped) + " triangles concealed by another opaque layer were dropped");
             if (!lod) { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; throw FormatError(target.label + " simplification failed"); }
             log(target.label + ": " + std::to_string(st.originalTriangles) + " -> " + std::to_string(st.resultTriangles) + " triangles ("
                 + std::to_string(static_cast<int>(remaining * 100.0f + 0.5f)) + "% remaining)");
@@ -1080,7 +1089,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 // Skip the write and record an alias to the previous level (deterministic simplification, same input -> same bytes).
                 log(target.label + ": identical to " + prevLabel + " (nothing left to collapse under the preservation constraints); the manifest aliases it");
                 lods.push_back({{"file", prevFile}, {"label", target.label}, {"remaining", remaining},
-                                {"triangles", st.resultTriangles}, {"vertices", st.resultVertices}, {"identical_to", prevLabel}});
+                                {"triangles", st.resultTriangles}, {"vertices", st.resultVertices}, {"identical_to", prevLabel}, {"covered_faces_dropped", st.occludedFacesDropped}});
                 res.lods.push_back({prevFile, target.label, remaining, st.resultTriangles, st.resultVertices});
                 continue;
             }
@@ -1103,7 +1112,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
             prevTris = e.triangles;
             prevVerts = e.vertices;
             lods.push_back({{"file", e.file}, {"label", e.label}, {"remaining", remaining},
-                            {"triangles", e.triangles}, {"vertices", e.vertices}});
+                            {"triangles", e.triangles}, {"vertices", e.vertices}, {"covered_faces_dropped", st.occludedFacesDropped}});
             res.lods.push_back(std::move(e));
         }
         if (!res.lods.empty()) {

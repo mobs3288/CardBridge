@@ -111,6 +111,7 @@ add_library(cardbridge_core STATIC
     src/measure/BodyMeasure.cpp
     src/mesh/Simplify.cpp
     src/mesh/Lod.cpp
+    src/mesh/Occlusion.cpp
     src/material/MaterialWorkbench.cpp
     src/material/UvDiagnostics.cpp
     src/shader/Dxbc.cpp

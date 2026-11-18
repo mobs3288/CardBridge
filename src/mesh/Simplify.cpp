@@ -70,6 +70,9 @@ struct WFace {
     int v[3] = {0, 0, 0};
     int submesh = 0;
     bool alive = true;
+    float ox = 0.0f, oy = 0.0f, oz = 1.0f;   // the face's unit normal when the mesh entered; the fold-through measurement anchors on it
+    bool origDegenerate = false;              // the input face had ~zero area: it has no orientation to protect, the guard never constrains it
+    float qScale = 1.0f;                    // the collapse-budget multiplier for occluded faces (from coveredQuadricScale when all three vertices are covered)
 };
 
 struct WVertex {
@@ -142,8 +145,10 @@ void blendWeights(const int ub[4], const float uw[4], const int vb[4], const flo
 } // namespace
 
 SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions& opt,
-                               const std::vector<assemble::SceneBone>* bones) {
+                               const std::vector<assemble::SceneBone>* bones,
+                               const std::vector<char>* vertexCovered) {
     SimplifyMeshStats stats;
+    const bool haveCoverage = vertexCovered && vertexCovered->size() == mesh.vertices.size();
     const auto t0 = std::chrono::steady_clock::now();
     stats.originalVertices = mesh.vertices.size();
     stats.originalTriangles = 0;
@@ -160,19 +165,6 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
     const std::size_t targetFaces = std::max<std::size_t>(1, static_cast<std::size_t>(std::floor(totalFaces * (1.0 - clampedReduction))));
 
     // ---- working copy ---------------------------------------------------------
-    std::vector<WFace> faces;
-    faces.reserve(totalFaces);
-    for (const auto& sm : mesh.submeshes) {
-        const int sub = static_cast<int>(&sm - mesh.submeshes.data());
-        for (std::size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
-            WFace f;
-            f.v[0] = static_cast<int>(sm.indices[i]);
-            f.v[1] = static_cast<int>(sm.indices[i + 1]);
-            f.v[2] = static_cast<int>(sm.indices[i + 2]);
-            f.submesh = sub;
-            faces.push_back(f);
-        }
-    }
     std::vector<WVertex> verts;
     verts.reserve(mesh.vertices.size());
     for (const auto& v : mesh.vertices) {
@@ -183,6 +175,45 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
         for (int k = 0; k < 4; ++k) { w.bone[k] = v.bone[k]; w.weight[k] = v.weight[k]; }
         verts.push_back(w);
     }
+    std::vector<WFace> faces;
+    faces.reserve(totalFaces);
+    for (const auto& sm : mesh.submeshes) {
+        const int sub = static_cast<int>(&sm - mesh.submeshes.data());
+        for (std::size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+            WFace f;
+            f.v[0] = static_cast<int>(sm.indices[i]);
+            f.v[1] = static_cast<int>(sm.indices[i + 1]);
+            f.v[2] = static_cast<int>(sm.indices[i + 2]);
+            f.submesh = sub;
+            if (haveCoverage && opt.allowOccludedCull) {
+                // Occluded-face cull (LOD 2+): a triangle hidden from every outward direction by an opaque outer
+                // layer is removed outright — never part of one (no partial faces, no holes). Visible clothing
+                // survives untouched; the meshes this applies to are Clothing class only.
+                if ((*vertexCovered)[static_cast<size_t>(f.v[0])] && (*vertexCovered)[static_cast<size_t>(f.v[1])] && (*vertexCovered)[static_cast<size_t>(f.v[2])]) {
+                    ++stats.occludedDropped;
+                    continue;
+                }
+            }
+            const Vec3 e1 = sub3(verts[static_cast<size_t>(f.v[1])].pos, verts[static_cast<size_t>(f.v[0])].pos);
+            const Vec3 e2 = sub3(verts[static_cast<size_t>(f.v[2])].pos, verts[static_cast<size_t>(f.v[0])].pos);
+            const Vec3 n = cross3(e1, e2);
+            const float nl = std::sqrt(lenSquared(n));
+            if (nl > 1e-20f) { f.ox = n.x / nl; f.oy = n.y / nl; f.oz = n.z / nl; }
+            else f.origDegenerate = true;   // no orientation to protect
+            if (haveCoverage && opt.coveredQuadricScale != 1.0f &&
+                (*vertexCovered)[static_cast<size_t>(f.v[0])] && (*vertexCovered)[static_cast<size_t>(f.v[1])] && (*vertexCovered)[static_cast<size_t>(f.v[2])])
+                f.qScale = opt.coveredQuadricScale;   // occluded face: collapses first, its quadric barely holds shape
+            faces.push_back(f);
+        }
+    }
+    // Vertices whose faces were all culled have nothing left to draw: pin them dead so the compaction drops them
+    // (their blend-shape offsets drop with them, the bones keep everyone else's weights intact).
+    if (stats.occludedDropped > 0) {
+        std::vector<char> used(verts.size(), 0);
+        for (const auto& f : faces) { used[static_cast<size_t>(f.v[0])] = 1; used[static_cast<size_t>(f.v[1])] = 1; used[static_cast<size_t>(f.v[2])] = 1; }
+        for (size_t i = 0; i < verts.size(); ++i) if (!used[i]) verts[i].alive = false;
+    }
+    const std::size_t keptFaces = faces.size();
     std::vector<std::vector<int>> vertFaces(verts.size());
     for (int i = 0; i < static_cast<int>(faces.size()); ++i) {
         faces[static_cast<size_t>(i)].alive = true;
@@ -255,6 +286,9 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
                 q.add(Quadric::fromScatter(g, w, a.pos));
             }
         }
+        if (f.qScale != 1.0f) {   // occluded face: its metric counts far less than a visible one
+            for (int i = 0; i < 10; ++i) q.q[i] *= static_cast<double>(f.qScale);
+        }
         for (int k = 0; k < 3; ++k) verts[static_cast<size_t>(f.v[k])].quadric.add(q);
     }
 
@@ -285,9 +319,9 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
         pushEdge(f.v[2], f.v[0]);
     }
 
-    std::size_t aliveFaces = totalFaces;
+    std::size_t aliveFaces = keptFaces;
     std::size_t collapses = 0;
-    std::size_t skippedLocked = 0, skippedFlip = 0, skippedDegenerate = 0;
+    std::size_t skippedLocked = 0, skippedFlip = 0, skippedDegenerate = 0, skippedFoldTurn = 0;
     std::vector<CollapseRec> shapeLog;
     shapeLog.reserve(1 << 16);
     std::size_t sinceProgress = 0;
@@ -312,13 +346,21 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
         return count;
     };
 
-    auto flipBroken = [&](int u, int v, const Vec3& x) {
-        // Every face touching u or v must not turn more than flipDot away from its current normal.
+    // The seam guard, one walk, two verdicts: 1 = a face turns more than flipDot vs its CURRENT orientation (the old
+    // flip test), 2 = a face turns more than maxFaceTurnDeg vs its orientation when the mesh entered (the cumulative
+    // fold-through guard). The second is the hard one: it bounds what a whole collapse sequence can do to a surface,
+    // so a surviving face is never rotated far enough for single-sided culling to erase it.
+    const double foldCapCos = opt.maxFaceTurnDeg > 0.0f
+        ? std::cos(static_cast<double>(opt.maxFaceTurnDeg) * 3.14159265358979323846 / 180.0)
+        : -1.0;
+    auto seamBroken = [&](int u, int v, const Vec3& x) {
         const auto check = [&](int vi) {
+            int rc = 0;
             const int other = vi == u ? v : u;
             for (int fi : vertFaces[static_cast<size_t>(vi)]) {
                 const WFace& f = faces[static_cast<size_t>(fi)];
                 if (!f.alive) continue;
+                if (f.origDegenerate) continue;   // no orientation to protect
                 bool hasBoth = false;
                 for (int k = 0; k < 3; ++k) if (f.v[k] == other) hasBoth = true;
                 if (hasBoth) continue;   // this face is destroyed by the collapse; its normal is meaningless here
@@ -328,14 +370,28 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
                 const Vec3 oldN = cross3(sub3(verts[static_cast<size_t>(f.v[1])].pos, verts[static_cast<size_t>(f.v[0])].pos),
                                          sub3(verts[static_cast<size_t>(f.v[2])].pos, verts[static_cast<size_t>(f.v[0])].pos));
                 const float ll = lenSquared(n), ol = lenSquared(oldN);
-                // A degenerate face (old or new) carries no orientation to protect: skip it instead of rejecting the collapse.
-                if (ll <= 1e-18f || ol <= 1e-18f) continue;
+                // A zero-area candidate face carries no direction to check, but unlike a flip it must still not
+                // become zero-area through this collapse: it would drift freely (never evaluated) and regrow into
+                // a differently oriented face — exactly how a garment inverts unseen. Only faces that started
+                // degenerate (pole fans) are exempt, since they were never constrained.
+                if (ll <= 1e-18f) { if (foldCapCos >= 0.0) rc = std::max(rc, 2); continue; }
+                if (ol <= 1e-18f) {   // the flip test needs an old normal; the fold guard does not
+                    if (foldCapCos >= 0.0) {
+                        const float d0 = (n.x * f.ox + n.y * f.oy + n.z * f.oz) / std::sqrt(ll);
+                        if (d0 < static_cast<float>(foldCapCos)) rc = 2;
+                    }
+                    continue;
+                }
                 const float d = (n.x * oldN.x + n.y * oldN.y + n.z * oldN.z) / (std::sqrt(ll) * std::sqrt(ol));
-                if (d < opt.flipDot) return true;
+                if (d < opt.flipDot) rc = std::max(rc, 1);
+                if (foldCapCos >= 0.0) {
+                    const float d0 = (n.x * f.ox + n.y * f.oy + n.z * f.oz) / std::sqrt(ll);
+                    if (d0 < static_cast<float>(foldCapCos)) rc = 2;
+                }
             }
-            return false;
+            return rc;
         };
-        return check(u) || check(v);
+        return std::max(check(u), check(v));
     };
 
     auto collapsedQuadricSum = [&](int u, int v, Quadric& out) { out = verts[static_cast<size_t>(u)].quadric; out.add(verts[static_cast<size_t>(v)].quadric); };
@@ -414,12 +470,13 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
             const float cc = candidateCost(sum, optimal);
             if (cc < bestCost) { bestCost = cc; chosen = optimal; }
         }
-        if (flipBroken(u, v, chosen)) {
+        const int seamFail = seamBroken(u, v, chosen);
+        if (seamFail != 0) {
             // A cheaper candidate exists but is deforming; try the plainer ones before giving up.
             bool placed = false;
             for (const Vec3& cand : {mid, a.pos, b.pos})
-                if (!flipBroken(u, v, cand)) { chosen = cand; placed = true; break; }
-            if (!placed) { ++skippedFlip; continue; }
+                if (seamBroken(u, v, cand) == 0) { chosen = cand; placed = true; break; }
+            if (!placed) { if (seamFail == 2) ++skippedFoldTurn; else ++skippedFlip; continue; }
         }
         // ---- the collapse itself ---------------------------------------------------
         float t = 0.5f;
@@ -473,6 +530,24 @@ SimplifyMeshStats SimplifyMesh(assemble::SceneMesh& mesh, const SimplifyOptions&
     stats.skippedLocked = skippedLocked;
     stats.skippedFlip = skippedFlip;
     stats.skippedDegenerate = skippedDegenerate;
+    stats.skippedFoldTurn = skippedFoldTurn;
+
+    // ---- fold-through: cumulative rotation of the surviving faces from their original orientation ----
+    for (const auto& f : faces) {
+        if (!f.alive) continue;
+        if (f.origDegenerate) continue;   // it never had an orientation to rotate
+        const Vec3 e1 = sub3(verts[static_cast<size_t>(f.v[1])].pos, verts[static_cast<size_t>(f.v[0])].pos);
+        const Vec3 e2 = sub3(verts[static_cast<size_t>(f.v[2])].pos, verts[static_cast<size_t>(f.v[0])].pos);
+        const Vec3 n = cross3(e1, e2);
+        const float nl = std::sqrt(lenSquared(n));
+        if (nl <= 1e-18f) continue;
+        const float d = std::clamp((n.x * f.ox + n.y * f.oy + n.z * f.oz) / nl, -1.0f, 1.0f);
+        const float ang = std::acos(d) * 57.295779513f;
+        if (ang > 60.0f) ++stats.foldOver60;
+        if (ang > 84.0f) ++stats.foldOver84;
+        if (ang > 90.0f) ++stats.foldOver90;
+        if (ang > stats.foldMaxDeg) stats.foldMaxDeg = ang;
+    }
 
     // ---- final normals (area-weighted, seam-aware: split vertices stay split) ----
     std::vector<Vec3> normalAcc(verts.size(), Vec3{});

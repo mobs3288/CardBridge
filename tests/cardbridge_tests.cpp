@@ -7383,6 +7383,133 @@ size_t sceneTris(const assemble::Scene& s) {
 
 } // namespace
 
+// ---- clothing-preservation (LOD) fixture -----------------------------------
+namespace {
+
+// A layered character: an opaque body, an opaque shirt (the inner garment, two materials: one panel tagged as
+// the trim half), an opaque jacket (the outer garment) with a 56-degree front opening (a wedge of faces never
+// built, like an unbuttoned coat facing +Z), a tiny accessory shell fully inside the shirt, and a small scene
+// skeleton. All single-sided (doubleSided defaults false), exactly like the game's garment materials.
+// jacketStyle: 0 = opaque, 1 = translucent (main_alpha), 2 = perforated lace (one fully transparent main_item texture).
+assemble::Scene makeLayeredScene(int jacketStyle) {
+    using namespace assemble;
+    Scene s;
+    s.name = "lodlayer";
+    auto addBone = [&](const char* name, int parent, Vec3 pos) {
+        SceneBone b;
+        b.name = name; b.parent = parent; b.pos = pos; b.source = "rig"; b.world = Mat4{};
+        s.bones.push_back(b);
+    };
+    addBone("root", -1, {0, 0, 0});
+    addBone("cf_j_hips", 0, {0, 0.9f, 0});
+
+    SceneMaterial matBody; matBody.name = "mf_m_body"; matBody.shader = "Shader Forge/main_opaque"; matBody.diffuse = {0.9f, 0.8f, 0.7f, 1.0f};
+    SceneMaterial matShirtA; matShirtA.name = "clo_shirt_a"; matShirtA.shader = "Shader Forge/main_opaque"; matShirtA.diffuse = {0.2f, 0.2f, 0.6f, 1.0f};
+    SceneMaterial matJacket; matJacket.name = "clo_jacket";
+    matJacket.shader = jacketStyle == 1 ? "Shader Forge/main_alpha" : "Shader Forge/main_opaque";
+    matJacket.diffuse = {0.6f, 0.3f, 0.2f, 1.0f};
+    if (jacketStyle == 1) matJacket.translucent = true;
+    SceneMaterial matShirtB; matShirtB.name = "clo_shirt_b"; matShirtB.shader = "Shader Forge/main_opaque"; matShirtB.diffuse = {0.1f, 0.3f, 0.5f, 1.0f};
+    SceneMaterial matAcc; matAcc.name = "acc_ribbon"; matAcc.shader = "Shader Forge/main_opaque"; matAcc.diffuse = {0.8f, 0.1f, 0.1f, 1.0f};
+    s.materials = {matBody, matShirtA, matJacket, matShirtB, matAcc};
+    int jacketMat = 2;
+    if (jacketStyle == 2) {
+        SceneTexture tex;
+        tex.name = "lace"; tex.source = "test"; tex.format = "RGBA32"; tex.width = 2; tex.height = 2;
+        tex.rgba = std::vector<uint8_t>(2 * 2 * 4, 0);   // every texel discards: a fully perforated shell does not shield
+        s.textures.push_back(std::move(tex));
+        SceneMaterial matLace;
+        matLace.name = "clo_lace"; matLace.shader = "Shader Forge/main_item"; matLace.diffuse = {0.5f, 0.5f, 0.5f, 1.0f};
+        matLace.alpha = true; matLace.texture = 0;
+        s.materials.push_back(matLace);
+        jacketMat = 5;
+    }
+
+    auto shell = [&](const char* name, int material, float radius, int partIndex, float skipHalfDeg, int splitMaterial) {
+        SceneMesh m;
+        m.name = name;
+        m.part = partIndex;
+        m.reshapable = false;
+        const int rings = 12, sectors = 24, stride = sectors + 1;
+        for (int r = 0; r <= rings; ++r) {
+            const float v = static_cast<float>(r) / static_cast<float>(rings);
+            const float phi = 3.14159265f * v;
+            for (int si = 0; si < stride; ++si) {
+                const float u = static_cast<float>(si) / static_cast<float>(sectors);
+                const float th = 2.0f * 3.14159265f * u;
+                SceneVertex vert;
+                vert.pos = {radius * std::sin(phi) * std::cos(th), radius * std::cos(phi), radius * std::sin(phi) * std::sin(th)};
+                vert.normal = normalize(vert.pos);
+                vert.uv = {u, 1.0f - v};
+                vert.uv1 = vert.uv; vert.uv2 = vert.uv; vert.uv3 = vert.uv;
+                for (int k = 0; k < 4; ++k) { vert.bone[k] = k == 0 ? 1 : 0; vert.weight[k] = k == 0 ? 1.0f : 0.0f; }
+                m.vertices.push_back(vert);
+            }
+        }
+        const double skipHalf = skipHalfDeg * 3.14159265358979323846 / 180.0;   // azimuth around the vertical axis, from +Z
+        SceneSubmesh sm;
+        sm.material = material;
+        for (int r = 0; r < rings; ++r)
+            for (int si = 0; si < sectors; ++si) {
+                const int a = r * stride + si, b = a + 1, c = a + stride, d = c + 1;
+                if (skipHalfDeg > 0.0f) {
+                    const Vec3& pa = m.vertices[static_cast<size_t>(a)].pos;
+                    const Vec3& pb = m.vertices[static_cast<size_t>(b)].pos;
+                    const Vec3& pc = m.vertices[static_cast<size_t>(c)].pos;
+                    const Vec3 cen{(pa.x + pb.x + pc.x) / 3.0f, (pa.y + pb.y + pc.y) / 3.0f, (pa.z + pb.z + pc.z) / 3.0f};
+                    const double az = std::atan2(static_cast<double>(cen.x), static_cast<double>(cen.z));
+                    if (std::fabs(az) < skipHalf) continue;   // the opening: no face here
+                }
+                sm.indices.insert(sm.indices.end(), {(uint32_t)a, (uint32_t)c, (uint32_t)b, (uint32_t)b, (uint32_t)c, (uint32_t)d});
+            }
+        m.submeshes.push_back(std::move(sm));
+        if (splitMaterial >= 0) {
+            // the |x| > |z| half (sideways-facing) is the trim panel: a second submesh with the second material
+            SceneSubmesh sm2;
+            sm2.material = splitMaterial;
+            for (SceneSubmesh& sm : m.submeshes)
+                for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) {
+                    const uint32_t ia = sm.indices[t], ib = sm.indices[t + 1], ic = sm.indices[t + 2];
+                    const Vec3 cen{(m.vertices[ia].pos.x + m.vertices[ib].pos.x + m.vertices[ic].pos.x) / 3.0f,
+                                   (m.vertices[ia].pos.y + m.vertices[ib].pos.y + m.vertices[ic].pos.y) / 3.0f,
+                                   (m.vertices[ia].pos.z + m.vertices[ib].pos.z + m.vertices[ic].pos.z) / 3.0f};
+                    const double az = std::atan2(static_cast<double>(cen.x), static_cast<double>(cen.z));
+                    if (std::fabs(az) >= 1.5707963) {
+                        sm2.indices.insert(sm2.indices.end(), sm.indices.begin() + static_cast<long>(t), sm.indices.begin() + static_cast<long>(t) + 3);
+                        std::fill(sm.indices.begin() + static_cast<long>(t), sm.indices.begin() + static_cast<long>(t) + 3, 0xFFFFFFFFu);
+                    }
+                }
+            for (SceneSubmesh& sm : m.submeshes) {
+                std::vector<uint32_t> keep;
+                for (size_t i = 0; i < sm.indices.size(); ++i) if (sm.indices[i] != 0xFFFFFFFFu) keep.push_back(sm.indices[i]);
+                sm.indices = std::move(keep);
+            }
+            m.submeshes.push_back(std::move(sm2));
+        }
+        return m;
+    };
+
+    s.meshes.push_back(shell("o_body_a", 0, 0.35f, 0, 0.0f, -1));         // body: Covered skin, never culled (Body class)
+    s.meshes.push_back(shell("o_shirt", 1, 0.42f, 1, 0.0f, 3));          // the inner garment (two materials: the trim panel)
+    s.meshes.push_back(shell("o_jacket", jacketStyle == 2 ? 5 : jacketMat, 0.48f, 2, 28.0f, -1));   // the outer garment, with the front opening
+    s.meshes.push_back(shell("ri_acc", 4, 0.10f, 3, 0.0f, -1));          // a small accessory fully inside the shirt
+
+    ScenePart bodyPart; bodyPart.id = "body"; bodyPart.group = "Body"; bodyPart.meshes = {0};
+    ScenePart shirtPart; shirtPart.id = "outfit0.top"; shirtPart.group = "Outfit"; shirtPart.meshes = {1};
+    ScenePart jacketPart; jacketPart.id = "outfit0.jacket"; jacketPart.group = "Outfit"; jacketPart.meshes = {2};
+    ScenePart accPart; accPart.id = "outfit0.acc05"; accPart.group = "Accessories"; accPart.meshes = {3};
+    s.parts = {bodyPart, shirtPart, jacketPart, accPart};
+    return s;
+}
+
+size_t sceneTrisLayered(const assemble::Scene& s) {
+    size_t t = 0;
+    for (const auto& m : s.meshes) for (const auto& sm : m.submeshes) t += sm.indices.size() / 3;
+    return t;
+}
+
+} // namespace
+
 void meshTests() {
     test("simplify: per-class weights and caps follow the brief (eyes 0, face a sliver, accessories the most)", [] {
         using namespace mesh;
@@ -7910,6 +8037,143 @@ void meshTests() {
         const std::string manifest(manifestBytes.begin(), manifestBytes.end());
         CHECK(manifest.find("\"lods\"") == std::string::npos);
         CHECK(manifest.find("\"simplification\"") == std::string::npos);
+    });
+}
+
+void lodPreserveTests() {
+    using namespace mesh;
+
+    test("lod: level 1 (60% remaining) drops no face anywhere, whatever the coverage says", [] {
+        auto s = makeLayeredScene(0);
+        SimplifyOptions so;
+        so.maxReduction = 0.4f;   // reduction maps to the 60% level; below 0.5 the occluded-face cull is disarmed
+        SceneSimplifyStats st;
+        auto reduced = SimplifyScene(s, 0.4f, so, st);
+        CHECK(reduced != nullptr);
+        CHECK(st.occludedFacesDropped == 0);
+        CHECK(st.coveredVertices > 0);   // the coverage map itself is computed and reported
+    });
+
+    test("lod: the outer shell is never culled; hidden under-layer faces are dropped; visible ones survive", [] {
+        auto s = makeLayeredScene(0);
+        SimplifyOptions so;
+        so.maxReduction = 0.7f;   // LOD 2 semantics: the occluded-face cull is on
+        SceneSimplifyStats st;
+        auto reduced = SimplifyScene(s, 0.7f, so, st);
+        CHECK(reduced != nullptr);
+        std::map<int, MeshFoldStats> folds;
+        for (const auto& [mi, fs] : st.meshFolds) folds[mi] = fs;
+        CHECK(folds.size() == s.meshes.size());
+        // the jacket is the outermost shell: not a single face may be dropped, ever
+        CHECK(folds[2].occludedDropped == 0);
+        // accessories are never culled either (they simplify, but no face is removed outright)
+        CHECK(folds[3].occludedDropped == 0);
+        // the body skin is never culled either (hidden or not: that is the under-piece path, not LOD)
+        CHECK(folds[0].occludedDropped == 0);
+        // the inner garment genuinely disappears behind the jacket: faces were dropped there
+        CHECK(folds[1].occludedDropped > 0);
+        // ...and the faces genuinely visible through the opening are still there (ray exits through the slit)
+        const assemble::SceneMesh& shirt = reduced->meshes[1];
+        bool foundOpeningFace = false;
+        for (const auto& sm : shirt.submeshes)
+            for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) {
+                const Vec3& a = shirt.vertices[sm.indices[t]].pos;
+                const Vec3& b = shirt.vertices[sm.indices[t + 1]].pos;
+                const Vec3& c = shirt.vertices[sm.indices[t + 2]].pos;
+                const Vec3 cen{(a.x + b.x + c.x) / 3.0f, (a.y + b.y + c.y) / 3.0f, (a.z + b.z + c.z) / 3.0f};
+                const double az = std::atan2(static_cast<double>(cen.x), static_cast<double>(cen.z));
+                if (std::fabs(az) < 0.45) { foundOpeningFace = true; break; }
+            }
+        CHECK(foundOpeningFace);
+        // both materials of the shirt keep at least one face (no visible submesh is ever emptied)
+        for (const auto& sm : shirt.submeshes)
+            CHECK(sm.indices.size() >= 3);
+    });
+
+    test("lod: a translucent outer shell never conceals the layer under it (nothing is culled)", [] {
+        auto s = makeLayeredScene(1);
+        SimplifyOptions so;
+        so.maxReduction = 0.7f;
+        SceneSimplifyStats st;
+        auto reduced = SimplifyScene(s, 0.7f, so, st);
+        CHECK(reduced != nullptr);
+        std::map<int, MeshFoldStats> folds;
+        for (const auto& [mi, fs] : st.meshFolds) folds[mi] = fs;
+        CHECK(folds[1].occludedDropped == 0);   // the shirt shows through the sheer jacket
+        CHECK(st.occludedFacesDropped == 0);
+    });
+
+    test("lod: a perforated lace outer shell never conceals the layer under it (nothing is culled)", [] {
+        auto s = makeLayeredScene(2);
+        SimplifyOptions so;
+        so.maxReduction = 0.7f;
+        SceneSimplifyStats st;
+        auto reduced = SimplifyScene(s, 0.7f, so, st);
+        CHECK(reduced != nullptr);
+        std::map<int, MeshFoldStats> folds;
+        for (const auto& [mi, fs] : st.meshFolds) folds[mi] = fs;
+        CHECK(folds[1].occludedDropped == 0);   // every lace texel discards: the shirt survives intact
+        CHECK(st.occludedFacesDropped == 0);
+    });
+
+    test("lod: no surviving face rotates more than the cumulative ceiling, at any level", [] {
+        auto s = makeLayeredScene(0);
+        for (int level = 1; level <= 4; ++level) {
+            const float remaining = level == 1 ? 0.6f : level == 2 ? 0.3f : level == 3 ? 0.15f : 0.05f;
+            SimplifyOptions so;
+            so.maxReduction = 1.0f - remaining;
+            SceneSimplifyStats st;
+            auto reduced = SimplifyScene(s, so.maxReduction, so, st);
+            CHECK(reduced != nullptr);
+            for (const auto& [mi, fs] : st.meshFolds) {
+                CHECK(fs.foldOver60 == 0);
+                CHECK(fs.foldOver84 == 0);
+                CHECK(fs.foldOver90 == 0);
+                CHECK(fs.foldMaxDeg <= 40.0f + 1e-4f);   // the cumulative ceiling, in degrees
+            }
+        }
+    });
+
+    test("lod: the export writes LOD files whose manifest records the occluded-face cull", [] {
+        auto s0 = makeLayeredScene(0);
+        card::Card c;
+        c.path = "lodlayer.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("lodlayer_export") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        eo.lodTargets = {{"LOD 2", 0.3f}};
+        const auto r = exporter::ExportScene(s0, c, eo);
+        CHECK(fileio::Exists(r.folder + "/lodlayer_lod2.pmx"));
+        const Bytes manifestBytes = fileio::ReadFile(r.manifestPath);
+        const std::string manifest(manifestBytes.begin(), manifestBytes.end());
+        CHECK(manifest.find("covered_faces_dropped") != std::string::npos);
+        CHECK(manifest.find("lodlayer_lod2.pmx") != std::string::npos);
+    });
+
+    test("lod: generation is deterministic — two runs produce byte-identical geometry", [] {
+        auto make = [] { return makeLayeredScene(0); };
+        auto a = make(), b = make();
+        SimplifyOptions so;
+        so.maxReduction = 0.7f;
+        SceneSimplifyStats sta, stb;
+        auto ra = SimplifyScene(a, 0.7f, so, sta);
+        auto rb = SimplifyScene(b, 0.7f, so, stb);
+        CHECK(ra && rb);
+        CHECK(sceneTrisLayered(*ra) == sceneTrisLayered(*rb));
+        CHECK(SceneVertexCount(*ra) == SceneVertexCount(*rb));
+        for (size_t mi = 0; mi < ra->meshes.size(); ++mi) {
+            const auto& mv = ra->meshes[mi].vertices;
+            const auto& mv2 = rb->meshes[mi].vertices;
+            CHECK(mv.size() == mv2.size());
+            for (size_t i = 0; i < mv.size(); ++i) {
+                CHECK(std::fabs(mv[i].pos.x - mv2[i].pos.x) < 1e-6f);
+                CHECK(std::fabs(mv[i].pos.y - mv2[i].pos.y) < 1e-6f);
+                CHECK(std::fabs(mv[i].pos.z - mv2[i].pos.z) < 1e-6f);
+            }
+            for (size_t si = 0; si < ra->meshes[mi].submeshes.size(); ++si)
+                CHECK(ra->meshes[mi].submeshes[si].indices == rb->meshes[mi].submeshes[si].indices);
+        }
+        CHECK(sta.occludedFacesDropped == stb.occludedFacesDropped);
     });
 }
 
@@ -8557,6 +8821,7 @@ void customHairTests() {
 int main() {
     unitTests();
     meshTests();
+    lodPreserveTests();
     customHairTests();
     integrationTests();
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);

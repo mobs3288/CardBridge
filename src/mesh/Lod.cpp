@@ -2,6 +2,7 @@
 // multi-level LOD generation (every level is generated from the untouched original).
 
 #include "mesh/Simplify.h"
+#include "mesh/Occlusion.h"
 
 #include <algorithm>
 #include <atomic>
@@ -111,7 +112,7 @@ std::vector<LodLevelSpec> DefaultLodLevels() {
 
 std::shared_ptr<assemble::Scene> SimplifyScene(const assemble::Scene& pristine, float reduction,
                                                 const SimplifyOptions& base, SceneSimplifyStats& stats,
-                                                const std::function<void(float, const std::string&)>& progress) {
+                                                const std::function<void(float, const std::string&)>& progress, const mesh::CoverageResult* precomputedCoverage) {
     stats = {};
     const auto t0 = std::chrono::steady_clock::now();
     auto out = std::make_shared<assemble::Scene>(pristine);   // deep copy; the caller's scene is never simplified
@@ -121,17 +122,31 @@ std::shared_ptr<assemble::Scene> SimplifyScene(const assemble::Scene& pristine, 
     stats.resultVertices = stats.originalVertices;
     if (reduction <= 0.0f || out->meshes.empty()) return out;
 
+    // Occlusion coverage, computed once on the pristine scene before any mesh is simplified: every visible
+    // mesh gets per-vertex flags ("an opaque outer garment shell replaces me from outside"). The copy indexes
+    // the same way, so the flags pass straight through. Without it, all geometry is kept exactly as before.
+    const mesh::CoverageResult coverageStorage = precomputedCoverage ? mesh::CoverageResult{} : mesh::ComputeSceneCoverage(pristine);
+    const mesh::CoverageResult& coverage = precomputedCoverage ? *precomputedCoverage : coverageStorage;
+    const bool cullOk = reduction >= 0.5f;   // LOD 2 and coarser: faces hidden by another opaque layer are dropped outright
+
     const std::size_t n = out->meshes.size();
     std::vector<float> meshReduction(n, 0.0f);
-    for (std::size_t i = 0; i < n; ++i)
-        meshReduction[i] = ClassReduction(ClassifyMesh(*out, i), reduction);
+    std::vector<MeshClass> meshClass(n, MeshClass::Other);
+    for (std::size_t i = 0; i < n; ++i) {
+        meshClass[i] = ClassifyMesh(*out, i);
+        meshReduction[i] = ClassReduction(meshClass[i], reduction);
+    }
+    stats.providerTriangles = coverage.providerTriangles;
+    stats.coveredVertices = coverage.coveredVertices;
 
     std::atomic<std::size_t> nextMesh{0};
     std::atomic<std::size_t> doneMeshes{0};
     std::atomic<bool> anyCancelled{false};
     std::mutex warnMu;
+    std::vector<std::pair<int, MeshFoldStats>> meshFolds;   // filled under warnMu
 
     const unsigned threads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned>(n)));
+    std::atomic<std::size_t> occludedDropped{0};
     auto worker = [&]() {
         for (;;) {
             const std::size_t i = nextMesh.fetch_add(1, std::memory_order_relaxed);
@@ -146,10 +161,14 @@ std::shared_ptr<assemble::Scene> SimplifyScene(const assemble::Scene& pristine, 
             SimplifyOptions o = base;
             o.maxReduction = red;
             o.progress = {};   // the scene-level progress is per mesh; per-collapse progress would be noise
-            SimplifyMeshStats st = SimplifyMesh(out->meshes[i], o, &out->bones);
+            o.allowOccludedCull = cullOk && meshClass[i] == MeshClass::Clothing;   // only clothing drops hidden faces, only at LOD 2+
+            const std::vector<char>* covered = i < coverage.meshCovered.size() && !coverage.meshCovered[i].empty() ? &coverage.meshCovered[i] : nullptr;
+            SimplifyMeshStats st = SimplifyMesh(out->meshes[i], o, &out->bones, covered);
             if (st.cancelled) { anyCancelled = true; continue; }
+            occludedDropped.fetch_add(st.occludedDropped, std::memory_order_relaxed);
             {
                 std::lock_guard<std::mutex> lock(warnMu);
+                meshFolds.emplace_back(static_cast<int>(i), MeshFoldStats{st.foldOver60, st.foldOver84, st.foldOver90, st.foldMaxDeg, st.skippedFoldTurn, st.occludedDropped});
                 for (auto& w : st.warnings) stats.warnings.push_back(std::move(w));
             }
             const std::size_t done = doneMeshes.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -167,6 +186,13 @@ std::shared_ptr<assemble::Scene> SimplifyScene(const assemble::Scene& pristine, 
         stats.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         return nullptr;
     }
+    stats.occludedFacesDropped = occludedDropped.load(std::memory_order_relaxed);
+    std::sort(meshFolds.begin(), meshFolds.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    stats.meshFolds = std::move(meshFolds);
+    if (stats.occludedFacesDropped > 0)
+        stats.warnings.push_back("coverage: " + std::to_string(stats.occludedFacesDropped) +
+                                 " triangles completely concealed by another opaque layer were dropped (faces hidden from every outward direction; visible clothing is untouched)");
+
     std::size_t resultTris = 0, resultVerts = 0;
     for (std::size_t i = 0; i < n; ++i) {
         resultTris += trianglesOf(out->meshes[i]);
@@ -184,6 +210,12 @@ std::vector<LodResult> GenerateLods(const assemble::Scene& pristine, const std::
                                     const std::function<void(float, const std::string&)>& progress) {
     std::vector<LodResult> out;
     out.reserve(levels.size());
+    // The occlusion map is identical for every level generated from this scene: compute it once here instead of
+    // once per level (and pass it down). When nothing reduces, the coverage pass is skipped entirely.
+    mesh::CoverageResult coverage;
+    bool coverageComputed = false;
+    for (const auto& l : levels) if (l.remaining < 1.0f) { coverage = mesh::ComputeSceneCoverage(pristine); coverageComputed = true; break; }
+    const mesh::CoverageResult* coverageArg = coverageComputed ? &coverage : nullptr;
     for (std::size_t li = 0; li < levels.size(); ++li) {
         const LodLevelSpec& spec = levels[li];
         LodResult r;
@@ -197,7 +229,7 @@ std::vector<LodResult> GenerateLods(const assemble::Scene& pristine, const std::
             const float reduction = 1.0f - spec.remaining;
             auto scene = SimplifyScene(pristine, reduction, base, st, [&](float f, const std::string& stage) {
                 if (progress) progress((static_cast<float>(li) + f) / static_cast<float>(levels.size()), spec.label + ": " + stage);
-            });
+            }, coverageArg);
             if (!scene) {
                 r.cancelled = true;
             } else {

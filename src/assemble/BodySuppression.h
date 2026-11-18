@@ -58,15 +58,18 @@ void EmitUnderPieces(Scene& scene, const std::string& what, size_t pi, const Und
 
 // Collects the opaque triangles of every worn Outfit/Accessory part (hidden ones included — a hidden garment covers the same as the visible
 // layer it replaces). Each triangle is tagged with its owner's part id for under-piece tagging. Translucent materials don't occlude.
+// With `excludeCutout`, a material whose faces sample a discard texel is not a provider either — a perforated shell
+// (lace with real holes) does not conceal what is behind it. The default is off (historical assemble-time behaviour).
 struct CoverageProvider {
     Tri tri;             // world-space triangle of the opaque garment
     std::string owner;   // part id
 };
-std::vector<CoverageProvider> GatherOpaqueProviders(const Scene& scene);
+std::vector<CoverageProvider> GatherOpaqueProviders(const Scene& scene, bool excludeCutout = false);
 
 // Classifies every body vertex: true when its outward-normal ray hits an opaque garment triangle within `maxDist` (default 0.4 m).
 // `coverage` is sized like the body mesh's vertex count; use with `meshIndices` of the body part(s).
-std::vector<char> ClassifyBodyOcclusion(const Scene& scene, const std::vector<int>& meshIndices, const std::vector<CoverageProvider>& providers, float maxDist = 0.4f);
+// `excludeOwner` (when non-null) names a part id whose providers never block — a shell never covers itself.
+std::vector<char> ClassifyBodyOcclusion(const Scene& scene, const std::vector<int>& meshIndices, const std::vector<CoverageProvider>& providers, float maxDist = 0.4f, const std::string* excludeOwner = nullptr);
 
 // Fallback pass: suppresses body triangles whose vertices are all concealed by opaque garments (ray test), and hides crotch triangles
 // when a bottom with KokanHide=1 is worn. Body-only; the bra uses the mask passes. Call after the mask passes.
