@@ -1348,7 +1348,10 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
-        if (mat.translucent) { ++skipTranslucent; continue; }  // an authored translucency shader: keep the card's texture as it is (alpha is the point); the material blends and the body behind it stays
+        // Translucent materials are baked like any other: the bake preserves the shader's alpha (the game's authored opacity is its
+        // output alpha), so the PMX shows what the game shows for them — shaded, colour-graded, with the material's own toon ramp.
+        // Keeping the raw texture here instead dropped the shader's whole look (the card's studio-alpha shell drew a flat charcoal
+        // sheet over the graded bake beneath it, and the main_alpha stockings/gloves showed without the game's shading or grading).
         const ShaderRuntime* sr = GetShader(scene, st, mat.shaderIndex);
         if (!sr) { ++skipNoShader; continue; }
         // A clamped main texture is edge-clamped in the game, not repeated: its triangles must stay at their UVs (the
@@ -1610,6 +1613,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             ApplyColourGrade(px, 0u);
             for (size_t i = 0; i < px.size(); ++i) { bt.rgba[i * 4] = (px[i] >> 16) & 255; bt.rgba[i * 4 + 1] = (px[i] >> 8) & 255; bt.rgba[i * 4 + 2] = px[i] & 255; }
         }
+        bt.bakedInShaderBake = true;   // the bake's own grade choice is authoritative: never re-grade at export
         scene.textures.push_back(std::move(bt));
         st.mips.push_back(Mips{});
         st.built.push_back(false);

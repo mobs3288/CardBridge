@@ -43,6 +43,7 @@ struct SceneTexture {
     bool clamp = false;          // the texture's wrap mode is clamp (ramps), not repeat
     bool srgb = true;            // the texture is flagged sRGB (colour data); false for masks and other linear data
     uint64_t pixelHash = 0;      // FNV-1a 64 of rgba
+    bool bakedInShaderBake = false;   // true when the shader bake wrote this texture (do not colour-grade it again at export)
 };
 
 struct SceneTexBinding {

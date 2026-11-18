@@ -11,6 +11,7 @@
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
+#include "export/ColourGrade.h"
 #include "pmx/PmxWriter.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -605,7 +606,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     // stage and every encode is independent, so it runs on the pool.
     struct PendingEncode {
         const assemble::SceneTexture* tex = nullptr;   // points into the scene (never moved)
-        assemble::SceneTexture solidCopy;              // the alpha-rewritten pixels, for the main_item cutout case
+        assemble::SceneTexture solidCopy;              // the rewritten pixels: alpha-thresholded (main_item cutout) or colour-graded (unbaked colour texture)
         std::string file;
     };
     std::vector<PendingEncode> pendingEncodes;
@@ -678,19 +679,39 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                         throw FormatError("the LOD export expected texture " + std::to_string(ti) + " (\"" + scene.textures[ti].name + "\") to have been written by the main export");
                     if (pmxTex < 0) {
                         // Encoded straight from the scene texture: copying a 2048 texture (16 MB) only to hand it to the
-                        // PNG encoder was a needless transient at export time. The solid variant needs its own copy
-                        // because its alpha channel is rewritten.
-                        assemble::SceneTexture solidCopy;
+                        // PNG encoder was a needless transient at export time. A rewritten copy is made only when the pixels
+                        // differ (the alpha-thresholded main_item cutout, or an unbaked colour texture the game's colour grade
+                        // has not touched yet).
+                        assemble::SceneTexture rewritten;
+                        bool rewrote = false;
                         const assemble::SceneTexture* tp = &scene.textures[ti];
                         if (solid) {
-                            solidCopy = scene.textures[ti];
-                            for (size_t px = 3; px < solidCopy.rgba.size(); px += 4) solidCopy.rgba[px] = solidCopy.rgba[px] < kItemCutout ? 0 : 255;
-                            tp = &solidCopy;
+                            rewritten = scene.textures[ti];
+                            for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = rewritten.rgba[px] < kItemCutout ? 0 : 255;
+                            rewrote = true;
+                        } else if (ColourGradeEnabled() && tp->srgb && !tp->bakedInShaderBake) {
+                            // The game grades its whole frame, translucent layers included. A colour texture the shader bake did
+                            // not write (no shader in the bundle, or the LOD's reused main export) carries raw bytes; the same
+                            // look-up the preview applies to its frame runs here so the PMX matches, alpha untouched.
+                            rewritten = scene.textures[ti];
+                            const size_t n = rewritten.rgba.size() / 4;
+                            std::vector<uint32_t> px(n);
+                            for (size_t i = 0; i < n; ++i)
+                                px[i] = (uint32_t(rewritten.rgba[i * 4 + 3]) << 24) | (uint32_t(rewritten.rgba[i * 4]) << 16) |
+                                        (uint32_t(rewritten.rgba[i * 4 + 1]) << 8) | rewritten.rgba[i * 4 + 2];
+                            ApplyColourGrade(px, 0u);
+                            for (size_t i = 0; i < n; ++i) {
+                                rewritten.rgba[i * 4] = (px[i] >> 16) & 255;
+                                rewritten.rgba[i * 4 + 1] = (px[i] >> 8) & 255;
+                                rewritten.rgba[i * 4 + 2] = px[i] & 255;
+                            }
+                            rewrote = true;
                         }
+                        if (rewrote) tp = &rewritten;
                         std::string file = "textures/" + safeFileName(tp->name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         log("texture " + tp->name + " (" + std::to_string(tp->width) + "x" + std::to_string(tp->height) + ")");
                         PendingEncode pe;
-                        if (solid) pe.solidCopy = std::move(solidCopy);
+                        if (rewritten.width > 0) pe.solidCopy = std::move(rewritten);
                         else pe.tex = tp;
                         pe.file = file;
                         pendingEncodes.push_back(std::move(pe));
