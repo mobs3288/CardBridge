@@ -1283,6 +1283,47 @@ void unitTests() {
         CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) == 0);   // the lining is single-sided
         CHECK((exporter::MmdMaterialLook(s, s.materials[0]).drawFlags & 0x01) != 0);   // the base keeps its authored (double-sided) flags
     });
+    // The Nihilux studio-alpha case, as authored: the twin has its own vertices, the same positions, the same cell grid, but
+    // antiswap (inward) winding with authored normals pointing into the garment — the old own-normals classifier read this as
+    // "wound with its normals, faces outward" and flipped it onto the outside of the coat; the sibling-relative read keeps it.
+    auto colocatedNin = [&] {
+        using namespace assemble;
+        Scene s;
+        SceneMaterial mb; mb.shader = "Shader Forge/main_opaque"; mb.name = "base"; mb.doubleSided = true;
+        SceneMaterial mt; mt.shader = "Shader Forge/main_alpha"; mt.alpha = true; mt.translucent = true; mt.name = "shell"; mt.doubleSided = true;
+        s.materials = {mb, mt};
+        SceneMesh mesh;
+        constexpr int NX = 8, NY = 6;
+        for (int y = 0; y <= NY; ++y)
+            for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0.0f, 0.0f, 1.0f}; mesh.vertices.push_back(v); }
+        for (int y = 0; y <= NY; ++y)
+            for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0.0f, 0.0f, -1.0f}; mesh.vertices.push_back(v); }   // the twin's copies, normals inward
+        const uint32_t rv = static_cast<uint32_t>((NX + 1) * (NY + 1));
+        auto vid = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
+        auto rid = [&](int x, int y) { return rv + static_cast<uint32_t>(y * (NX + 1) + x); };
+        auto cell = [&](SceneSubmesh& dst, int x, int y, bool reversed) {
+            const uint32_t a = rid(x, y), b = rid(x + 1, y), c = rid(x + 1, y + 1), d = rid(x, y + 1);
+            if (reversed) dst.indices.insert(dst.indices.end(), {a, c, b, a, d, c});
+            else dst.indices.insert(dst.indices.end(), {a, b, c, a, c, d});
+        };
+        SceneSubmesh base; base.material = 0;
+        for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x) {
+            const uint32_t a = vid(x, y), b = vid(x + 1, y), c = vid(x + 1, y + 1), d = vid(x, y + 1);
+            base.indices.insert(base.indices.end(), {a, b, c, a, c, d});
+        }
+        mesh.submeshes.push_back(base);
+        SceneSubmesh shell; shell.material = 1;
+        for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x) cell(shell, x, y, true);   // the twin wound the opposite way, its normals pointing inward
+        mesh.submeshes.push_back(shell);
+        s.meshes.push_back(mesh);
+        return s;
+    };
+    test("lining G: Nihilux studio-alpha twin (antiswap winding, inward normals) is kept as authored — not flipped onto the outside", [&] {
+        auto s = colocatedNin();
+        const char code = exporter::ColocatedLinings(s)[1];
+        CHECK(code == exporter::kLiningInward);
+        CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) == 0);   // single-sided, interior lining
+    });
     test("lining C: a co-located twin the author wound inward is an interior lining, single-sided, winding kept", [&] {
         auto s = colocated(true, 1, 0);
         const char code = exporter::ColocatedLinings(s)[1];

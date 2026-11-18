@@ -114,9 +114,10 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
 std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
 // One flag per scene material: it is the translucent, co-located twin of an opaque material in the same mesh (the
 // base layer and its "studio" lining share nearly all of their triangles). Such a layer is authored as the
-// garment's interior; depending on the winding it is classified as kLiningOutward (faces outward, reversed at
-// export so it faces inward), kLiningInward (already faces inward, kept as-is) or kLiningAmbiguous (mixed winding:
-// never guessed, drawn exactly as authored). Inside-out twins are single-sided and drawn only into the garment.
+// garment's interior; its winding relative to the opaque sibling decides the verdict: wound the same way it is the
+// cover shell (reversed at export so it faces into the garment), wound the opposite way it is already the interior
+// lining (kept as authored), mixed - kLiningAmbiguous - never guessed, drawn exactly as authored. Interior twins
+// are single-sided and culled from outside.
 std::vector<char> ColocatedLinings(const assemble::Scene& scene);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.

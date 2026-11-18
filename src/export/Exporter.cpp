@@ -309,14 +309,18 @@ std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene) {
 }
 
 // An opaque submesh and a translucent one cover the same surface (nearly all triangles shared positionally) inside one mesh: the
-// game's "studio" shell pattern - the translucent sibling was authored as the other's lining. The lining is not meant to win the
-// outside view; it is exported with its triangles reversed and single-sided, so it draws only as the garment's interior (white coat,
-// purple lining) instead of covering the outer layer with its colour.
+// game's "studio" shell pattern. The lining verdict is decided from the twin's winding relative to its opaque sibling's (per matched
+// triangle), never from the twin's own normals: a twin wound the same way as the opaque sibling is the covering shell and is exported
+// reversed (so it faces into the garment); a twin wound the opposite way is already the interior lining and is kept as authored.
+// Both cases are written single-sided, so the opaque layer wins the outside view; from inside the garment the twin is the interior lining.
 //
-// The detector is deliberately conservative: orientation is established only from the layer's own winding relative to its own authored
-// normals (per matched triangle, uniform or mixed). Co-located geometry alone cannot say which side of a shared surface an author
-// intended as the fashion layer - for a byte-identical duplicate there is no such signal. A layer whose winding is mixed therefore
-// gets no treatment at all: ambiguous, preserve original behaviour exactly (never guess).
+// The verdict is deliberately conservative: orientation is established only from the twin's winding relative to its sibling's (per matched
+// triangle, uniform or mixed). Co-located geometry alone cannot say which side an author intended as the interior - a layer whose relative
+// winding is mixed therefore gets no treatment at all: ambiguous, preserve original behaviour exactly (never guess).
+// Diagnostic dump for the lining classifier (CARDBRIDGE_LINT_LINING=1): every candidate pair with its counts and
+// verdict, so an export can be audited without a debugger.
+static bool LintLining() { static const bool on = std::getenv("CARDBRIDGE_LINT_LINING") != nullptr; return on; }
+
 std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
     std::vector<char> out(scene.materials.size(), kLiningNone);
     struct Key {
@@ -328,6 +332,7 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
         struct Sub {
             int material = -1;
             std::vector<Key> keys;          // one Key per triangle, the centroid
+            std::vector<float> gx, gy, gz;  // the triangle's geometric normal (unnormalised), for the sibling-relative winding sign
             std::vector<char> facing;       // per triangle: +1 winds with its authored normal (faces outward), -1 against (faces inward), 0 degenerate
         };
         std::vector<Sub> subs;
@@ -336,6 +341,7 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
             s.material = sm.material;
             const auto& V = mesh.vertices;
             s.keys.reserve(sm.indices.size() / 3);
+            s.gx.reserve(sm.indices.size() / 3); s.gy.reserve(sm.indices.size() / 3); s.gz.reserve(sm.indices.size() / 3);
             s.facing.reserve(sm.indices.size() / 3);
             for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
                 const size_t ia = sm.indices[i], ib = sm.indices[i + 1], ic = sm.indices[i + 2];
@@ -347,18 +353,21 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
                 // geometric winding (b-a)x(c-a) vs the authored normals: which side of the surface is its authored front?
                 const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
                 const float gx = uy * vz - uz * vy, gy = uz * vx - ux * vz, gz = ux * vy - uy * vx;
+                s.gx.push_back(gx); s.gy.push_back(gy); s.gz.push_back(gz);
                 const float d = gx * (na.x + nb.x + nc.x) + gy * (na.y + nb.y + nc.y) + gz * (na.z + nb.z + nc.z);
                 s.facing.push_back(d > 1e-12f ? 1 : (d < -1e-12f ? -1 : 0));
             }
-            // keep keys and facing aligned when sorted by key
+            // keep keys, facing and the cross products aligned when sorted by key
             std::vector<size_t> ord(s.keys.size());
             for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
             std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return s.keys[x] < s.keys[y]; });
-            std::vector<Key> sk; std::vector<char> sf;
+            std::vector<Key> sk; std::vector<char> sf; std::vector<float> ps, py, pz;
             sk.reserve(s.keys.size()); sf.reserve(s.facing.size());
-            for (size_t i : ord) { sk.push_back(s.keys[i]); sf.push_back(s.facing[i]); }
+            ps.reserve(s.gx.size()); py.reserve(s.gy.size()); pz.reserve(s.gz.size());
+            for (size_t i : ord) { sk.push_back(s.keys[i]); sf.push_back(s.facing[i]); ps.push_back(s.gx[i]); py.push_back(s.gy[i]); pz.push_back(s.gz[i]); }
             s.keys.swap(sk);
             s.facing.swap(sf);
+            s.gx.swap(ps); s.gy.swap(py); s.gz.swap(pz);
             subs.push_back(std::move(s));
         }
         for (size_t i = 0; i < subs.size(); ++i) {
@@ -380,24 +389,41 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
                 const Sub& outer = aTr ? subs[j] : subs[i];   // the opaque sibling (unchanged at export)
                 const Sub& inner = aTr ? subs[i] : subs[j];   // the translucent twin (the lining)
                 const int matLin = aTr ? subs[i].material : subs[j].material;
-                size_t outward = 0, inward = 0;
-                // facing is kept aligned with keys; orientation is read off the lining's own winding against its own
-                // authored normals, counted over the matched triangles only (the common multiset with the opaque sibling).
+                size_t aligned = 0, opposed = 0;
+                // Orientation is read off the twin's winding relative to its sibling's, counted over the matched triangles only
+                // (aligned = the two submeshes wind the same way about the shared surface; opposed = the twin winds the other way).
                 size_t mi2 = 0, mj2 = 0;
                 while (mi2 < inner.keys.size() && mj2 < outer.keys.size()) {
                     if (inner.keys[mi2] < outer.keys[mj2]) { ++mi2; continue; }
                     if (outer.keys[mj2] < inner.keys[mi2]) { ++mj2; continue; }
-                    const char f = inner.facing[mi2];
-                    if (f > 0) ++outward;
-                    else if (f < 0) ++inward;
+                    const float d = inner.gx[mi2] * outer.gx[mj2] + inner.gy[mi2] * outer.gy[mj2] + inner.gz[mi2] * outer.gz[mj2];
+                    if (d > 1e-12f) ++aligned;
+                    else if (d < -1e-12f) ++opposed;
                     ++mi2; ++mj2;
                 }
-                const size_t matched = outward + inward;
+                const size_t matched = aligned + opposed;
                 char verdict;
-                if (matched == 0) verdict = kLiningAmbiguous;             // degenerate normals: fall back, do not guess
-                else if (outward * 20 >= matched * 19) verdict = kLiningOutward;   // >=95% wind outward (authored front)
-                else if (inward * 20 >= matched * 19) verdict = kLiningInward;     // >=95% wind inward (already an interior)
+                if (matched == 0) verdict = kLiningAmbiguous;             // degenerate triangles: fall back, do not guess
+                else if (aligned * 20 >= matched * 19) verdict = kLiningOutward;   // >=95% wound like the sibling: the cover, reversed at export
+                else if (opposed * 20 >= matched * 19) verdict = kLiningInward;     // >=95% wound opposite the sibling: the interior lining as authored, kept
                 else verdict = kLiningAmbiguous;                            // mixed: never guess
+                if (LintLining()) {
+                    size_t degenerate = 0, ownOutward = 0, ownInward = 0, mo = 0, mt = 0;
+                    while (mo < inner.keys.size() && mt < outer.keys.size()) {
+                        if (inner.keys[mo] < outer.keys[mt]) { ++mo; continue; }
+                        if (outer.keys[mt] < inner.keys[mo]) { ++mt; continue; }
+                        if (inner.facing[mo] > 0) ++ownOutward; else if (inner.facing[mo] < 0) ++ownInward; else ++degenerate;
+                        ++mo; ++mt;
+                    }
+                    const auto& ma = scene.materials[static_cast<size_t>(outer.material)];
+                    const auto& mb = scene.materials[static_cast<size_t>(inner.material)];
+                    std::fprintf(stderr,
+                        "lining pair mesh='%s' opaque mat %d '%s' tri %zu | translucent mat %d '%s' tri %zu | common %zu (%.1f%% of smaller, %.1f%% of larger) | matched %zu (aligned %zu opposed %zu; own-normals outward %zu inward %zu degenerate %zu) | verdict %d\n",
+                        mesh.name.c_str(), outer.material, ma.name.c_str(), outer.keys.size(), inner.material, mb.name.c_str(), inner.keys.size(), common,
+                        common * 100.0 / (outer.keys.size() < inner.keys.size() ? outer.keys.size() : inner.keys.size()),
+                        common * 100.0 / (outer.keys.size() < inner.keys.size() ? inner.keys.size() : outer.keys.size()),
+                        matched, aligned, opposed, ownOutward, ownInward, degenerate, static_cast<int>(verdict));
+                }
                 const size_t mv = static_cast<size_t>(matLin);
                 if (out[mv] == kLiningNone) out[mv] = verdict;
                 else if (out[mv] != verdict) out[mv] = kLiningAmbiguous;    // inconsistent across meshes: never guess
@@ -763,6 +789,8 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                 pm.memo = "part=" + part.id + "; material=" + mat.name + "; shader=" + mat.shader;
                 const bool garment = static_cast<size_t>(sm.material) < garmentMaterials.size() && garmentMaterials[static_cast<size_t>(sm.material)] != 0;
                 const char liningCode = static_cast<size_t>(sm.material) < linings.size() ? linings[static_cast<size_t>(sm.material)] : kLiningNone;
+                if (LintLining() && (mesh.name.find("botacc") != std::string::npos || mesh.name.find("bota") != std::string::npos || mesh.name.find("o_bra_a") != std::string::npos))
+                    std::fprintf(stderr, "emit mesh='%s' sub=%d sm.material=%d liningCode=%d\n", mesh.name.c_str(), sub - 1, sm.material, static_cast<int>(liningCode));
                 const MmdLook look = MmdMaterialLook(scene, mat, garment, liningCode);
                 pm.diffuse = look.diffuse;
                 pm.ambient = look.ambient;
