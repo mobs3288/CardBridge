@@ -561,6 +561,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Default the viewport to the "as exported" (MMD look) view — the same image the PMX export produces.
         // The bake runs in the background; WM_EXP_READY switches the view on once it is ready. X (the MMD button) toggles back.
         if (L && g.gpu.ready()) ToggleAsExported();
+        // Keep the loading bar alive while the bake is in flight - hiding it now would drop the user onto the
+        // interactive view until the bake finished. WM_EXP_READY hides it (on success and on failure alike) and flips the view.
+        if (g.expBusy.load()) ProgSet(0.98, "rendering the exported preview (MMD look)"); else ProgEnd();
         // The exported PMX's morphs, for the Morphs tab (all weights at 0 on a fresh character)
         {   // a new character: the cached optimized scenes and the applied export setting belonged to the previous one; the preset stays as a preference
             g.opt.applied = OptApplied{};
@@ -574,7 +577,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (L) LoadMorphCatalog();
         else { g.morphCatalog = {}; g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); }
-        ProgEnd();
+        if (!g.expBusy.load()) ProgEnd();   // only close the bar here when no exported-preview bake is in flight (WM_EXP_READY closes it)
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
         // Materials: capture a fresh baseline for the new character.
