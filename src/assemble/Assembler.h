@@ -36,6 +36,7 @@ struct AssembleOptions {
     std::string bodyRigPrefab = "p_cf_body_bone";
     std::string headRigPrefab = "p_cf_head_bone";
     bool applyShape = true;                // apply the card's body sliders to the skeleton
+    bool settleHeels = true;               // the foot-lift pass (only the heel pose moves the character, not the bind); false for the disposable layer assemblies whose vertices are grafted away
     std::string headAttachBone = "cf_s_head";   // where the head rig hangs (ChaReference HeadParent)
     // Tweaks from the viewer. A slider vector replaces the card's own values index by index (shorter = the rest stay the card's);
     // empty = the card's. Body has 44 sliders, face 52 (shape::BodySliders / FaceSliders say what each one is).

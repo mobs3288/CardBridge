@@ -601,6 +601,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 bool applyPin = true;
                 if (pin.dstOutfit >= 0) applyPin = pin.dstOutfit == shown && pin.dstOutfit < static_cast<int>(c.outfits.size());
                 if (!applyPin) continue;
+                // A selective pin whose decision map is empty would re-apply with the *suggested* actions
+                // (Replace the lot) on reload — never do that; the import selected replace-your-slot or nothing.
+                if (pin.mode == 2 && pin.decisions.empty()) { Log("selective import: skipped an empty pin (nothing to merge)"); continue; }
                 const card::ImageSourceKind srcKind = card::DetectImageSource(pin.path);
                 ProgSet(0.20, pin.mode == 2 ? "applying selective import" : pin.mode == 1 ? "applying coordinate import" : "applying outfit source (clothing)");
                 const std::string layerTag = clothingPins.size() > 1 ? " (layer " + std::to_string(layerIndex) + "/" + std::to_string(clothingPins.size()) + ")" : std::string();

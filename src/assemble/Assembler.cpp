@@ -3985,10 +3985,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             mergeOpt.outfit = mergeOutfit;
             mergeOpt.srcOutfit = spec.srcOutfit;
             card::ApplySelectiveOutfitSource(copy, spec.path, mergeOpt, decisions);
-            // assemble the disposable copy; the graft only takes the layers' parts
+            // assemble the disposable copy; the graft only takes the layers' parts. The layer scene
+            // is discarded after the graft, so it must not apply the foot-lift pass: that lift bakes
+            // into the vertices, it would double the shown character's own lift once the destination assembly runs it.
             AssembleOptions layerOpt = opt;
             layerOpt.layers.clear();
             layerOpt.outfit = mergeOutfit;
+            layerOpt.settleHeels = false;
             Scene layer = Assemble(copy, resolver, layerOpt);
             // graft; the layer scene is discarded after
             GraftLayerScene(scene, std::move(layer), slotNames, layerSlotIdx);
@@ -4309,7 +4312,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0 || pr.first.rfind("_overcolor", 0) == 0 || pr.first == "_nipsize" || pr.first.rfind("_paint", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
             std::fprintf(stderr, "\n");
         }
-    settleHeels(scene);
+    if (opt.settleHeels) settleHeels(scene);
     {   // proportion diagnostics: informational findings about this card's sliders and ABMX table ([proportions] in the issues panel)
         for (const auto& f : AnalyzeCard(card))
             scene.warn("proportions", f.property + " — " + f.reason + (f.safety >= kSafetyManual ? " (manual review)" : "; suggested: " + f.suggestion));

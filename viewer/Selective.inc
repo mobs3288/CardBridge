@@ -2114,18 +2114,24 @@ void SelApply() {
             lp.layerSlots = spec.slots;
             g.clothingPins.push_back(std::move(lp));
         }
-        // everything else becomes/extends a normal (mode 2) pinned merge
+        // everything else becomes/extends a normal (mode 2) pinned merge — nothing at all when every component
+        // was set to Add Layer. Pushing an empty pair would land the whole file with the *suggested* (Replace)
+        // actions on reload after an additive apply — that is what replaced the previous outfit silently.
         card::SelectiveDecisions merge;
         for (const auto& [key, action] : g.sel.decisions)
             if (action != card::SelectiveAction::AddLayer) merge.actions[key] = action;
-        ClothingPin pin;
-        pin.path = g.sel.srcPath;
-        pin.name = (name.empty() ? fileio::FileName(g.sel.srcPath) : name) + " (selective)";
-        pin.mode = 2;
-        pin.srcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
-        pin.dstOutfit = outfit;
-        pin.decisions = merge.actions;
-        g.clothingPins.push_back(std::move(pin));
+        const bool mergeImports = std::any_of(merge.actions.begin(), merge.actions.end(),
+                                              [](const auto& kv) { return kv.second != card::SelectiveAction::Skip; });
+        if (mergeImports) {   // only pin the merge when it imports something; a pure Add-Layer apply pushes no merge pin
+            ClothingPin pin;
+            pin.path = g.sel.srcPath;
+            pin.name = (name.empty() ? fileio::FileName(g.sel.srcPath) : name) + " (selective)";
+            pin.mode = 2;
+            pin.srcOutfit = g.sel.srcIsCoordinate ? g.sel.srcOutfit : -1;
+            pin.dstOutfit = outfit;
+            pin.decisions = merge.actions;
+            g.clothingPins.push_back(std::move(pin));
+        }
         layerCount = g.clothingPins.size();
     }
     const size_t layerSpecCount = [&] { size_t n = 0; for (const auto& kv : g.sel.decisions) if (kv.second == card::SelectiveAction::AddLayer) ++n; return n; }();
