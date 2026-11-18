@@ -8,6 +8,9 @@
 //   CARDBRIDGE_TEST_OUT      scratch folder for the exported result
 //
 // Without them the integration tests are skipped, not failed.
+//
+// Output is quiet by default: a dot per passing test, then a one-line summary. On failure every failed test is
+// listed with its failing checks and a total. Set CARDBRIDGE_TEST_VERBOSE=1 for per-test [ RUN ]/[ OK ] lines.
 
 #include "assemble/BodySuppression.h"
 #include "assemble/Assembler.h"
@@ -84,14 +87,25 @@ namespace {
 
 int g_failed = 0, g_run = 0, g_skipped = 0;
 
-#define CHECK(cond) do { ++g_run; if (!(cond)) { ++g_failed; std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+// The runner is quiet by default: no per-test output, then a summary — on failure,
+// every failed test is listed with its failing checks and a total. Set CARDBRIDGE_TEST_VERBOSE=1 for the old
+// per-test [ RUN ]/[ OK ]/[ FAIL ] lines (a crash mid-suite names its test only in verbose mode).
+const bool g_verbose = std::getenv("CARDBRIDGE_TEST_VERBOSE") != nullptr;
+std::string g_current;                                  // the test running right now (tags its failure lines)
+struct FailureLine { std::string test, detail; };
+std::vector<FailureLine> g_failures;                    // every failing check, in run order
+
+#define CHECK(cond) do { ++g_run; if (!(cond)) { ++g_failed; \
+    g_failures.push_back({g_current, std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " #cond}); } } while (0)
 
 void test(const char* name, const std::function<void()>& f) {
-    std::printf("[ RUN  ] %s\n", name);
-    std::fflush(stdout);                              // a crashing test must name itself in the log
+    g_current = name;
+    if (g_verbose) { std::printf("[ RUN  ] %s\n", name); std::fflush(stdout); }
     int before = g_failed;
-    try { f(); } catch (const std::exception& e) { ++g_failed; std::printf("  FAIL exception: %s\n", e.what()); }
-    std::printf("[ %s ] %s\n", g_failed == before ? " OK " : "FAIL", name);
+    try { f(); } catch (const std::exception& e) { ++g_failed; g_failures.push_back({name, std::string("exception: ") + e.what()}); }
+    catch (...) { ++g_failed; g_failures.push_back({name, "unknown exception"}); }
+    const bool ok = g_failed == before;
+    if (g_verbose) std::printf("[ %s ] %s\n", ok ? " OK " : "FAIL", name);
     std::fflush(stdout);
 }
 
@@ -1236,7 +1250,7 @@ void unitTests() {
         for (int y = 0; y <= NY; ++y)
             for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0.0f, 0.0f, 1.0f}; mesh.vertices.push_back(v); }
         if (relocate)
-            for (int y = 0; y <= NY / 2; ++y)
+            for (int y = 0; y <= NY; ++y)   // the lifted grid covers every row the relocated cells touch (rid() goes up to NY)
                 for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x + 500), float(y), 0.0f}; v.normal = {0.0f, 0.0f, 1.0f}; mesh.vertices.push_back(v); }
         const uint32_t rv = static_cast<uint32_t>((NX + 1) * (NY + 1));
         auto vid = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
@@ -2488,7 +2502,7 @@ void unitTests() {
                 return last;
             };
             const int tSim = settledAt(lagSim, 0.015), tRef = settledAt(lagRef, 0.015);
-            std::printf("  %-12s peak lag sim %.3f m ref %.3f m; within 1.5 cm for good after %.2f s (sim) %.2f s (ref); final lag ref %.4f m; speed %.4f; largest joint angle %.2f rad\n", su.what, peakSim, peakRef, tSim / 60.0, tRef / 60.0, lagRef.back(), ref.speed(), maxAngle);
+            if (g_verbose) std::printf("  %-12s peak lag sim %.3f m ref %.3f m; within 1.5 cm for good after %.2f s (sim) %.2f s (ref); final lag ref %.4f m; speed %.4f; largest joint angle %.2f rad\n", su.what, peakSim, peakRef, tSim / 60.0, tRef / 60.0, lagRef.back(), ref.speed(), maxAngle);
             CHECK(peakRef < 0.45);                                  // never flung past the head's own move
             CHECK(std::fabs(lagRef.back()) < 0.01 && ref.speed() < 0.5);   // hangs straight under the anchor again and is at rest
             CHECK(tRef <= 420);                                     // and does so within 7 s
@@ -2517,7 +2531,7 @@ void unitTests() {
             springref::Chain ref(back, 9.8 * scale);
             for (int f = 0; f < 900; ++f) ref.step();
             const double tipDrop = (back.bodies[0].pos.y - ref.jointPoint(ref.pinCount() - 1).y) / scale;   // below where the anchor stands, metres
-            std::printf("  ribbon droop: tip %.3f m below its rest height over a strand of 0.3 m, speed %.4f\n", tipDrop, ref.speed());
+            if (g_verbose) std::printf("  ribbon droop: tip %.3f m below its rest height over a strand of 0.3 m, speed %.4f\n", tipDrop, ref.speed());
             bool locked = true;   // as loose as it gets, standing out sideways: gravity beats the spring, so every joint is written locked
             for (const auto& j : back.joints) locked = locked && j.rotUpper.z == 0.0f && j.rotLower.z == 0.0f;
             CHECK(locked || (tipDrop > 0.0 && tipDrop < 0.15 && ref.speed() < 0.05));
@@ -2553,7 +2567,7 @@ void unitTests() {
             CHECK(crossings.size() >= 3);
             if (crossings.size() >= 3) {
                 const double measured = (crossings.back() - crossings.front()) / double(crossings.size() - 1);
-                std::printf("  reference pendulum: period %.3f s measured, %.3f s from sqrt(K / I)\n", measured, period);
+                if (g_verbose) std::printf("  reference pendulum: period %.3f s measured, %.3f s from sqrt(K / I)\n", measured, period);
                 CHECK(std::fabs(measured - period) < 0.06 * period);
             }
         }
@@ -9175,6 +9189,24 @@ int main() {
     lodPreserveTests();
     customHairTests();
     integrationTests();
+    if (!g_verbose) std::putchar('\n');
+    if (!g_failures.empty()) {
+        // every failed test, in run order, with its failing checks, then a total
+        std::vector<std::string> order;
+        for (const auto& fl : g_failures) if (order.empty() || order.back() != fl.test) order.push_back(fl.test);
+        std::printf("\nFAILURES in %zu test(s):\n", order.size());
+        size_t totalFailed = 0;
+        for (const auto& name : order) {
+            size_t n = 0;
+            for (const auto& fl : g_failures) if (fl.test == name) ++n;
+            totalFailed += n;
+            std::printf("[FAIL] %s (%zu check%s)\n", name.c_str(), n, n == 1 ? "" : "s");
+            for (const auto& fl : g_failures) if (fl.test == name) std::printf("    %s\n", fl.detail.c_str());
+        }
+        std::printf("total: %zu failed check(s) across %zu test(s)\n", totalFailed, order.size());
+    } else {
+        std::printf("all checks passed\n");
+    }
     std::printf("\n%d checks, %d failed, %d integration suite(s) skipped\n", g_run, g_failed, g_skipped);
     return g_failed ? 1 : 0;
 }

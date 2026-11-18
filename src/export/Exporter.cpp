@@ -338,10 +338,12 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
             s.keys.reserve(sm.indices.size() / 3);
             s.facing.reserve(sm.indices.size() / 3);
             for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
-                const auto& a = V[sm.indices[i]].pos, &b = V[sm.indices[i + 1]].pos, &c = V[sm.indices[i + 2]].pos;
+                const size_t ia = sm.indices[i], ib = sm.indices[i + 1], ic = sm.indices[i + 2];
+                if (ia >= V.size() || ib >= V.size() || ic >= V.size()) continue;   // malformed mesh: never read out of bounds
+                const auto& a = V[ia].pos, &b = V[ib].pos, &c = V[ic].pos;
                 s.keys.push_back({std::llround((a.x + b.x + c.x) / 3.0 * 1000.0), std::llround((a.y + b.y + c.y) / 3.0 * 1000.0),
                                   std::llround((a.z + b.z + c.z) / 3.0 * 1000.0)});
-                const auto& na = V[sm.indices[i]].normal, &nb = V[sm.indices[i + 1]].normal, &nc = V[sm.indices[i + 2]].normal;
+                const auto& na = V[ia].normal, &nb = V[ib].normal, &nc = V[ic].normal;
                 // geometric winding (b-a)x(c-a) vs the authored normals: which side of the surface is its authored front?
                 const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
                 const float gx = uy * vz - uz * vy, gy = uz * vx - ux * vz, gz = ux * vy - uy * vx;
