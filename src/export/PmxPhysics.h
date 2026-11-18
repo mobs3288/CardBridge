@@ -34,7 +34,10 @@ constexpr uint8_t kPmxGroupChain = 1;
 // bodies whose mass follows the setting and tapers toward the tip, damping derived from the damper (1 - exp(-c / 2m)), and a
 // three-axis joint whose limits follow the amplitudes (X the forward / back flop, Z the sideways sway, Y a small twist), with
 // springs derived from the same stiffness and mass as the preview. This keeps what the viewer simulates and what
-// MikuMikuDance plays from the same numbers.
+// MikuMikuDance plays from the same numbers. The two sides of a bust / hip pair are additionally tied together by one soft
+// coordination 6-DOF joint per corresponding rotating link (a share of the link's hold spring on the relative rotation plus a
+// hard envelope at 75% of the link's own), so the pair reads as one connected structure with independently deformable sides
+// instead of two independent objects; common motion costs nothing (both bodies turning together keeps the relative rotation at zero).
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
                 const assemble::JiggleSettings& jiggle = {});
 

@@ -2971,7 +2971,7 @@ void unitTests() {
         }
     });
 
-    test("jiggle: each side is simulated independently, the other side does not move", [&makeJiggleScene] {
+    test("jiggle: a one-sided move does not force the other side to jump in a single update", [&makeJiggleScene] {
         using namespace assemble;
         Scene s;
         s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
@@ -3002,7 +3002,58 @@ void unitTests() {
         const Vec3 pl = skin[3].point(s.bones[3].pos);
         const Vec3 pr = skin[5].point(s.bones[5].pos);
         CHECK(pl.x - 0.09f > 0.01f);                  // the left side followed its own bone
-        CHECK(std::fabs(pr.x - (-0.09f)) < 0.02f);    // the right side did not budge
+        CHECK(std::fabs(pr.x - (-0.09f)) < 0.02f);    // the right side did not budge in a single update
+        const float follow0 = pr.x - (-0.09f);
+        CHECK(follow0 >= 0.0f);                       // the fascia started to pull it (or held it), never pushed it off
+        CHECK(follow0 < 0.02f);                       // and imperceptibly so in a single update
+        // over time the forced side sways toward its edit and the unforced side is dragged only subtly along by the fascia
+        for (int i = 0; i < 600; ++i) sim.Step(s, pw, 1, skin);
+        const Vec3 ql = skin[3].point(s.bones[3].pos);
+        const Vec3 qr = skin[5].point(s.bones[5].pos);
+        CHECK(ql.x > 0.12f);            // the left side swayed substantially toward its edit
+        CHECK(qr.x > -0.09f + 0.005f);  // the fascia dragged the unforced side along, in the edit's direction
+        CHECK(qr.x < -0.09f + 0.06f);   // but subtly: nowhere near a rigid share of the shove
+    });
+
+    test("jiggle: symmetric forcing moves the two sides alike (no hidden parameter skew)", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene r;   // the left/right pair, mirroring the coordination test
+        r.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        r.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        r.bones.push_back({"cf_s_bnip02_L", 1, {0.08f, 1.05f, 0.1f}, "rig"});
+        r.bones.push_back({"cf_s_bnip02_L2", 2, {0.09f, 0.95f, 0.12f}, "rig"});
+        r.bones.push_back({"cf_s_bnip02_R", 1, {-0.08f, 1.05f, 0.1f}, "rig"});
+        r.bones.push_back({"cf_s_bnip02_R2", 4, {-0.09f, 0.95f, 0.12f}, "rig"});
+        SceneChain left;
+        left.name = "bust_L";
+        left.bones = {2, 3};
+        left.characterOwn = true;
+        SceneChain right;
+        right.name = "bust_R";
+        right.bones = {4, 5};
+        right.characterOwn = true;
+        r.chains.push_back(left);
+        r.chains.push_back(right);
+        const Pose rest;
+        std::vector<Mat4> pw = BoneWorlds(r, rest);
+        PhysicsSim sim;
+        sim.Reset(r, pw, true, true, JiggleSettings{});
+        std::vector<Mat4> skin(r.bones.size());
+        Pose jump;
+        jump.edit(0).pos = {0, 0.08f, 0};   // the chest jumps vertically, symmetrically
+        pw = BoneWorlds(r, jump);
+        sim.Step(r, pw, 1, skin);
+        const Vec3 pl = skin[3].point(r.bones[3].pos);
+        const Vec3 pr = skin[5].point(r.bones[5].pos);
+        CHECK(std::fabs(pl.x + pr.x) < 1e-4f);               // the pair responds mirror-symmetrically (x mirrors, y and z agree)
+        CHECK(std::fabs((pl.y - 0.95f) - (pr.y - 0.95f)) < 1e-4f);
+        CHECK(std::fabs((pl.z - 0.12f) - (pr.z - 0.12f)) < 1e-4f);
+        for (int i = 0; i < 300; ++i) sim.Step(r, pw, 1, skin);
+        const Vec3 ql = skin[3].point(r.bones[3].pos);
+        const Vec3 qr = skin[5].point(r.bones[5].pos);
+        CHECK(std::fabs(ql.x + qr.x) < 1e-3f);               // and stays mirror-symmetric over time
+        CHECK(std::fabs((ql.y - 0.95f) - (qr.y - 0.95f)) < 1e-3f);
+        CHECK(std::fabs((ql.z - 0.12f) - (qr.z - 0.12f)) < 1e-3f);
     });
 
     test("jiggle: amplitude zero locks the axis to the posed pose exactly", [&makeJiggleScene] {
@@ -3210,7 +3261,7 @@ void unitTests() {
         CHECK(JiggleJointRange(natural, true, 0) > JiggleJointRange(natural, true, 2));   // the flop is the widest axis
     });
 
-    test("jiggle: PMX joint limits open the sway more than the twist, and the side asymmetry differs between the two breasts", [&makeJiggleScene] {
+    test("jiggle: PMX joint limits open the sway more than the twist, and the two sides share symmetric physics", [&makeJiggleScene] {
         using namespace assemble;
         // A card with only lateral sway unlocked and everything else zeroed: the MMD's sideways range (Z) must open, vertical/depth (X) and twist (Y) stay shut.
         Scene s;
@@ -3235,18 +3286,75 @@ void unitTests() {
         CHECK(m.joints[1].rotUpper.z > 0.3f);     // the sway opens wide
         CHECK(m.joints[1].rotUpper.y > 0.0f);     // a little twist remains, narrower than the sway
         CHECK(m.joints[1].rotUpper.z > m.joints[1].rotUpper.y);
-        // the two sides do not share the same mass: the left and the right differ by a few percent (they never bounce as one)
+        // the two sides share the same physical parameters (the fascia coordination, not a hidden parameter skew, keeps them from moving as one rigid pair)
         Scene r = s;
         r.bones[2].name = "cf_s_bnip02_R";
         r.bones[3].name = "cf_s_bnip02_R2";
         r.chains[0].name = "bust_R";
         pmx::Model mr;
         for (const auto& b : r.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; mr.bones.push_back(pb); }
-        JiggleSettings natural;
-        exporter::AddPhysics(r, mr, 10.0f, true, false, natural);
+        exporter::AddPhysics(r, mr, 10.0f, true, false, lateral);
         CHECK(mr.rigidBodies.size() == m.rigidBodies.size());
-        CHECK(mr.rigidBodies[1].mass != m.rigidBodies[1].mass);
-        CHECK(std::fabs(mr.rigidBodies[1].mass - m.rigidBodies[1].mass) < 0.08f);   // only a few percent, the two stay coordinated
+        CHECK(mr.rigidBodies[1].mass == m.rigidBodies[1].mass);   // identical tissue: identical numbers on both sides
+        CHECK(mr.joints[1].springRot.x == m.joints[1].springRot.x);
+        CHECK(mr.joints[1].rotUpper.x == m.joints[1].rotUpper.x);
+    });
+
+    test("jiggle: both bust chains get one soft coordination joint per corresponding rotating link", [&makeJiggleScene] {
+        using namespace assemble;
+        Scene s;
+        s.bones.push_back({"cf_j_chest01", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_j_chest02", 0, {0, 1.15f, 0.05f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L", 1, {0.08f, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L2", 2, {0.09f, 0.95f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L3", 3, {0.10f, 0.85f, 0.13f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_R", 1, {-0.08f, 1.05f, 0.1f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_R2", 5, {-0.09f, 0.95f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_R3", 6, {-0.10f, 0.85f, 0.13f}, "rig"});
+        SceneChain left;
+        left.name = "bust_L";
+        left.bones = {2, 3, 4};
+        left.characterOwn = true;
+        left.damping = 0.1f; left.elasticity = 0.1f; left.stiffness = 0.1f;
+        SceneChain right;
+        right.name = "bust_R";
+        right.bones = {5, 6, 7};
+        right.characterOwn = true;
+        right.damping = 0.1f; right.elasticity = 0.1f; right.stiffness = 0.1f;
+        s.chains.push_back(left);
+        s.chains.push_back(right);
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+        exporter::AddPhysics(s, m, 10.0f, true, false);
+        // 2 anchors + 6 link bodies; 2 anchor joints + 2 link joints per side; plus one coordination joint per corresponding link (3 links - 1 root? roots are chest-locked)
+        size_t coord = 0;
+        int coordA = -1, coordB = -1;
+        for (size_t j = 0; j < m.joints.size(); ++j) {
+            const pmx::Joint& jt = m.joints[j];
+            if (jt.name.find("coordination") == std::string::npos) continue;
+            ++coord;
+            const pmx::RigidBody& A = m.rigidBodies[static_cast<size_t>(jt.bodyA)];
+            const pmx::RigidBody& B = m.rigidBodies[static_cast<size_t>(jt.bodyB)];
+            // the coordination joint always couples the LEFT link (_L bone) with the RIGHT link (_R bone)
+            CHECK(s.bones[static_cast<size_t>(A.bone)].name.find("_L") != std::string::npos);
+            CHECK(s.bones[static_cast<size_t>(B.bone)].name.find("_R") != std::string::npos);
+            CHECK(jt.springRot.x > 0.0f);
+            CHECK(jt.springRot.x == jt.springRot.y && jt.springRot.y == jt.springRot.z);
+            CHECK(jt.rotUpper.x > 0.0f && jt.rotUpper.x <= 0.60f);
+            CHECK(jt.rotUpper.y < jt.rotUpper.x && jt.rotUpper.z < jt.rotUpper.x);   // the coordination envelope keeps the link's axis proportions
+            coordA = jt.bodyA; coordB = jt.bodyB;
+        }
+        CHECK(coord == 2);   // the two rotating links per side (the chest-locked root is not coupled)
+        CHECK(coordA >= 0 && coordB >= 0);
+        // an unpaired chain exports no coordination joints
+        Scene one = s;
+        one.chains.pop_back();   // drop the right side
+        pmx::Model m1;
+        for (const auto& b : one.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m1.bones.push_back(pb); }
+        exporter::AddPhysics(one, m1, 10.0f, true, false);
+        size_t coord1 = 0;
+        for (const auto& jt : m1.joints) if (jt.name.find("coordination") != std::string::npos) ++coord1;
+        CHECK(coord1 == 0);
     });
 
     test("jiggle: re-resetting with a fresh pose restarts from rest (no stale velocity)", [&makeJiggleScene] {
@@ -8708,16 +8816,22 @@ void integrationTests() {
             //   * a chain whose PhysicsChainBones bone-index sequence was already exported in this run is skipped (a card can resolve the
             //     same DynamicBone twice, e.g. the kimono item scanning the component into two items) - keep the first occurrence only;
             //   * the exporter also synthesises limb capsules (shoulder-to-hand, knee-to-shin per side) so chains slide off them; they
-            //     are kinematic bodies with no joints.
+            //     are kinematic bodies with no joints;
+            //   * and each exported bust / hip pair gets one coordination joint per corresponding rotating link (the chest-locked root
+            //     is not coupled; a chain with no counterpart on the other side gets none).
             const bool jiggleOn = assemble::SanitizeJiggleSettings(eo.jiggle).strength > 0.0f;
             size_t colBodies = 0, chainBodies = 0, anchorBodies = 0, limbBodies = 0, dupSequences = 0;
             std::set<std::vector<int>> exportedSequences;
+            std::vector<std::pair<bool, std::pair<int, size_t>>> coordChains;   // (isBust, side, rotating link count) of every exported characterOwn chain
             for (const auto& chain : scene.chains) {
                 if (chain.bones.size() < 2) continue;
                 bool on = true;
+                bool bust = false;
+                int side = 0;
                 if (chain.characterOwn) {
-                    const bool bust = assemble::IsBustJiggleChain(scene, chain);
+                    bust = assemble::IsBustJiggleChain(scene, chain);
                     on = jiggleOn && ((bust && eo.jiggleBust) || (!bust && eo.jiggleButt));
+                    side = assemble::BoneSideSign(scene.bones[static_cast<size_t>(chain.bones[0])].name);
                 }
                 if (!on) continue;
                 const std::vector<int> bones = exporter::PhysicsChainBones(scene, chain);   // same sequence the exporter keys its dedup on
@@ -8728,7 +8842,18 @@ void integrationTests() {
                 if (chain.characterOwn && scene.bones[static_cast<size_t>(bones.front())].parent >= 0) {
                     ++anchorBodies;   // the kinematic anchor on the parent bone
                     ++expectJoints;   // the rigid anchor joint
+                    coordChains.push_back({bust, {side, bones.size() - 1}});   // the rotating links
                 }
+            }
+            for (bool wantBust : {true, false}) {   // mirror AddPhysics' coordination pass: pair left with right of the same class
+                std::vector<size_t> linkCounts[2];
+                for (const auto& cc : coordChains) {
+                    if (cc.first != wantBust) continue;
+                    if (cc.second.first > 0) linkCounts[0].push_back(cc.second.second);
+                    else if (cc.second.first < 0) linkCounts[1].push_back(cc.second.second);
+                }
+                const size_t pairs = std::min(linkCounts[0].size(), linkCounts[1].size());
+                for (size_t p = 0; p < pairs; ++p) expectJoints += std::min(linkCounts[0][p], linkCounts[1][p]);
             }
             for (const char* side : {"_L", "_R"}) {
                 const int shoulder = scene.boneIndex(std::string("cf_j_shoulder") + side);

@@ -98,6 +98,7 @@ private:
     std::vector<Particle> particles_;
     std::vector<Chain> chains_;
     std::vector<JiggleChain> jiggles_;
+    std::vector<std::pair<int, int>> jigglePairs_;   // (left, right) jiggle chain indices of the same class, for the coordination spring; built in Reset
     std::vector<WorldCollider> colliders_;
     JiggleSettings jiggle_;
     bool fallFully_ = false;   // the garment hang bake wants the full world gravity, not the rest-pose residual (see Reset)

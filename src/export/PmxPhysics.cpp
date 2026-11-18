@@ -19,11 +19,37 @@ float clamp01(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 // v0.2.1-alpha append rate for the garment root to follow its thigh (the author approved that handling).
 constexpr float kLegFollow = 0.75f;
 
+// Left/right coordination of the character's own bust / hip chains. Each side is exported as its own independent
+// chain, and MikuMikuDance simulates them independently, so under motion they de-phase until one breast flops while
+// the other does not — the "two disconnected objects" the export shows. The two sides hang from the same chest and are
+// tied together by the fascia of the chest wall, so corresponding links of the pair get a soft coordination joint:
+//   * a gentle centring spring on the relative rotation (common motion costs nothing: both bodies turning together
+//     keeps the relative rotation at zero),
+//   * a hard envelope at kCoordRangeShare of the link's own envelope, wide enough for real independent play and tight
+//     enough to stop opposite-direction bouncing,
+//   * per-link taper toward the tip (the base carries the coordination, the tip stays freest),
+//   * no coupling on the chest-locked root (both are locked to the same frame, there is no relative rotation to couple).
+// The spring is a share of the link's hold spring, so the coordination is always subordinate to the part's own physics.
+constexpr float kCoordSpringShare = 0.25f;
+constexpr float kCoordRangeShare = 0.75f;
+constexpr float kCoordTaper = 0.75f;   // per extra link depth from the root
+
 // What one link of a chain is, in PMX units (the model scale already applied).
 struct Link {
     int bone = -1;
     Vec3 head, centre, unit;
     float len = 0.0f, radius = 0.0f, cylinder = 0.0f, mass = 1.0f;
+};
+
+// One exported jiggle chain's links, for the coordination pass below (see kCoord* at the top of the file). Only the rotating
+// links (k >= 1) are recorded: the root is locked to the chest by its rigid anchor joint and carries no relative rotation.
+struct CoordChain {
+    bool bust = false;        // false: the hip chains
+    int side = 0;             // +1 left (_L), -1 right (_R), 0 neither
+    std::vector<int> bodies;           // link body indices, in chain order
+    std::vector<float> holdSpring;     // the link's rotational hold spring (the coordination spring is a share of this)
+    std::vector<Vec3> envelope;        // the link's joint envelope (flop, twist, sway)
+    std::string name;                  // the chain's own name, for the coordination joint's name
 };
 
 // Bullet's capsule inertia (btCapsuleShape::calculateLocalInertia): the box that bounds the capsule, about the centre; the axis is Y.
@@ -137,6 +163,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
     const float gravity = 9.8f * scale;   // model units a second squared
     std::vector<Core> colliderCore;       // per collider body, in the order they were added
     std::vector<int> colliderBody;        // its rigid body index
+    std::vector<CoordChain> coordChains;  // the exported jiggle chains' links, for the coordination pass after the chain loop
     for (const auto& c : scene.colliders) {
         if (c.bone < 0 || c.bone >= boneCount || c.inside || c.radius <= 0.0f) continue;
         pmx::RigidBody rb;
@@ -180,7 +207,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         // the same settings the viewer previews, and the joint's three axes carry the flop, the sway and a little twist.
         bool jigBody = false;
         bool jigBust = false;  // which jiggle: the bust gets a wider envelope than the butt
-        int jigSide = 0;
+        int jigSide = 0;   // +1 left (_L), -1 right (_R), 0 neither: the coordination pairing keys off it
         if (ch.characterOwn) {
             const bool bust = assemble::IsBustJiggleChain(scene, ch);
             if (bust && jiggleBust) jigBody = jiggleOn;
@@ -240,10 +267,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             l.centre = head + l.unit * (l.len * 0.5f);
             l.mass = std::max(0.05f, l.len / scale * 10.0f);   // a tenth of a metre of strand is a unit of mass
             if (jigBody) {
-                // The reference models' taper: the root carries the setting's mass, each link below it half. The two sides differ by
-                // a couple of percent so they never move as one rigid pair.
-                l.mass = std::max(0.01f, jiggleSet.mass * std::pow(0.5f, static_cast<float>(links.size())) *
-                                             (1.0f - 0.02f * static_cast<float>(jigSide)));
+                // The reference models' taper: the root carries the setting's mass, each link below it half. Both sides of a pair share
+                // the same numbers, like the symmetric tissue they are; the coordination joints (see the bottom of AddPhysics) keep the
+                // sides coordinated without making them rigid twins.
+                l.mass = std::max(0.01f, jiggleSet.mass * std::pow(0.5f, static_cast<float>(links.size())));
             }
             links[b] = l;
         }
@@ -259,6 +286,10 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         std::map<int, int> bodyOf;   // chain bone -> rigid body
         int jigAnchor = -1;   // a jiggle chain's anchor: a kinematic body on the parent bone, rigid-jointed to the root, like the reference models' torso body
         Vec3 jigAnchorPos;   // the anchor body's authored position (its bone's), the anchor joint's place
+        CoordChain coordChain;   // this chain's rotating links, for the coordination pass after the chain loop (jiggle chains only)
+        coordChain.bust = jigBust;
+        coordChain.side = jigSide;
+        coordChain.name = ch.name;
         const size_t firstBodyForChain = model.rigidBodies.size();
         for (size_t k = 0; k < bones.size(); ++k) {
             const Link& l = links[bones[k]];
@@ -318,6 +349,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             rb.mode = jigBody ? 2 : (k == 0 ? 0 : 1);
             if (k == 0 && !jigBody) { rb.mass = 1.0f; rb.moveDamping = rb.rotDamping = 0.0f; }
             bodyOf[l.bone] = static_cast<int>(model.rigidBodies.size());
+            if (jigBody && k > 0) coordChain.bodies.push_back(static_cast<int>(model.rigidBodies.size()));
             if (k > 0) {
                 chainBody.push_back(static_cast<int>(model.rigidBodies.size()));
                 chainJiggle.push_back(jigBody ? 1 : 0);
@@ -426,6 +458,8 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 j.rotLower = {-jigRange[0], -jigRange[1], -jigRange[2]};
                 j.rotUpper = {jigRange[0], jigRange[1], jigRange[2]};
                 j.springRot = {jigSpring, jigSpring, jigSpring};
+                coordChain.holdSpring.push_back(jigSpring);
+                coordChain.envelope.push_back(Vec3{jigRange[0], jigRange[1], jigRange[2]});
             } else {
                 // A link that gravity pushes further than its spring can hold inside the limits would rest on the stop, and a body resting on a
                 // joint limit shivers in MMD: such a joint is locked (a zero range) instead.
@@ -443,6 +477,58 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             for (size_t i = firstBodyForChain; i < model.rigidBodies.size(); ++i)
                 if (model.rigidBodies[i].mode == 1) model.rigidBodies[i].mode = 2;
             if (debugChains) std::fprintf(stderr, "chain '%s': demand beyond solver-safe spring, exported bone-aligned (mode 2)\n", ch.name.c_str());
+        }
+        if (jigBody && !coordChain.bodies.empty()) coordChains.push_back(std::move(coordChain));
+    }
+
+    // Left/right coordination joints, one per corresponding pair of rotating links of the character's own bust / hip chains. Each
+    // side swings on its own springs and never knew about the other: under motion the two sides de-phase until one breast flops while
+    // the other lags — the "two disconnected objects" a PMX shows for the same card that plays coherently in the viewer. A soft, wide
+    // 6-DOF joint per link pair ties the sides together the way the chest-wall fascia does: a gentle centring spring on the relative
+    // rotation (full common motion costs nothing — both bodies turning together keeps the relative rotation at zero), a hard envelope at
+    // kCoordRangeShare of the link's own envelope (real independent play stays, opposite-direction bouncing is bounded), tapering toward
+    // the tip (the base coordinates, the tip stays freest). No joint touches the chest-locked roots (they cannot rotate relative to the
+    // chest anyway), and no new bodies are added. A chain with no counterpart (one-sided hip chain) gets none.
+    if (!coordChains.empty()) {
+        const bool debugChains = std::getenv("CARDBRIDGE_DEBUG_CHAINS") != nullptr;
+        for (bool wantBust : {true, false}) {
+            std::vector<size_t> lefts, rights;
+            for (size_t i = 0; i < coordChains.size(); ++i) {
+                if (coordChains[i].bust != wantBust) continue;
+                if (coordChains[i].side > 0) lefts.push_back(i);
+                else if (coordChains[i].side < 0) rights.push_back(i);
+            }
+            const size_t pairs = std::min(lefts.size(), rights.size());
+            for (size_t p = 0; p < pairs; ++p) {
+                const CoordChain& L = coordChains[lefts[p]];
+                const CoordChain& R = coordChains[rights[p]];
+                const size_t n = std::min(L.bodies.size(), R.bodies.size());
+                for (size_t k = 0; k < n; ++k) {
+                    const float taper = std::pow(kCoordTaper, static_cast<float>(k));
+                    const float spring = kCoordSpringShare * taper * L.holdSpring[k];
+                    // An axis pinned to zero by the settings (amplitude 0) stays pinned on the pair as well; every other axis opens to
+                    // kCoordRangeShare of the link's envelope, floored a couple of degrees above resting on the limit.
+                    auto coordLimit = [](float env) { return env > 0.0f ? std::max(0.02f, env * kCoordRangeShare) : 0.0f; };
+                    const Vec3 lo{-coordLimit(L.envelope[k].x), -coordLimit(L.envelope[k].y), -coordLimit(L.envelope[k].z)};
+                    const Vec3 hi{coordLimit(L.envelope[k].x), coordLimit(L.envelope[k].y), coordLimit(L.envelope[k].z)};
+                    const Vec3 pa = model.rigidBodies[static_cast<size_t>(L.bodies[k])].position;
+                    pmx::Joint j;
+                    j.name = (wantBust ? "bust" : "hip") + std::string(" coordination ") + std::to_string(k + 1);
+                    j.bodyA = L.bodies[k];
+                    j.bodyB = R.bodies[k];
+                    // authored on the left link, like the rest of the export's joints (a joint far from both bodies is authored wrong,
+                    // whatever the springs say; the rotation frame is what matters for the coupling, the position is only the solver's anchor)
+                    j.position = pa;
+                    j.rotation = model.rigidBodies[static_cast<size_t>(L.bodies[k])].rotation;
+                    j.rotLower = lo;
+                    j.rotUpper = hi;
+                    j.springRot = {spring, spring, spring};
+                    model.joints.push_back(std::move(j));
+                    if (debugChains)
+                        std::fprintf(stderr, "coordination '%s': bodyA %d (%s) <-> bodyB %d (%s) limit X=±%.1f Y=±%.1f Z=±%.1f spring=%.2f\n",
+                                     j.name.c_str(), j.bodyA, L.name.c_str(), j.bodyB, R.name.c_str(), lo.x * 57.29578f, lo.y * 57.29578f, lo.z * 57.29578f, spring);
+                }
+            }
         }
     }
 

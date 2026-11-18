@@ -14,6 +14,12 @@ namespace {
 constexpr float kGravity = 9.81f;
 constexpr float kMaxSpeed = 2.0f;   // m/s, a hard lid so a shove or an extreme setting can neither fling a link out of the model nor carry enough
                                     // momentum to generate fresh energy each contact (a bust never exceeds roughly a quarter of this in a fast jump)
+// Left/right coordination (the same mechanism as the PMX export's coordination joints, so the viewer shows what MikuMikuDance
+// plays): one soft spring between corresponding links of the bust / hip pair, pulling their lags (pos - target) together — the
+// fascia of the chest wall tying the two sides. Common motion costs nothing (both lag equally), independent motion rides on it,
+// opposite-direction bouncing is damped. Per-link taper toward the tip; the base carries the coordination, the tip stays freest.
+constexpr float kCoordSpringShare = 0.25f;   // a share of the hold stiffness, like the PMX's share of the hold spring
+constexpr float kCoordTaper = 0.75f;         // per extra link depth from the root
 
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -155,6 +161,15 @@ void PhysicsSim::Reset(const Scene& scene, const std::vector<Mat4>& poseWorld, b
     // per chain and skip them in the contact response; the response against every other object is unchanged. Rebuilt against the same
     // colliders Step uses on every reset (i.e. every pose change).
     CollectColliders(scene, poseWorld);
+    // Pair the left and right chains of each class (bust with bust, hip with hip) for the coordination spring in StepJiggle — the same
+    // mechanism as the PMX export's coordination joints, so the viewer shows the same coherence MikuMikuDance plays. A chain with no
+    // counterpart on the other side keeps no pair.
+    jigglePairs_.clear();
+    for (size_t i = 0; i < jiggles_.size(); ++i) {
+        if (jiggles_[i].sideSign <= 0) continue;   // a centre chain has no side; the other side keys off it below
+        for (size_t j = i + 1; j < jiggles_.size(); ++j)
+            if (jiggles_[j].bust == jiggles_[i].bust && jiggles_[j].sideSign < 0) { jigglePairs_.push_back({static_cast<int>(i), static_cast<int>(j)}); break; }
+    }
     for (JiggleChain& jc : jiggles_) {
         const SceneChain& sc = scene.chains[jc.scene];
         const float radius = std::max(0.004f, sc.radius);
@@ -346,13 +361,41 @@ void PhysicsSim::StepJiggle(const Scene& scene, const std::vector<Mat4>& poseWor
     for (JiggleChain& jc : jiggles_)
         if (!jc.asleep)
             for (JiggleLink& l : jc.links) l.prevWorld = l.world;
-    for (JiggleChain& jc : jiggles_) {
+    // Coordination across pairs (the fascia between the two sides): a soft spring pulling each link's lag toward its pair's, computed
+    // from this substep's lag snapshot so the force is symmetric between the two chains. A non-negligible pull wakes a sleeping pair.
+    std::vector<std::vector<Vec3>> pairAccel(jiggles_.size());
+    auto lagOf = [](const JiggleLink& l) { return sub(l.pos, l.target); };
+    for (const auto& [ai, bi] : jigglePairs_) {
+        const JiggleChain& A = jiggles_[static_cast<size_t>(ai)];
+        const JiggleChain& B = jiggles_[static_cast<size_t>(bi)];
+        const size_t n = std::min(A.links.size(), B.links.size());
+        float maxPull = 0.0f;
+        std::vector<Vec3> pullA(n), pullB(n);
+        for (size_t k = 0; k < n; ++k) {
+            const float taper = std::pow(kCoordTaper, static_cast<float>(k));
+            const float share = kCoordSpringShare * taper;
+            const Vec3 lagA = lagOf(A.links[k]), lagB = lagOf(B.links[k]);
+            const Vec3 pull = sub(lagA, lagB) * share;   // the lag difference: the fascia pulls the pair toward a common lag, symmetric motion costs nothing
+            pullA[k] = pull * (jiggle_.stiffness / std::max(0.01f, A.links[k].mass));
+            pullB[k] = pull * (-jiggle_.stiffness / std::max(0.01f, B.links[k].mass));
+            maxPull = std::max(maxPull, dot(pull, pull));
+        }
+        if (maxPull > 1e-12) {   // the pair diverges: both wake (a one-sided edit must pull the sibling, like the PMX does)
+            jiggles_[static_cast<size_t>(ai)].asleep = false;
+            jiggles_[static_cast<size_t>(bi)].asleep = false;
+            jiggles_[static_cast<size_t>(ai)].stillSeconds = 0.0f;
+            jiggles_[static_cast<size_t>(bi)].stillSeconds = 0.0f;
+        }
+        pairAccel[static_cast<size_t>(ai)] = std::move(pullA);
+        pairAccel[static_cast<size_t>(bi)] = std::move(pullB);
+    }
+    for (size_t ci = 0; ci < jiggles_.size(); ++ci) {
+        JiggleChain& jc = jiggles_[ci];
         if (jc.asleep) continue;
         const SceneChain& sc = scene.chains[jc.scene];
-        const float side = static_cast<float>(jc.sideSign);
-        const float stiffness = jiggle_.stiffness * (1.0f + 0.03f * side);
-        const float damping = jiggle_.damping * (1.0f - 0.02f * side);
-        const float amplitudeScale = 1.0f + 0.02f * side;
+        const float stiffness = jiggle_.stiffness;
+        const float damping = jiggle_.damping;
+        const float amplitudeScale = 1.0f;
         const float rootMass = std::max(0.01f, jc.links[0].mass);
         const float radius = std::max(0.004f, sc.radius);
         const float limitX = JiggleMaxDisplacement(jiggle_, 0) * amplitudeScale;
@@ -361,13 +404,15 @@ void PhysicsSim::StepJiggle(const Scene& scene, const std::vector<Mat4>& poseWor
 
         // Semi-implicit Euler: stable at every rate the sanitizer allows once the spring and damper are capped below the
         // fixed step's stability limit (an extreme stiffness at 30 Hz would otherwise ring itself apart).
-        for (JiggleLink& l : jc.links) {
+        for (size_t lk = 0; lk < jc.links.size(); ++lk) {
+            JiggleLink& l = jc.links[lk];
             const float stableK = 0.8f * l.mass / (dt * dt);
             const float k = std::min(stiffness, stableK);
             const float dampingC = std::min(damping * (l.mass / rootMass), 0.8f * l.mass / dt);
             Vec3 accel = sub(l.target, l.pos) * (k / l.mass);
             accel.y -= (1.0f - kJiggleSupport) * gravity;
             accel = accel + l.vel * (-dampingC / l.mass);
+            if (ci < pairAccel.size() && lk < pairAccel[ci].size()) accel = accel + pairAccel[ci][lk];
             l.vel = l.vel + accel * dt;
             const float speed = length(l.vel);
             if (speed > kMaxSpeed) l.vel = l.vel * (kMaxSpeed / speed);
