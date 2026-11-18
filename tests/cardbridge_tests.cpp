@@ -1218,6 +1218,133 @@ void unitTests() {
         s.materials[0].shader = "Shader Forge/main_opaque";
         CHECK(!exporter::HasCutout(s, s.materials[0]));
     });
+    // A doubled surface (opaque base + translucent twin) — the co-located lining pattern (A) seen from both sides:
+    // indices/winding/order identical except the translucent twin can be wound differently and (optionally) have an
+    // island triangulated elsewhere entirely (partial overlap). mode: 0 same winding, 1 reversed (the author reversed
+    // the twin), 2 mixed (half reversed — never guessed). relocate: how many shell cells are moved out of place
+    // (48 = the whole twin relocated, 0% overlap; 4 = only 8 triangles moved, ~92% still co-located).
+    auto colocated = [&](bool translucentTwin, int mode, int relocate) {
+        using namespace assemble;
+        Scene s;
+        SceneMaterial mb; mb.shader = "Shader Forge/main_opaque"; mb.name = "base"; mb.doubleSided = true;
+        SceneMaterial mt; mt.shader = "Shader Forge/main_alpha"; mt.alpha = true; mt.translucent = true; mt.name = "shell"; mt.doubleSided = true;
+        s.materials = {mb, mt};
+        SceneMesh mesh;
+        constexpr int NX = 8, NY = 6;
+        for (int y = 0; y <= NY; ++y)
+            for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0.0f, 0.0f, 1.0f}; mesh.vertices.push_back(v); }
+        if (relocate)
+            for (int y = 0; y <= NY / 2; ++y)
+                for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x + 500), float(y), 0.0f}; v.normal = {0.0f, 0.0f, 1.0f}; mesh.vertices.push_back(v); }
+        const uint32_t rv = static_cast<uint32_t>((NX + 1) * (NY + 1));
+        auto vid = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
+        auto rid = [&](int x, int y) { return rv + static_cast<uint32_t>(y * (NX + 1) + x); };
+        auto cell = [&](SceneSubmesh& dst, int x, int y, bool relocated, bool reversed) {
+            const uint32_t a = relocated ? rid(x, y) : vid(x, y), b = relocated ? rid(x + 1, y) : vid(x + 1, y);
+            const uint32_t c = relocated ? rid(x + 1, y + 1) : vid(x + 1, y + 1), d = relocated ? rid(x, y + 1) : vid(x, y + 1);
+            if (reversed) dst.indices.insert(dst.indices.end(), {a, c, b, a, d, c});
+            else dst.indices.insert(dst.indices.end(), {a, b, c, a, c, d});
+        };
+        SceneSubmesh base; base.material = 0;
+        for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x) cell(base, x, y, false, false);
+        mesh.submeshes.push_back(base);
+        SceneSubmesh shell; shell.material = 1;
+        int cellNo = 0;
+        for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x, ++cellNo) {
+            const bool relocated = cellNo < relocate;   // that many shell cells are triangulated elsewhere (never overlap)
+            const bool rev = (mode == 1) || (mode == 2 && (x + y) % 2 == 0);
+            cell(shell, x, y, relocated, rev);
+        }
+        mesh.submeshes.push_back(shell);
+        s.meshes.push_back(mesh);
+        if (!translucentTwin) { s.materials[1].alpha = false; s.materials[1].translucent = false; }   // both opaque: not a lining pair
+        return s;
+    };
+    test("lining A: a translucent co-located twin (same triangle order) is the interior lining, written single-sided", [&] {
+        auto s = colocated(true, 0, 0);
+        const char code = exporter::ColocatedLinings(s)[1];
+        CHECK(code == exporter::kLiningOutward);
+        CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) == 0);   // the lining is single-sided
+        CHECK((exporter::MmdMaterialLook(s, s.materials[0]).drawFlags & 0x01) != 0);   // the base keeps its authored (double-sided) flags
+    });
+    test("lining C: a co-located twin the author wound inward is an interior lining, single-sided, winding kept", [&] {
+        auto s = colocated(true, 1, 0);
+        const char code = exporter::ColocatedLinings(s)[1];
+        CHECK(code == exporter::kLiningInward);
+        CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) == 0);
+    });
+    test("lining F: a co-located twin with mixed winding is ambiguous — never guessed, flags preserved", [&] {
+        auto s = colocated(true, 2, 0);
+        const char code = exporter::ColocatedLinings(s)[1];
+        CHECK(code == exporter::kLiningAmbiguous);
+        CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) != 0);   // exactly as authored (double-sided kept)
+    });
+    test("lining E: partial overlap (half the twin triangulated elsewhere) is not co-located — preserved as authored", [&] {
+        auto s = colocated(true, 0, 48);
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningNone);
+    });
+    test("lining: small partial overlap still co-located (4 of 48 cells relocated)", [&] {
+        auto s = colocated(true, 0, 4);
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningOutward);
+    });
+    test("lining B: a translucent sheer overlay with a different triangulation is not a co-located pair — preserved as authored", [&] {
+        // Same surface, same topology, different triangulation (a fan from the cell centre): no centroid is shared at all
+        using namespace assemble;
+        Scene s;
+        SceneMaterial mb; mb.shader = "Shader Forge/main_opaque"; mb.doubleSided = true; mb.name = "base";
+        SceneMaterial mt; mt.shader = "Shader Forge/main_alpha"; mt.alpha = true; mt.translucent = true; mt.doubleSided = true; mt.name = "lace";
+        s.materials = {mb, mt};
+        SceneMesh mesh;
+        constexpr int NX = 8, NY = 6;
+        for (int y = 0; y <= NY; ++y)
+            for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+        const uint32_t centerBase = static_cast<uint32_t>((NX + 1) * (NY + 1));
+        for (int y = 0; y < NY; ++y)
+            for (int x = 0; x < NX; ++x) { SceneVertex v; v.pos = {x + 0.5f, y + 0.5f, 0.0f}; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+        const auto V = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
+        const auto C = [&](int x, int y) { return centerBase + static_cast<uint32_t>(y * NX + x); };
+        SceneSubmesh base; base.material = 0;
+        SceneSubmesh lace; lace.material = 1;
+        for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x) {
+            const uint32_t a = V(x, y), b = V(x + 1, y), c = V(x + 1, y + 1), d = V(x, y + 1), e = C(x, y);
+            base.indices.insert(base.indices.end(), {a, b, c, a, c, d});
+            lace.indices.insert(lace.indices.end(), {a, b, e, b, c, e, c, d, e, d, a, e});
+        }
+        mesh.submeshes = {base, lace};
+        s.meshes.push_back(mesh);
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningNone);
+    });
+    test("lining: two opaque co-located layers are not a lining pair", [&] {
+        auto s = colocated(false, 0, 0);
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningNone);
+    });
+    test("lining: inconsistent verdicts across meshes degrade the material to ambiguous (never guess)", [&] {
+        using namespace assemble;
+        Scene s;
+        SceneMaterial mb; mb.shader = "Shader Forge/main_opaque"; mb.doubleSided = true; mb.name = "base";
+        SceneMaterial mt; mt.shader = "Shader Forge/main_alpha"; mt.alpha = true; mt.translucent = true; mt.doubleSided = true; mt.name = "shell";
+        s.materials = {mb, mt};
+        auto build = [&](bool reversed) {
+            SceneMesh m;
+            constexpr int NX = 8, NY = 6;
+            auto vid = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
+            for (int y = 0; y <= NY; ++y)
+                for (int x = 0; x <= NX; ++x) { SceneVertex v; v.pos = {float(x), float(y), 0.0f}; v.normal = {0, 0, 1}; m.vertices.push_back(v); }
+            SceneSubmesh base; base.material = 0;
+            SceneSubmesh shell; shell.material = 1;
+            for (int y = 0; y < NY; ++y) for (int x = 0; x < NX; ++x) {
+                const uint32_t a = vid(x, y), b = vid(x + 1, y), c = vid(x + 1, y + 1), d = vid(x, y + 1);
+                base.indices.insert(base.indices.end(), {a, b, c, a, c, d});
+                if (reversed) shell.indices.insert(shell.indices.end(), {a, c, b, a, d, c});
+                else shell.indices.insert(shell.indices.end(), {a, b, c, a, c, d});
+            }
+            m.submeshes = {base, shell};
+            return m;
+        };
+        s.meshes.push_back(build(false));
+        s.meshes.push_back(build(true));
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningAmbiguous);
+    });
     test("double-layered mesh: MMD's edge would poke the inner layer through, so it gets none; a single surface keeps its edge", [] {
         using namespace assemble;
         auto quad = [](bool doubled, bool alpha) {

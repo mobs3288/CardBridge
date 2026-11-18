@@ -13,6 +13,15 @@
 
 namespace cardbridge::exporter {
 
+// Lining verdicts from ColocatedLinings: 0 none, 1 outward-facing twin (reverse winding at export), 2 inward-facing twin (keep
+// winding), 3 ambiguous (preserve original exactly). Callers treat 1 and 2 as the same interior-lining treatment (single-sided,
+// culled from outside); 3 is not treated as a lining at all.
+constexpr char kLiningNone = 0;
+constexpr char kLiningOutward = 1;
+constexpr char kLiningInward = 2;
+constexpr char kLiningAmbiguous = 3;
+
+
 struct ExportOptions {
     std::string outDir;            // created; must be empty or absent unless `overwrite`
     std::string baseName;          // file stem; defaults to the character name
@@ -97,15 +106,17 @@ struct MmdLook {
 };
 // `outfitGarment` marks a material of an outfit garment (ScenePart::garment): it keeps the ground shadow and casts into the self-shadow
 // map, but takes no self-shadow (inverted cloth bands where it clips) and gets no edge (back faces pushed through it).
-// `innerLayer` marks a co-located translucent twin of an opaque layer (its lining): single-sided, facing the garment's
-// interior, never visible from outside.
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, bool innerLayer = false);
+// `innerLayer` is a lining verdict from ColocatedLinings (kLiningNone..kLiningAmbiguous): kLiningOutward/kLiningInward are
+// written single-sided; an ambiguous verdict keeps the authored draw flags untouched.
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, char innerLayer = kLiningNone);
 // One flag per scene material: it belongs to an outfit garment (ScenePart::garment, or group Outfit in a hand-built scene). The exporter
 // and the viewer's as-exported pass both use this, so the written PMX flags and the preview cannot drift apart.
 std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
 // One flag per scene material: it is the translucent, co-located twin of an opaque material in the same mesh (the
-// base layer and its "studio" lining share every triangle for practical purposes). Such a layer is authored as the
-// garment's interior; it is exported with its triangles reversed and single-sided, so it renders only as the lining.
+// base layer and its "studio" lining share nearly all of their triangles). Such a layer is authored as the
+// garment's interior; depending on the winding it is classified as kLiningOutward (faces outward, reversed at
+// export so it faces inward), kLiningInward (already faces inward, kept as-is) or kLiningAmbiguous (mixed winding:
+// never guessed, drawn exactly as authored). Inside-out twins are single-sided and drawn only into the garment.
 std::vector<char> ColocatedLinings(const assemble::Scene& scene);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.

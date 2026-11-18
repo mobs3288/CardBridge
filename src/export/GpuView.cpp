@@ -1552,7 +1552,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
             I.looks.clear();
             for (size_t i = 0; i < scene.materials.size(); ++i) {
                 const auto& m = scene.materials[i];
-                I.looks.push_back(MmdMaterialLook(scene, m, garment[i] != 0, lining[i] != 0));
+                I.looks.push_back(MmdMaterialLook(scene, m, garment[i] != 0, lining[i]));
                 if (I.looks.back().sphere == 0) continue;
                 const assemble::SceneTexture t = MmdSphereImage(I.looks.back());
                 if (!I.spheres.count(t.name)) I.MakeTexture(t.width, t.height, t.rgba.data(), I.spheres[t.name], false, LinearLight());
@@ -1674,7 +1674,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
                     // The PMX writes an interior lining inside-out (ColocatedLinings): the plain view draws it inside-out too,
                     // so the outer layer shows through exactly as MikuMikuDance shows it.
-                    const bool innerLining = !I.linings.empty() && static_cast<size_t>(gs.material) < I.linings.size() && I.linings[static_cast<size_t>(gs.material)] != 0;
+                    const bool innerLining = !I.linings.empty() && static_cast<size_t>(gs.material) < I.linings.size() && I.linings[static_cast<size_t>(gs.material)] == kLiningOutward;
                     // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
                     ctx->RSSetState(twoSided || !I.rasterCull ? I.raster : (innerLining && I.rasterCullFront ? I.rasterCullFront : I.rasterCull));
                     // Viewport diagnostics GPU path (ADR-003/ADR-008): one runtime-compiled shader instead of the game's shaders.

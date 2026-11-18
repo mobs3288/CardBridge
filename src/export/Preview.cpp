@@ -281,7 +281,9 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                 for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                     const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
                     if (mat.hidden) continue;
-                    if (static_cast<size_t>(mesh.submeshes[si].material) < linings.size() && linings[static_cast<size_t>(mesh.submeshes[si].material)]) continue;
+                    if (static_cast<size_t>(mesh.submeshes[si].material) < linings.size() &&
+                    (linings[static_cast<size_t>(mesh.submeshes[si].material)] == kLiningOutward ||
+                     linings[static_cast<size_t>(mesh.submeshes[si].material)] == kLiningInward)) continue;
                     items.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat)});
                 }
             }
@@ -749,7 +751,8 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 if (mat.hidden) continue;
                 // A co-located lining faces into its garment: culled from every view this renderer can produce.
                 const int mi2 = static_cast<int>(mesh.submeshes[si].material);
-                if (mi2 >= 0 && static_cast<size_t>(mi2) < linings.size() && linings[static_cast<size_t>(mi2)]) continue;
+                if (mi2 >= 0 && static_cast<size_t>(mi2) < linings.size() &&
+                    (linings[static_cast<size_t>(mi2)] == kLiningOutward || linings[static_cast<size_t>(mi2)] == kLiningInward)) continue;
                 jobs.push_back({mi, static_cast<int>(si), detail::RenderQueueOf(scene, mat), detail::IsOverlayMaterial(scene, mat), highlight});
             }
         }
