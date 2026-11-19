@@ -1020,21 +1020,28 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         ikBones.insert(ikBones.end(), mb.ik.begin(), mb.ik.end());
         mmdExtraBones = mb.extra;
     }
-    {   // display frames: Root, Exp (the first 255 morphs), then the bones by group
+    {   // display frames: Root, Exp (outfit toggles, standard morphs, effects), the facial tabs share MMD's byte-sized listed-morph budget
         pmx::DisplayFrame root;
         root.name = "Root"; root.special = true;
         pmx::DisplayFrame exp;
         exp.name = "\xE8\xA1\xA8\xE6\x83\x85"; exp.nameEn = "Exp"; exp.special = true;   // 表情
-        // MikuMikuDance keeps the number of listed morphs in a byte and fills tables sized by it: 256 or more corrupt its heap (a crash a few
-        // seconds after the file opens). The outfit morphs and the game's expressions come first, so what does not fit is the raw per-mesh
-        // shapes; they stay in the file (the engine and PMX Editor use them) but MMD's morph panel does not list them.
+        // MikuMikuDance keeps the number of morphs ALL display frames list in one byte and fills a table of 46-byte records sized by it: 256 or more
+        // corrupt its heap (a crash a few seconds after the file opens). Exp lists the priority morphs (outfit toggles, the standard MMD names, the
+        // facial effects); the Eye/Brow/Mouth/Other facial tabs list the remaining budget split across their panels — nothing is listed twice and
+        // whatever does not fit stays in the file unlisted (the engine and PMX Editor use it).
         constexpr size_t kMmdMaxListedMorphs = 255;
         exp.morphs = mmdMorphs;   // the standard ones first
         for (int i : {faceFx.eyeRoll, faceFx.heartEyes, faceFx.sweat, faceFx.sweatHeavy})
-            if (i >= 0) exp.morphs.push_back(i);   // the effects are listed in Exp too
-        for (size_t i = 0; i < model.morphs.size() && exp.morphs.size() < kMmdMaxListedMorphs; ++i)
-            if (std::find(mmdMorphs.begin(), mmdMorphs.end(), static_cast<int>(i)) == mmdMorphs.end() &&
-                std::find(exp.morphs.begin(), exp.morphs.end(), static_cast<int>(i)) == exp.morphs.end()) exp.morphs.push_back(static_cast<int>(i));
+            if (i >= 0 && std::find(exp.morphs.begin(), exp.morphs.end(), i) == exp.morphs.end()) exp.morphs.push_back(i);   // the effects go in too
+        // outfit toggles: the material/group morphs (Hide/Show clothes, All clothes off) — the first thing an MMD user reaches for
+        for (size_t i = 0; i < model.morphs.size() && exp.morphs.size() < kMmdMaxListedMorphs; ++i) {
+            const pmx::Morph& mo = model.morphs[i];
+            if (mo.materials.empty() && mo.group.empty()) continue;
+            const int mi = static_cast<int>(i);
+            if (std::find(exp.morphs.begin(), exp.morphs.end(), mi) == exp.morphs.end()) exp.morphs.push_back(mi);
+        }
+        if (exp.morphs.size() > kMmdMaxListedMorphs) exp.morphs.resize(kMmdMaxListedMorphs);
+        const size_t facialBudget = kMmdMaxListedMorphs - exp.morphs.size();
         std::vector<pmx::DisplayFrame> frames;
         for (auto& [group, list] : BoneFrames(scene)) {
             if (group == "Root") { root.bones = list; continue; }
@@ -1043,9 +1050,10 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
             f.bones = std::move(list);
             frames.push_back(std::move(f));
         }
+        const std::vector<int> expListed = exp.morphs;   // moved into the frames below; kept for the facial budget split
         model.frames.push_back(std::move(root));
         model.frames.push_back(std::move(exp));
-        for (auto& f : FacialDisplayFrames(model)) model.frames.push_back(std::move(f));   // Eye / Brow / Mouth / Other: the facial panel, by name
+        for (auto& f : FacialDisplayFrames(model, expListed, facialBudget)) model.frames.push_back(std::move(f));   // Eye / Brow / Mouth / Other: the facial panel, by name
         for (auto& f : frames) model.frames.push_back(std::move(f));
         if (!ikBones.empty()) {
             pmx::DisplayFrame f;
