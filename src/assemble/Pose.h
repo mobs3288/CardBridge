@@ -107,6 +107,8 @@ Pose MakePose(const Scene& scene, const PoseFile& file, std::vector<std::string>
 
 // The rotation matrix that turns direction `from` onto direction `to` the short way (both need not be unit length).
 Mat4 RotationBetween(Vec3 from, Vec3 to);
+// The rotation matrix that turns `radians` about `axis` (need not be unit length; the zero axis gives the identity).
+Mat4 RotationAxisAngle(Vec3 axis, float radians);
 
 // The Euler angles (degrees, Unity's order: z, then x, then y) of a rotation matrix; the inverse of shape::EulerToQuat on rotations.
 Vec3 EulerFromMatrix(const Mat4& rotation);

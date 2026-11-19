@@ -478,18 +478,26 @@ struct App {
     int hoverBone = -1;                       // the bone under the pointer (in the view or the tree), lit up in the overlay
     int dragBone = -1;                        // the bone being turned (or moved) with the left button in the view
     bool dragMove = false;
-    // The accessory move gizmo: shown in the view when an accessory part is selected in the list (its chip);
-    // dragging an axis moves the accessory (as bone edits on its root bones, so undo / save / export see it).
+    // The accessory move/rotate gizmo: shown in the view when an accessory part is selected in the list (its chips);
+    // dragging an axis moves it, dragging a ring rotates it (as bone edits on its root bones, so undo / save / export see it).
     int viewHoverBall = -1;   // the navigation widget's ball under the pointer (0 +X, 1 +Y, 2 +Z, 3 -X, 4 -Y, 5 -Z); -1 = none
     int selAccessory = -1;                    // scene.parts index of the accessory the gizmo holds, -1 = none
+    int gizmoMode = 0;                        // 0 = move (arrows), 1 = rotate (rings): which gizmo the chips on the row picked
     int gizmoHoverAxis = -1;                  // the axis under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
     int gizmoAxis = -1;                       // the axis being dragged, -1 = none
-    exporter::MoveGizmoState gizmoState;      // where the last picture drew the gizmo (x < 0: not drawn)
+    exporter::MoveGizmoState gizmoState;      // where the last picture drew the move gizmo (x < 0: not drawn)
     float gizmoAcc[3] = {0, 0, 0};            // world delta applied during the current drag (for the log line)
+    int rotGizmoHoverAxis = -1;               // the ring under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
+    int rotGizmoAxis = -1;                    // the ring being dragged, -1 = none
+    exporter::RotateGizmoState rotGizmoState; // where the last picture drew the rotate gizmo (x < 0: not drawn)
+    float rotGizmoAcc[3] = {0, 0, 0};         // degrees turned about each axis during the current drag (for the log line)
+    float rotGizmoTheta = 0.0f;               // the pointer's angle in the ring plane at the last applied step of the drag
+    float rotGizmoPtrX = 0.0f, rotGizmoPtrY = 0.0f;   // the last pointer position of the current ring drag (view pixels)
     bool transMmdWasActive = false;           // the stroke started while the "as exported" view showed (so the bake returns to it after release)
     bool transRebakePending = false;          // the brush changed pixels; rebake the exported preview instead of staying on the interactive view
     float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
-    int hoverAccChip = -1;                    // the accessory chip under the pointer in the panel, -1 = none
+    int hoverAccChip = -1;                    // the accessory move chip under the pointer in the panel, -1 = none
+    int hoverRotChip = -1;                    // the accessory rotate chip under the pointer in the panel, -1 = none
     // Translucent clothes (Look tab): the brush paints the see-through area of the garment under the cursor. The mask is
     // baked into the garment's own texture (see export/Translucency.cpp): session-only, kept in the scene, undone by the toggle.
     bool transBrush = false;                  // the toggle: off by default, like every brush that changes pixels

@@ -592,10 +592,43 @@ try {
                 $c = Shot 'gizmo_reset'
                 Check 'gizmo: the window answers after the reset' ($null -ne $lay)
                 Check 'gizmo: the reset puts the picture back' ([V]::DiffView($s.Path, $c.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($s.Path, $c.Path, $lay.panel))
+                # ---- now the rotate gizmo: select it with its chip, drag a ring, reset the rotation ----
+                $best = -1; $bestMinor = -1.0
+                if ($null -ne $acc.rotChip) {
+                    Click ([int]$acc.rotChip[0]) ([int]$acc.rotChip[1]) 600
+                    $lay = Layout
+                    Write-Host ("  click rotchip : selAcc={0} gizmoMode={1}" -f $lay.state.selAccessory, $lay.state.gizmoMode)
+                    $selRow = $lay.accessories | Where-Object { $_.part -eq $acc.part } | Select-Object -First 1
+                    Check 'gizmo: the rotate chip selects the rotate gizmo' ($null -ne $selRow -and [bool]$selRow.sel -and [int]$lay.state.gizmoMode -eq 1)
+                    Check 'gizmo: the rotate gizmo is drawn' ($null -ne $lay.rotateGizmo)
+                }
+                if ($null -ne $lay.rotateGizmo) {
+                    $s2 = Shot 'gizmo_rotate'
+                    Check 'gizmo: the ring picture differs from the move gizmo picture' ([V]::DiffView($s.Path, $s2.Path, $lay.panel) -gt 0.0005) ("{0:P2} of the view" -f [V]::DiffView($s.Path, $s2.Path, $lay.panel))
+                    for ($i = 0; $i -lt 3; $i++) { if ([double]$lay.rotateGizmo.minorPx[$i] -gt $bestMinor) { $bestMinor = [double]$lay.rotateGizmo.minorPx[$i]; $best = $i } }
+                    if ($bestMinor -lt 12) { Check 'gizmo: at least one ring is face-on enough to grab' $false }
+                    else {
+                        $ra = @($lay.rotateGizmo.ringA[$best]); $rb = @($lay.rotateGizmo.ringB[$best])
+                        $undo0 = $lay.state.undo
+                        Drag ([int]$ra[0]) ([int]$ra[1]) ([int]$rb[0]) ([int]$rb[1]) 12
+                        $lay = Layout
+                        Write-Host ("  cam yaw={0:F1} pitch={1:F1} zoom={2:F2} drag={3} undo={4} edits={5}" -f $lay.state.camYaw, $lay.state.camPitch, $lay.state.camZoom, $lay.state.drag, $lay.state.undo, $lay.state.edits)
+                        Check 'gizmo: the window answers after the ring drag' ($null -ne $lay)
+                        Check 'gizmo: the accessory was rotated' ($lay.state.edits -ge 1) "$($lay.state.edits) edit(s)"
+                        Check 'gizmo: the ring drag is one undo step' (($lay.state.undo - $undo0) -eq 1) "undo $undo0 -> $($lay.state.undo)"
+                        # right-click the rotate chip to reset the rotation
+                        [void][V]::PostMessage($script:target, 0x204, [IntPtr]0, [V]::L([int]$acc.rotChip[0], [int]$acc.rotChip[1])); Start-Sleep -Milliseconds 80
+                        [void][V]::PostMessage($script:target, 0x205, [IntPtr]0, [V]::L([int]$acc.rotChip[0], [int]$acc.rotChip[1])); Start-Sleep -Milliseconds 700
+                        $lay = Layout
+                        $s3 = Shot 'gizmo_rotate_reset'
+                        Check 'gizmo: the window answers after the rotate reset' ($null -ne $lay)
+                        Check 'gizmo: the rotate reset puts the rotation back' ([V]::DiffView($s2.Path, $s3.Path, $lay.panel) -lt 0.002) ("view diff {0:P3}" -f [V]::DiffView($s2.Path, $s3.Path, $lay.panel))
+                    }
+                }
                 # Esc deselects
                 [void][V]::PostMessage($script:target, $WM_KEYDOWN, [IntPtr]27, [IntPtr]0); Start-Sleep -Milliseconds 400
                 $lay = Layout
-                Check 'gizmo: Esc deselects' ($null -eq $lay.gizmo)
+                Check 'gizmo: Esc deselects' ($null -eq $lay.gizmo -and $null -eq $lay.rotateGizmo)
             }
         }
     }

@@ -302,13 +302,17 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
                         if (p.fromClothing) name += "  (added)";
-                        if (acc && AccessorySelected() == row.part) name += "  ·  xyz";
+                        if (acc && AccessorySelected() == row.part) name += g.gizmoMode == 0 ? "  ·  xyz" : "  ·  rot";
                         // Name and the right-aligned triangle count share the row.
-                        const RECT partClip{38, y, acc ? kPanel - 110 : kPanel - 64, y + kRowH};
-                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, acc ? 34 : 44), &partClip);
+                        const RECT partClip{38, y, acc ? kPanel - 136 : kPanel - 64, y + kRowH};
+                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, acc ? 30 : 44), &partClip);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
-                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, acc ? kPanel - 44 : kPanel - 16, y + 4, tris);
-                        if (acc) DrawAccessoryChip(s, y, AccessorySelected() == row.part, g.hoverAccChip == idx);
+                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, acc ? kPanel - 70 : kPanel - 16, y + 4, tris);
+                        if (acc) {
+                            const bool sel = AccessorySelected() == row.part;
+                            DrawAccessoryRotateChip(s, y, sel && g.gizmoMode == 1, g.hoverRotChip == idx);
+                            DrawAccessoryChip(s, y, sel && g.gizmoMode == 0, g.hoverAccChip == idx);
+                        }
                     }
                 }
                 ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(rows.size()), visible, g.partPos);
@@ -362,7 +366,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             if (!p.modName.empty()) hint += "  ·  " + p.modName;
             if (static_cast<size_t>(g.hoverPart) < g.hidden.size() && g.hidden[static_cast<size_t>(g.hoverPart)]) hint += "  ·  hidden";
         } else if (const int acc = AccessorySelected(); acc >= 0 && L && static_cast<size_t>(acc) < L->scene.parts.size()) {
-            hint = "gizmo  ·  drag an axis to move " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its chip to reset  ·  Esc deselects";
+            hint = g.gizmoMode == 0
+                ? "gizmo move  ·  drag an axis to move " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its move chip to reset  ·  Esc deselects"
+                : "gizmo rotate  ·  drag a ring to rotate " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its rotate chip to reset  ·  Esc deselects";
         } else if (!modsInfo.empty() && !L) {
             hint = modsInfo;
         }

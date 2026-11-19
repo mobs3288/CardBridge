@@ -19,9 +19,9 @@
 //
 //   mouse: left drag orbit, right/middle drag pan, wheel zoom, hover a part to light it up in the model,
 //          click a part to hide/show it, right-click a part to solo it
-//          accessory rows (Accessories / Added outfit) carry a move chip on their right end: click it to hold that accessory
-//          with the X/Y/Z gizmo in the view — drag an axis to move it (or the numbers in the Bones tab, like any bone),
-//          right-click the chip to reset the move, Esc (or the chip again) deselects
+//          accessory rows (Accessories / Added outfit) carry a move and a rotate chip on their right end: click one to hold
+//          that accessory with the X/Y/Z gizmo in the view — drag an axis to move it, a ring to rotate it (or the numbers in
+//          the Bones tab, like any bone), right-click the chip to reset that one edit, Esc (or the chip again) deselects
 //          the view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K editor):
 //          click an axis ball to look from that side (drag anywhere in it to orbit)
 //   keys:  Left/Right or 1-7 outfit, T textures, H the game shaders on/off, V extra shader layers on/off (layers/*.hlsl),
@@ -45,6 +45,7 @@
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"
+#include "export/RotateGizmo.h"
 #include "card/CardFile.h"
 #include "card/SelectiveImport.h"
 #include "card/ClothingExport.h"

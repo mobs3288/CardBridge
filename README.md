@@ -358,9 +358,9 @@ cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folde
 # header to fold it. The lists under the panel (Parts, and every slider tab) scroll with the wheel or by dragging them
 # with the left button: a vertical drag picks the list up and moves it; the click under it is swallowed. The view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K
 # editor): click an axis ball to look at the model from that side (drag anywhere in it to orbit as before).
-# Accessory rows carry a move chip (an X/Y/Z gizmo) on their right end: click it to hold that accessory,
-# then drag an axis in the view to reposition it in XYZ (the move is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
-# Export PMX bakes it, and the Bones tab's numbers move with it); right-click the chip to reset the move, Esc deselects.
+# Accessory rows carry a move chip (an X/Y/Z arrow gizmo) and a rotate chip (an X/Y/Z ring gizmo) on their right end: click one to hold that accessory,
+# then drag an axis (move) or a ring (rotate) in the view to reposition it in XYZ (the edit is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
+# Export PMX bakes it, and the Bones tab's numbers move with it); right-click a chip to reset that one edit (move / rotation), Esc deselects.
 # The log panel shows every load/bake/export stage as it happens; E (or Export PMX) exports the
 # scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
 # name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game

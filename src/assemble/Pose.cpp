@@ -212,6 +212,17 @@ Pose MakeHandsOnHipsPose(const Scene& scene) {
     return MakePose(scene, pf, nullptr);
 }
 
+Mat4 RotationAxisAngle(Vec3 axis, float radians) {
+    const Vec3 a = normalize(axis);
+    if (std::fabs(a.x) + std::fabs(a.y) + std::fabs(a.z) < 1e-6f) return Mat4();
+    const float s = std::sin(radians), c = std::cos(radians), oc = 1.0f - c;
+    Mat4 r;
+    r.m[0] = c + a.x * a.x * oc; r.m[1] = a.x * a.y * oc - a.z * s; r.m[2] = a.x * a.z * oc + a.y * s;
+    r.m[4] = a.y * a.x * oc + a.z * s; r.m[5] = c + a.y * a.y * oc; r.m[6] = a.y * a.z * oc - a.x * s;
+    r.m[8] = a.z * a.x * oc - a.y * s; r.m[9] = a.z * a.y * oc + a.x * s; r.m[10] = c + a.z * a.z * oc;
+    return r;
+}
+
 // Rodrigues' formula; half a turn about a perpendicular axis when the directions are opposite.
 Mat4 RotationBetween(Vec3 from, Vec3 to) {
     const Vec3 a = normalize(from), b = normalize(to);

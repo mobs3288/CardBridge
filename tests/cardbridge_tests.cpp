@@ -40,6 +40,7 @@
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
+#include "export/RotateGizmo.h"
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
@@ -3036,6 +3037,75 @@ void unitTests() {
         moved.edit(static_cast<size_t>(root)).rot = {0, 0, 90};
         moved.edit(static_cast<size_t>(a)).pos = MoveBone(s, moved, static_cast<size_t>(a), {0.1f, 0, 0});
         CHECK(std::fabs(BoneWorlds(s, moved)[static_cast<size_t>(a)].translation().x - 0.1f) < 1e-4f);
+    });
+
+    test("rotate gizmo: RotationAxisAngle turns vectors, the rings pick by distance and by foreshortening", [] {
+        using namespace assemble;
+        using namespace cardbridge::exporter;
+        // Rodrigues: a quarter turn about +Y takes +Z to +X
+        const Mat4 q = RotationAxisAngle({0, 1, 0}, 1.5707963f);
+        const Vec3 v = q.dir({0, 0, 1});
+        CHECK(std::fabs(v.x - 1.0f) < 1e-4f && std::fabs(v.y) < 1e-4f && std::fabs(v.z) < 1e-4f);
+        const Vec3 w = q.dir({1, 0, 0});
+        CHECK(std::fabs(w.z + 1.0f) < 1e-4f && std::fabs(w.x) < 1e-4f);
+        // the zero axis is the identity
+        const Vec3 same = RotationAxisAngle({0, 0, 0}, 1.0f).dir({1, 0, 0});
+        CHECK(std::fabs(same.x - 1.0f) < 1e-6f);
+        // two half turns equal one full turn
+        const Vec3 dbl = (RotationAxisAngle({0, 0, 1}, 0.6f) * RotationAxisAngle({0, 0, 1}, 0.6f)).dir({1, 0, 0});
+        const Vec3 once = RotationAxisAngle({0, 0, 1}, 1.2f).dir({1, 0, 0});
+        CHECK(std::fabs(dbl.x - once.x) < 1e-5f && std::fabs(dbl.y - once.y) < 1e-5f);
+        // a full turn about any axis leaves a vector lying on it alone
+        const Vec3 axis = normalize({1, 2, 3});
+        const Vec3 stay = RotationAxisAngle(axis, 6.2831853f).dir(axis);
+        CHECK(std::fabs(stay.x - axis.x) < 1e-4f && std::fabs(stay.y - axis.y) < 1e-4f && std::fabs(stay.z - axis.z) < 1e-4f);
+        // TurnBone with an axis turn turns the bone in place; MoveBone with the orbit delta swings it around the anchor
+        Scene s;
+        auto add = [&](const char* name, int parent, Vec3 pos) { s.bones.push_back({name, parent, pos, "rig"}); return static_cast<int>(s.bones.size()) - 1; };
+        const int root = add("root", -1, {0, 1, 0});
+        const int child = add("child", root, {0.3f, 1, 0});
+        Pose pose;
+        const Mat4 turn = RotationAxisAngle({0, 1, 0}, 1.5707963f);
+        pose.edit(static_cast<size_t>(child)).rot = TurnBone(s, pose, static_cast<size_t>(child), turn);
+        const Vec3 c = BoneWorlds(s, pose)[static_cast<size_t>(child)].translation();
+        CHECK(std::fabs(c.x - 0.3f) < 1e-4f && std::fabs(c.y - 1.0f) < 1e-4f);   // the orientation turn alone does not move the bone
+        Pose moved;
+        const Vec3 td = turn.dir({0.3f, 0, 0});   // about +Y: (0.3,0,0) lands at (0,0,-0.3), so the orbit delta is (-0.3,0,-0.3)
+        const Vec3 orbit{td.x - 0.3f, td.y, td.z};
+        moved.edit(static_cast<size_t>(child)).pos = MoveBone(s, moved, static_cast<size_t>(child), orbit);
+        const Vec3 swung = BoneWorlds(s, moved)[static_cast<size_t>(child)].translation();
+        CHECK(std::fabs(swung.x) < 1e-4f && std::fabs(swung.y - 1.0f) < 1e-4f && std::fabs(swung.z + 0.3f) < 1e-4f);
+        // the gizmo's rings: a face-on state picked by hand
+        RotateGizmoState st;
+        st.ox = 100.0f; st.oy = 100.0f; st.ringWorld = 0.5f;
+        auto circle = [&](int a, float r) {   // a face-on circle of radius r around (100,100)
+            st.uX[a] = 100.0f; st.uY[a] = 0.0f; st.vX[a] = 0.0f; st.vY[a] = 100.0f;
+            st.det[a] = 10000.0f; st.ringPx[a] = r; st.minorPx[a] = r;
+            st.ring[a].clear();
+            for (int k = 0; k < RotateGizmoState::kRingSamples; ++k) {
+                const float t = 6.2831853f * static_cast<float>(k) / static_cast<float>(RotateGizmoState::kRingSamples);
+                st.ring[a].push_back({100.0f + r * std::cos(t), 100.0f + r * std::sin(t)});
+            }
+        };
+        circle(0, 50.0f); circle(2, 50.0f);   // axes 0 and 2 hold the same ring: axis 0 wins the tie
+        circle(1, 50.0f);   // placeholder, replaced below by an edge-on ring
+        st.minorPx[1] = 8.0f; st.ring[1].clear();   // seen edge-on: not pickable, whatever the polygon says
+        st.ring[1].push_back({100.0f - 50.0f, 100.0f}); st.ring[1].push_back({100.0f + 50.0f, 100.0f}); st.ring[1].push_back({100.0f, 100.0f - 8.0f});
+        CHECK(PickRotateGizmoAxis(st, 150.0f, 100.0f, 8.0f) == 0);    // on the ring
+        CHECK(PickRotateGizmoAxis(st, 100.0f, 50.0f, 8.0f) == 0);     // on the top of the ring (axis 0 ties axis 2)
+        CHECK(PickRotateGizmoAxis(st, 150.0f, 100.0f, 0.5f) == 0);    // tighter radius, still the ring
+        CHECK(PickRotateGizmoAxis(st, 160.0f, 110.0f, 8.0f) == -1);   // ~11 px off the ring, outside the radius
+        CHECK(PickRotateGizmoAxis(st, 100.0f, 92.0f, 8.0f) == -1);    // on the edge-on axis's line: not grabbable
+        CHECK(PickRotateGizmoAxis(st, 400.0f, 400.0f, 8.0f) == -1);   // far away
+        // the pointer angle in the ring plane (exact inverse of the projection)
+        float theta = -1.0f;
+        CHECK(RotateGizmoPointerAngle(st, 0, 150.0f, 100.0f, theta) && std::fabs(theta) < 1e-6f);          // +U
+        CHECK(RotateGizmoPointerAngle(st, 0, 100.0f, 150.0f, theta) && std::fabs(theta - 1.5707963f) < 1e-4f);   // +V
+        CHECK(RotateGizmoPointerAngle(st, 0, 100.0f - 50.0f, 100.0f, theta) && std::fabs(theta - 3.1415927f) < 1e-4f);
+        CHECK(RotateGizmoPointerAngle(st, 0, 135.36f, 135.36f, theta) && std::fabs(theta - 0.7853982f) < 1e-3f);
+        CHECK(!RotateGizmoPointerAngle(st, 0, 100.0f, 100.0f, theta));   // too close to the centre: the angle is noise
+        CHECK(!RotateGizmoPointerAngle(st, 1, 150.0f, 100.0f, theta));   // too edge-on to invert
+        CHECK(!RotateGizmoPointerAngle(st, 3, 150.0f, 100.0f, theta));   // axis out of range
     });
 
     test("physics sim: a chain lags behind a moving anchor, settles again, stays out of colliders", [] {

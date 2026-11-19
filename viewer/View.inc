@@ -5,7 +5,8 @@ void Render(int w, int h) {
     std::shared_ptr<Loaded> L = Current();
     if (w < 8 || h < 8) return;
     g.fw = w; g.fh = h;
-    g.gizmoState = exporter::MoveGizmoState{};   // re-filled only when this picture draws the gizmo (stale picks from the last picture are never used)
+    g.gizmoState = exporter::MoveGizmoState{};   // re-filled only when this picture draws the move gizmo (stale picks from the last picture are never used)
+    g.rotGizmoState = exporter::RotateGizmoState{};   // likewise the rotate gizmo; only the mode's gizmo is drawn
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     g.hidden.resize(L->scene.parts.size(), 0);
     g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
