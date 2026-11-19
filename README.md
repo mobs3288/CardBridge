@@ -3,18 +3,30 @@
 [![XERJ Corpus Hub](https://hub.xerj.org/contributors/mobs3288/badge.svg)](https://hub.xerj.org/contributors/mobs3288)
 
 <p align="center">
-  <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="500">
+  <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="420">
 </p>
 
-**CardBridge** converts Koikatsu character cards into rigged 3D models (PMX) with separately addressable outfit parts, entirely offline and **completely separate from the game**: it reads the card, a CardBridge asset library and the user's mod files, and needs no Koikatsu install to run. It never launches or controls the game.
+**CardBridge turns a Koikatsu character card into a rigged PMX model** — offline, on your own machine. The game does not need to be running, no plugin or BepInEx is involved, and nothing is uploaded anywhere. Drop a card onto the window, press `E`, and out comes a PMX with its textures, physics, morphs and a `.cardbridge.json` manifest — an alternative to KKPMX with a standalone workflow.
 
-It is a standalone C++ Windows application built in the same style as the Project K engine and Map Maker. Its core is a UI-free library so the Map Maker can later import its output (or call it) without a second implementation.
+> **Version 0.3.0.** It works **100% for the base game**: stock Koikatsu items convert and look right. **Several modded cards also work**, but not all of them — expect rough edges and see [Known limitations](#known-limitations).
+>
+> **Starting 1 December 2026, development will slow down — but CardBridge is still in active development.** If you run into any issue, [open an issue](https://github.com/mobs3288/CardBridge/issues). That is the best way to get it looked at.
 
-> **Version 0.2.1-alpha. It is usable today, but it is not finished.** It works **100% only for the base game**: cards made with the stock Koikatsu items convert and look right. **Several modded cards also work**, but not all of them, and a mod can still break a conversion or a material. It is **still in development**: expect rough edges, wrong colours on some mod items, and missing pieces (see Known limitations). Every export also writes a `_preview.png` (front, side, back) so a result can be judged without a PMX viewer, and the viewer shows exactly what the game's shaders draw. The checklist at the bottom of this file is the source of truth for what is done. The version is in the [`VERSION`](VERSION) file; `cardbridge --version` and the viewer's header show it.
+## Why it exists
 
-## Video Demo
+Koikatsu's character maker is excellent at making anime characters — but the usual exporters run *inside* a launched game with a matching plugin set and break whenever anything drifts. CardBridge reads the same data from disk instead, so a conversion does not depend on a game process at all.
 
-Watch CardBridge's converted PMX models in action in MikuMikuDance (MMD).
+It started as a tool for my own game, Project K, because the character was the blocker: getting a finished, rigged, textured model out of Koikatsu without spending hours in a DCC tool. It is also for anyone who wants their own Koikatsu characters in MikuMikuDance or in another engine.
+
+<p align="center">
+  <img src="image/meme.jpg" alt="Meme: &quot;All my homies hate that&quot;, captioned &quot;Fuck KKPMX&quot;" width="420">
+</p>
+
+*(Humour aside: KKPMX is MIT-licensed, documents useful PMX clean-up rules, and is a reference for this project. See [Prior art](#prior-art-and-licensing).)*
+
+## Video demo
+
+Converted models in MikuMikuDance:
 
 <p align="center">
   <a href="https://youtu.be/z1WUHVzbCjQ" target="_blank" rel="noopener noreferrer">
@@ -26,400 +38,140 @@ Watch CardBridge's converted PMX models in action in MikuMikuDance (MMD).
   <em>Matou Sakura – Catch Catch | Koikatsu to MMD | CardBridge</em>
 </p>
 
-## Screenshots and examples
+## Screenshots
 
-The images below show example character cards, their appearance in CardBridge, and the exported models in MikuMikuDance.
+| Character cards | CardBridge | MikuMikuDance |
+|---|---|---|
+| <img src="image/demo_card1.png" alt="Demo character card 1" width="220"><br><img src="image/demo_card2.png" alt="Demo character card 2" width="220"> | <img src="image/demo_cardbridge1.png" alt="CardBridge demo 1" width="220"><br><img src="image/demo_cardbridge2.png" alt="CardBridge demo 2" width="220"> | <img src="image/demo_MMD_card1.png" alt="MMD export demo 1" width="220"><br><img src="image/demo_MMD_card2.png" alt="MMD export demo 2" width="220"> |
 
-### Character cards
+## Install
 
-| Example 1 | Example 2 |
-|---|---|
-| <img src="image/demo_card1.png" alt="Demo character card 1" width="400"> | <img src="image/demo_card2.png" alt="Demo character card 2" width="400"> |
+**Windows 10 or 11, 64-bit.** The recommended download is the installer:
 
-### CardBridge
+1. Download **[CardBridge-Setup-0.3.0.exe](https://github.com/mobs3288/CardBridge/releases/download/v0.3.0/CardBridge-Setup-0.3.0.exe)** (or browse **[all releases](https://github.com/mobs3288/CardBridge/releases)**).
+2. Run it. Windows may warn that the publisher is unrecognised — see [Troubleshooting](#troubleshooting).
+3. Choose the install directory (default: `Program Files\CardBridge`).
+4. Pick the optional shortcuts (desktop) and finish.
+5. Launch CardBridge from the Start Menu.
 
-| Example 1 | Example 2 |
-|---|---|
-| <img src="image/demo_cardbridge1.png" alt="CardBridge demo 1" width="400"> | <img src="image/demo_cardbridge2.png" alt="CardBridge demo 2" width="400"> |
+The installer creates the Start Menu shortcuts, registers CardBridge in **Add/Remove Programs**, and removes itself cleanly when you uninstall. Your settings, the asset library and your exports are **never** deleted by the uninstaller.
 
-### MikuMikuDance
+**Prefer not to install?** The portable package is the same build without the installer:
+[CardBridge-Portable-0.3.0.zip](https://github.com/mobs3288/CardBridge/releases/download/v0.3.0/CardBridge-Portable-0.3.0.zip). Unzip it anywhere and run `CardBridge.exe` from the folder. Both distributions are built from the same binaries and behave identically.
 
-| Example 1 | Example 2 |
-|---|---|
-| <img src="image/demo_MMD_card1.png" alt="MMD export demo 1" width="400"> | <img src="image/demo_MMD_card2.png" alt="MMD export demo 2" width="400"> |
+### First run
 
-## Get it and run it
+The first time CardBridge starts it needs to know where your game data lives — one time only:
 
-The release is **one exe**: `CardBridge-<version>.exe` (the viewer, with the converter and exporter inside). No installer, no scripts, no extra files.
+1. It asks for **your Koikatsu folder** (the one that contains `abdata`) and copies the data it needs into `%LOCALAPPDATA%\CardBridge\library` — about 0.9 GB for the full library (about 5 MB if you pick the minimal one), roughly 20 seconds, once.
+2. It asks for your **mods folder** (or Cancel for base-game items only). CardBridge reads mods in place and never modifies them; mods are never shipped with it.
+3. Drop a card `.png` on the window and press **E** (or *Export PMX*) to export.
 
-1. Run it. The first time it asks for **your own Koikatsu folder** (the one that contains `abdata`) and copies the base-game data it needs into `%LOCALAPPDATA%\CardBridge\library` (about 0.9 GB, about 20 seconds, once). The game is never needed again.
-2. It asks for your Koikatsu **mods folder** (or Cancel for base-game items only). Mods are never shipped with CardBridge: each user points it at their own.
-3. Drop a card `.png` on the window. Press **E** (or *Export PMX*) to write the PMX.
-
-**Settings.** The **Setup** tab (last tab in the panel) changes everything chosen at first run, and each change is saved at once to `%LOCALAPPDATA%\CardBridge\viewer.json`: use another library folder or build a new one from a Koikatsu folder; choose the mods folder, rebuild the mod index after adding mods, or use no mods; one fixed export folder (or ask every time); an extra folder of shader layers; open the settings folder; forget all settings. Keys `M` (mods folder) and `L` (library) still work.
-
-`CardBridge-CLI-<version>.exe` is the same converter as a command line tool (see Usage). Every exported PMX carries the model information (CardBridge, its version and its author, Ryan Oktaviandi Susilo Wibowo, which is fixed and cannot be changed by a setting; the character; the source card) in the header comment, which MikuMikuDance shows in its model info.
+**Settings** live in the **Setup** tab (library folder, mods folder, export defaults, graphics); keys `M` (mods folder) and `L` (library) work too. Everything is saved at once to `%LOCALAPPDATA%\CardBridge\viewer.json`.
 
 ## What you need
 
-| Thing | What it is | Where it comes from |
+| Thing | What for | Notes |
 |---|---|---|
-| Windows 10 or 11, 64-bit | CardBridge is a Windows program | A graphics card with Direct3D 11 draws the viewer with the game's shaders and skins the pose on the GPU (the best-suited hardware adapter is picked by memory and capability, not vendor — see `docs/GPU_SKINNING_HARDENING.md`). Without a real GPU it uses WARP on the CPU, and without Direct3D 11 it falls back to the software renderer: slower, same pictures |
+| Windows 10 or 11, 64-bit | The app runs only on Windows | Windows 10/11 ship Direct3D 11 and the C++/GDI components the viewer uses |
+| A GPU with Direct3D 11 | The 3D viewer (GPU-skinned) | Without a real GPU it uses WARP on the CPU; without D3D 11, a software renderer — same pictures, slower |
+| Your Koikatsu (or Koikatsu Party) install | Copied into the CardBridge library, once | **Never needed at run time after that** |
+| Your mods folder (optional) | `.zipmod` files (Sideloader mods) | Read in place, never changed. `.rar`/`.7z` mods must be unpacked first |
+| A character card | The thing you convert | A `.png` made in the character maker |
 
-**Graphics.** The Setup tab's Graphics rows choose the device (auto picks the best-suited hardware adapter; hardware insists on one; warp and software are the CPU fallbacks) and the skin (GPU compute shader, auto — CPU for small meshes, GPU for large — or CPU loop). Changing the device takes effect at once, without restarting: the viewer recreates the Direct3D device and re-uploads the current card (and the "as exported" copy, when there is one). The header names the device actually in use. The environment variables `CARDBRIDGE_GPU` (auto/hardware/warp/software), `CARDBRIDGE_GPU_ADAPTER` (adapter index), `CARDBRIDGE_SKIN` (gpu/cpu/auto) and `CARDBRIDGE_SKIN_THRESHOLD` (auto threshold in verts) override the settings, and `cardbridge convert --gpu-view --gpu auto|hardware|warp|software --gpu-skin gpu|cpu|auto --skin-threshold N` does the same on the command line. `cardbridge skin-bench [--repeats N]` measures CPU vs GPU skinning on synthetic workloads. The Setup tab's **Export defaults** group has a "Skin shading strength" slider remembered for new cards (persisted in the viewer's own settings file, under `%LOCALAPPDATA%\CardBridge\viewer.json`): the same slider on the Look tab, applied by new loads and by the export. It defaults to 1.5 (on a 0..2 scale, higher is deeper).
-| **Koikatsu or Koikatsu Party install** | The game's own data files, read **once** by the first-run setup and never again | Your own copy of the game (this is the game folder that contains `abdata`) |
-| **Your mods folder** (optional) | The `.zipmod` files (Sideloader mods: hair, clothes, accessories, textures) your cards use | Your Koikatsu `mods` folder (or any folder holding the `.zipmod` files). CardBridge reads it in place and never changes it |
-| **A card** | A Koikatsu character card, `.png` | Made in the Koikatsu character maker |
+Disk space: about 20 MB of application files plus the library (~0.9 GB full, ~5 MB minimal). In our own tests the converter peaked around ~350–430 MB of RAM (see [`docs/PERFORMANCE_REVIEW.md`](docs/PERFORMANCE_REVIEW.md)). Hardware requirements have not been formally profiled beyond that — the numbers above are from the machines the project was actually developed and tested on.
 
-**What the setup copies from the game** into the CardBridge library (`%LOCALAPPDATA%\CardBridge\library`, about 0.9 GB):
+## Features
 
-- `abdata/chara/oo_base.unity3d`: the shared skeleton and the body.
-- `abdata/chara/etc.unity3d`: the dummy items some mods point their empty slots at.
-- `abdata/chara/*.unity3d`: every base-game hair, clothing and accessory bundle, which also hold the game's shaders (the bulk of the 0.9 GB).
-- `abdata/list/characustom/*.unity3d` and `abdata/list/customshape.unity3d`: the item tables (which item id is which file) and the body and face slider shapes.
-- The colour-grading table (`Lut_Amount`) from the `abdata/map/scene` bundles, so the viewer and the export use the character maker's colours.
+**Conversion and export**
 
-`cardbridge library import --game <game folder> --library <folder> --minimal` copies only the first, second, fourth and fifth items (about 5 MB): base-game clothes and hair are then missing and every item has to come from mods.
+- Reads Koikatsu character cards (`.png`) into a full part tree: body, head, hair, clothing, accessories
+- Writes a self-contained export next to the PMX: PNG textures, and a `.cardbridge.json` manifest (part tree, stable IDs, per-part export toggles, material ranges, validation status)
+- Preview baked into every export (`_preview.png`) — judge the result without opening the PMX
+- Merged-physics export: DynamicBone chains (hair, skirts, ribbons) and bust soft-physics chains
+- MMD-ready rig: Japanese MMD morph/bone names, A-pose rest pose by default, ground/self shadows
+- Command-line interface: `cardbridge inspect|convert|clothes|library|simplify-bench|skin-bench`
+- ~5× faster than early versions (see [`docs/PERFORMANCE_REVIEW.md`](docs/PERFORMANCE_REVIEW.md))
 
-**What the mods folder is for.** A card stores a mod item as the mod author's slot id plus the mod's GUID. CardBridge finds the `.zipmod` with that GUID in your mods folder and reads its meshes, textures and item list from there. If the mod is not in the folder, that item is listed as missing (by mod GUID) in the issues and the manifest, and the rest of the character still converts. The first run over a mods folder builds an index (about 15 minutes for 4,000 mods; cached in `%LOCALAPPDATA%\CardBridge\modindex.json`, so later runs are fast). Mods packed as `.rar` or `.7z` must be unpacked first.
+**Viewer and editing**
 
-**Not needed:** the game running, BepInEx or any plugin, Blender, MikuMikuDance (only to open the PMX afterwards). Game files and mods are never uploaded anywhere and never stay inside CardBridge's exe.
+- Built-in 3D viewer (Direct3D 11, GPU-skinned; software fallback) showing exactly what the game's shaders draw
+- Visibility controls: hover to highlight, click to hide/show, right-click to solo, group fold — hidden parts are dropped from the export entirely
+- **Bones** tab: move/rotate/scale sliders with Shift-click exact entry, A-pose preset, undo/redo (`Ctrl+Z`/`Y`), pose save/load to JSON
+- **Morphs** tab: the game's expression morphs as live 0–100 sliders, grouped like MMD's panels, with English aliases (MMD-standard names included)
+- **Body measurements (BWH)**: Bust / Waist / Hip as real measurements in centimetres — typing an exact value solves the shape to it
+- **Proportion correction** (opt-in, non-destructive): flags unusual values, offers half-way-to-neutral fixes, never touches your card. [`docs/PROPORTION_CORRECTION.md`](docs/PROPORTION_CORRECTION.md)
+- **Material Workbench**: inspect and override mod materials live, with diagnostic viewport modes and an issues list
+- **Optimize** tab: triangle reduction and stacked LOD files (`name_lod1.pmx` … `lod4.pmx`), per-part budgets that keep faces, eyes, hair and garments intact
+- **Translucency brush**: hand-paint see-through regions onto garments; exports as a proper transparent material
+- **Skin shading / Koikatsu AO bake**: cleavage shading and the game's own crease lines baked into the body skin ([`docs/KOIKATSU_AO_INVESTIGATION.md`](docs/KOIKATSU_AO_INVESTIGATION.md))
 
-## Why this project exists
+**Outfits and coordinates**
 
-CardBridge is a tool for making anime characters for my own game, Project K, using the established Koikatsu character engine instead of Blender. I am not good at 3D modelling or texturing, and Koikatsu's character maker already does that part very well; what was missing was a reliable way to get a finished character out of it, rigged and textured, into my own engine.
+- Drag a Koikatsu **outfit file** (`【KoiKatuClothes】`) or a **Coordinate PNG** onto a loaded character: merge as clothing, replace as coordinate, or pick components one by one in the **Selective Import** window — three live views, nothing applied until you press Apply. The card on disk is never modified. [`docs/COORDINATE_IMPORT.md`](docs/COORDINATE_IMPORT.md)
+- **Export clothes** (`Shift+E`): write an outfit file back out from a character card. [`docs/CLOTHING_EXPORT.md`](docs/CLOTHING_EXPORT.md)
 
-It also exists to make character conversion more reliable, mod compatibility more extensible, and the entire workflow less painful.
+**Experimental**
 
-Existing exporters run inside the running game, so a conversion needs a launched game, a working plugin set and a matching patch level, and it breaks whenever any of those drift. CardBridge reads the same data from disk instead.
+- **DynamicBone preview**: press `Y` for live physics in the viewer — hair and ribbons swing as they would in MMD. `N` gives them a shove
+- **Face morph effects** (rendered on synthetic scenes so far, real-card verification pending): Eye Roll, Heart Eyes, Sweat — [`docs/FACE_MORPHS.md`](docs/FACE_MORPHS.md)
 
-<p align="center">
-  <img src="image/meme.jpg" alt="Meme: &quot;All my homies hate that&quot;, captioned &quot;Fuck KKPMX&quot;" width="420">
-</p>
+## How to use
 
-*(Humour aside: KKPMX is MIT-licensed, documents useful PMX clean-up rules, and is a reference for this project. See **Prior art** below.)*
+### Viewer
 
-## What it does
+1. Open CardBridge (Start Menu, or run `CardBridge.exe` with the card as argument, e.g. `CardBridge.exe "<card.png>"`).
+2. Inspect the character — the Parts list shows Body, Head, Hair, Outfit, Accessories; the log panel shows every load/bake/export step.
+3. Edit if you want (Parts visibility, Bones, Morphs, Look, Proportions, Optimize). Everything you see is what exports.
+4. Press `E` (or **Export PMX**). Choose a folder, and CardBridge writes:
+   `YourChar.pmx`, `textures/*.png`, `YourChar.cardbridge.json` (the manifest) and `_preview.png` (plus `_head.png` / `_feet.png` / `_shaded.png` depending on settings).
 
-1. Reads a Koikatsu character card (`.png` with the card payload after the image).
-2. Identifies which item IDs the card uses and which are base-game versus mod items, using the card's own Sideloader resolve data.
-3. Finds the item's assets in the asset library (base-game items) or in the matching `.zipmod` under the mods folder (mod items), read-only.
-4. Assembles body, head, hair, clothing slots and accessories onto the shared skeleton.
-5. Writes a self-contained folder: a PMX file, PNG textures, and a `.cardbridge.json` manifest carrying the part tree, stable part IDs, per-part export inclusion, material ranges and validation status.
+Hidden parts are dropped from the PMX entirely (and their bones with them); visible parts keep a `Hide <part>` morph so MMD can toggle them.
 
-A Koikatsu outfit file (`【KoiKatuClothes】`, the `.png` the game saves for one coordinate) can be applied to a character **in memory only**: its clothes overwrite one outfit of the character (by default the one on screen), its accessories fill empty slots without ever deleting accessories, and the result is previewed and exported from that memory copy. The character card on disk is never saved or modified. In the viewer's Parts list the import is its own **Added outfit** group, apart from the base model's Body/Head/Hair/Outfit/Accessories: its header checkbox toggles every added part at once, each item keeps its own checkbox, the slot it overwrote is marked `*` and shown as OUTFIT (REPLACED), and `<` `>` move the import to another outfit slot. The manifest records the same split (`added_outfit` plus a `from_clothing` flag per part).
-
-An item unticked (hidden) in the viewer's list is gone from the export the same way it is gone from the view: its meshes, its DynamicBone physics and the bones only it used are not in the PMX at all, and every exported preview picture (`_preview.png`, `_head.png`, `_feet.png`, `_view.png`, `_shaded.png`) is the viewer's picture at export time (1:1). Visible items stay in the PMX with a `Hide <part>` morph, so MMD can still hide them; the skin under a visible garment stays as the `Under`/`Nude body` morphs, not as a visible part. In the manifest this is recorded as `include_in_export: false` for the removed items.
-
-## Proportion correction (optional)
-
-Some Koikatsu cards are saved with proportions the maker allows but most viewers do not expect: a tiny body with an oversized head (`Overall · Head size` past the maker's 0..1 range with SliderUnlocker), `0.0` chest width, hand-sculpted ABMX bone scales that reshape the skull. **CardBridge converts those faithfully by default — never normalized, never trimmed.** For users who want CardBridge to *suggest* a normalization, there is an opt-in corrective layer: the **Proportions** tab (between Mats and Optimize) analyzes the card's sliders and its ABMX table, reports what it finds with values and reasons, and offers per-correction suggestions you apply or reject individually. On the command line: `cardbridge convert ... --print-diagnostics` prints the findings, `--proportions layer.json` applies a saved layer, and `--normalize-head-proportions` / `--normalize-body-proportions` / `--normalize-face-proportions` / `--normalize-overall` apply the matching suggestion sets.
-
-* Suggestions move values **half-way back toward neutral**, never to 0.5 exactly and never all the way; ABMX bone scales are partially neutralized the same way (×0.7 → ×1.15), rotations and positions are never touched, and everything composes **after** the card's own shape data and **after** ABMX — the same order the game itself uses.
-* Nothing is ever applied without you clicking a button; the card on disk is never modified (not on import, not on export, not by any option). Corrections are stored as a separate layer in the exported scene.
-* The viewer toggles the layer with the same `Proportion correction layer` switch: off = the original character, camera, pose, lighting and everything, on = the corrected one (the export follows 1:1). In the **Proportions** tab each suggestion row reverts with one click, and `Reset all corrections` restores the faithful pipeline exactly.
-* The exported PMX matches the preview by construction (the corrected scene *is* the exported scene), and the manifest records whether a correction layer was active (`proportions: {active, ops: [...]}`) so a file can be identified later. Without the corrections the manifest says `active: false`.
-* Faithful remains the default and is never overridable by a flag you did not pass: without `--proportions`/`--normalize-*`, `cardbridge convert` produces the same file as before this feature existed.
-
-Limitations, honestly stated: suggestions are heuristics, not verdicts — a card with `Head size 1.25` and a 0.3 height body is unusual but *may be what its author intended*; the diagnostics say so rather than declare it broken. Extreme values the maker allows via SliderUnlocker are flagged, not clamped. Parent/child ABMX interactions are only *reported* (compounding scale is visible as such), never auto-resolved, because untangling a hand-authored sculpt belongs to whoever made it. Mesh-based proportions (e.g. measuring head width from the skin) are out of scope. See [`docs/PROPORTION_CORRECTION.md`](docs/PROPORTION_CORRECTION.md) for the full behavior, thresholds and safety levels.
-
-## Mesh simplification and LODs
-
-Some imported character components contain far more triangles than the silhouette needs. The **Optimize** tab (and the command line) reduce the triangle count with a quadric-error-metrics edge collapse (attribute-aware: the UV layout, material boundaries, hard edges, normal and weight seams stay intact, bone weights are blended top-4 and renormalised, blend-shape offsets travel with their vertices, and every open boundary is preserved, so UV seams and material boundaries cannot tear). It is **not** a uniform percentage of every mesh: each component class gets its own reduction budget relative to the requested amount, so the face keeps its features, the eyes are never touched, the hair keeps its silhouette and strand planes readable, the body keeps proportions and deformation quality, and clothes and accessories reduce the most. Two invariants protect what you can see, at every level, including Aggressive (80%):
-
-- **No surviving face may turn more than 40° from its orientation when the mesh entered the simplifier** (cumulative across all collapses). A face past ~90° is back-facing, and single-sided garment materials — the game's `main_opaque`, exactly what KK ships — render nothing for it: that was the "LOD made the clothes disappear" failure. The ceiling makes it impossible; the per-collapse tolerance is only a second net.
-- **Visible clothing is never deleted.** Only a face whose three vertices are *occluded from every outward direction by an opaque layer of another part* can be removed, and only at LOD 2 and coarser. LOD 1 (60%) never removes a face anywhere; at LOD 2+ such hidden faces (the underwear genuinely under the skirt, the shoe's inner sole behind the leather shell) are dropped instead of being carried into the distance; everything else is only simplified.
-
-| class | relative weight | hard cap |
-|---|---|---|
-| Eyes | none (kept exactly) | 0% |
-| Face (skin, teeth, brows, tongue) | 0.25 | 15% |
-| Hair | 1.0 | 45% |
-| Body | 0.75 | 60% |
-| Clothing | 1.0 | 80% |
-| Accessories | 1.0 | 90% |
-
-Quality presets in the Optimize tab and on the command line:
-
-| Preset | Target reduction | Intended use |
-|---|---|---|
-| Original | 0% | maximum fidelity |
-| High Quality | 20% | minimal visual differences |
-| Balanced (default) | 40% | general-purpose |
-| Performance | 60% | reduced polygon count |
-| Aggressive | 80% | low-poly / distant viewing |
-| Custom | any 0..100% | the slider |
-
-The slider sets the target; the panel shows the original triangle count, the estimated simplified count, the reduction in effect, per-part-class behaviour is applied automatically and the export always derives the result from the untouched original vertices, never from an already-simplified mesh, so quality cannot degrade cumulatively. The **Apply to export** button commits the current reduction for the next export; **Reset to original** reverts everything to the untouched character. In the viewer the simplified model and any LOD are previewable live; in the export the PMX is simply the reduced mesh (a plain PMX has no runtime LOD switching of its own: pick the file by viewing distance).
-
-LODs are generated the same way and recorded in the manifest. Each level is generated from the original geometry (LOD 0), never from a previous simplified level; the files share the export's textures and are written as `<name>_lod1.pmx` .. `<name>_lod4.pmx` next to the main PMX:
-
-| LOD | default target (remaining) | intended viewing distance |
-|---|---|---|
-| LOD 1 | 60% | near |
-| LOD 2 | 30% | medium |
-| LOD 3 | 15% | far |
-| LOD 4 | 5% | very far |
-
-The targets are configurable per level on the Optimize tab (independent `-` / `+` steppers, 5..95% per level) and on the CLI (`--lods`, or `--lod-targets 70,40,20,10`). The targets are not guarantees: with open borders locked and the class caps above, some meshes cannot reduce further and the exporter logs exactly that (`could not reduce below N triangles`) and, when two levels land on identical counts, writes the alias once instead of a duplicate file (the manifest lists it with `identical_to`). The skeleton, the morphs, the material assignments, the bone indices and every texture are identical between the levels; only the triangulation changes.
-
-The face-removal rule (LOD 2 and coarser, when the requested reduction is 50% or more) works like this: every visible mesh's vertices are ray-cast from a hair above the surface along its outward normal, and a vertex is *occluded* when that ray is blocked by an opaque Outfit/Accessory triangle of another part — a shell never covers itself (its own part's triangles never block it), translucent layers never occlude, perforated lace never occlude (any texel the game's shader discards disqualifies the shell as a shield), and anything the ray does not block — a neckline, a slit, an opening — keeps its geometry. It is not a bounding-box overlap test; it is actual per-vertex visibility, the same logic the body's skin suppression uses. Faces removed this way are always whole triangles (never half a face), reported per level in the manifest (`covered_faces_dropped`) and in the log, and the under-piece skin hidden for the nude morph uses the same machinery as always. Inner garments are culled only where genuinely covered — the visibly draped part always survives; outer garments are never dropped at all.
-
-CLI:
+### Command line
 
 ```powershell
-cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --simplify 40
-cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --lods       # LOD 1..4 at 60/30/15/5
-cardbridge convert "<card.png>" --library "<lib>" --mods "<mods>" --out "<out>" --lod-targets 70,40,20,10
+# once: copy the base-game data into your library (the ONLY command that reads the game)
+cardbridge library import --game "<game folder>" --library "<library>"   # add --minimal for ~5 MB
+cardbridge library check --library "<library>"
+
+# look at a card without exporting
+cardbridge inspect "<card.png>" --library "<library>" --mods "<mods>"
+
+# convert
+cardbridge convert "<card.png>" --library "<library>" --mods "<mods>" --out "<output folder>"
 ```
 
-Validation: `cardbridge simplify-bench --subdiv 6` times the reduction on a synthetic closed mesh, and the test suite checks weight renormalisation, UV-seam preservation, blend-shape carry-over, reshape-consistency (bind frames rebuilt), LOD non-cumulation and the export round-trip (simplified PMX + LOD files re-read; the skeleton is unchanged).
+Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memory), `--outfit N`, `--apose-degrees N` / `--tpose`, `--simplify 40`, `--lods`, `--skin-shade F`, `--skin-ao F`, `--pose <file>`, `--print-diagnostics`, `--normalize-*` for the opt-in proportion fixes. `cardbridge clothes` writes an outfit file back out from a card. Exit codes: `0` ok, `1` usage, `2` unsupported/rejected card, `3` conversion failed.
 
-## What it deliberately does not do
+### Comparing the viewer view with the MMD output
 
-- Launch Koikatsu, automate its UI, depend on a game process, or read a game install at run time.
-- Modify user files. Mods are read in place; the output contains only meshes and textures generated for the card being converted.
-- Guess. Unknown card families are reported as unsupported; unresolved items are reported by mod GUID rather than silently dropped.
-
-## Asset library: running without the game
-
-The converter needs base-game data (the shared skeleton and body, the item list tables, and the base-game hair, clothing and accessory bundles). Instead of reading a game install, CardBridge reads its own **asset library** folder, laid out like the game's `abdata` folder:
-
-```text
-<library>/library.json            what was copied, with sizes and hashes
-<library>/abdata/chara/oo_base.unity3d
-<library>/abdata/list/characustom/*.unity3d
-<library>/abdata/chara/*.unity3d  (full profile)
-```
-
-`cardbridge library import --game <install> --library <dir>` copies those files once. Only this command ever reads a game install. `--minimal` copies just the skeleton, body and list tables (about 5 MB); the full profile is about 0.9 GB. `cardbridge library check` verifies a library. After that, `convert` and `inspect` take `--library` and never see the game. There is no game code to copy: what the game does in its C# assembly is reimplemented in C++ here from observation and decompiled reading.
-
-**Important:** the library holds copies of the game's data files, which belong to their authors. It is kept out of this repository (`.gitignore`). Whether a library may be redistributed to people who do not own the game is a licensing question this project does not answer. The mechanism supports "build it from your own game copy" and "ship a prepared library"; choosing the second is a legal decision for whoever distributes it.
-
-## Supported inputs
-
-| Family | Card marker | Status |
-|---|---|---|
-| Koikatsu | `【KoiKatuChara】` | Target of the first release; card and asset layers verified on real files |
-| Koikatsu Party (patched) | `【KoiKatuCharaSP】` | Card container verified; asset layout assumed identical, not yet tested |
-| Koikatsu Sunshine | `【KoiKatuCharaSun】` | Recognised and reported as unsupported: the container differs (4 outfits, an extra `About` block) and no Sunshine install was available to verify its asset bundles |
-| Koikatsu outfit files | `【KoiKatuClothes】` (and Party/SP variants) | Supported as a clothing source (merged into the character's in-memory outfit) and as a clothing target: `cardbridge clothes` / **Export clothes** write one back out from a character card |
-| Koikatsu Coordinate PNGs | `【KoiKatuChara】` / `【KoiKatuCharaS】` / `【KoiKatuCharaSP】` | Supported as an outfit source: drop one on a loaded character and choose **Import as Clothing** (the outfit contents, merged as the clothing import does) or **Import as Coordinate** (the whole coordinate replaces the slot). Character A's outfit transfers to Character B; identity never travels |
-| Koikatsu Sunshine outfit files | `【KoiKatuClothesSun】` | Recognised and reported as unsupported, like Sunshine characters |
-| Other games, other families | others | Rejected with a specific error |
-
-**Platform:** Windows only for now.
-
-### Clothing files (outfit files)
-
-An outfit file is a Koikatsu `.png` whose payload after the image is a single coordinate (the same clothes / accessories / makeup blob a character card stores per outfit) plus the same `KKEx` extended map a character carries. It never carries a face, body or hair: those always come from the character.
-
-**Viewer.** Open a character, then drag an outfit file onto the window. It overwrites the outfit on screen in memory (the card on disk is not saved) and stays pinned to that one slot; the log says what was replaced and that hair was kept. Switching to another outfit slot shows that slot's own clothing again, and switching back shows the imported file again. The status line under the slots names the slot that holds it, and **Reset clothing** (or `D`) drops the file and returns the outfit to the card default. Dropping a different character clears the applied outfit too. Exporting (`E`) exports the merged scene, exactly as shown. The drop dialog also offers **Selective Import...**: a window with three live 3D views (your character, the imported source, and the proposed result) and a per-component picker — add or replace individual clothes and accessories, keep your own, or skip the source's — with nothing applied until you press Apply.
-
-**Command line.** `convert <card.png> --clothes <outfit.png> ...` and `inspect <card.png> --clothes <outfit.png>` do the same one-shot merge for the export. `inspect <outfit.png>` shows an outfit file's name, garment ids and resolver rows. `--outfit N` chooses the target slot (default: the card's current outfit); `--replace-accessories` opts into wholesale accessory replacement.
-
-### Coordinate PNGs (a character card as an outfit source)
-
-A Koikatsu character card is a PNG with serialized data appended after the image, and its outfits live in the `Coordinate` block — **one Coordinate per outfit**, each holding the clothes, the accessories and the makeup. A **Coordinate PNG** is a character card used as an *outfit source*: take Character A's card, put her outfit on Character B. CardBridge detects one by the bytes (the PNG signature, then the marker after the image — `【KoiKatuChara】` and its Party/SP variants), never by the file name; Sunshine/EmotionCreators cards are not accepted as Coordinate sources yet and are opened as usual.
-
-Drop an outfit file onto a loaded character and CardBridge asks how to import it:
-
-| Choice | What it does |
-|---|---|
-| **Import as Clothing** | Extracts only this coordinate's outfit — clothes, accessories and makeup — and runs it through the existing outfit import. Character B keeps their identity, face, body, personality and every other outfit; hair worn as accessories is kept; the result behaves exactly as if you had dropped a clothing file of the same outfit. |
-| **Import as Coordinate** | Replaces the outfit on screen with the whole coordinate, as saved — clothes, accessories (parents, positioning, rotation, scale, colors, hide flags), makeup and accessory visibility flags. Accessories are replaced too, including hair accessories (use Import as Clothing to keep them); the coordinate's clothes toggle state (half-off/off) is applied too. |
-| **Selective Import...** | Opens a dedicated window with three live 3D views — the character as loaded, the imported source, and the proposed result — plus a per-component picker: import only the clothes and accessories you choose (Add, Replace, Keep Existing or Skip), then **Apply** to commit in memory. **Cancel** discards everything; nothing touches the card on disk either way. |
-
-Both modes leave the target's own identity, face, body, personality, hair and other outfits untouched — nothing outside the coordinate is ever imported, and the card on disk is never saved. A Coordinate file (【KoiKatuClothes】, what Koikatsu itself saves as “coordinate” files) always opens the import dialog on drop. With no character on screen (or while the current load is still running) the dialog explains there is nothing to import onto yet; the import choices appear once a character is loaded and then the file is dropped on it. A dropped character card (【KoiKatuChara】, a Koikatsu card) opens as a character as it always did — no dialog. `CARDBRIDGE_COORDINATE_MODE=clothing|coordinate|selective|cancel` answers the dialog in scripted runs. On the command line, `--clothes <a Coordinate PNG>` imports the outfit contents (as clothing) with a log line saying so — `cardbridge convert` never silently applies a card as an outfit file, and never falls back to opening it as a character.
-
-Which coordinate of the source is imported: the one the source card itself was saved with (`Status.coordinateType`) — the outfit on screen when you loaded it. Clothes ids are author slot ids on both sides of a card-to-card import, so no local→slot id re-localisation happens (the extraction rebases the Sideloader rows to the target outfit and disables that translation; pattern ids and sub-parts follow the same rules as the clothing import). Mod items carried by the coordinate and found in your mods folder resolve as they do for any card; missing ones are reported like any other item. Coordinate-scoped plugin data travels with coordinate-indexed payloads (MaterialEditor rows, KCOX garment paint, ABMX bone mods, `moreAccessories` beyond slot 20, Accessory_States, DynamicBoneEditor rows, HairAccessoryCustomizer settings, pushup garment physics and the coordinate's own Additional_Card_Info entry), rebased from the source coordinate to the target outfit -- for `【KoiKatuClothes】` files the whole verbatim author coordinate comes through (its own CoordinateIndex preserved, flat-shaped plugin payloads included); ABMX bones coordinate-wise (a vanilla target with no KKEx gets one created), the rest per coordinate. Stale paint of the replaced outfit is dropped rather than applied to the wrong garments. `Status.clothesState` (the half-off/off toggles, a byte per clothing slot) is copied in coordinate mode, and `Status.showAccessory` (the 20 per-slot visibility flags) in both modes.
-
-Design and format notes: [`docs/COORDINATE_IMPORT.md`](docs/COORDINATE_IMPORT.md).
-
-**Export clothes.** The outfit section's **Export clothes** button (Shift+E) asks a small confirmation first — a task dialog with the title, the body and a verification checkbox: **Include hair-type accessories (and show the hair on the mannequin icon)** — because an outfit file (like the PMX export) never contains the character's own hair meshes, but may carry hair worn as accessories (types 122/123); the default is unchecked (hair off). Accept to write the `【KoiKatuClothes】` file (the save dialog opens next); cancel to abort with nothing written. On a headless/scripted run the dialog is skipped the same way it is for the save dialog: the environment variables `CARDBRIDGE_TEST_HOOKS`, `CARDBRIDGE_CLOTHES_PATH` and `CARDBRIDGE_CLOTHES_WITH_HAIR` (1 to answer the checkbox) drive it with no UI.
-
-**Exporting an outfit file from a character card.** The reverse direction exists too: `cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [--render-thumbnail] [--json] [--overwrite] [--hide a,b,c] [--include-hidden] [--with-hair-accessories] [--with-abmx]` writes the shown outfit back out as a `【KoiKatuClothes】` `.png` — the same format `--clothes` applies and the game reads. The viewer does the same from **Export clothes** (or `Shift+E`) in the outfit section next to Reset clothing. The file carries the clothes (with jacket sub-parts and pattern ids), the accessories, the makeup, the Sideloader resolver rows, the garment paint (`KCOX`) and the MaterialEditor main-texture edits, rebased to coordinate 0; MoreAccessories extras past slot 20 travel by copying the card's own XML, never by re-serialising it. Hidden accessories (the card's per-slot show/hide state in `Status.showAccessory`, the viewer's unticked slots, or `--hide a,b,c`) and hair-type accessories are **not exported**, by default — the same "hidden leaves the export" rule as the PMX; `--include-hidden` / `--with-hair-accessories` keep them, and the report names every slot omitted. The icon in the file is a faceless, bald grey mannequin wearing the outfit — the same convention Koikatsu itself uses for its own coordinate files — rendered by the same software path as the preview: hands on hips, standing on a built-in stage backdrop (pink tiled wallpaper, filigree frame, floor; the picture ships inside CardBridge) with a soft shadow baked behind it and the toon shading baked into the body; `--render-thumbnail` does this on the CLI (needs `--library` and `--mods`, like `convert`), and the viewer's button always does. The card on disk is never written; the export is byte-reproducible: the same card always yields the same file (viewer and CLI agree byte-for-byte).
-
-**Hair is never deleted.** In Koikatsu the hair can live entirely in the accessory slots (a "no hair" back slot, with the hair front and back worn as accessories, categories 122/123). The merge therefore keeps every hair accessory in its slot: an empty outfit slot never clears the character, and an outfit accessory that wants a slot taken by hair moves to the first empty slot instead (its attach node still decides where it hangs). The character's hair slots (back / front / side / extension) are untouched, because an outfit file has no hair. `--replace-accessories` on the CLI is the only way to overwrite them, for users who really want it.
-
-**How ids translate.** Outfit files store mod ids as session-local ids (the resolver rows' `LocalSlot`); character cards store the author's `Slot`. The merge translates each id through the outfit file's own resolver rows before resolving, and rewrites the rows' property paths to the target outfit (relocated accessories get their new slot index). Makeup follows the file's own enable switch: when the file does not enable its makeup, the character's makeup is kept.
-
-**What merges.** The outfit, the Sideloader resolver rows, the outfit file's KKABMX bone mods, MaterialEditor edits, KoiClothesOverlayX garment paint, Accessory_States data, DynamicBoneEditor rows, HairAccessoryCustomizer settings and pushup garment physics are merged -- rebased per coordinate in a coordinate import, remapped around kept hair in a clothing import. Never copied: the wearer's body pushup (Pushup_BodyData), character-scoped Additional_Card_Info keys (CardInfo, Personal_Clothing_Save, MakeUpKeep, Cosplay_Academy_Ready), MoreOutfits `CoordinateNames`, and any plugin payload outside that set (ExtendedSaveData is literal null everywhere observed and never travels).
-
-## Reverse-engineering findings
-
-These are facts established against real cards and the decompiled game assembly; the full evidence, with the places where it is thin, is in [`docs/OFFLINE_FORMAT_FEASIBILITY.md`](docs/OFFLINE_FORMAT_FEASIBILITY.md).
-
-**Card container.** PNG image, then `int32 productNo`, .NET string marker, .NET string version, `int32 faceLen` + face PNG, `int32 headerLen` + MessagePack block header, `int64 dataSize`, then the blocks `Custom`, `Coordinate`, `Parameter`, `Status`, plus `KKEx` (written by the ExtendedSave plugin) and, on Sunshine, `About`. MessagePack payloads use string keys, so they decode without a schema.
-
-**The card is references, not a model.** It stores item IDs, colours, slider values, and some embedded textures (the MaterialEditor plugin payload alone was 16 MB on the sample card). Meshes, skeleton and most textures live in Unity AssetBundles under `abdata` or inside `.zipmod` files.
-
-**Mod resolution.** The card stores the mod author's own *slot* ID, not the session-local ID; the `KKEx` block `com.bepis.sideloader.universalautoresolver` maps each slot to a mod GUID and a property path. The zipmod's `manifest.xml` gives the GUID, and its `abdata/list/characustom/*.csv` map slot to bundle and asset name. Items without a resolve row are base game and resolve through the `ChaListData` MessagePack tables in `abdata/list/characustom/*.unity3d`.
-
-**Assets.** UnityFS version 6, Unity 5.6.2f1. All 297 bundles in `abdata/chara` use LZ4HC (no LZMA). Meshes were uncompressed in every sampled bundle, skin weights are stored per vertex (four influences), and clothing binds to the shared skeleton by bone name. Textures seen were DXT1 and DXT5.
-
-**Outfit structure.** Mod and base garments carry a `ChaClothesComponent` listing their renderer groups, which is the source of the part tree.
+`X` (or the **MMD** button next to *All*) switches to "as exported": the exact materials, toon ramps, edges, self-shadow and ground shadow the PMX has — what MikuMikuDance will actually show.
 
 ## Known limitations
 
-- **Body proportions: applied. Face shape: not yet.** The card's 44 body slider values are turned into bone scales and offsets by the game's own formulas, which are copied into this project as generated C++ (`tools/gen_shape.py`, `src/shape/`) and applied to the skeleton, so height, bust, waist, hips and limbs follow the card. The 52 face sliders (eye size and position, jaw, nose ...) are not applied yet: the head keeps its default shape. The body shape ignores the alternative bone type (`typeBone` other than 0), which has a correction table that is not loaded.
-- **Body masking.** Clothing hides body areas through mask textures; removing a garment can expose geometry that was never modelled. The tool warns; it does not invent body geometry.
-- **Materials and colours.** The game's Shader Forge shaders have no PMX equivalent, so output is a diffuse-texture approximation. Done: clothing textures are baked from the list row's main texture and colour mask with the card's colours (including jacket-type tops, whose real garments are sub-parts), accessories are tinted by their colours, and eyes, eyebrows, eyelines and the nose line get their textures and colours from the card's face ids (the brow and lash shaders paint with the material's _Color, so the card's eyebrow / eyeline colour is set there, or the strokes bake white). Not done: the face (still the card's flat skin colour; the bust region of the body's skin texture is shaded automatically from the mesh's own creases, see `--skin-shade` or the Look tab; 0 disables it; the game's own body look is baked in too — a local-curvature (cavity) factor from the base body normal map (no fixed light, so it cannot fight MMD's own lighting; the game's ribs/abs/creases come out as form) plus the ink-line channel of the line mask for the card's body detailId (cf_body_00_line by default), see `--skin-ao`; 0 disables it), lips, blush and makeup layers, eye highlights, pattern textures, hair colour (hair-type accessories are recoloured to the character's hair by a plugin whose data is not decoded), shading and rim light, BC7 textures (a few face parts) and textures stored in other bundles. Items a mod ships with mismatched texture names (as in the Rin sample) keep their prefab look.
-- **Export vs the preview.** The viewer runs the game's own shaders with the maker camera's colour grading and one headlight; a PMX has neither. What the export does about it: each material's shader is run over its UV layout once (colour only, lit straight from the front) and the result, passed through the same grading look-up table as the preview (`G`), is the PMX texture; the material is plain white (diffuse 1, so an engine that tints the texture by diffuse, like Project K's, shows it unchanged). Its shade comes with it as a toon ramp: the shader is also run with the light swept from straight on to behind and the result, relative to the baked colour, becomes the material's own PMX toon texture (`textures/toonN.png`, bright at the top, MikuMikuDance's and Project K's convention; the material's ambient is then white). So lighting still comes from the viewer that opens the file, but through the game's own shade curve (specular, rim and outline stay out). `--no-toon-ramp` writes the shared toon01 and the old shadow tint. Press `X` (or the `MMD` button by `All`) in the viewer to see exactly that ("as exported", the PMX as MikuMikuDance shows it: the baked textures and the materials' own toon ramps and edges, MMD's default light, its self-shadow and ground shadow, no game shader, no second grading). Every visible material but the face's painted layers (eyes, brows, lines) and lenses asks MMD for a ground shadow, so the silhouette includes the hair, sleeves, skirt, shoes and accessories instead of only the body (flag 0x02). Everything except those layers, lenses and a mesh cut to a shape by its texture also casts into MMD's self-shadow map (0x04); a cut mesh only receives it (0x08), because MMD would put its whole rectangular sheet in the map. Outfit cloth and transparent (alpha) materials do not receive the self-shadow (0x08) - MMD multiplies the map over the texture, so inverted cloth or a see-through garment then reads as a solid dark shape - but the cloth still casts and still takes the ground shadow. The body and skin keep the full ground/cast/receive/edge flags (0x1E, like hand-made models). A transparent garment modelled as two co-located layers (an outer and an inner surface sharing one vertex grid) gets no edge, since MMD's edge draws back faces pushed outward and so pushed the inner layer through the outer one, covering the whole garment in the edge colour; its texture still shows. Which sides are drawn follows each shader's own Cull setting read from the bundle (the game's main shaders draw both sides, the face's layers one), and the item shader's cut-out (it discards texels with alpha below 0.25, which a MaterialEditor image uses to cut a primitive to a shape) is kept in the PMX texture instead of the cut texels showing black; a cut mesh gets no ground shadow, shadow map or edge (they would draw the whole mesh). The edge is the game's dark outline colour, or its light default applied to the texture's mean colour, at size 0.6; specular is off (MMD's broad sheen whitened skin, hair and shoes); gloss comes from sphere maps chosen from the material instead: any hair shader gets a ring highlight (add), any other non-skin surface the game gives a highlight (`_SpecularColor` x `_SpecularPower`) a soft add-gloss as strong as that highlight, and the teeth their roundness (multiply). Still different: the game's rim and outline shading, cast shadows and the face shadow mask are not in a PMX, and each viewer lights materials its own way. CLI: the baked-and-graded default, `--no-grade` to leave the grading out, `--no-toon-ramp` for the shared toon, `--bake-lit` for the old texture with the front-view shading baked in (the material is then unlit, which an engine that lights it itself shows black), `--no-bake` for the raw textures; `--gpu-view` also writes `gpu_plain.png`, the "as exported" picture.
-- **Bones, expressions and physics in the PMX.** Every transform of the body and head rigs is a bone (677 on the sample cards; eyes, eyelids, brows, mouth, cheeks, chin, ears, nose included), plus the joints and chain nodes of hair, clothes and accessories. The game's bone name is the PMX name (the identity the sliders and mods use); the English field is a readable guess, driven / shape / attach nodes are written hidden, the tail points at the first child, and the bone panel is grouped (Face: Eyes, Arms, Hands, Hair, ...). The face's blend shapes become vertex morphs: one per brow / eye / mouth pattern of the game's FaceBlendShape (closed and open, in the brow / eye / mouth panels) and one per raw shape. DynamicBone chains (hair, skirts, ribbons, and the body's own jiggle chains) become a kinematic anchor, capsules and spring joints, and the body colliders become kinematic bodies. Garment chains (skirts, capes, kimonos) keep the card's authored drape as the joint equilibrium: per-joint springs sized from the torque of the subchain hanging below them, so MikuMikuDance's world gravity cannot fold the cloth away from the pose the artist drew — with joint limits derived from the card's own stiffness (a stiff skirt exports a narrow envelope, a loose one a wide one) and garment bodies colliding with other chains except the ones they overlap at rest. Gravity still drives the cloth's secondary motion. The jiggle is switchable: breast and butt jiggle are both on by default. They are one physical system, mass-spring-damper, driven by a single set of physical numbers (mass in kg, stiffness in N/m, damping in N s/m, gravity as a multiple of 9.81, per-axis swing amplitudes, rotation strength and a master strength) shared by the viewer preview and the PMX. The two sides of a bust / hip pair are tied by one soft coordination joint per rotating link (a share of the link's hold spring on the relative rotation, tapering toward the tip), so the pair reads as one connected structure with independently deformable sides instead of two objects; common motion costs nothing. In the viewer these are the switches, the preset chips and the sliders under "Jiggle (the exported PMX, and the physics preview)" on the Look tab, on the CLI `--no-jiggle-bust` / `--no-jiggle-butt` / `--jiggle-preset subtle|very-subtle|very-very-subtle|natural|dynamic` / `--jiggle-mass F` / `--jiggle-stiffness F` / `--jiggle-damping F` / `--jiggle-gravity F` / `--jiggle-amplitude-vertical F` / `--jiggle-amplitude-horizontal F` / `--jiggle-amplitude-depth F` / `--jiggle-rotation-strength F` / `--jiggle-strength F` / `--jiggle-sim-hz F` / `--sag F` (`--jiggle-intensity F` remains as the old name for `--jiggle-strength`). The Subtle/Natural/Dynamic presets are tuned from the same physical model (Natural is the default; MatchJigglePreset reports Custom when a value differs), and a part whose switch is off stays rigid, following its bone. The jiggle itself is mapped the same way the hand-made models do it (compared against a real shipped model): mode-2 bodies that follow their bones with physics on top, fat capsules with weight tapering toward the tip (1, 1/2, 1/4, ...) and a few percent of side asymmetry so the two never bounce as one, damping converted from the damper to Bullet's per-second retention (d = 1 - exp(-c / 2m)), three rotation limits from the amplitudes (X the forward/back flop, Z the sideways sway, Y a small twist; the sideways axis is opened wider than the twist, which is what makes the lateral motion visible), and no collider at all, so the bust hit spheres cannot shove the part for ever — plus our own joint spring, derived from the same k and m, which pulls the part back to its rest pose (untuned, the reference models' bare pendulum hangs displaced under gravity and wobbles like jelly). A zero amplitude pins that axis. The preview simulates at `simulationHz` (default 120) with its own fixed substeps and draws interpolated between them, stable at 30/60/120/240 FPS and better; the invisible anchor of each link's rod is the posed place — the physics has no resting displacement of its own (gravity, spring stiffness and damping never move the rest pose), and the static sag of the resting shape comes exclusively from the Sag slider (the viewer's sag control; the CLI's `--sag`) applied as the same hierarchical tilt at bake time. The same settings feed both the preview and the PMX, and the manifest records the whole set and its derived values (angular frequency, damping ratio, static sag, per-axis displacement limits and joint ranges, with the preset name) under `jiggle`. The mapping follows the component's particle update: every chain bone (the root too) has a capsule and a spring joint at its head, damping becomes the same decay a second, elasticity the swing rate, stiffness the rotation limits; the collision mask is the Bullet filter (bit n = collides with group n), so chains meet colliders and nothing else. A test-side PMX reader and a small planar Bullet-like reference (`tests/PmxReader.h`, `tests/SpringRef.h`) check the written bodies, joints, morphs and frames and show the exported numbers settle in the time the DynamicBone sim does; gravity and force are not carried, and none of it has been opened in a real PMX editor. IK: one IK bone per arm and leg (`cb_ik_hand_L` ...; with the MMD names only the legs, because MMD solves every IK bone each frame and a motion keys no arm IK, so a handle at rest would pin the arms to the A-pose) is added after the rig's bones where the limb bones (`cf_j_arm00` / `forearm01` / `hand`, `thigh00` / `leg01` / `leg03`) form a parent chain; the elbow and knee may only flex further the way the rest pose already bends. With the MMD names the semi-standard bones of hand-made models are added around them (inserted in evaluation order, not appended): 肩P / 肩C, the twist bones 腕捩 and 手捩 (fixed axis along the limb; the game's driven skin helpers `cf_d_arm01-03`, `cf_d_forearm02`, `cf_d_wrist` take the twist in proportion to how far along the limb they sit), 腰キャンセル, 足IK親, 操作中心, 上半身1 (halfway up the back) and the tip bones 手先 and 親指先 / 人差指先 / 中指先 / 薬指先 / 小指先 (one joint length past the last joint). センター and グルーブ sit at about two thirds of the character's own pelvis height, and the foot IK turns up to 2.0 radians a pass, as on the standard models.
-- **Independent outfit toggles in PMX.** PMX has no per-object visibility switch. Whether material opacity, display frames or group morphs give reliable toggles in a given viewer is untested; the manifest keeps the real toggles so the engine does not depend on viewer behaviour.
-- **Plugin data.** Done: MaterialEditor main-texture replacements and KoiSkinOverlayX body, face and eye overlays, whose images are embedded in the card (they decide the look of many mod cards: the Rin sample is a blue outfit without them and the red-and-black one the card shows with them) — including the older BodyUnder/FaceUnder layout (full-coverage skin repaints drawn under the skin's own detail) and BodyOver/FaceOver (drawn on top) — and KoiClothesOverlayX garment paint. Not done: MaterialEditor colour, float and shader overrides, ABMX, DynamicBoneEditor, HairAccessoryCustomizer and similar payloads, which need their own decoders. The same applies to an outfit file's extended data: the outfit, the Sideloader rows, the outfit file's KKABMX bone mods (the skirt fit), its MaterialEditor edits (the sheer stockings) and its KoiClothesOverlayX garment paint (the blue vault suit, the Shrine Maiden's white/red overlay, the Jiangshi's mustard/pink overlay, which carry the real look where the ChaFile colours are placeholder grey or red/green/blue) are merged into the character for the target outfit; its HairAccessoryCustomizer settings, DynamicBoneEditor rows, Accessory_States data and pushup garment physics merge too, rebased like the rest.
-- **Mods.** Only mods present on disk resolve. Duplicate GUIDs and mods shipped as unextracted `.rar`/`.7z` are not handled yet.
+**What works, honestly:** the base game, 100%. Several modded cards convert well too — especially Sideloader packs that ship their own textures — but no guarantee is made for any specific mod.
 
-## MikuMikuDance compatibility and rig details
+- **Mods:** only mods present on disk resolve; duplicates, and mods shipped as `.rar`/`.7z` (unpack first), are not handled. Some mods look right only with their MaterialEditor plugin data — main-texture replacements work, colour/float/shader overrides do not yet ([`docs/MATERIAL_EDITOR.md`](docs/MATERIAL_EDITOR.md))
+- **Geometry:** clothing binds to the shared skeleton and the tool has no intuition about a mod's layout; items a mod ships with mismatched textures keep their prefab look. The tool warns when a garment hides body areas that were never modelled — it does not invent geometry
+- **Bones & morphs:** every body/head rig transform becomes a bone (677 on the sample cards) and the face's blend shapes become morphs; the twist/helper bones and morphs the game's face has no pattern for are not exported
+- **Face shape sliders are not applied yet** — the head keeps the default shape. Body sliders are applied
+- **Export vs preview:** the preview runs the game's shaders with its own grading; the PMX carries the baked result through a toon ramp. It matches by construction, but it is still an approximation — judge exports with `X` ("as exported") and in MMD itself
+- **Toggles:** PMX has no per-object visibility switch; outfit toggles are group morphs and ride on each viewer's behaviour; the manifest records the real toggles so engines do not depend on viewer behaviour
+- **Plugins:** DynamicBoneEditor/HairAccessoryCustomizer/ABMX data is read and applied where the exporter understands it (see [`docs/COORDINATE_IMPORT.md`](docs/COORDINATE_IMPORT.md)); other plugin payloads are carried through untouched or skipped with a note in the issues list
+- **Sunshine** (`【KoiKatuCharaSun】` / `【KoiKatuClothesSun】`) is recognised and reported as unsupported; **Koikatsu Party** cards are recognised but not verified end to end
+- Not a guarantee: every export writes the source card, the library, the version and the author into the PMX header comment (shown in MMD's model info)
 
-The PMX faces -Z, MikuMikuDance's front (`--unity-facing` on the CLI keeps the +Z the character is built facing). A motion (VMD) finds a model's bones and morphs by name, and MMD's standard names are Japanese, so the body bones carry them: 全ての親, センター, グルーブ, 腰, 下半身, 上半身, 上半身2, 首, 頭, 左/右 肩 腕 ひじ 手首, the finger bones (親指０-２, 人指/中指/薬指/小指 １-３), 足 ひざ 足首 つま先, 左目 / 右目 (pivot at the eyeball's centre) with 両目 above them (the eyes follow it by append rotation), 左足ＩＫ / 左つま先ＩＫ (and the right side), and the standard facial morphs with the names and panels of a hand-made MMD model: the vowels あ い う え お ん (the game's own lip-sync patterns a_l, i_l, u_l, e_l, o_l, n_l), い2 え2 お2, ワ ワ1 ワ2, ∧, ω ω□, ▲, ぺろっ, 口角上げ / 口角下げ, にやり にやり２ にやり３, ムッ, 怒った 怒った2, 口, 大口, 心配する, えー; the eyes まばたき, 笑い, ウィンク / ウィンク右 (笑い on one eye), ウィンク２ / ｳｨﾝｸ２右 (まばたき on one eye), じと目, ｷﾘｯ ｷﾘｯ2, 喜び, 慈愛; the brows 真面目, 困る, 怒り, 悲しい, 上, やっかい. Each copies the game pattern of that meaning, found by the pattern's own blend shape name, so lips, teeth, canines and the tongue (`o_tang`, kept in the mouth) move together as in the game; a head without those names gets the vowels and まばたき from its plain open mouth and closed eyes. The teeth (`cf_O_tooth`, `cf_O_canine`) come before the face in the material list: drawn after it, MikuMikuDance never showed them through the open mouth. The upper body hangs from 腰 and not from the hips, so a 下半身 turn does not carry the torso. Not there: the twist and helper bones (腕捩, 肩P ...) and the morphs the game's face has no pattern for (びっくり, はぅ, 涙, 照れ ...); a motion's keys for them find nothing and are ignored. `--no-mmd-names` keeps the rig's own names. MMD keeps the number of morphs a display frame lists in one byte and corrupts its heap from 256 on, so the Exp frame lists the first 255 morphs (outfit toggles, then the game's brow / eye / mouth patterns, then the raw per-mesh shapes); morphs beyond that stay in the file, unlisted. A physics body meets only the colliders it does not already overlap in the rest pose (a body that starts inside one is thrown out of it), no link turns more than 35 degrees, and the body's own jiggle chains (breast, hip) are left rigid (a light link carrying body skin shivers in MMD). A chain's root follows its bone and the links below it swing (a moving root shook the whole model in MMD), and a link's spring is never stiffer than 15 rad/s for its own weight, a joint that gravity would push onto its stop is locked, `--no-physics` writes no physics at all, which MMD's solver turns into a permanent shiver otherwise.
+## Troubleshooting
 
-## Prior art and licensing
-
-| Tool | Role | License |
-|---|---|---|
-| KKPMX | Reference for PMX clean-up rules; it runs in the game, so it cannot be a dependency | MIT |
-| KKBP exporter/importer | Reference for what a full export contains; in-game plugin | Not verified |
-| KKManager | Reference for card-marker detection | GPL-3.0: read for format knowledge only, no code is copied |
-| UnityPy | Used for research and golden reference data only; not shipped | MIT |
-| AssetRipper | Not used; noted as a reference | GPL-3.0 |
-| bc7decomp (Richard Geldreich, Jr.) | BC7 texture decoder, the only third-party code in the repository (`third_party/bc7decomp`, its notice kept in the file) | MIT or public domain |
-| nlohmann/json, stb_image, stb_image_write, glm | Downloaded by CMake at build time, not in the repository; glm only for the engine cross-check test | MIT; MIT or public domain; MIT |
-| BepInEx | The sidecar plugin builds against the game install's copy; not in the repository | LGPL-2.1 |
-
-Format knowledge is re-implemented from observation and the decompiled assembly; no code from the reference tools above is copied. Game and mod assets are never committed to this repository.
-
-CardBridge's own code is released under the MIT License (see [LICENSE](LICENSE)). The licence covers this repository's code only: the game's and mods' assets, and anything converted from them, belong to their owners and are not covered by it.
-
-## Layout
-
-```text
-cardbridge/
-  CMakeLists.txt      standalone project; also add_subdirectory()-able from the engine
-  src/
-    core/             file IO (UTF-8 paths), LZ4, inflate, MessagePack, zip, math, SHA-256
-    card/             card container and section decoding
-    unity/            UnityFS bundles, serialized files, meshes, textures
-    resolve/          mod index, list tables, card-to-asset resolution
-    assemble/         skeleton and part assembly
-    pmx/              PMX writer
-    export/           output folder and manifest
-    library/          asset library import and check
-  cli/                command-line shell
-  viewer/             the viewer window (Win32 + Direct3D 11): main.cpp (hub) + *.inc fragments grouped by tab/system, Ui.* (off-screen panel, theme), res/ (icon, logo)
-  tools/              Python reference (research only, not shipped), viewer_smoke.ps1
-  tests/              unit and golden tests
-  image/              README artwork (CB.png is the logo)
-  VERSION             the one place the version number is written
-```
-
-## Building
-
-Windows, using the repository's portable toolchain (`tools/`):
-
-```powershell
-scripts\cardbridge.ps1
-```
-
-`scripts\cardbridge.ps1 -Test` also runs the unit tests. The build runs at idle priority. Output goes to `build-cardbridge\bin\cardbridge.exe`.
-
-On its own (this folder as its own repository): install CMake, Ninja and a Windows C++20 compiler (MinGW-w64 or MSVC), then `build.ps1` (`-Test` runs the unit tests); output goes to `build\bin`. `package.ps1` makes the release files (`CardBridge-<version>.exe`, `CardBridge-CLI-<version>.exe`, their SHA-256) in `dist\`; the version comes from the `VERSION` file.
-
-To check a PMX for what MikuMikuDance chokes on (nested group morphs, IK limits, NaN, bad indices): `python tools/audit_pmx_for_mmd.py model.pmx`.
-
-## Usage
-
-```powershell
-# once: copy the needed base-game data into a library (the only command that reads a game install)
-cardbridge library import --game "<game folder>" --library "<library folder>"          # add --minimal for ~5 MB
-cardbridge library check  --library "<library folder>" --hashes
-
-# export one outfit of a character card as an outfit file (the reverse of --clothes; nothing is written to the card)
-cardbridge clothes "<card.png>"                                        # current outfit; default out: <card stem> - <outfit name>.png next to the card
-cardbridge clothes "<card.png>" --outfit 2 --out "<outfit.png>"          # another outfit slot
-cardbridge clothes "<card.png>" --hide 3,7 --with-hair-accessories     # include hidden/hair slots too (and your hair on the mannequin icon)
-cardbridge clothes "<card.png>" --render-thumbnail --library "<lib>" --mods "<mods>"   # the mannequin icon (it needs the scene, like convert)
-# the viewer writes the same file from the "Export clothes" button (Shift+E) in the outfit section
-
-# look at a card: family, outfits, which items resolve to which mod
-# (an outfit file alone inspects as an outfit; --clothes merges one onto the card's outfit)
-cardbridge inspect "<card.png>" --library "<library folder>" --mods "<mods folder>"
-cardbridge inspect "<outfit.png>"
-cardbridge inspect "<card.png>" --library "<library folder>" --mods "<mods folder>" --clothes "<outfit.png>"
-
-# convert (writes <out>\<name>.pmx, <out>\textures\*.png, <out>\<name>.cardbridge.json)
-cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folder>" --out "<out folder>"
-# with an outfit file applied in memory for this export only (the card on disk is never saved)
-cardbridge convert "<card.png>" --library "<library folder>" --mods "<mods folder>" --clothes "<outfit.png>" --out "<out folder>"
-
-# look at a card in a window (Windows): orbit with the left mouse button, pan with the right, zoom with the wheel.
-# Hover a part row to light that part up in the model, click to hide/show it, right-click to solo it, click a group
-# header to fold it. The lists under the panel (Parts, and every slider tab) scroll with the wheel or by dragging them
-# with the left button: a vertical drag picks the list up and moves it; the click under it is swallowed. The view's top-right corner shows an always-on navigation widget (Blender-style, like the Project K
-# editor): click an axis ball to look at the model from that side (drag anywhere in it to orbit as before).
-# Accessory rows carry a move chip (an X/Y/Z arrow gizmo) and a rotate chip (an X/Y/Z ring gizmo) on their right end: click one to hold that accessory,
-# then drag an axis (move) or a ring (rotate) in the view to reposition it in XYZ (the edit is one pose edit: Ctrl+Z undoes it, save/load pose keeps it,
-# Export PMX bakes it, and the Bones tab's numbers move with it); right-click a chip to reset that one edit (move / rotation), Esc deselects.
-# The log panel shows every load/bake/export stage as it happens; E (or Export PMX) exports the
-# scene currently on screen to a new folder, with the same live log. The panel shows the current outfit's number and
-# name over a row of numbered slots: click a slot, press 1-7, or step with Left/Right. Other keys: T textures, H game
-# shaders, G colour grading, X (or the MMD button) as exported (the PMX as MikuMikuDance shows it: toon, edge, self-shadow, ground shadow), F/S/B front/side/back, R reset, I issues, A show all, C clear log, O open, M mods folder, L library.
-# Shift+Left-click any slider (the panel, the Bones tab, the Material Workbench) to type its value with the keyboard: Enter commits, Esc restores it, clicking away commits. The typed text is the stored value (percent rows: 0..100). On the Morphs tab, Shift+Left-click a row to rename its displayed name instead (display only, kept in the settings; the PMX keeps the original names).
-# The Body tab's "Body measurements (BWH)" group is three macro rows at the top: Bust (the Bust > Size slider), Waist (the Waist > Waist width and Waist > Waist depth sliders together) and Hip (the Hips > Hip width and Hips > Hip depth sliders together).
-# Each row is a real measurement: the skin's circumference at the bust / waist / hip lines, in centimetres, re-measured every time the shape changes (well-shapen assets; a card whose skin is not a closed surface falls back to plain slider percent for its rows). The number is shown to one decimal; Shift+Left-click types an exact centimetre value and the shape solves to it (the slider limits are the reachability limits; the closest reachable value lands when the target is out of reach, and a warning line says so). Dragging maps the track to the coupled sliders' full delta range, keeping the card's own width against its depth.
-# The same edit shows on the individual rows below at once, the group's "reset" restores the card's values, and the preview, the export and the PMX carry the measurements like any other body slider change. A card that is never touched exports exactly as before.
-# The Body tab's Bust Size row carries a simple "Band:" (65..105) and "Cup:" (AA..G) preset under the slider: one click sets the size, and the chips track the slider (a size not on the grid lights none). The Look tab's Nipples group carries "Size:" (S, M, L, XL: -4 / 0 / +4 / +8 mm) under "Nipple out / in (mm)" the same way.
-# Posing: K shows the skeleton over the model (click a bone to select it), the Bones tab lists the bones as a tree (helper nodes behind a switch)
-# and edits the selected bone's move / rotate / scale (sliders, wheel for a fine step, right-click resets a field); the mesh follows at once, no re-assembly.
-# The Morphs tab lists every morph the exported PMX would carry for this scene - the game's FaceBlendShape expressions (Brow / Eyes / Mouth, closed and open),
-# one morph per raw blend shape, the MMD standard names (あ い う え お, ん, まばたき, ウィンク, 真面目 ...) as copies of the game's pattern of the same meaning and the
-# one-eyed versions (ウィンク / ｳｨﾝｸ２右) - with live 0..100 sliders. The offsets are applied
-# bind-space before skinning, exactly the way the game applies blend shapes and MMD applies PMX vertex morphs, and the iris follows the lid (the white's mean
-# offset per shape) as it does in the PMX; so what you see is what the exported model does. The weights are not exported (no pose is baked - MMD plays them);
-# bones move in the Bones tab, the DynamicBone physics in the Look tab (Y), so every way the PMX can move is checkable in the viewer. The outfit / nude toggles are
-# material morphs in the PMX; the Parts list hides and shows the same meshes.
-# The list is organized like MMD's morph panels - Brows / Eyes / Mouth / Other - and every section that has them is split into Left and Right sub-groups for the
-# morphs that have a twin on the other side (winkl / winkr, gyul / gyur, gimoL / gimoR, the white-eye meshes cf_Ohitomi_L / _R, ウィンク / ｳｨﾝｸ２右 ...), with the rest
-# under Other. Every header folds its group (click the header to collapse and expand; the "reset" text on its right edge - or a right-click -
-# resets that group's sliders), the whole panel scrolls with the wheel or by dragging it with the left button, and the Shift+Left-click on any
-# morph row edits its displayed name - the new name is kept in the viewer's settings (%LOCALAPPDATA%\CardBridge\viewer.json, "morphAliases") so it
-# survives restarts, and it is display only: the PMX still carries the original names, because MikuMikuDance motions key morphs by them.
-# Right-clicking a renamed row restores the original name (if it was not renamed, right-click resets the slider).
-# The Optimize tab (before Setup): triangle reduction for the exported PMX and stacked LOD files. A quality preset (Original / High Quality /
-# Balanced / Performance / Aggressive / Custom) or the 0-100% slider picks how hard to simplify - applied on a copy, never on your loaded character;
-# the face keeps its features, the eyes are untouched, the hair keeps its silhouette, the body keeps proportions, clothes and accessories go the furthest
-# (UVs, material boundaries, bone weights and blend shapes are preserved, simplex-like budget per component class, always starting from the untouched original
-# so quality never degrades cumulatively). "Apply to export" commits the reduction and the selected LODs for the next Export PMX; "Reset to original" reverts to the
-# card's look. The LOD section generates LOD 1..4 (each from the original, never from another level), each with its own target in 5% steps, a preview chip per
-# level and the measured triangle count once generated; an LOD whose level adds nothing over the previous one is aliased to it in the manifest, and the files are listed there with triangle counts.
-# Clothing survives every level: no face may rotate more than 40 degrees from its authored orientation (cumulative), and at LOD 2+ only a whole face completely hidden by an opaque outer
-# layer (e.g. the underwear under the skirt) is removed - the visible garment, the openings, the silhouette and every material slot always make it into the file.
-# P (or Look tab > Pose) is the automatic A-pose, on by default (MMD motions are keyed for it): clavicle and upper arm turn the arms down from the T-pose, 40 degrees by default. Export PMX writes the
-# pose as the model's rest pose and lists it in the manifest's "pose". CLI: on by default, --apose-degrees N, --tpose to keep the T-pose; --gpu-view --gpu-bones draws the skeleton on the picture.
-# With the skeleton on, the bone under the pointer is ringed and a click-drag on a bone turns it (Ctrl+drag moves it): the tip follows the pointer, the bone and
-# everything below it (drawn in the same warm colour) swing. The body and face sliders and the nipple controls are real time too (about 6 ms: the skeleton is rebuilt
-# with the game's formulas and every vertex follows through its per-bone frames, no loading), the blend shape offsets and the areola size follow too (a character whose DynamicBone chains were settled with CARDBRIDGE_DYNBONE is assembled again instead).
-# The Look tab's "Translucent clothes" group adds a hand-painted see-through brush for garments (Koikatsu-style see-through clothes, brushed by hand): a toggle, off by default. With it on, left-drag on a garment in the 3D view paints a per-texel mask into that garment's own texture in UV space (right-drag, or the Erase switch, erases; a brush ring shows the radius, adjustable in centimetres; strokes interpolate, and the stamps are gated by the mesh's own UV islands). The bake lowers the painted texels' alpha and moves the material to the transparent pass, so the skin - or a bra, through a painted shirt - shows through, in the viewer, in the "as exported" view and in the PMX (MikuMikuDance draws it in its transparent pass; the skin a painted garment covers is kept visible for exactly this reason). "How see-through the painted area is" sets the strength (0 restores the card's texture and the material exactly); toggling the brush off reverts the bake the same way; "Clear the brush from every garment" wipes the mask. The mask is session-only (like the Morphs tab's live weights): reloading the card drops it, and the export carries whatever is painted at the moment of the export.
-# The Look tab's skin shading and nipple rows are live too: "Cleavage shading" (0..2) bakes an occlusion map into the body's skin texture, limited to the bust front (a ray-cast against the character's own body, a concavity term and a soft band along the midline; the body hidden under clothing is shaded the same way so the nude body keeps its shape, and everything else keeps the card's base colour). "Koikatsu AO" (0..2, default 0.85) bakes the game's own look in as well: a local-curvature cavity factor off the base body normal map (cf_body_00_base_n; orientation-independent, darkens the creases Koikatsu paints - navel, knees, shins, joints) plus the ink-line channel of the game's line mask for the card's body detailId (cf_body_00_line at the default: clavicle, knees, navel; BetterRepack kits add a sternum line) - it complements the cleavage shading without stacking on it. "Underboob fold shading" tunes the fold at the base of the breasts independently of the cleavage (ray-gated to the fold where the breast meets the torso, so the rest of the underside stays bright); "Cleavage length" (0..2) sets how far up the breast line the cleavage shading reaches: 0 = nothing, 1 = the full breast line (top of the bust), 2 = a full bust length higher, toward the base of the neck (default 1.2); "Shading width" (0.1..2, default 0.6) sets how wide the cleavage line runs (a narrow seam to a broad gradient). The nipple colour switch and its three sliders tint the nipple and areola (on by default, a natural warm salmon-red; off gives back the card's own nipColor). CLI: --skin-shade F (cleavage), --skin-underboob F, --skin-top F, --skin-width F, --skin-ao F (the game's own look baked in: a local-curvature cavity factor off the base body normal map plus the ink-line channel of the game's line mask for the card's body detailId - cf_body_00_line at the default; the new bake yields to SkinShade's darkening where both fall on the same texel, never stacks, and defaults to 0.85; 0 restores the previous output exactly), --nipple-colour R,G,B, --card-nipples.
-# Ctrl+Z / Ctrl+Y undo and redo bone edits and the A-pose (one drag or click is one step), Ctrl+S / Ctrl+O (or the buttons under the bone editor) save and load a pose as
-# JSON; `--pose <file>` on the viewer loads one at start, `cardbridge convert --pose <file>` bakes it into the PMX. The software view (no Direct3D 11) shows the pose too.
-# The panel is drawn off screen and only where it changed, the mouse never queues work faster than a picture can be made, and the lists scroll
-# smoothly. Timing: set CARDBRIDGE_BENCH=<file.json> and open a card; the viewer plays a scripted session (orbit, hover, tabs, a slider drag, a flood of
-# mouse moves, log lines, wheel), writes how long each step took from input to finished paint, and closes.
-# tools/viewer_smoke.ps1 runs a private viewer on a card and takes screenshots of every tab and interaction (see its header).
-# Y switches the physics preview on: the DynamicBone chains (hair, skirts, ribbons, the body's jiggle) are simulated live against the body
-# colliders, so they swing as bones, sliders or the A-pose move what they hang from; N gives them a shove. The jiggle is simulated at
-# JiggleSettings::simulationHz (default 120 Hz) with its own fixed substeps and drawn interpolated, so it is smooth at any frame rate;
-# the viewer repaints at ~8 ms while the jiggle is moving. The camera never pauses it.
-# Drop a card .png on the window to open it, or an outfit file (.png) onto a loaded character to apply it in memory.
-cardbridge_viewer "<card.png>" --library "<library folder>" --mods "<mods folder>"      # the folders are remembered
-cardbridge_viewer "<card.png>" --clothes "<outfit.png>" --library "<library folder>" --mods "<mods folder>"
-```
-
-Exit codes: 0 success, 1 usage, 2 not a supported card (with the reason: not a PNG, no card data, truncated, an outfit file, unknown or unsupported family), 3 conversion failed. Items that cannot be loaded are listed with a status and reason on screen and in the manifest's `issues`; the first run over a mods folder builds an index (about 15 minutes for 4,000 mods, then cached).
-
-Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed). Set `CARDBRIDGE_TEST_LIBRARY`, `_MODS`, `_CARD` and `_GOLDEN` (`tests/golden/rin_reference.json`) to also run the card-to-PMX integration test, and run `cardbridge_pmx_crosscheck <model.pmx> <manifest.json>` to read a result back with the engine's PMX loader.
+- **"Windows protected your PC" / unrecognised publisher** — the installer is not code-signed, so SmartScreen warns. Click **More info** → **Run anyway**. The download's `.sha256` file lets you verify the file you got matches the release you meant to download (`Get-FileHash CardBridge-Setup-0.3.0.exe -Algorithm SHA256`)
+- **Missing DLLs / won't start** — CardBridge ships nothing it does not need and links its C++ runtime statically; on Windows 10/11 it needs no extra downloads. If it fails to start anyway: update Windows, check the GPU driver (or force the software renderer in Setup → Graphics), and run `CardBridge-CLI.exe` to see the error on a console
+- **First run is slow** — building the mod index takes about 15 minutes for ~4,000 mods; it is cached in `%LOCALAPPDATA%\CardBridge\modindex.json`, so later runs are fast
+- **A mod item shows as missing** — it is not in your mods folder. The issues list names the mod GUID; drop the `.zipmod` in the folder, rebuild the index from the Setup tab, and reload
+- **Card rejected as unsupported** — check the card family (`【KoiKatuChara】` is the target); Sunshine is not supported. If it should work, [open an issue](https://github.com/mobs3288/CardBridge/issues) with the log and the card's header bytes
+- **The export looks different from the viewer** — press `X` ("as exported"): the PMX will look like what you see there, not like the Lit/game view
+- **Export wrote nothing / nothing found** — check the export folder in the Setup tab, and the Issues tab for the reason
+- **Still stuck** — [open an issue](https://github.com/mobs3288/CardBridge/issues) with: what you did, what you expected, what happened, your CardBridge version and GPU, and the log (the viewer's log panel, or the CLI's stderr output)
 
 ## FAQ
 
@@ -440,8 +192,8 @@ Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed)
 > Why spend hours writing code when I can spend those hours reviewing AI-generated code, debugging it, reverse-engineering Unity AssetBundles, and questioning every life decision that led me here?
 >
 > **Work smarter, not harder.** Or at least make the computer do the hard part.
-> 
-> And yes, when I'm not using Claude—or the budget runs out—I'll do it myself.
+>
+> And yes, when I'm not using Claude — or the budget runs out — I'll do it myself.
 > — Thanos
 
 **Q: So the AI writes everything?**
@@ -508,6 +260,65 @@ Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed)
 >
 > **Priorities, people.** 💀
 
+## Changelog and releases
+
+- [CHANGELOG.md](CHANGELOG.md) — what changed, release by release
+- [Releases](https://github.com/mobs3288/CardBridge/releases) — downloads and notes for each version
+- [Issues](https://github.com/mobs3288/CardBridge/issues) — bug reports and feature requests (please open one if anything breaks)
+
+## Prior art and licensing
+
+| Tool | Role | License |
+|---|---|---|
+| KKPMX | Reference for PMX clean-up rules; it runs in the game, so it cannot be a dependency | MIT |
+| KKBP exporter/importer | Reference for what a full export contains; in-game plugin | Not verified |
+| KKManager | Reference for card-marker detection | GPL-3.0: read for format knowledge only, no code is copied |
+| UnityPy | Used for research and golden reference data only; not shipped | MIT |
+| AssetRipper | Not used; noted as a reference | GPL-3.0 |
+| bc7decomp (Richard Geldreich, Jr.) | BC7 texture decoder, the only third-party code in the repository (`third_party/bc7decomp`, its notice kept in the file) | MIT or public domain |
+| nlohmann/json, stb_image, stb_image_write, glm | Downloaded by CMake at build time, not in the repository; glm only for the engine cross-check test | MIT; MIT or public domain; MIT |
+| BepInEx | The sidecar plugin builds against the game install's copy; not in the repository | LGPL-2.1 |
+
+Format knowledge is re-implemented from observation and the decompiled assembly; no code from the reference tools above is copied. Game and mod assets are never committed to this repository.
+
+CardBridge's own code is released under the MIT License (see [LICENSE](LICENSE)). The licence covers this repository's code only: the game's and mods' assets, and anything converted from them, belong to their owners and are not covered by it.
+
+## Building from source
+
+Windows, using the repository's portable toolchain (`tools/`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
+```
+
+Output goes to `build\bin` (`cardbridge.exe`, `cardbridge_viewer.exe`, `cardbridge_tests.exe`). `-Test` runs the unit tests (no game files needed); integration tests run when `CARDBRIDGE_TEST_LIBRARY` / `_MODS` / `_CARD` / `_GOLDEN` are set.
+
+To build the release artifacts (the installer and the portable ZIP):
+
+```powershell
+.\installer\build_installer.ps1
+```
+
+See [`installer/README.md`](installer/README.md) for the Inno Setup requirement and the layout. Release asset names come from the `VERSION` file at the repository root — update it (and see [CHANGELOG.md](CHANGELOG.md)) every release.
+
+To check a PMX for what MikuMikuDance chokes on (nested group morphs, IK limits, NaN, bad indices): `python tools/audit_pmx_for_mmd.py model.pmx`.
+
+## Repository layout
+
+```text
+cardbridge/
+  CMakeLists.txt      standalone project; also add_subdirectory()-able from the engine
+  src/                core library: cards, bundles, resolver, assembler, PMX writer, export
+  cli/                the command-line shell
+  viewer/             the viewer window (Win32 + Direct3D 11)
+  installer/          Inno Setup script, build_installer.ps1, branded wizard assets
+  tests/              unit and golden tests
+  tools/              Python reference (research only, not shipped), smoke tests
+  docs/               design notes, investigations, per-feature documentation
+  image/              README artwork (CB.png is the logo)
+  VERSION             the one place the version number is written
+```
+
 ## Milestones
 
 - [x] **0.** Offline feasibility study (verdict: go)
@@ -516,7 +327,7 @@ Tests: `scripts\cardbridge.ps1 -Test` runs the unit tests (no game files needed)
 - [ ] **3.** PMX part organisation, toggle testing, validation
 - [ ] **4.** Standalone UI, project save/load
 - [ ] **5.** Slot replacement and mod robustness
-- [ ] **6.** Packaging
+- [x] **6.** Packaging (installer + portable ZIP, reproducible build)
 
 Milestone 1 acceptance tests (A1 to A10) are listed in the feasibility document.
 
