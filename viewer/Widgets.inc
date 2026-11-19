@@ -1,5 +1,9 @@
 // viewer fragment: buttons, check, sliders, scrollbar (included in order by main.cpp)
 
+// The button hierarchy: Normal (secondary, the default), Primary (the one action the screen wants; flat accent),
+// Ghost (low-chrome inline actions), Danger (destructive). Flat fills, no gradients: an accent fill says "this does the work".
+enum class Btn : int { Normal, Primary, Ghost, Danger };
+
 bool Touches(const RECT& clip, const RECT& r) { RECT t; return IntersectRect(&t, &clip, &r) != 0; }
 bool TouchesY(const RECT& clip, int top, int bottom) { return bottom > clip.top && top < clip.bottom; }
 
@@ -17,28 +21,53 @@ ListView ViewOf(int top, int bottom, float pos, int rowH = kRowH) {
     return v;
 }
 
-void Button(ui::Surface& s, const RECT& r, const std::string& label, bool hot, bool on, bool enabled, bool primary = false) {
-    COLORREF text;
-    if (primary && enabled) {
-        s.FillGradient(r, 7, hot ? Mix(ui::kAccent, RGB(255, 255, 255), 0.18f) : ui::kAccent, hot ? Mix(ui::kAccent2, RGB(255, 255, 255), 0.18f) : ui::kAccent2);
-        text = RGB(12, 14, 24);
-    } else {
-        s.FillRound(r, 7, !enabled ? ui::kCard : hot ? ui::kLineHi : on ? RGB(34, 48, 76) : ui::kCardHi);
-        s.StrokeRound(r, 7, on ? ui::kAccent : ui::kLine);
-        text = !enabled ? ui::kFaint : on ? RGB(206, 230, 255) : ui::kText;
+void Button(ui::Surface& s, const RECT& r, const std::string& label, bool hot, bool on, bool enabled, Btn kind = Btn::Normal) {
+    if (kind == Btn::Primary) {
+        if (enabled) {
+            s.FillRound(r, ui::kRad, hot ? ui::kAccentHi : ui::kAccent);
+            s.TextCentered(g.fontBold, ui::kOnAccent, r, label);
+        } else {
+            s.FillRound(r, ui::kRad, ui::kCardHi);
+            s.TextCentered(g.fontSemi, ui::kFaint, r, label);
+        }
+        return;
     }
-    s.TextCentered(primary && enabled ? g.fontBold : g.fontUi, text, r, label);
+    if (kind == Btn::Ghost) {   // no chrome until hovered
+        if (hot && enabled) s.FillRound(r, ui::kRad, ui::kCardHi);
+        s.TextCentered(g.fontSemi, !enabled ? ui::kFaint : hot ? ui::kText : ui::kSub, r, label);
+        return;
+    }
+    if (kind == Btn::Danger) {
+        if (hot) s.FillRound(r, ui::kRad, Mix(ui::kBad, ui::kBg, 0.82f));
+        s.StrokeRound(r, ui::kRad, ui::kBad);
+        s.TextCentered(g.fontSemi, ui::kBad, r, label);
+        return;
+    }
+    s.FillRound(r, ui::kRad, !enabled ? ui::kCard : hot ? ui::kSelect : on ? ui::kSelect : ui::kCardHi);
+    s.StrokeRound(r, ui::kRad, on ? ui::kAccent : ui::kLine);
+    s.TextCentered(g.fontSemi, !enabled ? ui::kFaint : on ? ui::kAccentHi : ui::kText, r, label);
+}
+
+// A modal dropdown menu: one card, one row per item; the checked item is accent-tinted, the hovered row is slate.
+void DrawMenu(ui::Surface& s, const RECT& r, const std::vector<std::string>& items, int selected, int hover) {
+    s.FillRound(r, ui::kRad, ui::kCard);
+    s.StrokeRound(r, ui::kRad, ui::kLineHi);
+    for (size_t i = 0; i < items.size(); ++i) {
+        const RECT row{r.left + 3, r.top + static_cast<int>(i) * kRowH, r.right - 3, r.top + static_cast<int>(i + 1) * kRowH};
+        if (static_cast<int>(i) == hover) s.FillRound(row, ui::kRadSm, ui::kSelect);
+        s.Text(g.fontUi, static_cast<int>(i) == selected ? ui::kAccentHi : ui::kText, row.left + 8, row.top + 2, items[i], &row);
+    }
 }
 
 // A check box: a rounded square, filled with a tick when on.
 void CheckBox(ui::Surface& s, int x, int y, bool on, COLORREF onColor, bool dimmed = false) {
     const RECT r{x, y, x + 14, y + 14};
     if (on) {
-        s.FillRound(r, 4, dimmed ? ui::kFaint : onColor);
-        s.Line(static_cast<float>(x) + 3.5f, static_cast<float>(y) + 7.5f, static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, RGB(14, 16, 24), 1.8f);
-        s.Line(static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, static_cast<float>(x) + 10.8f, static_cast<float>(y) + 4.2f, RGB(14, 16, 24), 1.8f);
+        s.FillRound(r, ui::kRadSm, dimmed ? ui::kFaint : onColor);
+        s.Line(static_cast<float>(x) + 3.5f, static_cast<float>(y) + 7.5f, static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, ui::kOnAccent, 1.8f);
+        s.Line(static_cast<float>(x) + 6.0f, static_cast<float>(y) + 10.0f, static_cast<float>(x) + 10.8f, static_cast<float>(y) + 4.2f, ui::kOnAccent, 1.8f);
     } else {
-        s.StrokeRound(r, 4, ui::kLineHi);
+        s.StrokeRound(r, ui::kRadSm, ui::kLineHi);
     }
 }
 
@@ -59,9 +88,9 @@ void DrawPresetChips(ui::Surface& s, int rowId, const std::string& label, int y)
     for (int i = 0; i < count; ++i) {
         const RECT r = PresetChipRect(rowId, i, y);
         const bool on = i == active;
-        s.FillRound(r, 5, on ? ui::kLineHi : ui::kCardHi);
-        s.StrokeRound(r, 5, on ? ui::kAccent : ui::kLine);
-        s.TextCentered(g.fontSmall, on ? ui::kAccent : ui::kText, r, PresetChipText(rowId, i));
+        s.FillRound(r, ui::kRad, on ? ui::kSelect : ui::kCardHi);
+        s.StrokeRound(r, ui::kRad, on ? ui::kAccent : ui::kLine);
+        s.TextCentered(g.fontSmall, on ? ui::kAccentHi : ui::kText, r, PresetChipText(rowId, i));
     }
 }
 
@@ -79,8 +108,8 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int 
     s.Text(g.fontUi, changed ? ui::kAmber : ui::kText, labelX, y + 2, ClipText(label, 22), &labelClip);
     if (g.sliderEdit == id) {   // Shift+Left-click opened the keyboard box: the track and the value become one input field
         const RECT box{trackL - 2, y + 1, valueR + 2, y + kRowH - 1};
-        s.FillRound(box, 5, ui::kBg);
-        s.StrokeRound(box, 5, ui::kAccent);
+        s.FillRound(box, ui::kRad, ui::kBg);
+        s.StrokeRound(box, ui::kRad, ui::kAccent);
         s.Text(g.fontMono, ui::kAmber, trackL + 6, y + 3, ClipText(g.sliderEditBuf + "_", 46), nullptr);
         return true;
     }
@@ -100,13 +129,14 @@ bool DrawSliderRow(ui::Surface& s, int id, const std::string& label, int y, int 
     return true;
 }
 
-// A thin scroll bar at the right edge of a list (rightEdge = where its thumb ends).
+// A thin scroll bar at the right edge of a list (rightEdge = where its thumb ends), with a faint track.
 void ScrollBar(ui::Surface& s, int top, int bottom, int rows, int visible, float pos, int rightEdge = kPanel - 7) {
     if (rows <= visible) return;
     const int trackH = bottom - top;
     const int thumbH = std::max(18, trackH * visible / rows);
     const float span = static_cast<float>(std::max(1, rows - visible));
     const int thumbY = top + static_cast<int>(static_cast<float>(trackH - thumbH) * std::clamp(pos / span, 0.0f, 1.0f));
+    s.FillRound(RECT{rightEdge - 4, top, rightEdge, bottom}, 2, ui::kCard);
     s.FillRound(RECT{rightEdge - 4, thumbY, rightEdge, thumbY + thumbH}, 2, ui::kLineHi);
 }
 

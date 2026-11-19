@@ -209,19 +209,14 @@ void ApplyPickerAt(int x, int y, int kind, const RECT& outer) {
     ApplyMatRgb(material::HsvToRgb(hsv.x, hsv.y, hsv.z));
 }
 
+// Ahead of the widget kit (Widgets.inc) in the include order: the declaration so DrawMatFilterDrop can call it.
+void DrawMenu(ui::Surface& s, const RECT& r, const std::vector<std::string>& items, int selected, int hover);
 // The class filter dropdown, drawn below a filter button at (x, y) of width w. Both
 // lists own one of these (the panel's launcher and the workbench), so both draw it here.
 void DrawMatFilterDrop(ui::Surface& s, int x, int y, int w) {
     const RECT drop = MatFilterDropRect(x, y, w);
-    s.FillRound(drop, 5, ui::kCard);
-    s.StrokeRound(drop, 5, ui::kLineHi);
-    static const char* const labels[12] = {"All", "Skin", "Fabric", "Hair", "Eyes", "Eyelashes", "Metal", "Plastic", "Leather", "Glass", "Rubber", "Generic"};
-    for (int i = 0; i < 12; ++i) {
-        const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
-        const int val = i == 0 ? -1 : i - 1;
-        if (val == g.matFilter || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
-        s.Text(g.fontUi, val == g.matFilter ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, labels[i], &row);
-    }
+    static const std::vector<std::string> labels = {"All", "Skin", "Fabric", "Hair", "Eyes", "Eyelashes", "Metal", "Plastic", "Leather", "Glass", "Rubber", "Generic"};
+    DrawMenu(s, drop, labels, g.matFilter + 1, g.matDropHover);
 }
 
 // ---- Texture inspector + UV canvas helpers (Stage 3) ----

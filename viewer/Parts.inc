@@ -88,13 +88,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     // exists in every layout (one LayoutFor), so it only counts on that tab, and before
     // the tab branch below (20 would otherwise mean "tab 10").
     if (g.tab == TabMaterials && PtInRect(&l.matOpen, p)) return 20;
-    if (l.tabScrollable && PtInRect(&l.tabLeft, p)) return 30;
-    if (l.tabScrollable && PtInRect(&l.tabRight, p)) return 31;
-    if (l.tabScrollable) {   // offscreen tabs are not clickable
-        if (!PtInRect(&l.tabStrip, p)) return 0;
-        for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
-        return 0;
-    }
+    if (PtInRect(&l.clearLog, p)) return 22;   // the log's inline clear button
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;
 }

@@ -216,20 +216,6 @@ function WaitFor([scriptblock]$cond, [int]$timeoutSec) {
 function GoTab([int]$tab) {
     $lay = Layout
     if ($null -eq $lay) { return $null }
-    if ($lay.tabScrollable) {   # the strip may not show the target tab: click the right arrow until it is in view
-        $visible = { param($l, $t) $l.tabs[$t][2] }
-        if (-not (& $visible $lay $tab)) {
-            # the strip's right arrow ">" sits at the client's right edge; client coords are small positives
-            # (screen coords are off-screen in this smoke's window, so wheel messages cannot be aimed at it)
-            $arrowRight = 380 - 16; $arrowRowY = 228
-            for ($i = 0; $i -lt 10 -and -not (& $visible $lay $tab); $i++) {
-                Click $arrowRight $arrowRowY 60
-                $lay = Layout
-                if ($null -eq $lay) { return $null }
-                Write-Host ("    tab-{0}: arrow {1} -> tabScroll={2} visible={3}" -f $tab, $i, $lay.tabScroll, (& $visible $lay $tab))
-            }
-        }
-    }
     Click ([int]$lay.tabs[$tab][0]) ([int]$lay.tabs[$tab][1]) 350
     return (Layout)
 }

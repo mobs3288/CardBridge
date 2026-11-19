@@ -110,9 +110,9 @@ RECT AccessoryChipRect(int rowTop) { return RECT{kPanel - 34, rowTop + 3, kPanel
 
 void DrawAccessoryChip(ui::Surface& s, int y, bool selected, bool hot) {
     const RECT r = AccessoryChipRect(y);
-    const COLORREF ink = selected ? RGB(12, 14, 24) : (hot ? ui::kAccent : ui::kSub);
-    s.FillRound(r, 4, selected ? ui::kAccent : (hot ? ui::kCardHi : ui::kCard));
-    s.StrokeRound(r, 4, selected ? ui::kAccent : (hot ? ui::kAccent : ui::kLine));
+    const COLORREF ink = selected ? ui::kOnAccent : (hot ? ui::kAccentHi : ui::kSub);
+    s.FillRound(r, ui::kRad, selected ? ui::kAccent : (hot ? ui::kSelect : ui::kCard));
+    s.StrokeRound(r, ui::kRad, selected ? ui::kAccent : (hot ? ui::kAccent : ui::kLine));
     const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f, a = 4.2f, head = 2.3f;
     s.Line(cx - a, cy, cx + a, cy, ink, 1.4f);
     s.Line(cx, cy - a, cx, cy + a, ink, 1.4f);

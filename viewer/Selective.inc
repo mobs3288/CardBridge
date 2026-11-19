@@ -1,4 +1,4 @@
-﻿// viewer fragment: the Selective Import window (included in order by main.cpp, after Window.inc)
+// viewer fragment: the Selective Import window (included in order by main.cpp, after Window.inc)
 //
 // The clothing import's second mode. The one-click Replace All import is untouched; this window is
 // the alternative: three actual 3D views of the character (what it is now, what the imported source
@@ -20,7 +20,7 @@
 
 constexpr wchar_t kSelClassName[] = L"CardBridgeSelectiveImport";
 constexpr UINT_PTR kSelBuildTimer = 3;   // the 250 ms debounce that rebuilds the proposed scene
-constexpr UINT_PTR kSelResizeTimer = 4;  // 250 ms without a resize → re-render the three viewports at the new size
+constexpr UINT_PTR kSelResizeTimer = 4;  // 250 ms without a resize ? re-render the three viewports at the new size
 
 // Forward declarations (the input handlers reach these before their definitions appear):
 card::SelectiveDecisions SelDecisionsNow();
@@ -37,23 +37,23 @@ void SelPaint(HWND hwnd);
 // The action colours, shared by the dots, the legend and the 3D highlights in every view.
 COLORREF SelActionColor(card::SelectiveAction a) {
     switch (a) {
-    case card::SelectiveAction::Add:          return RGB(96, 214, 128);
-    case card::SelectiveAction::Replace:      return RGB(244, 192, 94);
-    case card::SelectiveAction::KeepExisting: return RGB(110, 168, 244);
-    case card::SelectiveAction::Skip:         return RGB(139, 146, 163);
-    case card::SelectiveAction::AddLayer:     return RGB(196, 120, 250);
+    case card::SelectiveAction::Add:          return ui::kGood;
+    case card::SelectiveAction::Replace:      return ui::kAmber;
+    case card::SelectiveAction::KeepExisting: return ui::kAccent;
+    case card::SelectiveAction::Skip:         return ui::kDim;
+    case card::SelectiveAction::AddLayer:     return ui::kAccentHi;
     }
-    return RGB(139, 146, 163);
+    return ui::kDim;
 }
 static COLORREF SelActionText(card::SelectiveAction a) {
     switch (a) {
-    case card::SelectiveAction::Add:          return RGB(26, 84, 44);
-    case card::SelectiveAction::Replace:      return RGB(84, 60, 18);
-    case card::SelectiveAction::KeepExisting: return RGB(18, 52, 84);
-    case card::SelectiveAction::Skip:         return RGB(38, 40, 48);
-    case card::SelectiveAction::AddLayer:     return RGB(64, 24, 96);
+    case card::SelectiveAction::Add:          return ui::kOnAccent;
+    case card::SelectiveAction::Replace:      return ui::kOnAccent;
+    case card::SelectiveAction::KeepExisting: return ui::kOnAccent;
+    case card::SelectiveAction::Skip:         return ui::kOnAccent;
+    case card::SelectiveAction::AddLayer:     return ui::kOnAccent;
     }
-    return RGB(38, 40, 48);
+    return ui::kOnAccent;
 }
 static exporter::HighlightPart SelHighlightFor(card::SelectiveAction a, int part) {
     const COLORREF c = SelActionColor(a);
@@ -174,7 +174,7 @@ SelLayout SelLay(int W, int H) {
     l.subtitle = RECT{M, 30, W - 320, 48};
     l.srcPrev = RECT{M, 6, 0, 0}; l.srcNext = RECT{M, 6, 0, 0}; l.srcLabel = RECT{M, 6, 0, 0};
     if (g.sel.srcIsCoordinate) {
-        l.srcPrev = RECT{M, 6, M + 26, 30}; l.srcLabel = RECT{M + 30, 6, M + 210, 30}; l.srcNext = RECT{M + 214, 30 - 26, M + 240, 30};
+        l.srcPrev = RECT{M, 6, M + 26, 30}; l.srcLabel = RECT{M + 30, 6, M + 210, 30}; l.srcNext = RECT{M + 214, 6, M + 240, 30};
         l.title = RECT{M, 0, 0, 0};   // the cycler replaces the plain title line
         l.subtitle = RECT{M, 30, W - 320, 48};
     }
@@ -203,7 +203,7 @@ SelLayout SelLay(int W, int H) {
         for (const ClothingPin& pin : g.clothingPins) if (pin.mode == 3) ++n;
         return n;
     }();
-    const int layersH = pinnedLayers > 0 ? 46 : 0;
+    const int layersH = pinnedLayers > 0 ? 22 + pinnedLayers * 38 + 6 : 0;   // caption + one 38 px row per pinned layer
     l.layersCard = RECT{M, bodyTop, 0, 0};
     int layerRow = 0;
     l.layerRows.clear();
@@ -212,7 +212,7 @@ SelLayout SelLay(int W, int H) {
         l.layersCard = RECT{M, bodyTop, M + listW, bodyTop + layersH};
         for (const ClothingPin& pin : g.clothingPins) {
             if (pin.mode != 3) continue;
-            const int y = l.layersCard.top + 7 + layerRow * 38;
+            const int y = l.layersCard.top + 22 + layerRow * 38;
             l.layerRows.push_back(RECT{l.layersCard.left + 8, y, l.layersCard.right - 34, y + 32});
             l.layerRemove.push_back(RECT{l.layersCard.right - 28, y + 6, l.layersCard.right - 4, y + 26});
             ++layerRow;
@@ -441,7 +441,7 @@ void SelBuildImported() {
     const int dstOutfit = g.sel.dstOutfit;
     const int session = g.sel.session;
     SelView& v = g.sel.views[1];
-    // identical inputs → identical result; cache key doesn't depend on decisions at all
+    // identical inputs ? identical result; cache key doesn't depend on decisions at all
     const std::string importedKey = std::string(srcCoord ? "1c|" : "1|") + g.cardPath + '>' + path + '|' + std::to_string(dstOutfit) + '|' + std::to_string(srcOutfit);
     SelProgressReset(1, srcCoord ? "assembling the source character ..." : "assembling the merged outfit ...");
     {
@@ -922,17 +922,12 @@ void SelDrawFrame(int view, HDC dc, const RECT& rect) {
     }
 }
 
-// GDI helpers (the direct-drawing UI layer)
-HFONT SelFontTiny() {
-    static HFONT tiny = nullptr;
-    if (!tiny) tiny = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    return tiny;
-}
-void SelRoundBox(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF border) {
+// GDI helpers (the direct-drawing UI layer). `corner` is the TRUE corner radius, like Surface::FillRound.
+void SelRoundBox(HDC dc, const RECT& r, int corner, COLORREF fill, COLORREF border) {
     HBRUSH b = CreateSolidBrush(fill);
     HPEN p = CreatePen(PS_SOLID, 1, border);
     HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, corner * 2, corner * 2);
     SelectObject(dc, ob); SelectObject(dc, op);
     DeleteObject(b); DeleteObject(p);
 }
@@ -983,11 +978,11 @@ void SelDrawViewChip(HDC dc, const RECT& view, int which, const std::string& sub
     if (!sub.empty()) text += "  -  " + sub;
     const int tw = SelTextWidth(g.fontBold, text);
     const RECT chip{x, y, x + tw + 18, y + h};
-    SelRoundBox(dc, chip, 6, RGB(22, 25, 36), which == 2 ? ui::kAccent : RGB(62, 72, 98));
+    SelRoundBox(dc, chip, 6, ui::kCard, which == 2 ? ui::kAccent : ui::kLineHi);
     SelText(dc, g.fontBold, which == 2 ? ui::kAccent : ui::kText, chip.left + 9, chip.top + 3, text);
-    if (which == 0) SelText(dc, SelFontTiny(), ui::kDim, chip.left + 1, chip.bottom + 2, "unchanged");
-    else if (which == 1) SelText(dc, SelFontTiny(), ui::kDim, chip.left + 1, chip.bottom + 2, "the source, on its own");
-    else SelText(dc, SelFontTiny(), ui::kDim, chip.left + 1, chip.bottom + 2, "a preview of the import");
+    if (which == 0) SelText(dc, g.fontSmall, ui::kDim, chip.left + 1, chip.bottom + 2, "unchanged");
+    else if (which == 1) SelText(dc, g.fontSmall, ui::kDim, chip.left + 1, chip.bottom + 2, "the source, on its own");
+    else SelText(dc, g.fontSmall, ui::kDim, chip.left + 1, chip.bottom + 2, "a preview of the import");
 }
 
 void SelDrawLegendChip(HDC dc, int x, int y, COLORREF col, const std::string& label) {
@@ -995,17 +990,17 @@ void SelDrawLegendChip(HDC dc, int x, int y, COLORREF col, const std::string& la
     HBRUSH b = CreateSolidBrush(col);
     FillRect(dc, &r, b);
     DeleteObject(b);
-    SelText(dc, SelFontTiny(), ui::kSub, x + 16, y, label);
+    SelText(dc, g.fontSmall, ui::kSub, x + 16, y, label);
 }
 
 void SelButton(HDC dc, const RECT& r, const std::string& label, bool hot, bool on, bool enabled, bool primary) {
     if (primary && enabled) {
-        SelRoundBox(dc, r, 6, hot ? Mix(ui::kAccent, RGB(255, 255, 255), 0.18f) : ui::kAccent, ui::kAccent);
-        SelTextCentered(dc, g.fontBold, RGB(12, 14, 24), r, label);
+        SelRoundBox(dc, r, 6, hot ? ui::kAccentHi : ui::kAccent, ui::kAccent);
+        SelTextCentered(dc, g.fontBold, ui::kOnAccent, r, label);
         return;
     }
-    SelRoundBox(dc, r, 6, !enabled ? ui::kCard : hot ? ui::kLineHi : on ? RGB(34, 48, 76) : ui::kCardHi, on ? ui::kAccent : RGB(40, 46, 64));
-    SelTextCentered(dc, g.fontUi, !enabled ? ui::kFaint : on ? RGB(206, 230, 255) : ui::kText, r, label);
+    SelRoundBox(dc, r, 6, !enabled ? ui::kCard : hot ? ui::kSelect : on ? ui::kSelect : ui::kCardHi, on ? ui::kAccent : ui::kLine);
+    SelTextCentered(dc, g.fontUi, !enabled ? ui::kFaint : on ? ui::kAccentHi : ui::kText, r, label);
 }
 
 namespace {
@@ -1349,12 +1344,20 @@ void SelectiveOpen(const std::string& path) {
     GetClientRect(g.hwnd, &rc);
     const int w = 1480, h = 880;
     const bool testQuiet = std::getenv("CARDBRIDGE_TEST_HOOKS") != nullptr;
+    // Centre on the viewer, clamped into the monitor's work area (it used to be able to open partly off-screen).
     int x = rc.left + (rc.right - rc.left - w) / 2, y = rc.top + (rc.bottom - rc.top - h) / 2;
+    MONITORINFO mi{sizeof mi};
+    if (GetMonitorInfoW(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        if (x + w > mi.rcWork.right) x = mi.rcWork.right - w;
+        if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
+        if (x < mi.rcWork.left) x = mi.rcWork.left;
+        if (y < mi.rcWork.top) y = mi.rcWork.top;
+    }
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        g.sel.hwnd = CreateWindowExW(testQuiet ? WS_EX_NOACTIVATE : 0, kSelClassName, L"Selective Import - CardBridge",
+        g.sel.hwnd = CreateWindowExW(testQuiet ? WS_EX_NOACTIVATE : 0, kSelClassName, L"CardBridge \u2014 Selective Import",
                                      WS_OVERLAPPEDWINDOW | (testQuiet ? 0 : WS_VISIBLE),
                                      testQuiet ? -32000 : x, testQuiet ? -32000 : y, w, h,
                                      g.hwnd, nullptr, g.hinst, nullptr);
@@ -1894,31 +1897,31 @@ void SelViewportBorder(HDC dc, const RECT& r, COLORREF col, int width) {
 void SelDrawActionBtn(HDC dc, const RECT& r, const char* label, card::SelectiveAction action, bool on, bool hot, bool enabled) {
     const COLORREF col = SelActionColor(action);
     if (!enabled) {
-        SelRoundBox(dc, r, 5, ui::kCard, RGB(40, 46, 64));
-        SelTextCentered(dc, SelFontTiny(), ui::kFaint, r, label);
+        SelRoundBox(dc, r, 5, ui::kCard, ui::kLine);
+        SelTextCentered(dc, g.fontSmall, ui::kFaint, r, label);
         return;
     }
     if (on) {
         SelRoundBox(dc, r, 5, col, col);
-        SelTextCentered(dc, SelFontTiny(), SelActionText(action), r, label);
+        SelTextCentered(dc, g.fontSmall, SelActionText(action), r, label);
         return;
     }
-    SelRoundBox(dc, r, 5, hot ? ui::kLineHi : RGB(28, 32, 46), RGB(52, 60, 82));
-    SelTextCentered(dc, SelFontTiny(), ui::kText, r, label);
+    SelRoundBox(dc, r, 5, hot ? ui::kLineHi : ui::kSelect, ui::kLineHi);
+    SelTextCentered(dc, g.fontSmall, ui::kText, r, label);
 }
 
 // The window header: title (or the Coordinate cycler), subtitle, and the two view toggles.
 void SelDrawHeader(HDC dc, const SelLayout& l) {
     const bool srcCoord = g.sel.srcIsCoordinate;
     if (!srcCoord) {
-        SelText(dc, g.fontTitle, ui::kAccent, l.title.left, l.title.top - 2, "Selective Import");
+        SelText(dc, g.fontSemi, ui::kText, l.title.left, l.title.top - 2, "Selective Import");
         const std::string sub = "outfit source:  " + (g.sel.srcName.empty() ? fileio::FileName(g.sel.srcPath) : g.sel.srcName) +
                                 "     landing on outfit " + std::to_string(g.sel.dstOutfit + 1) + "  (in memory only - the card on disk is never saved)";
         RECT clip{l.subtitle.left, l.subtitle.top, l.subtitle.right, l.subtitle.bottom};
         const std::wstring w = Utf8ToWide(sub);
         SetTextColor(dc, ui::kSub);
         SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, SelFontTiny());
+        SelectObject(dc, g.fontSmall);
         DrawTextW(dc, w.c_str(), -1, &clip, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     } else {
         SelButton(dc, l.srcPrev, "<", g.sel.hoverAction == 12, false, true, false);
@@ -1937,7 +1940,7 @@ void SelDrawHeader(HDC dc, const SelLayout& l) {
         const std::wstring w = Utf8ToWide(sub);
         SetTextColor(dc, ui::kSub);
         SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, SelFontTiny());
+        SelectObject(dc, g.fontSmall);
         DrawTextW(dc, w.c_str(), -1, &clip, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
     SelButton(dc, l.linkBtn, "Link cameras", g.sel.hoverAction == 10, g.sel.linkCams, true, false);
@@ -1952,7 +1955,7 @@ void SelDrawLegend(HDC dc, const SelLayout& l) {
     int x = clip.left;
     auto chip = [&](COLORREF col, const char* label) {
         SelDrawLegendChip(dc, x, y, col, label);
-        x += 16 + SelTextWidth(SelFontTiny(), label) + 14;
+        x += 16 + SelTextWidth(g.fontSmall, label) + 14;
     };
     chip(SelActionColor(card::SelectiveAction::AddLayer), "Add layer");
     chip(SelActionColor(card::SelectiveAction::Add), "Add");
@@ -1960,9 +1963,9 @@ void SelDrawLegend(HDC dc, const SelLayout& l) {
     chip(SelActionColor(card::SelectiveAction::KeepExisting), "Keep existing");
     chip(SelActionColor(card::SelectiveAction::Skip), "Skip");
     chip(RGB(255, 255, 255), "hovered / picked");
-    SelTextRight(dc, SelFontTiny(), ui::kDim, clip.right, y, hint);
+    SelTextRight(dc, g.fontSmall, ui::kDim, clip.right, y, hint);
     // a thin divider above the row
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(40, 46, 64));
+    HPEN p = CreatePen(PS_SOLID, 1, ui::kLine);
     HGDIOBJ op = SelectObject(dc, p);
     MoveToEx(dc, l.legend.left, l.legend.top, nullptr);
     LineTo(dc, l.legend.right, l.legend.top);
@@ -1974,8 +1977,8 @@ void SelDrawLegend(HDC dc, const SelLayout& l) {
 // Drawn between the legend and the component list while any layer is pinned. Removing a layer reloads the character.
 void SelDrawLayers(HDC dc, const SelLayout& l) {
     if (l.layerRows.empty()) return;
-    SelRoundBox(dc, l.layersCard, 8, ui::kCardHi, RGB(40, 46, 64));
-    SelText(dc, SelFontTiny(), ui::kFaint, l.layersCard.left + 8, l.layersCard.top + 5, "LAYERS (top of the outfit, applied in order)");
+    SelRoundBox(dc, l.layersCard, 8, ui::kCardHi, ui::kLine);
+    SelText(dc, g.fontSmall, ui::kFaint, l.layersCard.left + 8, l.layersCard.top + 5, "LAYERS (top of the outfit, applied in order)");
     size_t drawn = 0;
     for (const ClothingPin& pin : g.clothingPins) {
         if (pin.mode != 3) continue;
@@ -1984,12 +1987,12 @@ void SelDrawLayers(HDC dc, const SelLayout& l) {
         const RECT row = l.layerRows[i];
         const RECT xBtn = l.layerRemove[i];
         const bool hot = g.sel.hoverAction == 100 + static_cast<int>(i);
-        SelRoundBox(dc, row, 8, hot ? RGB(56, 44, 70) : ui::kCard, hot ? RGB(96, 78, 116) : RGB(52, 58, 82));
+        SelRoundBox(dc, row, 8, hot ? ui::kSelect : ui::kCardHi, hot ? ui::kLineHi : ui::kLine);
         std::string label = pin.name.empty() ? std::string("layer") : pin.name;
         SelText(dc, g.fontBold, ui::kText, row.left + 8, row.top + 7, "+ " + ClipText(label, 26));
-        SelRoundBox(dc, xBtn, 5, hot ? RGB(80, 36, 36) : RGB(48, 36, 44), hot ? ui::kBad : RGB(58, 44, 54));
+        SelRoundBox(dc, xBtn, 6, hot ? ui::kSelect : ui::kCardHi, hot ? ui::kBad : ui::kLine);
         RECT r{xBtn.left, xBtn.top, xBtn.right, xBtn.bottom};
-        SetTextColor(dc, hot ? RGB(255, 190, 180) : ui::kFaint);
+        SetTextColor(dc, hot ? ui::kText : ui::kFaint);
         SetBkMode(dc, TRANSPARENT);
         DrawTextW(dc, L"x", -1, &r, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         ++drawn;
@@ -1998,12 +2001,12 @@ void SelDrawLayers(HDC dc, const SelLayout& l) {
 
 // The component list's rows, clipped to the list area.
 void SelDrawComponentList(HDC dc, const SelLayout& l) {
-    SelRoundBox(dc, l.listCard, 8, ui::kCard, RGB(40, 46, 64));
+    SelRoundBox(dc, l.listCard, 8, ui::kCard, ui::kLine);
     // heading
     const std::string head = "COMPONENTS";
-    SelText(dc, g.fontBold, ui::kAccent, l.listCard.left + 12, l.listCard.top + 8, head);
+    SelText(dc, g.fontSemi, ui::kSub, l.listCard.left + 12, l.listCard.top + 9, head);
     const int shown = static_cast<int>(g.sel.comps.size());
-    SelTextRight(dc, SelFontTiny(), ui::kDim, l.listCard.right - 12, l.listCard.top + 9,
+    SelTextRight(dc, g.fontSmall, ui::kDim, l.listCard.right - 12, l.listCard.top + 9,
                  std::to_string(shown) + (shown == 1 ? " importable part" : " importable parts"));
     if (g.sel.comps.empty()) {
         SelText(dc, g.fontUi, ui::kDim, l.listCard.left + 14, l.listCard.top + 40, "this source carries nothing this outfit can use");
@@ -2027,13 +2030,13 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         const bool hovered = ci == hoverRow || ci == g.sel.selComp;
         // row background
         if (hovered) {
-            SelRoundBox(dc, row, 6, RGB(34, 42, 62), RGB(52, 60, 82));
+            SelRoundBox(dc, row, 6, ui::kSelect, ui::kLineHi);
         }
         // the action dot
         const auto it = g.sel.decisions.find(sc.comp.key);
         const card::SelectiveAction eff = it == g.sel.decisions.end() ? card::SuggestedAction(sc.comp) : it->second;
         HBRUSH dot = CreateSolidBrush(SelActionColor(eff));
-        HPEN dotPen = CreatePen(PS_SOLID, 1, eff == card::SelectiveAction::Skip ? RGB(120, 124, 140) : SelActionColor(eff));
+        HPEN dotPen = CreatePen(PS_SOLID, 1, eff == card::SelectiveAction::Skip ? ui::kDim : SelActionColor(eff));
         HGDIOBJ ob = SelectObject(dc, dot), op = SelectObject(dc, dotPen);
         Ellipse(dc, row.left + 10, row.top + 14, row.left + 20, row.top + 24);
         SelectObject(dc, ob); SelectObject(dc, op);
@@ -2055,7 +2058,7 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         l2 += sc.modName.empty() ? "base game" : sc.modName;
         if (sc.missing) l2 += "  -  NOT INSTALLED";
         SetTextColor(dc, sc.missing ? ui::kBad : ui::kDim);
-        SelectObject(dc, SelFontTiny());
+        SelectObject(dc, g.fontSmall);
         DrawTextW(dc, Utf8ToWide(l2).c_str(), -1, &line2, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         // the action buttons
         const bool isClothes = sc.comp.kind == 0;
@@ -2080,9 +2083,9 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         if (comp.category != curCat) {
             const RECT hr{l.listClip.left + 8, y, l.listClip.right - 8, y + 22};
             if (y + 22 > l.listClip.top && y < l.listClip.bottom) {
-                SelText(dc, SelFontTiny(), ui::kFaint, hr.left, hr.top + 4, comp.category);
+                SelText(dc, g.fontSmall, ui::kFaint, hr.left, hr.top + 4, comp.category);
                 // a thin separator line
-                HPEN p = CreatePen(PS_SOLID, 1, RGB(46, 52, 72));
+                HPEN p = CreatePen(PS_SOLID, 1, ui::kLineHi);
                 HGDIOBJ op = SelectObject(dc, p);
                 MoveToEx(dc, hr.left, hr.bottom - 4, nullptr);
                 LineTo(dc, hr.right, hr.bottom - 4);
@@ -2103,14 +2106,14 @@ void SelDrawComponentList(HDC dc, const SelLayout& l) {
         const int contentH = SelListContentHeight();
         const int thumbH = std::max(24, trackH * (static_cast<int>(l.listClip.bottom) - l.listTop) / contentH);
         const int thumbY = static_cast<int>(l.scrollTrack.top) + (maxScroll > 0 ? (trackH - thumbH) * static_cast<int>(g.sel.listPos) / maxScroll : 0);
-        SelRoundBox(dc, RECT{l.scrollTrack.left, thumbY, l.scrollTrack.right, thumbY + thumbH}, 3, RGB(62, 72, 98), RGB(62, 72, 98));
+        SelRoundBox(dc, RECT{l.scrollTrack.left, thumbY, l.scrollTrack.right, thumbY + thumbH}, 3, ui::kLineHi, ui::kLineHi);
     }
 }
 
 // The import plan card (right column).
 void SelDrawSummary(HDC dc, const SelLayout& l) {
-    SelRoundBox(dc, l.sumCard, 8, ui::kCard, RGB(40, 46, 64));
-    SelText(dc, g.fontBold, ui::kAccent, l.sumCard.left + 12, l.sumCard.top + 8, "IMPORT PLAN");
+    SelRoundBox(dc, l.sumCard, 8, ui::kCard, ui::kLine);
+    SelText(dc, g.fontSemi, ui::kSub, l.sumCard.left + 12, l.sumCard.top + 9, "IMPORT PLAN");
     const card::SelectivePlan plan = SelPlan();
     // counts chips
     int x = l.sumCard.left + 12;
@@ -2118,10 +2121,10 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
     auto chip = [&](int count, const char* label, card::SelectiveAction a) {
         if (count <= 0) return;
         std::string s = std::to_string(count) + " " + label;
-        const int w = SelTextWidth(SelFontTiny(), s) + 22;
+        const int w = SelTextWidth(g.fontSmall, s) + 22;
         const RECT r{x, y, x + w, l.planChips.bottom - 2};
         SelRoundBox(dc, r, 8, SelActionColor(a), SelActionColor(a));
-        SelTextCentered(dc, SelFontTiny(), SelActionText(a), r, s);
+        SelTextCentered(dc, g.fontSmall, SelActionText(a), r, s);
         x += w + 6;
     };
     chip(plan.replaced, "replace", card::SelectiveAction::Replace);
@@ -2134,11 +2137,11 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
     for (const std::string& note : g.sel.notes) {
         if (flowY + 40 > flowMax) break;
         const RECT r{l.sumCard.left + 12, flowY, l.sumCard.right - 12, flowY + 36};
-        SelRoundBox(dc, r, 6, RGB(54, 44, 22), ui::kAmber);
+        SelRoundBox(dc, r, 6, Mix(ui::kAmber, ui::kBg, 0.82f), ui::kAmber);
         RECT tx{r.left + 8, r.top + 3, r.right - 8, r.bottom - 3};
-        SetTextColor(dc, RGB(246, 205, 120));
+        SetTextColor(dc, Mix(ui::kAmber, ui::kText, 0.45f));
         SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, SelFontTiny());
+        SelectObject(dc, g.fontSmall);
         DrawTextW(dc, Utf8ToWide(note).c_str(), -1, &tx, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
         flowY += 42;
     }
@@ -2148,15 +2151,15 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
     if (flowY + 36 <= flowMax) {
         const RECT vb{l.sumCard.left + 12, flowY, l.sumCard.right - 12, flowY + 36};
         if (!g.sel.validation.empty()) {
-            SelRoundBox(dc, vb, 6, g.sel.validationError ? RGB(58, 28, 28) : RGB(28, 48, 34), g.sel.validationError ? ui::kBad : ui::kGood);
+            SelRoundBox(dc, vb, 6, g.sel.validationError ? Mix(ui::kBad, ui::kBg, 0.80f) : Mix(ui::kGood, ui::kBg, 0.82f), g.sel.validationError ? ui::kBad : ui::kGood);
             RECT tx{vb.left + 8, vb.top + 3, vb.right - 8, vb.bottom - 3};
-            SetTextColor(dc, g.sel.validationError ? RGB(255, 170, 160) : RGB(140, 230, 165));
+            SetTextColor(dc, g.sel.validationError ? Mix(ui::kBad, ui::kText, 0.55f) : Mix(ui::kGood, ui::kText, 0.45f));
             SetBkMode(dc, TRANSPARENT);
-            SelectObject(dc, SelFontTiny());
+            SelectObject(dc, g.fontSmall);
             DrawTextW(dc, Utf8ToWide(g.sel.validation).c_str(), -1, &tx, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
         } else {
-            SelRoundBox(dc, vb, 6, RGB(26, 38, 30), ui::kGood);
-            SelText(dc, SelFontTiny(), RGB(140, 230, 165), vb.left + 10, vb.top + 10, "everything resolves - ready to apply");
+            SelRoundBox(dc, vb, 6, Mix(ui::kGood, ui::kBg, 0.82f), ui::kGood);
+            SelText(dc, g.fontSmall, Mix(ui::kGood, ui::kText, 0.45f), vb.left + 10, vb.top + 10, "everything resolves - ready to apply");
         }
         flowY = vb.bottom + 8;
     }
@@ -2168,7 +2171,7 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
         RECT tx{ir.left, ir.top, ir.right, ir.bottom};
         SetTextColor(dc, ui::kDim);
         SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, SelFontTiny());
+        SelectObject(dc, g.fontSmall);
         DrawTextW(dc, Utf8ToWide(std::to_string(keptNoCounterpart) + " component(s) with no counterpart in the source are skipped").c_str(), -1, &tx,
                   DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
@@ -2185,14 +2188,14 @@ void SelDrawSummary(HDC dc, const SelLayout& l) {
 
 void SelViewportBordersAndChips(HDC dc, const SelLayout& l) {
     // borders
-    for (int i = 0; i < 3; ++i) SelViewportBorder(dc, l.views[i], i == 2 ? ui::kAccent : RGB(40, 46, 64), i == 2 ? 2 : 1);
+    for (int i = 0; i < 3; ++i) SelViewportBorder(dc, l.views[i], i == 2 ? ui::kAccent : ui::kLine, i == 2 ? 2 : 1);
 }
 
 void SelDrawFooter(HDC dc, const RECT& r) {
     const std::string left = g.sel.buildingProposal ? "assembling the proposed character ..."
                                                     : "nothing changes on the character until you press Apply";
-    SelText(dc, SelFontTiny(), g.sel.buildingProposal ? ui::kAmber : ui::kSub, r.left + 2, r.top + 5, left);
-    SelTextRight(dc, SelFontTiny(), ui::kDim, r.right - 2, r.top + 5,
+    SelText(dc, g.fontSmall, g.sel.buildingProposal ? ui::kAmber : ui::kSub, r.left + 2, r.top + 5, left);
+    SelTextRight(dc, g.fontSmall, ui::kDim, r.right - 2, r.top + 5,
                  "left-drag orbit  ·  wheel zoom  ·  right-drag pan  ·  hover/click picks  ·  Esc closes");
 }
 

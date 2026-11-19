@@ -161,7 +161,7 @@ void InvalidateLog() { InvalidatePanelBand(Lay(ClientHeight()).logTop, ClientHei
 void InvalidateFooter() { InvalidatePanelBand(Lay(ClientHeight()).footerTop, ClientHeight()); }
 void InvalidateList() {
     const PanelLayout l = Lay(ClientHeight());
-    InvalidatePanelBand(l.partsHeadingTop - 4, l.partsBottom + 4);
+    InvalidatePanelBand(kTabBottom, l.partsBottom + 4);
 }
 
 void Log(const std::string& text, LogKind kind = LogKind::Info) {

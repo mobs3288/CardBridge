@@ -1,7 +1,7 @@
 // viewer fragment: frame, layout dump, WindowProc (included in order by main.cpp)
 
 // ---- one picture -------------------------------------------------------------------------------------------------------
-// A slider's row repaints while it is dragged (and the tab heading, whose "tweaked" label follows it); nothing else.
+// A slider's row repaints while it is dragged; nothing else.
 void InvalidateSliderRow(int id) {
     const PanelLayout l = Lay(ClientHeight());
     if (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) {
@@ -20,8 +20,6 @@ void InvalidateSliderRow(int id) {
             const int y = wl.edTop + row * kRowH;
             InvalidateWbBand(y, y + kRowH);
         }
-        RECT heading{kPanel - 80, l.partsHeadingTop - 2, kPanel, l.partsHeadingTop + 16};
-        InvalidateRect(g.hwnd, &heading, FALSE);
         return;
     }
     const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
@@ -31,8 +29,6 @@ void InvalidateSliderRow(int id) {
             InvalidatePanelBand(std::max(l.partsTop, y), std::min(l.partsBottom, y + kRowH));
             break;
         }
-    RECT heading{kPanel - 80, l.partsHeadingTop - 2, kPanel, l.partsHeadingTop + 16};
-    InvalidateRect(g.hwnd, &heading, FALSE);
 }
 
 // Mouse movement during a drag is only noted by the window procedure (dragPending); this applies it, once per picture, so a fast mouse
@@ -178,10 +174,8 @@ void Frame() {
     const bool b = EaseScroll(g.bonePos, g.boneScroll, dt);
     const bool c = EaseScroll(g.matPos, g.matScroll, dt);
     const bool wbList = EaseScroll(g.wbMatPos, g.wbMatScroll, dt);   // the workbench's own list
-    const bool tabMove = EaseScroll(g.tabPos, g.tabScroll, dt);     // the tab strip's horizontal scroll
-    g.animating = a || b || c || wbList || tabMove;
+    g.animating = a || b || c || wbList;
     if (g.animating) InvalidateList();
-    if (tabMove) InvalidatePanelBand(214, 242);
     if (wbList) InvalidateWbList();
     // While a job runs, Frame is the single painter for the bar (~30/s): it
     // repaints the overlay card, the strip and the footer hint, so worker
@@ -213,11 +207,7 @@ void DumpTestLayout() {
     j["rowH"] = kRowH;
     j["tab"] = g.tab;
     j["tabs"] = nlohmann::json::array();
-    j["tabScrollable"] = l.tabScrollable;
-    j["tabStrip"] = {l.tabStrip.left, l.tabStrip.top, l.tabStrip.right, l.tabStrip.bottom};
-    j["tabMaxScroll"] = l.tabMaxScroll;
-    j["tabScroll"] = g.tabScroll;
-    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, l.tabs[i].left >= l.tabStrip.left - 2 && l.tabs[i].right <= l.tabStrip.right + 2});
+    for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, true});
     j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     // The Optimize tab's controls (centre of each hit area), for scripted runs and the smoke test.
@@ -649,16 +639,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             int button = ButtonAt(l, x, y);
-            if (l.tabScrollable && y >= 214 && y < 242) {   // the tab strip scrolls horizontally: arrows nudge, a drag moves it, a tap switches the tab
-                if (button == 30) { g.tabScroll = std::max(0, g.tabScroll - 88); InvalidatePanelBand(214, 242); return 0; }
-                if (button == 31) { g.tabScroll = std::min(l.tabMaxScroll, g.tabScroll + 88); InvalidatePanelBand(214, 242); return 0; }
-                g.tabDragging = true;
-                g.tabDragMoved = false;
-                g.tabDragAnchor = x;
-                g.tabDragStart = g.tabPos;
-                SetCapture(hwnd);
-                return 0;
-            }
             if (button == 1) { OpenCard(); return 0; }
             if (button == 2) { ExportFolderIfNeeded(); return 0; }
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
@@ -670,7 +650,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 9) { MoveClothing(1); return 0; }
             if (button == 21) { StartExportClothing(); return 0; }
             if (button == 20 && !g.matFilterDropOpen) { OpenWorkbench(); return 0; }   // the Materials tab's launcher
-            if (button >= 10 && button != 20) {
+            if (button >= 10 && button != 20 && button != 22) {
                 g.showIssues = false;
                 g.tab = button - 10;
                 g.partScroll = 0;
@@ -819,20 +799,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        if (g.tabDragging) {   // a press on the tab strip: a horizontal drag scrolls it
-            const int dx = x - g.tabDragAnchor;
-            if (!g.tabDragMoved && std::abs(dx) > 4) g.tabDragMoved = true;
-            if (g.tabDragMoved) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                const PanelLayout l = Lay(rc.bottom);
-                const float want = std::clamp(g.tabDragStart - static_cast<float>(dx), 0.0f, static_cast<float>(l.tabMaxScroll));
-                g.tabScroll = static_cast<int>(std::lround(want));
-                g.tabPos = static_cast<float>(g.tabScroll);
-                InvalidatePanelBand(214, 242);
-            }
-            return 0;
-        }
         if (g.listPressY >= 0) {   // a press in the list: a vertical drag scrolls it (the row's click is swallowed by the drag)
             const int dy = y - g.listPressY, dx = x - g.listPressX;
             if (!g.listScroll && std::abs(dy) > 4 && std::abs(dy) >= std::abs(dx)) {
@@ -1026,8 +992,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (idx >= 0) InvalidatePanelBand(std::max(top, top + idx * kRowH - px), std::min(bottom, top + (idx + 1) * kRowH - px));
         }
         if (oldButton != g.hoverButton || oldOutfit != g.hoverOutfit) {
-            InvalidatePanelBand(l.open.top - 2, l.tabs[0].bottom + 2);
+            InvalidatePanelBand(l.open.top - 2, l.tabs[TabCount - 1].bottom + 2);
             if (oldButton == 20 || g.hoverButton == 20) InvalidatePanelBand(l.matFilter.top - 2, l.matListTop - 2);   // the launcher button
+            if (oldButton == 22 || g.hoverButton == 22) InvalidateLog();   // the log's clear button
         }
         // The viewport's diagnostic mode strip: hover highlight (repaint only on change).
         {
@@ -1063,28 +1030,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
-        if (g.tabDragging) {   // a press on the scrollable tab strip: a drag scrolls it, a tap switches the tab
-            const bool tap = !g.tabDragMoved;
-            g.tabDragging = false;
-            g.tabDragMoved = false;
-            ReleaseCapture();
-            if (tap) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-                const PanelLayout l = Lay(rc.bottom);
-                const int button = ButtonAt(l, x, y);
-                if (button >= 10 && button != 20 && button != 30 && button != 31) {
-                    g.showIssues = false;
-                    g.tab = button - 10;
-                    g.partScroll = 0;
-                    g.partPos = 0;
-                    g.hoverRow = g.hoverPart = -1;
-                    InvalidatePanel();
-                }
-            }
-            return 0;
-        }
         if (g.listScroll) {   // the list was dragged: the row's click is swallowed by the drag
             g.listScroll = false;
             g.listPressY = -1;
@@ -1179,11 +1124,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             PanelLayout l = Lay(rc.bottom);
             std::shared_ptr<Loaded> L = Current();
-            if (l.tabScrollable && pt.y >= 214 && pt.y < 242) {   // over the tab strip: the wheel scrolls it horizontally
-                g.tabScroll = std::clamp(g.tabScroll - (d > 0 ? 48 : -48), 0, l.tabMaxScroll);
-                InvalidatePanelBand(214, 242);
-                return 0;
-            }
             if (pt.y >= l.logTop) {
                 std::lock_guard<std::mutex> lk(g.logMu);   // Log() touches logScroll from worker threads
                 int visible = std::max(1, (l.logBottom - (l.logTop + 24)) / 15);
