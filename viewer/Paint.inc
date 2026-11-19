@@ -188,6 +188,10 @@ void TransPaintPress(int vx, int vy, bool erase) {
     g.paintAnchorSet = false;
     g.transEraseStroke = erase || g.transErase;
     g.transMmdWasActive = g.showExp && g.expOk;         // if the exported view was showing, kick the bake off on release
+    // The Lit upload was deliberately skipped on load (the default view is MMD); lazy-load it on the first
+    // brush stroke so the interactive preview runs on the GPU (far faster than the software rasterizer).
+    // No GPU / shader upload failure: g.gpuScene stays null and the software path is used instead.
+    if (g.gpu.ready() && g.gpuScene != L) UploadLitGpu(L);
     g.transPaintX = vx;
     g.transPaintY = vy;
     g.transPaintPending = false;
