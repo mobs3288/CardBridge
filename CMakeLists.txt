@@ -132,7 +132,28 @@ else()
     target_compile_options(cardbridge_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
 
-add_executable(cardbridge cli/main.cpp)
+# The CLI: a console exe with the same branding and version metadata as the viewer. On Windows it gets
+# an .rc like the viewer's; elsewhere it builds without resources.
+if(WIN32)
+    enable_language(RC)
+    string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" _v "${CARDBRIDGE_VERSION}")
+    set(CARDBRIDGE_VERSION_RC "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+    configure_file(cli/cli.rc.in ${CMAKE_CURRENT_BINARY_DIR}/cli.rc @ONLY)
+    if(MSVC)
+        set(CLI_RES ${CMAKE_CURRENT_BINARY_DIR}/cli.rc)
+    else()
+        set(CLI_RES ${CMAKE_CURRENT_BINARY_DIR}/cli_res.o)
+        add_custom_command(
+            OUTPUT ${CLI_RES}
+            COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff cli.rc cli_res.o
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/cli.rc
+            VERBATIM)
+    endif()
+    add_executable(cardbridge cli/main.cpp ${CLI_RES})
+else()
+    add_executable(cardbridge cli/main.cpp)
+endif()
 target_link_libraries(cardbridge PRIVATE cardbridge_core cardbridge_stb_write)
 if(WIN32 AND NOT MSVC)
     # The exe has to start from a plain folder with nothing beside it.
@@ -142,11 +163,13 @@ endif()
 
 # The viewer: a Win32 window over the same core (GDI blit of a frame drawn by the software renderer or by Direct3D 11).
 if(WIN32)
-    enable_language(RC)   # the icon and the logo are resources of the exe
-    # the .rc is generated (version, absolute resource paths) and compiled with windres by hand: the generated rule passes absolute include
+    # RC is already enabled by the CLI block above; the .rc is generated (version, absolute resource paths) and compiled with windres by hand: the generated rule passes absolute include
     # paths, which windres cannot hand to its preprocessor when the checkout path has a space in it.
     string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" _v "${CARDBRIDGE_VERSION}")
     set(CARDBRIDGE_VERSION_RC "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+    # the manifest takes the same version (as a dotted 4-part assemblyIdentity version): VERSION stays the one source
+    string(REPLACE "," "." CARDBRIDGE_VERSION_WIN "${CARDBRIDGE_VERSION_RC}")
+    configure_file(viewer/res/cardbridge.manifest.in ${CMAKE_CURRENT_BINARY_DIR}/cardbridge.manifest @ONLY)
     configure_file(viewer/viewer.rc.in ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc @ONLY)
     if(MSVC)
         set(VIEWER_RES ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc)
@@ -156,7 +179,7 @@ if(WIN32)
             OUTPUT ${VIEWER_RES}
             COMMAND ${CMAKE_RC_COMPILER} --preprocessor=gcc.exe --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED -O coff viewer.rc viewer_res.o
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.manifest
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/viewer.rc ${CMAKE_CURRENT_BINARY_DIR}/cardbridge.manifest ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/cardbridge.ico ${CMAKE_CURRENT_SOURCE_DIR}/viewer/res/logo.png
             VERBATIM)
     endif()
     add_executable(cardbridge_viewer WIN32 viewer/main.cpp viewer/Ui.cpp ${VIEWER_RES})

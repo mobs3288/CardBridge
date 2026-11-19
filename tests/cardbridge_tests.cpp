@@ -4401,6 +4401,56 @@ void unitTests() {
         CHECK(foundRoll && foundHeart && foundSweat && foundHeavy);
     });
 
+    test("facial display frames: the four tabs share MMD's 255 listed-morph budget with the Exp frame, nothing listed twice", [] {
+        using namespace exporter;
+        pmx::Model m;
+        for (int panel : {1, 2, 3, 4})   // 9 morphs per panel, in file order
+            for (int i = 0; i < 9; ++i) { pmx::Morph mo; mo.name = "m" + std::to_string(panel) + "_" + std::to_string(i); mo.panel = panel; mo.vertices = {{0, {0, 0, 0}}}; m.morphs.push_back(mo); }
+        {   // no budget and no skip list: everything is listed, one frame per panel, capped at 255 per frame
+            const auto frames = FacialDisplayFrames(m);
+            size_t total = 0;
+            for (const auto& f : frames) total += f.morphs.size();
+            CHECK(total == m.morphs.size() && frames.size() == 4);
+        }
+        {   // a split budget of 20 over 36 candidates: proportional (largest remainder), never more than asked, none duplicated
+            const auto frames = FacialDisplayFrames(m, {}, 20);
+            size_t total = 0;
+            std::map<int, size_t> perPanel;
+            std::set<int> seen;
+            bool dup = false;
+            for (const auto& f : frames) for (int mi : f.morphs) { ++total; ++perPanel[m.morphs[static_cast<size_t>(mi)].panel]; if (!seen.insert(mi).second) dup = true; }
+            CHECK(total == 20 && !dup);
+            for (const auto& [panel, n] : perPanel) CHECK(n == 5);   // equal panels share equally
+        }
+        {   // an uneven panel mix: the large panel gets more, the small panel still gets a share, the total is exactly the budget
+            pmx::Model uneven;
+            for (int i = 0; i < 4; ++i) { pmx::Morph mo; mo.name = "brow" + std::to_string(i); mo.panel = 1; mo.vertices = {{0, {0, 0, 0}}}; uneven.morphs.push_back(mo); }
+            for (int i = 0; i < 12; ++i) { pmx::Morph mo; mo.name = "mouth" + std::to_string(i); mo.panel = 3; mo.vertices = {{0, {0, 0, 0}}}; uneven.morphs.push_back(mo); }
+            const auto frames = FacialDisplayFrames(uneven, {}, 6);
+            size_t total = 0;
+            size_t brows = 0, mouths = 0;
+            for (const auto& f : frames) for (int mi : f.morphs) { ++total; if (f.name == "Brow") ++brows; if (f.name == "Mouth") ++mouths; }
+            CHECK(total == 6 && brows + mouths == 6 && brows >= 1 && mouths >= 3);   // 1.5 and 4.5 -> largest remainder hands the extra slots out deterministically
+        }
+        {   // morphs the Exp frame already lists are never listed twice, and the budget does not go over
+            const std::vector<int> listed = {0, 1, 2, 9, 18, 27};   // two per panel
+            const auto frames = FacialDisplayFrames(m, listed, 10);
+            size_t total = 0;
+            bool dup = false;
+            for (const auto& f : frames) for (int mi : f.morphs) {
+                ++total;
+                if (std::find(listed.begin(), listed.end(), mi) != listed.end()) dup = true;
+            }
+            CHECK(total == 10 && !dup);
+        }
+        {   // a budget larger than what is left lists only what is left (never invents morphs)
+            const auto frames = FacialDisplayFrames(m, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}, 255);
+            size_t total = 0;
+            for (const auto& f : frames) total += f.morphs.size();
+            CHECK(total == 0);
+        }
+    });
+
     test("face fx: a full synthetic export carries the semantic names, the effects and the facial display frames", [] {
         assemble::Scene s;
         s.name = "facefx_e2e";
@@ -4526,15 +4576,15 @@ void unitTests() {
             CHECK(!allDigits);
         }
         CHECK(names.size() == back.morphs.size());
-        // the facial display frames are there and point at real morphs; Exp is still the special frame
-        bool eye = false, other = false, exp = false;
+        // the facial display frames are there and point at real morphs; Exp is still the special frame. "Other" carries panel-4 morphs, and those
+        // are exactly the outfit toggles and the effects — all listed in Exp now (nothing is listed twice), so an empty Other frame is omitted.
+        bool eye = false, exp = false;
         for (const auto& f : back.frames) {
             if (f.name == "Eye") eye = true;
-            if (f.name == "Other") other = true;
             if (f.name == "表情" && f.special) exp = true;
             for (const auto& [kind, index] : f.items) CHECK(index >= 0 && index < static_cast<int>(back.morphs.size()));
         }
-        CHECK(eye && other && exp);
+        CHECK(eye && exp);
         // the effect textures are on disk beside the PMX
         CHECK(fileio::Exists(fileio::Join(res.folder, "textures/fx_hearteyes.png")));
         CHECK(fileio::Exists(fileio::Join(res.folder, "textures/fx_sweat.png")));

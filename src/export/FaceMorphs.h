@@ -20,6 +20,7 @@
 #include "export/Exporter.h"
 #include "pmx/PmxWriter.h"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -76,8 +77,11 @@ FaceEffectsResult AddFaceEffects(const assemble::Scene& scene, pmx::Model& model
                                  const std::string& outDir, float scale,
                                  const std::function<void(const std::string&)>& log);
 
-// The four facial display frames (Eye, Brow, Mouth, Other), one panel each, appended after the Exp frame by the caller. Indices of morphs
-// not listed by the Exp frame are included here too, capped at 255 entries per frame (MikuMikuDance keeps the count in a byte). Empty panels produce no frame.
-std::vector<pmx::DisplayFrame> FacialDisplayFrames(const pmx::Model& model);
+// The four facial display frames (Eye, Brow, Mouth, Other), one panel each, appended after the Exp frame by the caller. MikuMikuDance keeps the
+// number of morphs ALL display frames list in one byte (each listed item fills a 46-byte record), so the four frames share one `budget` with the Exp
+// frame: `alreadyListed` are the morph indices Exp lists (never listed twice) and `budget` is what is left of the 255 slots. The facial morphs are
+// split across the panels proportionally (largest remainder) so every tab stays populated; whatever does not fit stays in the file unlisted (the
+// engine and tools use it). Pass SIZE_MAX as `budget` to list everything. Empty panels produce no frame.
+std::vector<pmx::DisplayFrame> FacialDisplayFrames(const pmx::Model& model, const std::vector<int>& alreadyListed = {}, size_t budget = SIZE_MAX);
 
 } // namespace cardbridge::exporter

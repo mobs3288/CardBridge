@@ -720,18 +720,44 @@ FaceEffectsResult AddFaceEffects(const assemble::Scene& scene, pmx::Model& model
     return res;
 }
 
-std::vector<pmx::DisplayFrame> FacialDisplayFrames(const pmx::Model& model) {
-    // One frame per MMD panel; the Exp frame (special) still lists the first 255 morphs as usual. Indices of effects and aliases are included.
-    std::vector<pmx::DisplayFrame> out;
+std::vector<pmx::DisplayFrame> FacialDisplayFrames(const pmx::Model& model, const std::vector<int>& alreadyListed, size_t budget) {
+    // MikuMikuDance keeps the count of LISTED MORPHS in one byte for the whole file and fills its morph table by it: 256 or more corrupt its heap
+    // (a crash a few seconds after the model opens). The budget is shared with the Exp frame; morphs Exp already lists are never listed twice.
     const struct { const char* name; int panel; } kFrames[] = {{"Eye", 2}, {"Brow", 1}, {"Mouth", 3}, {"Other", 4}};
-    constexpr size_t kMaxListed = 255;   // MikuMikuDance keeps the count in a byte
-    for (const auto& f : kFrames) {
+    constexpr size_t kPanels = 4;
+    std::vector<char> skip(model.morphs.size(), 0);
+    for (int mi : alreadyListed) if (mi >= 0 && mi < static_cast<int>(skip.size())) skip[static_cast<size_t>(mi)] = 1;
+    std::vector<int> candidates[kPanels];
+    size_t total = 0;
+    for (size_t f = 0; f < kPanels; ++f) {
+        for (size_t i = 0; i < model.morphs.size(); ++i)
+            if (model.morphs[i].panel == kFrames[f].panel && !skip[i]) candidates[f].push_back(static_cast<int>(i));
+        total += candidates[f].size();
+    }
+    size_t assigned[kPanels] = {};
+    if (total <= budget) {
+        for (size_t f = 0; f < kPanels; ++f) assigned[f] = candidates[f].size();
+    } else {   // proportional split, largest remainder (ties: Eye, Brow, Mouth, Other), so every panel keeps a fair share of the 255 slots
+        size_t base = 0;
+        double remainder[kPanels];
+        for (size_t f = 0; f < kPanels; ++f) {
+            const double exact = total == 0 ? 0.0 : static_cast<double>(budget) * static_cast<double>(candidates[f].size()) / static_cast<double>(total);
+            assigned[f] = static_cast<size_t>(exact);
+            remainder[f] = exact - static_cast<double>(assigned[f]);
+            base += assigned[f];
+        }
+        size_t left = budget - base;
+        size_t order[kPanels] = {0, 1, 2, 3};
+        std::stable_sort(order, order + kPanels, [&](size_t a, size_t b) { return remainder[a] > remainder[b]; });
+        for (size_t k = 0; k < left; ++k) ++assigned[order[k]];   // left < kPanels: each floor lost less than one slot, so there are fewer leftovers than panels
+    }
+    std::vector<pmx::DisplayFrame> out;
+    for (size_t f = 0; f < kPanels; ++f) {
+        if (assigned[f] == 0) continue;
         pmx::DisplayFrame fr;
-        fr.name = f.name;
-        fr.nameEn = f.name;
-        for (size_t i = 0; i < model.morphs.size() && fr.morphs.size() < kMaxListed; ++i)
-            if (model.morphs[i].panel == f.panel) fr.morphs.push_back(static_cast<int>(i));
-        if (fr.morphs.empty()) continue;
+        fr.name = kFrames[f].name;
+        fr.nameEn = kFrames[f].name;
+        fr.morphs.assign(candidates[f].begin(), candidates[f].begin() + static_cast<std::ptrdiff_t>(assigned[f]));
         out.push_back(std::move(fr));
     }
     return out;
