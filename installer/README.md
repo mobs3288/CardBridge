@@ -91,8 +91,10 @@ Bump the version in `VERSION` (and everything that references it) as usual; see 
 Install into a scratch directory (not your real install) and check it end to end:
 
 ```powershell
-# silent install into a custom directory
-.\CardBridge-Setup-0.3.0.exe /VERYSILENT /DIR="C:\Path\To\Scratch\CardBridge"
+# silent install into a scratch directory (administrator: default Program Files location)
+.\CardBridge-Setup-0.3.0.exe /VERYSILENT /DIR="Program Files\CardBridge Scratch"
+# on a machine without administrator rights: per-user install (same wizard choice)
+.\CardBridge-Setup-0.3.0.exe /VERYSILENT /CURRENTUSER /DIR="C:\Path\To\Scratch\CardBridge"
 # the app must start from that folder without the repository anywhere near it
 & "C:\Path\To\Scratch\CardBridge\CardBridge.exe"
 # uninstall: the folder, the shortcuts and the Add/Remove Programs entry go away,

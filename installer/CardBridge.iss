@@ -3,6 +3,12 @@
 ; The application itself lives outside this file (src/, viewer/). This script only decides how it is
 ; installed: where it goes, what shortcuts it makes, what it does about upgrades, and what is left behind.
 ;
+; Default: a per-machine install into Program Files\CardBridge (needs administrator rights, as any
+; Program Files install does). Non-administrators get offered a per-user install into
+; %LOCALAPPDATA%\Programs\CardBridge instead (the wizard asks; or pass /CURRENTUSER — for example on
+; a locked-down or shared machine). Same binaries either way, Start Menu integration and Add/Remove
+; Programs in both cases.
+;
 ; Version number is not written here. The build script (build_installer.ps1) reads VERSION at the repository
 ; root and passes it in as /DMyAppVersion=<version> and /DMyAppVersionWin=<a.b.c.d>, so the repository has
 ; one source of truth for the version.
@@ -57,6 +63,7 @@ MinVersion=10.0.10240
 OutputDir=..\dist
 OutputBaseFilename=CardBridge-Setup-{#MyAppVersion}
 PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
 CloseApplications=yes
 RestartApplications=no
 UsePreviousAppDir=yes
