@@ -43,8 +43,8 @@ Converted models in MikuMikuDance:
 **The inputs — character cards**
 
 <p align="center">
-  <img src="image/demo_card1.png" alt="Demo character card 1" width="200">&nbsp;&nbsp;
-  <img src="image/demo_card2.png" alt="Demo character card 2" width="200">
+  <img src="image/demo_card1.png" alt="Demo character card 1" width="400">&nbsp;&nbsp;
+  <img src="image/demo_card2.png" alt="Demo character card 2" width="400">
 </p>
 
 **CardBridge — the app**
