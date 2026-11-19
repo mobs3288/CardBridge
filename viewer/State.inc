@@ -492,6 +492,8 @@ struct App {
     int gizmoAxis = -1;                       // the axis being dragged, -1 = none
     exporter::MoveGizmoState gizmoState;      // where the last picture drew the gizmo (x < 0: not drawn)
     float gizmoAcc[3] = {0, 0, 0};            // world delta applied during the current drag (for the log line)
+    bool transMmdWasActive = false;           // the stroke started while the "as exported" view showed (so the bake returns to it after release)
+    bool transRebakePending = false;          // the brush changed pixels; rebake the exported preview instead of staying on the interactive view
     float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
     int hoverAccChip = -1;                    // the accessory chip under the pointer in the panel, -1 = none
     // Translucent clothes (Look tab): the brush paints the see-through area of the garment under the cursor. The mask is

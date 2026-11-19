@@ -12,19 +12,34 @@
 // Right-clicking the switch row puts it back to off, like every switch.
 
 // ---- the bake -----------------------------------------------------------------------------------------------------
-// Pushes the bake's changed textures through the GPU upload and the software renderer's mip cache, and drops the baked
-// "as exported" copy when the bake actually changed pixels (it holds the old paint).
+// Re-bakes the exported (MMD-look) copy in the background when the translucency brush changed pixels and
+// the stroke started in that view - so the view comes back to the MMD look automatically on release, instead
+// of staying on the interactive renderer (which holds stale textures).
+static void RebakeAfterBrush() {
+    if (!g.transRebakePending) return;
+    if (!g.transMmdWasActive) { g.transRebakePending = false; return; }
+    g.transRebakePending = false;
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || !g.gpu.ready()) return;
+    g.expOk = false;
+    g.expScene.reset();
+    g.gpuExp.Unload();
+    g.showExp = false;          // let ToggleAsExported bake, then flip the view back on
+    ToggleAsExported();         // X button: bake + show the exported view when ready
+}
+
+// Pushes the bake's changed textures through the GPU upload and the software renderer's mip cache, and
+// flips the view to the interactive path while the brush is in action (the exported copy is stale).
 void TransInvalidate(const std::vector<int>& changed) {
     if (changed.empty()) return;
     std::shared_ptr<Loaded> L = Current();
     for (int ti : changed) if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
     if (L && g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(changed);
-    // The baked "as exported" copy holds the old paint, like it holds the old skin shading: drop it.
+    // The baked "as exported" copy is stale once the brush changed pixels - don't render stale pixels.
+    // Keep the interactive path so the change is visible live; RebakeAfterBrush kicks the MMD look back on
+    // release (or on a switch-change apply) when the stroke started in the exported view.
+    g.transRebakePending = true;
     g.expOk = false;
-    g.showExp = false;
-    g.expFor.reset();
-    g.expScene.reset();
-    g.gpuExp.Unload();
     g.dirty = true;
     InvalidateView();
     InvalidatePanel();
@@ -38,6 +53,7 @@ void TransApplyNow() {
     exporter::TranslucencyApply(L->scene, g.tw.transStrength, &changed);
     if (changed.empty()) return;   // nothing changed: the view and the export keep what they have
     TransInvalidate(changed);
+    if (g.drag != 6) RebakeAfterBrush();   // a stroke ends with the button; don't rebake on every mouse-move
 }
 
 // The toggle (or the erase switch) changed: apply or revert the bake at once, and say what it means.
@@ -171,6 +187,7 @@ void TransPaintPress(int vx, int vy, bool erase) {
     g.paintPart = -1;
     g.paintAnchorSet = false;
     g.transEraseStroke = erase || g.transErase;
+    g.transMmdWasActive = g.showExp && g.expOk;         // if the exported view was showing, kick the bake off on release
     g.transPaintX = vx;
     g.transPaintY = vy;
     g.transPaintPending = false;
@@ -187,6 +204,7 @@ void TransEndStroke() {
     g.paintAnchorSet = false;
     g.transPaintPending = false;
     TransApplyNow();   // final pixels; a no-op when nothing changed (the bake counts real pixel changes)
+    RebakeAfterBrush();   // back into the exported view, if it was showing when the stroke started
 }
 
 // ---- the cursor ring ------------------------------------------------------------------------------------------------
