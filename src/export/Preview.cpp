@@ -584,11 +584,15 @@ struct MatTextures : shader::ISm4Textures {
         const int sceneIdx = b.sceneTex;
         if (sceneIdx >= 0) {
                 size_t ti = static_cast<size_t>(sceneIdx);
-                if (ti >= st->built.size() || !st->built[ti]) {   // lazy build (a texture the caller did not pre-build): build under lock so two workers cannot build/read the same chain at once
-                    std::lock_guard<std::mutex> lk(st->mipMutex);
-                    if (st->built.size() != scene->textures.size()) { st->mips.assign(scene->textures.size(), Mips{}); st->built.assign(scene->textures.size(), false); }
-                    if (ti >= st->built.size() || !st->built[ti]) { st->mips[ti] = BuildMips(scene->textures[ti]); st->built[ti] = true; }
+                // A texture that was not pre-built (the bake builds all chains up front, and the translucency brush can
+                // reset a built bit mid-bake): never destroy existing mips here, other workers may hold pointers into them.
+                // Grow the vectors safely; anything still missing samples white, like an empty mip in SampleBilinear. The
+                // pre-pass rebuilds everything on the next bake anyway.
+                if (st->mips.size() < scene->textures.size()) {
+                    st->mips.resize(scene->textures.size());
+                    st->built.resize(scene->textures.size(), false);
                 }
+                if (ti < st->built.size() && !st->built[ti]) { out[0] = out[1] = out[2] = out[3] = 1.0f; return; }
                 const Mips& m = st->mips[ti];
                 if (b.globalTex) {   // the scene's global textures: always level 0, stored pixels, no sRGB decode
                     const bool cl = b.clamp;
