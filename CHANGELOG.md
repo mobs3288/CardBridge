@@ -40,6 +40,7 @@ The first installer release. From here on, CardBridge-Setup is the recommended d
 
 ### Fixed
 
+- MikuMikuDance crashed a few seconds after opening a model with facial morphs: it keeps the number of listed morphs for the whole file in one byte (256+ corrupts its heap). The `Exp` frame listed 255 and the facial tabs (Eye/Brow/Mouth/Other) listed every facial morph on top of that. The 255-slot listed-morph budget is now shared: `Exp` lists the priority morphs (outfit toggles, the MMD-standard morphs, the four face effects), the facial tabs split the remainder proportionally, nothing is listed twice, and whatever does not fit stays in the file unlisted (the audit passes: Exp 69 + Eye 78 + Brow 27 + Mouth 81 = 255)
 - Crash (`0xC0000005`) in the software shader bake when a translucency stroke invalidated a mip chain being read by worker threads
 - Crash and "exploding head" when an ABMX bone had zero scale (singular inverse); scales are clamped at 1e-6
 - Double-layered "studio-alpha" garments (an opaque shell and its translucent twin in one mesh) drew the lining over the outside in the viewer, in MMD, and in the PMX; the lining is now detected, exported single-sided and fenced to the interior only
