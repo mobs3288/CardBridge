@@ -40,9 +40,26 @@ Converted models in MikuMikuDance:
 
 ## Screenshots
 
-| Character cards | CardBridge | MikuMikuDance |
-|---|---|---|
-| <img src="image/demo_card1.png" alt="Demo character card 1" width="220"><br><img src="image/demo_card2.png" alt="Demo character card 2" width="220"> | <img src="image/demo_cardbridge1.png" alt="CardBridge demo 1" width="220"><br><img src="image/demo_cardbridge2.png" alt="CardBridge demo 2" width="220"> | <img src="image/demo_MMD_card1.png" alt="MMD export demo 1" width="220"><br><img src="image/demo_MMD_card2.png" alt="MMD export demo 2" width="220"> |
+**The inputs — character cards**
+
+<p align="center">
+  <img src="image/demo_card1.png" alt="Demo character card 1" width="200">&nbsp;&nbsp;
+  <img src="image/demo_card2.png" alt="Demo character card 2" width="200">
+</p>
+
+**CardBridge — the app**
+
+<p align="center">
+  <img src="image/demo_cardbridge1.png" alt="CardBridge demo 1" width="830"><br>
+  <img src="image/demo_cardbridge2.png" alt="CardBridge demo 2" width="830">
+</p>
+
+**MikuMikuDance — the exported models**
+
+<p align="center">
+  <img src="image/demo_MMD_card1.png" alt="MMD export demo 1" width="830"><br>
+  <img src="image/demo_MMD_card2.png" alt="MMD export demo 2" width="830">
+</p>
 
 ## Install
 
