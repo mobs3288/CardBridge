@@ -61,8 +61,9 @@ struct Bone {
     std::vector<IkLink> ikLinks;
 };
 
-// A morph. Only the two kinds the exporter needs: a material morph (type 8: per material an offset that multiplies or adds to its
-// colours) and a group morph (type 0: several morphs at a rate). `panel` is the MMD control panel (1 brows, 2 eyes, 3 mouth, 4 other).
+// A morph. Kinds the exporter uses: a group morph (type 0: several morphs at a rate), a vertex morph (type 1), a UV morph (type 3: per
+// vertex a (du, dv, ?, ?) offset - MikuMikuDance applies the first two to the main UV), a material morph (type 8). `panel` is the MMD
+// control panel (1 brows, 2 eyes, 3 mouth, 4 other).
 struct MaterialOffset {
     int material = -1;              // -1 = all materials
     bool add = true;                // false = multiply
@@ -81,6 +82,7 @@ struct Morph {
     std::vector<MaterialOffset> materials;               // a material morph when non-empty
     std::vector<std::pair<int, float>> group;            // (morph index, rate): a group morph when non-empty
     std::vector<std::pair<int, Vec3>> vertices;          // (vertex index, offset): a vertex morph when non-empty
+    std::vector<std::pair<int, Vec4>> uv;                // (vertex index, (du, dv, unused, unused)): a UV morph when non-empty
 };
 
 // Physics. Shapes: 0 sphere, 1 box, 2 capsule. Modes: 0 follows its bone, 1 physics, 2 physics with the bone aligned.

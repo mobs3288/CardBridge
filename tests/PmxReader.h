@@ -4,6 +4,7 @@
 // the writer), so a field the writer puts in the wrong place shows up as a different value here. Parses every section: vertices, faces,
 // textures, materials, bones (append, fixed axis, local axis, IK), morphs, display frames, rigid bodies and joints.
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -42,6 +43,7 @@ struct Morph {
     int panel = 0, type = 0;
     size_t count = 0;
     std::vector<std::pair<int, V3>> vertices;   // type 1
+    std::vector<std::pair<int, std::array<float, 4>>> uvs;   // type 3 (UV morph; only x, y are applied to the main UV)
     std::vector<int> refs;                      // group / flip: morph indices; material: material indices; bone: bone indices
 };
 
@@ -240,7 +242,7 @@ inline Model Read(const uint8_t* data, size_t size) {
                 case 0: case 9: mo.refs.push_back(r.sidx(moS)); r.f32(); break;
                 case 1: { const int vi = static_cast<int>(r.uidx(vS)); mo.vertices.emplace_back(vi, r.v3()); break; }
                 case 2: mo.refs.push_back(r.sidx(bS)); r.skip(28); break;
-                case 3: case 4: case 5: case 6: case 7: r.uidx(vS); r.skip(16); break;
+                case 3: case 4: case 5: case 6: case 7: { const int vi = static_cast<int>(r.uidx(vS)); const float x = r.f32(), y = r.f32(), z = r.f32(), w = r.f32(); mo.uvs.emplace_back(vi, std::array<float, 4>{x, y, z, w}); break; }
                 case 8: mo.refs.push_back(r.sidx(matS)); r.skip(1 + 16 + 12 + 4 + 12 + 16 + 4 + 48); break;
                 case 10: mo.refs.push_back(r.sidx(rbS)); r.skip(1 + 24); break;
                 default: throw std::runtime_error("unknown morph type");

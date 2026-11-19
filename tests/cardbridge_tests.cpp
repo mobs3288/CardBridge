@@ -33,7 +33,8 @@
 #include "core/ZipArchive.h"
 #include "export/AdapterSelect.h"
 #include "export/BoneLabels.h"
-#include "export/Exporter.h"
+#include "export/FaceMorphs.h"
+#include "export/Exporter.h"         
 #include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
@@ -63,7 +64,8 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
+#include <cctype>
+#include <cmath>  
 #include <filesystem>
 #include <cstdio>
 #include <cstring>
@@ -4029,6 +4031,445 @@ void unitTests() {
         m2.vertices.resize(10);
         CHECK(exporter::AddExpressionMorphs(s, m2, {-1}, 2.0f) == 0);
     });
+    test("face morphs: stem parser (prefix, state, set number, size tag, side tag)", [] {
+        using namespace exporter;
+        auto kp = ParseFaceStem("f00_a_l_op");
+        CHECK(kp.prefix == "f00_" && kp.state == "op" && kp.word == "a" && kp.size == "large" && kp.set == 0 && kp.side == 0 && kp.known);
+        kp = ParseFaceStem("mayu00_sianL_cl");
+        CHECK(kp.state == "cl" && kp.word == "sian" && kp.side == 1 && kp.known);
+        kp = ParseFaceStem("f00_ikari02_op");
+        CHECK(kp.word == "ikari" && kp.set == 2 && kp.state == "op" && kp.known);
+        kp = ParseFaceStem("f00_bisyou_op1");
+        CHECK(kp.word == "bisyou" && kp.state == "op" && kp.set == 1 && kp.known);
+        kp = ParseFaceStem("f00_ahe_deep_l_op");
+        CHECK(kp.word == "ahe_deep" && kp.size == "large" && kp.state == "op" && kp.known);
+        kp = ParseFaceStem("mayu00_winkl_op");
+        CHECK(kp.word == "winkl" && kp.side == 0 && kp.state == "op" && kp.known);
+        kp = ParseFaceStem("f00_gimoL_cl");
+        CHECK(kp.word == "gimo" && kp.side == 1 && kp.state == "cl" && !kp.known);
+        kp = ParseFaceStem("n_l_cl");
+        CHECK(kp.word == "n" && kp.size == "large" && kp.state == "cl");
+        kp = ParseFaceStem("t00_tabe_op");
+        CHECK(kp.word == "tabe" && kp.state == "op" && kp.prefix == "t00_");
+        kp = ParseFaceStem("sR00_gyur_op");
+        CHECK(kp.word == "gyur" && kp.state == "op" && kp.prefix == "sR00_" && kp.known);
+        kp = ParseFaceStem("elu00_def_op");
+        CHECK(kp.word == "def" && kp.state == "op" && kp.prefix == "elu00_");
+    });
+
+    test("face morphs: expressions and raw shapes get semantic names; unknown keys get Unknown fallbacks; all names are unique", [] {
+        using namespace exporter;
+        pmx::Model m;
+        for (int i = 0; i < 16; ++i) m.vertices.push_back({});
+        auto add = [&](const std::string& name, int panel, std::initializer_list<int> verts) {
+            pmx::Morph mo; mo.name = name; mo.panel = panel;
+            for (int v : verts) mo.vertices.emplace_back(v, Vec3{0.01f, 0.02f, 0.0f});
+            m.morphs.push_back(mo);
+        };
+        add("Brow 5 open", 1, {0, 1});
+        add("Brow 5 closed", 1, {0});
+        add("Eyes 0 closed", 2, {2});
+        add("Eyes 0 open", 2, {2});
+        add("Mouth 26 open", 3, {3, 4});
+        add("Mouth 27 open", 3, {5});
+        add("Eyes 13 open", 2, {6});
+        add("Brow 9 open", 1, {7});
+        add("Eyes 22 open", 2, {8});
+        add("cf_O_face.kuti_face.f00_a_l_op", 3, {9, 10});
+        add("o_tang.kuti_sita.t00_ahe_deep_l_op", 3, {11});
+        add("cf_O_tooth.kuti_ha.ha00_bisyou_op1", 3, {12});
+        add("cf_O_mayuge.mayuge.mayu00_gimoR_cl", 1, {13});
+        add("cf_O_mayuge.mayuge.mayu00_gimoL_cl", 1, {14});
+        add("Take off outfit0.bra", 4, {15});   // an outfit name with a dot: left alone
+        add("not a shape at all", 4, {});
+        const std::map<std::string, std::string> shapes = {
+            {"Brow 5 open", "sinken_op"}, {"Brow 5 closed", "sinken_cl"},
+            {"Eyes 0 closed", "def_cl"}, {"Eyes 0 open", "def_op"},
+            {"Mouth 26 open", "a_l_op"}, {"Mouth 27 open", "a_l_op"},
+            {"Eyes 13 open", "ikari02_op"}, {"Brow 9 open", "gimo_op"}, {"Eyes 22 open", "gyul02_op"},
+        };
+        const size_t renamed = ApplySemanticNames(m, shapes, nullptr);
+        CHECK(renamed == 14);
+        auto findMorph = [&](const char* n) -> const pmx::Morph* { for (const auto& mo : m.morphs) if (mo.name == n) return &mo; return nullptr; };
+        const struct { const char* was; const char* now; int panel; } expect[] = {
+            {"Brow 5 open", "Brow Serious Open", 1},
+            {"Brow 5 closed", "Brow Serious Closed", 1},
+            {"Eyes 0 closed", "Eye Neutral Closed", 2},
+            {"Eyes 0 open", "Eye Neutral Open", 2},
+            {"Mouth 26 open", "Mouth A (Large) Open", 3},
+            {"Mouth 27 open", "Mouth A (Large) Open 2", 3},   // same pattern key: a suffixed duplicate, never a collision
+            {"Eyes 13 open", "Eye Angry 2 Open", 2},
+            {"Brow 9 open", "Unknown Brow Morph 01", 1},
+            {"Eyes 22 open", "Eye Squeeze Left 2 Open", 2},
+            {"cf_O_face.kuti_face.f00_a_l_op", "Mouth Shape A (Large) Open", 3},
+            {"o_tang.kuti_sita.t00_ahe_deep_l_op", "Mouth Shape Ahegao Deep (Large) Open", 3},
+            {"cf_O_tooth.kuti_ha.ha00_bisyou_op1", "Mouth Shape Bashful Smile Open", 3},
+            {"cf_O_mayuge.mayuge.mayu00_gimoR_cl", "Unknown Brow Shape 01", 1},
+        };
+        for (const auto& e : expect) {
+            const pmx::Morph* mo = findMorph(e.now);
+            CHECK(mo != nullptr);
+            if (mo) CHECK(mo->panel == e.panel);
+        }
+        // the source identifier survives as the English name; the fallback morphs' original names survive too
+        const pmx::Morph* serious = findMorph("Brow Serious Open");
+        const pmx::Morph* unk = findMorph("Unknown Brow Morph 01");
+        const pmx::Morph* unkShape = findMorph("Unknown Brow Shape 01");
+        const pmx::Morph* unkTwin = findMorph("Unknown Brow Shape 02");
+        CHECK(serious && serious->nameEn == "Brow 5 open");
+        CHECK(unk && unk->nameEn == "Brow 9 open");
+        CHECK(unkShape && unkShape->nameEn == "cf_O_mayuge.mayuge.mayu00_gimoR_cl");
+        CHECK(unkTwin && unkTwin->nameEn == "cf_O_mayuge.mayuge.mayu00_gimoL_cl");
+        CHECK(findMorph("Take off outfit0.bra") != nullptr);   // untouched
+        CHECK(findMorph("not a shape at all") != nullptr);     // untouched
+        {   // every name is unique, and no surviving facial morph name is a bare index
+            std::set<std::string> names;
+            for (const auto& mo : m.morphs) names.insert(mo.name);
+            CHECK(names.size() == m.morphs.size());
+        }
+    });
+
+    test("face morphs: English aliases are made only against the Japanese sources that exist", [] {
+        using namespace exporter;
+        auto mk = [] {
+            pmx::Model m;
+            pmx::Morph a; a.name = "あ"; a.panel = 3; a.vertices = {{0, {0, 0.1f, 0}}}; m.morphs.push_back(a);
+            pmx::Morph i; i.name = "い"; i.panel = 3; i.vertices = {{0, {0, 0.05f, 0}}}; m.morphs.push_back(i);
+            return m;
+        };
+        pmx::Model m = mk();
+        const size_t added = AddFaceAliases(m);
+        CHECK(added == 2);   // Mouth Ah + Mouth Ee; う / ん / 口角上げ / 笑い are absent from this model
+        auto get = [&](const char* n) -> const pmx::Morph* { for (const auto& mo : m.morphs) if (mo.name == n) return &mo; return nullptr; };
+        const pmx::Morph* ah = get("Mouth Ah");
+        CHECK(ah && ah->panel == 3 && ah->group.size() == 1 && ah->group[0].first == 0 && ah->group[0].second == 1.0f);
+        CHECK(get("Mouth Mm") == nullptr && get("Mouth Oo") == nullptr && get("Mouth Smile") == nullptr && get("Eye Happy") == nullptr);
+        CHECK(AddFaceAliases(m) == 0);   // made already
+        pmx::Morph full; full.name = "ん"; full.panel = 3; m.morphs.push_back(full);
+        CHECK(AddFaceAliases(m) == 1 && get("Mouth Mm") != nullptr);
+    });
+
+    test("pmx writer: UV morphs (type 3) round-trip, validation rejects out-of-range vertices", [] {
+        pmx::Model m;
+        pmx::Bone b; b.name = "root"; m.bones.push_back(b);
+        for (int i = 0; i < 3; ++i) { pmx::Vertex v; v.position = {float(i), 0, 0}; m.vertices.push_back(v); }
+        m.indices = {0, 1, 2};
+        pmx::Material mat; mat.name = "m"; mat.indexCount = 3; m.materials.push_back(mat);
+        pmx::Morph roll; roll.name = "Eye Roll"; roll.nameEn = "Eye Roll"; roll.panel = 2;
+        roll.uv = {{0, {0.1f, -0.16f, 0, 0}}, {2, {-0.1f, -0.16f, 0, 0}}};
+        m.morphs.push_back(roll);
+        pmx::DisplayFrame exp; exp.name = "Exp"; exp.special = true; exp.morphs = {0};
+        m.frames.push_back(exp);
+        const Bytes out = pmx::WritePmx(m);
+        const pmxread::Model back = readPmx(out);
+        CHECK(back.morphs.size() == 1 && back.morphs[0].type == 3 && back.morphs[0].panel == 2);
+        CHECK(back.morphs[0].uvs.size() == 2);
+        CHECK(back.morphs[0].uvs[0].first == 0 && std::fabs(back.morphs[0].uvs[0].second[1] + 0.16f) < 1e-6f);
+        CHECK(back.morphs[0].uvs[0].second[2] == 0.0f && back.morphs[0].uvs[1].first == 2);
+        pmx::Model bad = m;
+        bad.morphs[0].uv.push_back({99, {0, 0, 0, 0}});
+        bool threw = false;
+        try { pmx::WritePmx(bad); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        pmx::Model mixed = m;   // a morph of more than one kind is rejected
+        mixed.morphs[0].vertices.emplace_back(0, Vec3{0, 0, 0});
+        threw = false;
+        try { pmx::WritePmx(mixed); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    });
+
+    test("face fx: Eye Roll, Heart Eyes and Sweat are generated as overlays with material morphs (disabled by default)", [] {
+        using namespace exporter;
+        assemble::Scene s;
+        s.name = "facefx_test";
+        auto addBone = [&](const char* n, int parent, Vec3 pos) {
+            assemble::SceneBone b; b.name = n; b.parent = parent; b.pos = pos; b.source = "rig";
+            s.bones.push_back(b);
+            return static_cast<int>(s.bones.size()) - 1;
+        };
+        const int root = addBone("cf_n_height", -1, {0, 0, 0});
+        const int head = addBone("cf_j_head", root, {0, 16.0f, 0});
+        addBone("cf_J_hitomi_tx_L", head, {0.062f, 16.35f, 0.45f});
+        addBone("cf_J_hitomi_tx_R", head, {-0.062f, 16.35f, 0.45f});
+        auto addMesh = [&](const char* name, std::vector<assemble::SceneVertex> verts, std::vector<uint32_t> indices, int material) {
+            assemble::SceneMesh mesh;
+            mesh.name = name;
+            mesh.vertices = std::move(verts);
+            assemble::SceneSubmesh sm;
+            sm.material = material;
+            sm.indices = std::move(indices);
+            mesh.submeshes.push_back(std::move(sm));
+            s.meshes.push_back(std::move(mesh));
+        };
+        assemble::SceneVertex fv;
+        std::vector<assemble::SceneVertex> faceVerts;
+        for (float y : {15.3f, 15.9f, 16.4f, 16.9f, 17.4f})
+            for (float x : {-0.8f, -0.4f, 0.0f, 0.4f, 0.8f}) {
+                assemble::SceneVertex v;
+                v.pos = {x, y, 0.74f + 0.04f * std::sin(x * 2.0f)};
+                v.normal = {0, 0.12f, 0.99f};
+                v.uv = {0.5f + 0.5f * x, 0.5f + 0.2f * (y - 16.0f)};
+                v.bone[0] = head; v.weight[0] = 1.0f;
+                faceVerts.push_back(v);
+            }
+        std::vector<uint32_t> faceIdx;
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+            const uint32_t a = static_cast<uint32_t>(r * 5 + c), b = a + 1, d = a + 5, e = a + 6;
+            faceIdx.insert(faceIdx.end(), {a, d, b, b, d, e});
+        }
+        addMesh("cf_O_face", std::move(faceVerts), std::move(faceIdx), 0);
+        for (int side = 0; side < 2; ++side) {
+            const float sgn = side == 0 ? 1.0f : -1.0f;
+            std::vector<assemble::SceneVertex> eyeVerts;
+            for (float dy : {-0.06f, 0.06f})
+                for (float dx : {-0.085f, 0.085f}) {
+                    assemble::SceneVertex v;
+                    v.pos = {sgn * 0.062f + dx, 16.35f + dy, 0.47f};
+                    v.normal = {0, 0, 1};
+                    v.uv = {0.35f + 0.3f * (dx / 0.085f) + (side == 1 ? 0.35f : 0.0f), 0.3f + 0.5f * (dy / 0.06f) + 0.2f};
+                    v.bone[0] = head; v.weight[0] = 1.0f;
+                    eyeVerts.push_back(v);
+                }
+            addMesh(side == 0 ? "cf_Ohitomi_L02" : "cf_Ohitomi_R02", std::move(eyeVerts), {0, 1, 2, 2, 1, 3}, 1);
+        }
+        {   // the head part must carry the meshes for them to be exported
+            assemble::ScenePart part;
+            part.id = "head"; part.group = "Head"; part.includeInExport = true;
+            for (size_t i = 0; i < s.meshes.size(); ++i) part.meshes.push_back(static_cast<int>(i));
+            s.parts.push_back(part);
+        }
+        assemble::SceneMaterial fm; fm.name = "cf_m_face"; fm.shader = "test/face";
+        s.materials.push_back(fm);
+        assemble::SceneMaterial em; em.name = "cf_m_eye"; em.shader = "test/eye";
+        s.materials.push_back(em);
+
+        pmx::Model m;
+        for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.position = b.pos; pb.parent = b.parent; m.bones.push_back(pb); }
+        std::vector<int> meshBase(s.meshes.size(), -1);
+        for (size_t i = 0; i < s.meshes.size(); ++i) {
+            meshBase[i] = static_cast<int>(m.vertices.size());
+            for (const auto& v : s.meshes[i].vertices) {
+                pmx::Vertex pv;
+                pv.position = v.pos; pv.normal = v.normal; pv.uv = v.uv;
+                for (int k = 0; k < 4; ++k) { pv.bone[k] = v.bone[k]; pv.weight[k] = v.weight[k]; }
+                m.vertices.push_back(pv);
+            }
+            for (const auto& sm : s.meshes[i].submeshes)
+                for (uint32_t idx : sm.indices) m.indices.push_back(static_cast<uint32_t>(meshBase[i]) + idx);
+        }
+        {   // one material per submesh, with the index counts the writer requires
+            size_t material = 0;
+            size_t at = 0;
+            for (const auto& mesh : s.meshes) {
+                for (const auto& sm : mesh.submeshes) {
+                    pmx::Material mat;
+                    mat.name = "face/meshes#" + std::to_string(material++);
+                    mat.indexCount = static_cast<uint32_t>(sm.indices.size());
+                    m.materials.push_back(std::move(mat));
+                    at += sm.indices.size();
+                }
+            }
+            (void)at;
+        }
+        const std::string dir = tempPath("facefx_unit") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        const FaceEffectsResult fx = AddFaceEffects(s, m, meshBase, dir, 12.5f, [](const std::string&) {});
+        CHECK(fx.eyeRoll >= 0 && fx.heartEyes >= 0 && fx.sweat >= 0 && fx.sweatHeavy >= 0);
+        {   // Eye Roll: a progressive UV morph on both iris caps, no vertex offsets, panel 2
+            const pmx::Morph& roll = m.morphs[static_cast<size_t>(fx.eyeRoll)];
+            CHECK(roll.panel == 2 && roll.uv.size() == 8 && roll.vertices.empty());
+            for (const auto& [vi, d] : roll.uv) CHECK(d.x == 0.0f && std::fabs(d.y + 0.16f) < 1e-6f && d.z == 0.0f && d.w == 0.0f);
+        }
+        {   // Heart Eyes: a material morph (additive alpha) over the two overlay caps; the material is invisible until driven
+            const pmx::Morph& heart = m.morphs[static_cast<size_t>(fx.heartEyes)];
+            CHECK(heart.panel == 2 && heart.materials.size() == 1 && heart.materials[0].add && heart.materials[0].diffuse.w == 1.0f);
+            const pmx::Material& hm = m.materials[static_cast<size_t>(heart.materials[0].material)];
+            CHECK(hm.diffuse.w == 0.0f && hm.drawFlags == 0x01 && hm.texture >= 0);
+            CHECK(hm.indexCount == 12);   // both caps' 4 triangles
+        }
+        {   // Sweat / Sweat Heavy: base set faded in by "Sweat"; "Sweat Heavy" fades in both sets (visibly stronger)
+            const pmx::Morph& sweat = m.morphs[static_cast<size_t>(fx.sweat)];
+            const pmx::Morph& heavy = m.morphs[static_cast<size_t>(fx.sweatHeavy)];
+            CHECK(sweat.panel == 4 && sweat.materials.size() == 1 && sweat.materials[0].diffuse.w == 1.0f);
+            CHECK(heavy.panel == 4 && heavy.materials.size() == 2 && heavy.materials[0].material == sweat.materials[0].material);
+            for (int mi : {sweat.materials[0].material, heavy.materials[1].material}) {
+                const pmx::Material& sm = m.materials[static_cast<size_t>(mi)];
+                CHECK(sm.diffuse.w == 0.0f && sm.drawFlags == 0x01 && sm.texture >= 0);
+            }
+        }
+        CHECK(fx.overlayVertices == 8 + 2 * 3 * 126);   // 8 heart-cap clones + (3 + 3) droplets x 126 vertices
+        {   // the droplets sit on the face, in front of it, above the shoulders
+            for (size_t i = m.vertices.size() - fx.overlayVertices; i < m.vertices.size(); ++i) {
+                const Vec3 p = m.vertices[i].position;
+                CHECK(std::fabs(p.x) < 30.0f && p.y > 150.0f && p.y < 250.0f && p.z > -1.0f && p.z < 40.0f);
+            }
+        }
+        // the generated textures are on disk
+        CHECK(fileio::Exists(fileio::Join(dir, "textures/fx_hearteyes.png")));
+        CHECK(fileio::Exists(fileio::Join(dir, "textures/fx_sweat.png")));
+        // the display frames cover the facial morphs by panel
+        const auto frames = FacialDisplayFrames(m);
+        bool eye = false, other = false;
+        size_t listed2 = 0, listed4 = 0;
+        for (const auto& f : frames) {
+            for (int mi : f.morphs) {
+                CHECK(mi >= 0 && mi < static_cast<int>(m.morphs.size()));
+                if (f.name == "Eye") { CHECK(m.morphs[static_cast<size_t>(mi)].panel == 2); ++listed2; }
+                if (f.name == "Other") { CHECK(m.morphs[static_cast<size_t>(mi)].panel == 4); ++listed4; }
+            }
+            eye |= f.name == "Eye"; other |= f.name == "Other";
+        }
+        CHECK(eye && other && listed2 == 2 && listed4 == 2);
+        const Bytes out = pmx::WritePmx(m);
+        const pmxread::Model back = readPmx(out);
+        bool foundRoll = false, foundHeart = false, foundSweat = false, foundHeavy = false;
+        for (const auto& mo : back.morphs) {
+            if (mo.name == "Eye Roll") { CHECK(mo.type == 3 && mo.panel == 2); foundRoll = true; }
+            if (mo.name == "Heart Eyes") { CHECK(mo.type == 8 && mo.refs.size() == 1); foundHeart = true; }
+            if (mo.name == "Sweat") { CHECK(mo.type == 8 && mo.refs.size() == 1 && mo.panel == 4); foundSweat = true; }
+            if (mo.name == "Sweat Heavy") { CHECK(mo.type == 8 && mo.refs.size() == 2 && mo.panel == 4); foundHeavy = true; }
+        }
+        CHECK(foundRoll && foundHeart && foundSweat && foundHeavy);
+    });
+
+    test("face fx: a full synthetic export carries the semantic names, the effects and the facial display frames", [] {
+        assemble::Scene s;
+        s.name = "facefx_e2e";
+        auto addBone = [&](const char* n, int parent, Vec3 pos) {
+            assemble::SceneBone b; b.name = n; b.parent = parent; b.pos = pos; b.source = "rig";
+            s.bones.push_back(b);
+            return static_cast<int>(s.bones.size()) - 1;
+        };
+        const int root = addBone("cf_n_height", -1, {0, 0, 0});
+        const int hips = addBone("cf_j_hips", root, {0, 0.92f, 0});
+        const int spine = addBone("cf_j_spine01", hips, {0, 1.12f, 0});
+        const int head = addBone("cf_j_head", spine, {0, 1.44f, 0});
+        addBone("cf_J_hitomi_tx_L", head, {0.031f, 1.60f, 0.052f});
+        addBone("cf_J_hitomi_tx_R", head, {-0.031f, 1.60f, 0.052f});
+        auto grid = [&](int n, float y0, float dy, float halfW, float z) {
+            std::vector<assemble::SceneVertex> verts;
+            for (int r = 0; r < n; ++r)
+                for (int c = 0; c < n; ++c) {
+                    assemble::SceneVertex v;
+                    v.pos = {(c - (n - 1) * 0.5f) * (halfW / ((n - 1) * 0.5f)), y0 + r * dy, z};
+                    v.normal = {0, 0, 1};
+                    v.uv = {float(c) / (n - 1), float(r) / (n - 1)};
+                    v.bone[0] = head; v.weight[0] = 1.0f;
+                    verts.push_back(v);
+                }
+            return verts;
+        };
+        auto gridIndices = [](int n) {
+            std::vector<uint32_t> idx;
+            for (int r = 0; r < n - 1; ++r)
+                for (int c = 0; c < n - 1; ++c) {
+                    const uint32_t a = static_cast<uint32_t>(r * n + c), b = a + 1, d = a + n, e = a + n + 1;
+                    idx.insert(idx.end(), {a, d, b, b, d, e});
+                }
+            return idx;
+        };
+        auto addMesh = [&](const char* name, std::vector<assemble::SceneVertex> verts, std::vector<uint32_t> indices, int material) {
+            assemble::SceneMesh mesh;
+            mesh.name = name;
+            mesh.vertices = std::move(verts);
+            assemble::SceneSubmesh sm;
+            sm.material = material;
+            sm.indices = std::move(indices);
+            mesh.submeshes.push_back(std::move(sm));
+            s.meshes.push_back(std::move(mesh));
+        };
+        addMesh("cf_O_face", grid(9, 1.50f, 0.036f, 0.085f, 0.088f), gridIndices(9), 0);
+        for (int side = 0; side < 2; ++side) {
+            std::vector<assemble::SceneVertex> eye;
+            const float sgn = side == 0 ? 1.0f : -1.0f;
+            for (Vec2 off : {Vec2{-0.020f, -0.014f}, Vec2{0.020f, -0.014f}, Vec2{-0.020f, 0.014f}, Vec2{0.020f, 0.014f}}) {
+                assemble::SceneVertex v;
+                v.pos = {sgn * 0.031f + off.x, 1.60f + off.y, 0.075f};
+                v.normal = {0, 0, 1};
+                v.uv = {0.3f + 0.4f * (off.x / 0.020f + 1.0f) * 0.5f, 0.3f + 0.4f * (off.y / 0.014f + 1.0f) * 0.5f};
+                v.bone[0] = head; v.weight[0] = 1.0f;
+                eye.push_back(v);
+            }
+            addMesh(side == 0 ? "cf_Ohitomi_L02" : "cf_Ohitomi_R02", std::move(eye), {0, 2, 1, 1, 2, 3}, 1);
+        }
+        // one blend shape and one expression on the face, so the morphs flow through the whole pipeline
+        {
+            assemble::SceneBlendShape sh;
+            sh.name = "eye_face.f00_def_cl";
+            sh.rest = 0.0f;
+            sh.offsets = {{0, {0, -0.01f, 0}}, {1, {0, -0.008f, 0}}};
+            s.meshes[0].shapes.push_back(sh);
+            assemble::SceneBlendShape shA;
+            shA.name = "kuti_face.f00_a_l_op";
+            shA.rest = 0.0f;
+            shA.offsets = {{12, {0, -0.03f, 0}}, {13, {0, -0.025f, 0}}};
+            s.meshes[0].shapes.push_back(shA);
+            assemble::SceneExpression ex;
+            ex.name = "Eyes 0 closed";
+            ex.panel = 2;
+            ex.targets = {{0, 0, 100.0f}};
+            ex.shape = "def_cl";
+            s.expressions.push_back(ex);
+            assemble::SceneExpression exA;
+            exA.name = "Mouth 26 open";
+            exA.panel = 3;
+            exA.targets = {{0, 1, 100.0f}};
+            exA.shape = "a_l_op";
+            s.expressions.push_back(exA);
+        }
+        {
+            assemble::ScenePart part;
+            part.id = "head"; part.group = "Head"; part.includeInExport = true;
+            for (size_t i = 0; i < s.meshes.size(); ++i) part.meshes.push_back(static_cast<int>(i));
+            s.parts.push_back(part);
+        }
+        assemble::SceneMaterial fm; fm.name = "cf_m_face"; fm.shader = "test/face";
+        s.materials.push_back(fm);
+        assemble::SceneMaterial em; em.name = "cf_m_eye"; em.shader = "test/eye";
+        s.materials.push_back(em);
+        card::Card c;
+        c.path = "facefx_e2e.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("facefx_e2e") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        eo.physics = false;
+        eo.mmdNames = true;
+        const auto res = exporter::ExportScene(s, c, eo);
+        const Bytes pm = fileio::ReadFile(res.pmxPath);
+        const pmxread::Model back = readPmx(pm);
+        auto find = [&](const char* n) -> const pmxread::Morph* { for (const auto& mo : back.morphs) if (mo.name == n) return &mo; return nullptr; };
+        // the expression got its semantic name and its raw shape twin, the alias resolves, the effects are present
+        CHECK(find("Eye Neutral Closed") != nullptr);
+        CHECK(find("Mouth A (Large) Open") != nullptr);
+        CHECK(find("Eye Shape Neutral Closed") != nullptr);
+        CHECK(find("Mouth Shape A (Large) Open") != nullptr);
+        CHECK(find("Mouth Ah") != nullptr);          // the English vowel alias for あ, which AddMmdMorphs found via a_l_op
+        CHECK(find("まばたき") != nullptr);            // the MMD-standard blink morph is still there
+        CHECK(find("あ") != nullptr);
+        CHECK(find("Eye Roll") && find("Heart Eyes") && find("Sweat") && find("Sweat Heavy"));
+        CHECK(find("Eye Roll")->type == 3);
+        // nothing purely numeric survives; every name is unique
+        std::set<std::string> names;
+        for (const auto& mo : back.morphs) {
+            names.insert(mo.name);
+            bool allDigits = true;
+            for (char ch : mo.name) if (!std::isdigit(static_cast<unsigned char>(ch))) { allDigits = false; break; }
+            CHECK(!allDigits);
+        }
+        CHECK(names.size() == back.morphs.size());
+        // the facial display frames are there and point at real morphs; Exp is still the special frame
+        bool eye = false, other = false, exp = false;
+        for (const auto& f : back.frames) {
+            if (f.name == "Eye") eye = true;
+            if (f.name == "Other") other = true;
+            if (f.name == "表情" && f.special) exp = true;
+            for (const auto& [kind, index] : f.items) CHECK(index >= 0 && index < static_cast<int>(back.morphs.size()));
+        }
+        CHECK(eye && other && exp);
+        // the effect textures are on disk beside the PMX
+        CHECK(fileio::Exists(fileio::Join(res.folder, "textures/fx_hearteyes.png")));
+        CHECK(fileio::Exists(fileio::Join(res.folder, "textures/fx_sweat.png")));
+    });
+
     test("clothing: the outfit replaces clothes but never deletes hair carried as accessories", [] {
         auto accPart = [](int64_t type, int64_t id, const char* parent) {
             Value::Array empty;

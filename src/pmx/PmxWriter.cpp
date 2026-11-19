@@ -118,6 +118,9 @@ Bytes WritePmx(const Model& m) {
     for (const auto& mo : m.morphs)
         for (const auto& vo : mo.vertices)
             if (vo.first < 0 || static_cast<size_t>(vo.first) >= m.vertices.size()) throw FormatError("PMX: a vertex morph points past the vertex list");
+    for (const auto& mo : m.morphs)
+        for (const auto& uv : mo.uv)
+            if (uv.first < 0 || static_cast<size_t>(uv.first) >= m.vertices.size()) throw FormatError("PMX: a UV morph points past the vertex list");
 
     int vSize = m.vertices.size() <= 255 ? 1 : (m.vertices.size() <= 65535 ? 2 : 4);
     int tSize = signedSize(m.textures.size());
@@ -126,7 +129,7 @@ Bytes WritePmx(const Model& m) {
     int morphSize = signedSize(m.morphs.size());
     int rbSize = signedSize(m.rigidBodies.size());
     for (const auto& mo : m.morphs) {
-        if ((!mo.materials.empty()) + (!mo.group.empty()) + (!mo.vertices.empty()) > 1) throw FormatError("PMX: a morph is of more than one kind");
+        if ((!mo.materials.empty()) + (!mo.group.empty()) + (!mo.vertices.empty()) + (!mo.uv.empty()) > 1) throw FormatError("PMX: a morph is of more than one kind");
         for (const auto& off : mo.materials)
             if (off.material >= static_cast<int>(m.materials.size())) throw FormatError("PMX: a material morph points past the material list");
         for (const auto& gr : mo.group)
@@ -248,6 +251,10 @@ Bytes WritePmx(const Model& m) {
             o.u8(1);
             o.i32(static_cast<int32_t>(mo.vertices.size()));
             for (const auto& vo : mo.vertices) { o.uidx(static_cast<uint32_t>(vo.first), vSize); o.vec3(vo.second); }
+        } else if (!mo.uv.empty()) {
+            o.u8(3);
+            o.i32(static_cast<int32_t>(mo.uv.size()));
+            for (const auto& uv : mo.uv) { o.uidx(static_cast<uint32_t>(uv.first), vSize); o.vec4(uv.second); }
         } else {
             o.u8(8);
             o.i32(static_cast<int32_t>(mo.materials.size()));

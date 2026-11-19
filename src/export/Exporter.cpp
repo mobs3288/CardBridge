@@ -7,6 +7,7 @@
 #include "core/Version.h"
 #include "assemble/JiggleSettings.h"
 #include "export/BoneLabels.h"
+#include "export/FaceMorphs.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
@@ -1004,6 +1005,12 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     const size_t expressionMorphs = AddExpressionMorphs(scene, model, meshBase, opt.scale, &expressionShapes);
     if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& [n, sh] : expressionShapes) std::fprintf(stderr, "expression %s = %s\n", n.c_str(), sh.c_str());
     const std::vector<int> mmdMorphs = opt.mmdNames ? AddMmdMorphs(model, expressionShapes) : std::vector<int>();
+    const size_t faceAliases = opt.mmdNames ? AddFaceAliases(model) : 0;
+    // Semantic names for the game's face morphs (the numbers a user was expected to dial in become names), then the extended effects.
+    std::vector<std::string> renameLog;
+    const size_t renamed = ApplySemanticNames(model, expressionShapes, &renameLog);
+    if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& l : renameLog) std::fprintf(stderr, "rename %s\n", l.c_str());
+    const FaceEffectsResult faceFx = AddFaceEffects(scene, model, meshBase, opt.outDir, opt.scale, log);
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
     if (opt.physics) AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggle);
     std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys
@@ -1023,8 +1030,11 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         // shapes; they stay in the file (the engine and PMX Editor use them) but MMD's morph panel does not list them.
         constexpr size_t kMmdMaxListedMorphs = 255;
         exp.morphs = mmdMorphs;   // the standard ones first
+        for (int i : {faceFx.eyeRoll, faceFx.heartEyes, faceFx.sweat, faceFx.sweatHeavy})
+            if (i >= 0) exp.morphs.push_back(i);   // the effects are listed in Exp too
         for (size_t i = 0; i < model.morphs.size() && exp.morphs.size() < kMmdMaxListedMorphs; ++i)
-            if (std::find(mmdMorphs.begin(), mmdMorphs.end(), static_cast<int>(i)) == mmdMorphs.end()) exp.morphs.push_back(static_cast<int>(i));
+            if (std::find(mmdMorphs.begin(), mmdMorphs.end(), static_cast<int>(i)) == mmdMorphs.end() &&
+                std::find(exp.morphs.begin(), exp.morphs.end(), static_cast<int>(i)) == exp.morphs.end()) exp.morphs.push_back(static_cast<int>(i));
         std::vector<pmx::DisplayFrame> frames;
         for (auto& [group, list] : BoneFrames(scene)) {
             if (group == "Root") { root.bones = list; continue; }
@@ -1035,6 +1045,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         }
         model.frames.push_back(std::move(root));
         model.frames.push_back(std::move(exp));
+        for (auto& f : FacialDisplayFrames(model)) model.frames.push_back(std::move(f));   // Eye / Brow / Mouth / Other: the facial panel, by name
         for (auto& f : frames) model.frames.push_back(std::move(f));
         if (!ikBones.empty()) {
             pmx::DisplayFrame f;
@@ -1050,7 +1061,10 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         }
     }
     if (opt.mmdNames) AddMmdStandardBones(model);
-    log("expression morphs: " + std::to_string(expressionMorphs) + ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
+    log("expression morphs: " + std::to_string(expressionMorphs) + " renamed: " + std::to_string(renamed) + ", aliases: " + std::to_string(faceAliases) +
+        ", face fx: roll=" + std::to_string(faceFx.eyeRoll) + " heart=" + std::to_string(faceFx.heartEyes) + " sweat=" + std::to_string(faceFx.sweat) +
+        " heavy=" + std::to_string(faceFx.sweatHeavy) + " overlay verts=" + std::to_string(faceFx.overlayVertices) +
+        ", rigid bodies: " + std::to_string(model.rigidBodies.size()) + ", joints: " + std::to_string(model.joints.size()));
 
     morphsTimer.Stop();
     if (opt.faceMinusZ) pmx::TurnAboutY(model);

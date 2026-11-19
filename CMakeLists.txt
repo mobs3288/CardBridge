@@ -92,6 +92,7 @@ add_library(cardbridge_core STATIC
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
     src/export/PmxIk.cpp
+    src/export/FaceMorphs.cpp
     src/export/MmdNames.cpp
     src/export/MorphCatalog.cpp
     src/export/SkeletonOverlay.cpp
