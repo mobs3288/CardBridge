@@ -79,6 +79,7 @@ struct OptState {
 
 constexpr int kPanel = 380;
 constexpr int kRowH = 20;
+constexpr int kTabBottom = 248;   // the tab strip's bottom edge (kTabRowTop + 2 rows x kTabCellH + kTabRowGap = 192+52+4)
 
 struct PartRow {
     int part = -1;        // -1 = a group header
@@ -110,7 +111,7 @@ struct Tweaks {
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
 enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Mats", "Proportions", "Optimize", "Setup"};
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Materials", "Proportions", "Optimize", "Setup"};
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
@@ -257,16 +258,11 @@ struct TweakRow {
 };
 
 struct PanelLayout {
-    RECT logo{}, tabs[TabCount]{};
-    // The tab strip: when the full strip does not fit the panel, it scrolls horizontally. tabStrip is the visible clip window;
-    // tabLeft / tabRight are the < > arrow buttons; tabMaxScroll is the furthest the strip can move (pixels).
-    bool tabScrollable = false;
-    RECT tabStrip{}, tabLeft{}, tabRight{};
-    int tabMaxScroll = 0;
+    RECT logo{}, tabs[TabCount]{};   // the tab strip: 2 rows x 5 pill tabs, equal cells, no scrolling
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
     RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
-    int partsHeadingTop = 0, partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
+    int partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
     int boneListTop = 0, boneListBottom = 0, boneEditTop = 0;   // Bones tab: a switch row, the tree, then the editor of the selected bone
     int matListTop = 0, matListBottom = 0;                      // Materials tab (the launcher): the list under the filter + open rows
     RECT clearLog{};
@@ -278,7 +274,10 @@ struct PanelLayout {
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
-constexpr int kHeaderBottom = 90;   // the header band (logo, name, stats) ends here
+constexpr int kHeaderBottom = 64;   // the header band (logo, wordmark, card title) ends here
+constexpr int kTabRowTop = 192;     // the tab strip's two rows of pills
+constexpr int kTabCellH = 26;
+constexpr int kTabRowGap = 4;
 
 PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows);   // defined after App (needs g)
 
@@ -356,11 +355,6 @@ struct App {
     int drag = 0;   // 1 orbit, 2 pan
     int partScroll = 0, logScroll = 0;        // list scroll targets, in rows
     float partPos = 0, bonePos = 0;           // what the lists show now: the targets, eased (smooth scrolling)
-    int tabScroll = 0;                        // the tab strip's horizontal scroll, in pixels
-    float tabPos = 0;                         // eased position of the tab strip
-    bool tabDragging = false, tabDragMoved = false;
-    int tabDragAnchor = 0;                    // x of the press that may become a strip drag
-    float tabDragStart = 0;                   // tabPos when that press began
     ui::Surface panel;                        // the panel, drawn off screen and copied where it changed
     // Mouse movement during a drag is only noted here; Frame() applies it once per picture, so a fast mouse cannot queue up work.
     bool dragPending = false;
@@ -538,7 +532,7 @@ struct App {
 
     std::mutex logMu;
     std::vector<LogLine> logLines;
-    HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr;
+    HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr, fontSemi = nullptr;   // fontSemi: 11 px semibold, section captions
 };
 App g;
 
@@ -554,57 +548,31 @@ std::string ClothingDisplayName() {
 
 PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     PanelLayout l;
-    l.logo = {12, 12, 68, 68};
-    const int by = 98, bh = 26;
-    l.open = {10, by, 58, by + bh};
-    l.exportPmx = {64, by, 156, by + bh};
-    l.issues = {162, by, 214, by + bh};
-    l.reset = {220, by, 288, by + bh};
-    l.all = {294, by, 324, by + bh};
-    l.asExported = {330, by, 370, by + bh};
-    // The outfit picker sits between the header buttons and the part list: a name line, then a row of numbered slots,
-    // then the imported-outfit status line with its reset button.
-    l.outfitNameTop = 138;
-    l.outfitChipsTop = 160;
-    l.outfitClothTop = 184;
+    l.logo = {12, 10, 50, 50};
+    // Header band 0..kHeaderBottom; the toolbar sits 8 px below it.
+    const int by = kHeaderBottom + 8, bh = 30;
+    l.open = {10, by, 62, by + bh};
+    l.exportPmx = {68, by, 162, by + bh};
+    l.issues = {168, by, 222, by + bh};
+    l.reset = {228, by, 298, by + bh};
+    l.all = {304, by, 330, by + bh};
+    l.asExported = {336, by, 370, by + bh};
+    // The outfit picker: a name line, then a row of numbered slots, then the imported-outfit status line with its reset button.
+    l.outfitNameTop = 116;
+    l.outfitChipsTop = 136;
+    l.outfitClothTop = 164;
     l.clothingPrev = {148, l.outfitClothTop, 172, l.outfitClothTop + 20};
     l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
     l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
     l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // The tab strip: if the labels fit the panel they are centred and static; otherwise the strip scrolls
-    // horizontally inside a clipped window, with small "<" ">" arrow buttons at the ends (wheel / drag also scroll it).
-    constexpr int kTabTextW[TabCount] = {25, 26, 23, 25, 40, 32, 25, 55, 46, 30};
-    constexpr int kTabPad = 8, kTabGap = 4, kTabArrowW = 16;
-    int tabsTotal = 0;
-    for (int i = 0; i < TabCount; ++i) tabsTotal += kTabTextW[i] + kTabPad;
-    const int stripWidth = tabsTotal + kTabGap * (TabCount - 1);
-    const int avail = kPanel - 24;
-    if (stripWidth <= avail) {
-        l.tabScrollable = false;
-        const int tabGap = std::max(1, (avail - tabsTotal) / (TabCount - 1));
-        const int used = tabsTotal + tabGap * (TabCount - 1);
-        int tx = (kPanel - used) / 2;
-        for (int i = 0; i < TabCount; ++i) {
-            const int w = kTabTextW[i] + kTabPad;
-            l.tabs[i] = {tx, 216, tx + w, 240};
-            tx += w + tabGap;
-        }
-    } else {
-        l.tabScrollable = true;
-        l.tabLeft = {8, 216, 8 + kTabArrowW, 240};
-        l.tabRight = {kPanel - 8 - kTabArrowW, 216, kPanel - 8, 240};
-        l.tabStrip = {8 + kTabArrowW + 4, 214, kPanel - 8 - kTabArrowW - 4, 242};
-        l.tabMaxScroll = std::max(0, stripWidth - (kPanel - 24 - 2 * (kTabArrowW + 4)));
-        const int off = static_cast<int>(std::lround(std::clamp(std::max(0.0f, g.tabPos), 0.0f, static_cast<float>(l.tabMaxScroll))));
-        int tx = l.tabStrip.left + 2 - off;
-        for (int i = 0; i < TabCount; ++i) {
-            const int w = kTabTextW[i] + kTabPad;
-            l.tabs[i] = {tx, 216, tx + w, 240};
-            tx += w + kTabGap;
-        }
+    // The tab strip: two rows of five equal pill tabs (no scrolling). Row 1: Parts..Morphs; row 2: Bones..Setup.
+    constexpr int kTabCellW = 68, kTabGap = 5;
+    for (int i = 0; i < TabCount; ++i) {
+        const int col = i % 5, row = i / 5;
+        const int x = 10 + col * (kTabCellW + kTabGap), y = kTabRowTop + row * (kTabCellH + kTabRowGap);
+        l.tabs[i] = {x, y, x + kTabCellW, y + kTabCellH};
     }
-    l.partsHeadingTop = 222;
-    l.partsTop = 248;
+    l.partsTop = kTabBottom + 8;
     const int logH = boneTab ? 100 : std::clamp(H / 3, 130, 330);   // the bone/material editor needs the room
     l.footerTop = H - 36;
     l.logBottom = l.footerTop - 4;
@@ -613,7 +581,7 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     l.boneEditTop = std::max(l.partsTop + 3 * kRowH, l.partsBottom - editRows * kRowH - 4);
     l.boneListTop = l.partsTop + kRowH;
     l.boneListBottom = l.boneEditTop - 4;
-    l.clearLog = {kPanel - 60, l.logTop + 3, kPanel - 8, l.logTop + 23};
+    l.clearLog = {kPanel - 46, l.logTop + 3, kPanel - 8, l.logTop + 23};
     l.boneSkeleton = {10, l.partsTop, 200, l.partsTop + kRowH};
     l.boneHelpers = {204, l.partsTop, kPanel - 8, l.partsTop + kRowH};
     const int ry = l.boneEditTop + 10 * kRowH, ay = l.boneEditTop + 11 * kRowH;
@@ -668,7 +636,7 @@ WbLayout WbLayoutFor(int W, int H) {
     // Row 1: class / preset / texture.
     l.classBtn = {x, top + kRowH, x + 130, top + 2 * kRowH};
     l.presetBtn = {x + 134, top + kRowH, x + 230, top + 2 * kRowH};
-    l.texBtn = {x + 234, top + kRowH, x + w, top + 2 * kRowH};
+    l.texBtn = {x + 234, top + kRowH, std::min(x + w, x + 384), top + 2 * kRowH};
     // Row 5: HEX + the colour picker and the texture view toggles.
     const int hy = top + 5 * kRowH;
     l.pickBtn = {x + w - 110, hy, x + w - 60, hy + kRowH};

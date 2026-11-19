@@ -342,8 +342,8 @@ void DrawOptSlider(ui::Surface& s, const RECT& track, float value, bool hot) {
     s.FillRound(RECT{track.left, mid - 2, track.right, mid + 2}, 2, ui::kLine);
     const int vx = left + static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * static_cast<float>(right - left)));
     s.FillRound(RECT{left, mid - 2, vx, mid + 2}, 2, ui::kAccent);
-    s.FillDisc(static_cast<float>(vx), static_cast<float>(mid), hot ? 8.0f : 7.0f, ui::kAccent);
-    s.FillDisc(static_cast<float>(vx), static_cast<float>(mid), 4.0f, ui::kBg);
+    s.FillDisc(static_cast<float>(vx), static_cast<float>(mid), hot ? 7.5f : 6.5f, ui::kAccent);
+    s.FillDisc(static_cast<float>(vx), static_cast<float>(mid), 3.5f, ui::kBg);
 }
 
 void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, const Loaded& L) {
@@ -358,7 +358,7 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
     s.Begin(sub);
 
     // Header: the tab's title, right-aligned status.
-    s.Text(g.fontBold, ui::kText, 12, o.headerY + 2, "MESH OPTIMIZATION");
+    s.Text(g.fontSemi, ui::kSub, 12, o.headerY + 2, "MESH OPTIMIZATION");
     const char* badge = g.opt.busy ? "working..." : g.opt.applied.set ? "applied to export" : "original";
     s.TextRight(g.fontSmall, g.opt.busy ? ui::kAmber : g.opt.applied.set ? ui::kGood : ui::kDim, kPanel - 12, o.headerY + 4, badge);
 
@@ -369,9 +369,9 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
         const RECT r = o.chips[static_cast<size_t>(i)];
         const bool sel = g.opt.preset == i;
         const bool hot = g.opt.hover == kOptPresetOriginal + i;
-        s.FillRound(r, 6, sel ? RGB(34, 48, 76) : hot ? ui::kCardHi : ui::kCard);
-        s.StrokeRound(r, 6, sel ? ui::kAccent : ui::kLine);
-        s.TextCentered(sel ? g.fontBold : g.fontUi, sel ? ui::kAccent : ui::kText, r, kPresetLabel[i]);
+        s.FillRound(r, ui::kRad, sel ? ui::kSelect : hot ? ui::kCardHi : ui::kCard);
+        s.StrokeRound(r, ui::kRad, sel ? ui::kAccent : ui::kLine);
+        s.TextCentered(sel ? g.fontSemi : g.fontUi, sel ? ui::kAccentHi : ui::kText, r, kPresetLabel[i]);
     }
 
     // Triangle reduction: caption, the slider and the big % on the same baseline.
@@ -387,7 +387,7 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
     s.Fill(RECT{12, o.div1Y, kPanel - 12, o.div1Y + 1}, ui::kLine);
 
     // LOD generation: one row per level; each target is configurable in 5% steps, independent of the others.
-    s.Text(g.fontBold, ui::kText, 12, o.lodCapY + 1, "LOD Generation");
+    s.Text(g.fontSemi, ui::kSub, 12, o.lodCapY + 2, "LOD GENERATION");
     s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, o.lodCapY + 3, "from the original");
     static const char* const kLodName[4] = {"LOD 1", "LOD 2", "LOD 3", "LOD 4"};
     static const char* const kLodDist[4] = {"near", "medium", "far", "very far"};
@@ -395,8 +395,8 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
         const OptLod& lv = g.opt.lods[static_cast<size_t>(i)];
         const int y = o.lodRows[static_cast<size_t>(i)].top;
         const bool hot = g.opt.hover == kOptLodBase + i;
-        if (hot) s.FillRound(RECT{8, y, kPanel - 8, y + 23}, 5, ui::kCardHi);
-        CheckBox(s, 14, y + 3, g.opt.lodSelected[static_cast<size_t>(i)], ui::kAmber);
+        if (hot) s.FillRound(RECT{8, y, kPanel - 8, y + 23}, ui::kRad, ui::kCardHi);
+        CheckBox(s, 14, y + 3, g.opt.lodSelected[static_cast<size_t>(i)], ui::kAccent);
         s.Text(g.fontUi, ui::kText, 38, y + 3, kLodName[i]);
         s.Text(g.fontSmall, ui::kFaint, 84, y + 5, kLodDist[i]);
         if (lv.pending) {
@@ -412,15 +412,15 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
         for (int side = 0; side < 2; ++side) {
             const RECT& r = side == 0 ? o.lodDown[i] : o.lodUp[i];
             const bool shot = g.opt.hover == (side == 0 ? kOptLodDown + i : kOptLodUp + i);
-            s.FillRound(r, 5, shot ? ui::kLineHi : ui::kCard);
-            s.StrokeRound(r, 5, ui::kLine);
-            s.TextCentered(g.fontUi, shot ? ui::kAccent : ui::kSub, r, side == 0 ? "-" : "+");
+            s.FillRound(r, ui::kRad, shot ? ui::kSelect : ui::kCardHi);
+            s.StrokeRound(r, ui::kRad, ui::kLine);
+            s.TextCentered(g.fontUi, shot ? ui::kAccentHi : ui::kSub, r, side == 0 ? "-" : "+");
         }
     }
     {
         const bool hot = g.opt.hover == kOptGenerate;
-        s.FillRound(o.generate, 6, hot ? ui::kLineHi : ui::kCardHi);
-        s.StrokeRound(o.generate, 6, g.opt.busy ? ui::kLine : ui::kLineHi);
+        s.FillRound(o.generate, ui::kRad, hot ? ui::kSelect : ui::kCardHi);
+        s.StrokeRound(o.generate, ui::kRad, ui::kLine);
         s.TextCentered(g.fontUi, g.opt.busy ? ui::kFaint : ui::kText, o.generate, g.opt.busy ? "Generating..." : "Generate LODs");
     }
 
@@ -447,24 +447,24 @@ void DrawOptimizeTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, con
         const bool active = g.opt.previewLod == i;
         const bool ready = i == 0 || (i == 1 ? g.opt.simplified != nullptr : g.opt.lods[static_cast<size_t>(i - 2)].scene != nullptr);
         const bool hot = g.opt.hover == kOptPreviewBase + i;
-        s.FillRound(r, 6, active ? RGB(34, 48, 76) : hot ? ui::kCardHi : ui::kCard);
-        s.StrokeRound(r, 6, active ? ui::kAccent : ui::kLine);
-        s.TextCentered(g.fontSmall, active ? ui::kAccent : ready ? ui::kText : ui::kFaint, r, kPreviewLabel[i]);
+        s.FillRound(r, ui::kRad, active ? ui::kSelect : hot ? ui::kCardHi : ui::kCard);
+        s.StrokeRound(r, ui::kRad, active ? ui::kAccent : ui::kLine);
+        s.TextCentered(g.fontSmall, active ? ui::kAccentHi : ready ? ui::kText : ui::kFaint, r, kPreviewLabel[i]);
     }
 
     // Apply & reset: the export reads g.opt.applied, so this row decides what the PMX gets.
     {
         const bool hot = g.opt.hover == kOptApply;
         if (g.opt.applied.set) {
-            s.FillRound(o.apply, 6, ui::kGood);
-            s.TextCentered(g.fontBold, RGB(16, 26, 18), o.apply, "Applied to export");
+            s.FillRound(o.apply, ui::kRad, ui::kGood);
+            s.TextCentered(g.fontBold, ui::kOnAccent, o.apply, "Applied to export");
         } else {
-            s.FillRound(o.apply, 6, hot ? ui::kLineHi : ui::kAccent);
-            s.TextCentered(g.fontBold, RGB(12, 20, 30), o.apply, "Apply to export");
+            s.FillRound(o.apply, ui::kRad, hot ? ui::kAccentHi : ui::kAccent);
+            s.TextCentered(g.fontBold, ui::kOnAccent, o.apply, "Apply to export");
         }
         const bool rhov = g.opt.hover == kOptReset;
-        s.FillRound(o.reset, 6, rhov ? ui::kCardHi : ui::kCard);
-        s.StrokeRound(o.reset, 6, ui::kLine);
+        s.FillRound(o.reset, ui::kRad, rhov ? ui::kSelect : ui::kCardHi);
+        s.StrokeRound(o.reset, ui::kRad, ui::kLine);
         s.TextCentered(g.fontUi, ui::kText, o.reset, "Reset to original");
     }
     s.Text(g.fontSmall, ui::kFaint, 12, o.noteY + 2, "Always generated from the original; no cumulative loss.");

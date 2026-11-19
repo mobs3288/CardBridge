@@ -16,8 +16,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     // header and toolbar ---------------------------------------------------------------------------------------------
     if (TouchesY(clip, 0, kHeaderBottom)) DrawHeader(s, clip, l, L, modsInfo);
     if (TouchesY(clip, l.open.top, l.open.bottom)) {
-        Button(s, l.open, "Open", g.hoverButton == 1, false, true);
-        Button(s, l.exportPmx, g.exporting ? "Exporting..." : "Export PMX", g.hoverButton == 2, false, L != nullptr && !g.busy && !g.exporting, true);
+        Button(s, l.open, "Open", g.hoverButton == 1, false, true);   // secondary: the file picker, not the work
+        Button(s, l.exportPmx, g.exporting ? "Exporting..." : "Export PMX", g.hoverButton == 2, false, L != nullptr && !g.busy && !g.exporting, Btn::Primary);
         Button(s, l.issues, "Issues", g.hoverButton == 3, g.showIssues, L != nullptr);
         Button(s, l.reset, "Reset view", g.hoverButton == 4, false, L != nullptr);
         Button(s, l.all, "All", g.hoverButton == 5, false, L != nullptr);
@@ -39,30 +39,29 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         int shown = L ? L->outfit : -1;
         if (g.busy && g.loadingOutfit >= 0) shown = g.loadingOutfit;
         if (L && L->outfits > 0) shown = std::clamp(shown, 0, L->outfits - 1);
-        s.Text(g.fontBold, ui::kAccent, 12, l.outfitNameTop, "OUTFIT");
+        // Does an imported outfit overwrite a slot right now? (drives the amber marks)
+        bool clothC = false;
+        int cOutfit = -1;
+        if (L && L->card.hasClothing) { clothC = true; cOutfit = L->card.clothingOutfit; }
+        else { std::lock_guard<std::recursive_mutex> lk(g.mu); clothC = !g.clothingPins.empty(); cOutfit = g.clothingPins.empty() ? -1 : g.clothingPins.back().dstOutfit; }
+        s.Text(g.fontSemi, ui::kDim, 12, l.outfitNameTop + 2, "OUTFIT");
         if (L && L->outfits > 0) {
             // Hovering a slot previews that outfit's name without loading it.
             const int preview = g.hoverOutfit >= 0 && g.hoverOutfit < L->outfits ? g.hoverOutfit : shown;
-            const COLORREF nameColor = g.busy ? ui::kAccent : g.hoverOutfit >= 0 ? RGB(246, 249, 255) : ui::kText;
+            const COLORREF nameColor = g.busy ? ui::kAccent : g.hoverOutfit >= 0 ? ui::kAccentHi : ui::kText;
             const RECT nameClip{74, l.outfitNameTop, kPanel - 64, l.outfitNameTop + 20};
             s.Text(g.fontBold, nameColor, 74, l.outfitNameTop, ClipText(L->card.outfitName(preview), 30), &nameClip);
             char count[32];
             std::snprintf(count, sizeof count, "%d / %d", shown + 1, L->outfits);
-            s.TextRight(g.fontBold, ui::kAmber, kPanel - 12, l.outfitNameTop, count);
+            s.TextRight(g.fontBold, clothC ? ui::kAmber : ui::kSub, kPanel - 12, l.outfitNameTop, count);
         } else {
             s.Text(g.fontUi, ui::kDim, 74, l.outfitNameTop, g.busy ? "loading ..." : "no card");
         }
         const int chips = L ? std::min(L->outfits, OutfitChipsPerRow()) : 0;
-        {
-            bool hasC = false;
-            int cOutfit = -1;
-            if (L && L->card.hasClothing) { hasC = true; cOutfit = L->card.clothingOutfit; }
-            else { std::lock_guard<std::recursive_mutex> lk(g.mu); hasC = !g.clothingPins.empty(); cOutfit = g.clothingPins.empty() ? -1 : g.clothingPins.back().dstOutfit; }
-            for (int i = 0; i < chips; ++i) {
-                const bool marked = hasC && i == cOutfit;   // the slot whose base outfit was replaced
-                Button(s, OutfitChipRect(l, i), marked ? (std::to_string(i + 1) + "*") : std::to_string(i + 1),
-                       g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
-            }
+        for (int i = 0; i < chips; ++i) {
+            const bool marked = clothC && i == cOutfit;   // the slot whose base outfit was replaced
+            Button(s, OutfitChipRect(l, i), marked ? (std::to_string(i + 1) + "*") : std::to_string(i + 1),
+                   g.hoverOutfit == i, i == shown, L != nullptr && !g.busy);
         }
     }
     // outfit file: which slot holds the imported outfit (if any), the way back
@@ -97,34 +96,19 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         Button(s, l.clothingPrev, "<", g.hoverButton == 8, false, canPrev && !g.busy);
         Button(s, l.clothingNext, ">", g.hoverButton == 9, false, canNext && !g.busy);
         Button(s, l.clothingExport, "Export clothes", g.hoverButton == 21, false, L != nullptr && !g.busy && !g.exporting);
-        Button(s, l.clothingReset, "Reset clothing", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
+        Button(s, l.clothingReset, "Reset", g.hoverButton == 7, false, L != nullptr && !g.busy && hasClothing);
     }
 
     lap(2);
-    // tabs ----------------------------------------------------------------------------------------------------------------
-    if (TouchesY(clip, l.tabs[0].top - 2, l.tabs[0].bottom + 2)) {
-        if (l.tabScrollable) s.Begin(l.tabStrip);
+    // tabs: two rows of five equal pills ----------------------------------------------------------------------------------
+    if (TouchesY(clip, l.tabs[0].top - 2, l.tabs[TabCount - 1].bottom + 2)) {
         for (int i = 0; i < TabCount; ++i) {
             const RECT& t = l.tabs[i];
             const bool act = !g.showIssues && g.tab == i, hot = g.hoverButton == 10 + i;
-            if (act) {
-                s.FillRound(t, 7, ui::kCardHi);
-                s.FillGradient(RECT{t.left + 10, t.bottom - 3, t.right - 10, t.bottom - 1}, 1, ui::kAccent, ui::kAccent2);
-            } else if (hot && L) {
-                s.FillRound(t, 7, ui::kCard);
-            }
-            s.TextCentered(act ? g.fontBold : g.fontSmall, (!L && i != TabSettings) ? ui::kFaint : act ? ui::kText : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
-        }
-        if (l.tabScrollable) s.Begin(clip);   // restore the outer clip
-        if (l.tabScrollable) {   // the < > scroll arrows; dim at the ends
-            const bool fullLeft = g.tabPos > 0.0f, fullRight = g.tabPos < static_cast<float>(l.tabMaxScroll) - 0.5f;
-            const int arrowsY = 216, arrowsH = 240 - 216;
-            const auto drawArrow = [&](const RECT& r, bool enabled, bool hot, bool left) {
-                s.FillRound(r, 4, hot && enabled ? ui::kLineHi : ui::kCard);
-                s.TextCentered(g.fontSmall, enabled ? (hot ? ui::kText : ui::kSub) : ui::kFaint, r, left ? "<" : ">");
-            };
-            drawArrow(l.tabLeft, fullLeft, g.hoverButton == 30, true);
-            drawArrow(l.tabRight, fullRight, g.hoverButton == 31, false);
+            const bool usable = L != nullptr || i == TabSettings;
+            s.FillRound(t, ui::kRad, act ? ui::kSelect : hot ? ui::kCardHi : ui::kCard);
+            if (act) s.StrokeRound(t, ui::kRad, ui::kAccent);
+            s.TextCentered(g.fontSemi, !usable ? ui::kFaint : act ? ui::kAccentHi : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
         }
     }
 
@@ -132,7 +116,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     // the list: parts, issues, sliders or bones ---------------------------------------------------------------------------
     const RECT listCard{6, l.partsTop - 4, kPanel - 6, l.partsBottom + 3};
     if (Touches(clip, listCard)) {
-        s.FillRound(listCard, 8, ui::kCard);
+        s.FillRound(listCard, ui::kRadLg, ui::kCard);
+        s.StrokeRound(listCard, ui::kRadLg, ui::kLine);
         const RECT listClip{6, l.partsTop, kPanel - 6, l.partsBottom};
         RECT sub;
         const bool inList = IntersectRect(&sub, &clip, &listClip) != 0;
@@ -156,12 +141,12 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                 pos = cut;
                 while (pos < msg.size()) {
                     while (pos < msg.size() && msg[pos] == ' ') ++pos;
-                    if (msg.size() - pos <= wrapCol) { lines.push_back({std::string("    ") + msg.substr(pos), LogKind::Info}); return; }
+                    if (msg.size() - pos <= wrapCol) { lines.push_back({std::string("    ") + msg.substr(pos), k}); return; }
                     size_t e = std::min(pos + wrapCol, msg.size());
                     size_t c = msg.rfind(' ', e);
                     if (c == std::string::npos || c <= pos) c = e;
                     else ++c;
-                    lines.push_back({std::string("    ") + msg.substr(pos, c - pos), LogKind::Info});
+                    lines.push_back({std::string("    ") + msg.substr(pos, c - pos), k});
                     pos = c;
                 }
             };
@@ -206,49 +191,49 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     const TweakRow& row = rows[static_cast<size_t>(idx)];
                     const int y = l.partsTop - v.offset + i * kRowH;
                     if (!TouchesY(sub, y, y + kRowH)) continue;
-                    if (idx == g.hoverRow && row.kind != 4 && !(row.kind == 0 && row.id < 0)) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
+                    if (idx == g.hoverRow && row.kind != 4 && !(row.kind == 0 && row.id < 0)) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, ui::kRad, ui::kCardHi);
                     if (row.kind == 0) {
                         std::string name = row.label;
                         for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                         const bool morph = g.tab == TabMorphs && row.group.find('/') != std::string::npos;   // a side sub-group under a section
+                        int tx = 14;
                         if (g.tab == TabMorphs && row.id >= 0) {   // brows / eyes / mouth / other, or a side sub-group: the fold arrow folds it
                             const bool collapsed = g.collapsedMorphs.count(row.group) != 0;
-                            const int tx = morph ? 26 : 14;
-                            Expander(s, tx, y + kRowH / 2, !collapsed, ui::kAccent);
-                            const RECT headClip{tx + 14, y, kPanel - 58, y + kRowH};
-                            s.Text(g.fontBold, ui::kAccent, tx + 14, y + 3, ClipText(name, 42), &headClip);
-                        } else {
-                            // Header and its right-aligned "reset" share the row:
-                            // clip the title so it can never run under "reset".
-                            const RECT headClip{14, y, kPanel - 58, y + kRowH};
-                            s.Text(g.fontBold, ui::kAccent, 14, y + 3, ClipText(name, 42), &headClip);
+                            tx = morph ? 26 : 14;
+                            Expander(s, tx, y + kRowH / 2, !collapsed, ui::kDim);
+                            tx += 16;
+                        }
+                        {
+                            // A small-caps muted caption; "reset" only when the group holds changed values.
+                            const RECT headClip{tx, y, kPanel - 58, y + kRowH};
+                            s.Text(g.fontSemi, ui::kSub, tx, y + 4, ClipText(name, 42), &headClip);
                         }
                         bool any = false;
                         for (size_t k = static_cast<size_t>(idx) + 1; k < rows.size() && rows[k].kind != 0; ++k)
                             if (rows[k].kind == 1 || rows[k].kind == 2 || rows[k].kind == 6) any = any || TweakChanged(rows[k].id);
-                        if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 4, "reset");
+                        if (row.id >= 0) s.TextRight(g.fontSmall, any ? ui::kAmber : ui::kFaint, kPanel - 16, y + 5, "reset");
                     } else if (row.kind == 4) {
                         const RECT infoClip{14, y, kPanel - 16, y + kRowH};
-                        s.Text(g.fontSmall, ui::kDim, 14, y + 4, ClipText(row.label, 58), &infoClip);
+                        s.Text(g.fontSmall, ui::kDim, 14, y + 5, ClipText(row.label, 58), &infoClip);
                     } else if (row.kind == 5) {
                         const RECT btn{12, y + 1, kPanel - 16, y + kRowH - 1};
-                        s.FillRound(btn, 5, idx == g.hoverRow ? ui::kLineHi : ui::kCardHi);
+                        s.FillRound(btn, ui::kRad, idx == g.hoverRow ? ui::kSelect : ui::kCardHi);
                         const RECT btnClip{20, y, kPanel - 24, y + kRowH};
                         s.Text(g.fontUi, ui::kText, 20, y + 2, ClipText(row.label, 56), &btnClip);
                     } else if (row.kind == 2) {
                         const bool on = TweakChanged(row.id);
                         const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
-                        CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAmber);
+                        CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAccent);
                         const RECT swClip{36, y, kPanel - 18, y + kRowH};
-                        s.Text(g.fontUi, failed ? ui::kBad : on ? ui::kAmber : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
+                        s.Text(g.fontUi, failed ? ui::kBad : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
                     } else if (row.kind == 6) {
                         DrawPresetChips(s, row.id, row.label, y);
                     } else if (g.morphEdit >= 0 && row.id == kMorphBase + g.morphEdit) {
                         // the rename box: the typed text with a caret, Enter commits (Esc restores)
                         std::string typed = g.morphEditBuf + "_";
                         const RECT box{12, y + 1, kPanel - 44, y + kRowH - 1};
-                        s.FillRound(box, 5, ui::kLineHi);
-                        s.StrokeRound(box, 5, ui::kAccent);
+                        s.FillRound(box, ui::kRad, ui::kBg);
+                        s.StrokeRound(box, ui::kRad, ui::kAccent);
                         const RECT boxClip{20, y, kPanel - 52, y + kRowH};
                         s.Text(g.fontMono, ui::kText, 20, y + 3, ClipText(typed, 30), &boxClip);
                         s.TextRight(g.fontSmall, ui::kFaint, kPanel - 16, y + 4, "Enter");
@@ -275,7 +260,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                     if (!TouchesY(sub, y, y + kRowH)) continue;
                     const bool hot = idx == g.hoverRow;
                     if (row.part < 0) {
-                        if (hot) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, ui::kCardHi);
+                        if (hot) s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, ui::kRad, ui::kCardHi);
                         if (row.replaced) {   // the base outfit this slot replaced: kept visible, marked, no parts follow
                             const RECT repClip{14, y, kPanel - 190, y + kRowH};
                             s.Text(g.fontBold, ui::kAmber, 14, y + 3, "OUTFIT (REPLACED)", &repClip);
@@ -298,9 +283,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                             const bool collapsed = g.collapsedGroups.count(row.group) != 0;
                             const bool isAmber = added;
-                            Expander(s, 34, y + kRowH / 2, !collapsed, ui::kAccent);
+                            Expander(s, 34, y + kRowH / 2, !collapsed, ui::kDim);
                             const RECT gClip1{52, y, kPanel - 58, y + kRowH};
-                            s.Text(g.fontBold, isAmber ? ui::kAmber : ui::kAccent, 52, y + 3, ClipText(name, 44), &gClip1);
+                            s.Text(g.fontSemi, isAmber ? ui::kAmber : ui::kSub, 52, y + 4, ClipText(name, 44), &gClip1);
                             s.TextRight(g.fontSmall, ui::kDim, kPanel - 16, y + 4, std::to_string(count));
                         }
                     } else {
@@ -308,7 +293,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         const bool off = static_cast<size_t>(row.part) < g.hidden.size() && g.hidden[static_cast<size_t>(row.part)];
                         const bool ok = p.status == "resolved-base" || p.status == "resolved-mod";
                         if (hot) {
-                            s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, 5, RGB(34, 46, 70));
+                            s.FillRound(RECT{8, y + 1, kPanel - 8, y + kRowH - 1}, ui::kRad, ui::kSelect);
                             s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
                         }
                         const COLORREF col = off ? ui::kDim : !ok ? ui::kBad : ui::kText;
@@ -336,10 +321,10 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     // log --------------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.logTop, l.logBottom)) {
         const RECT logCard{6, l.logTop, kPanel - 6, l.logBottom};
-        s.FillRound(logCard, 8, RGB(11, 13, 19));
-        s.StrokeRound(logCard, 8, ui::kLine);
-        s.Text(g.fontBold, ui::kAccent, 14, l.logTop + 5, "LOG");
-        s.TextRight(g.fontSmall, ui::kDim, kPanel - 14, l.logTop + 7, "clear");
+        s.FillRound(logCard, ui::kRadLg, ui::kCard);
+        s.StrokeRound(logCard, ui::kRadLg, ui::kLine);
+        s.Text(g.fontSemi, ui::kSub, 14, l.logTop + 5, "LOG");
+        s.TextRight(g.fontSmall, g.hoverButton == 22 ? ui::kText : ui::kDim, kPanel - 14, l.logTop + 5, "clear");
         std::lock_guard<std::mutex> lk(g.logMu);
         const int lineH = 15, top = l.logTop + 26;
         const int visible = std::max(1, (l.logBottom - 4 - top) / lineH);
@@ -354,14 +339,18 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             s.Text(g.fontLog, ui::kFaint, 14, y, line.time, &lc);
             s.Text(g.fontLog, KindColor(line.kind), 78, y, line.text, &lc);
         }
+        if (!g.logLines.empty()) {
+            const int startRow = std::max(0, static_cast<int>(g.logLines.size()) - visible - g.logScroll);
+            ScrollBar(s, top, l.logBottom - 3, static_cast<int>(g.logLines.size()), visible, static_cast<float>(startRow), kPanel - 10);
+        }
     }
 
     lap(5);
     // footer -----------------------------------------------------------------------------------------------------------
     if (TouchesY(clip, l.footerTop, H)) {
         const RECT footClip{12, l.footerTop, kPanel - 10, l.footerTop + 34};
-        s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export  O open  A all  T tex  H shader  G grade  X as exported", 64), &footClip);
-        std::string hint = "1-7 outfit · L lib · K bones · P pose · Y physics · N shake · D reset clothing";
+        s.Text(g.fontSmall, ui::kDim, 12, l.footerTop + 3, ClipText("E export · O open · A all · T tex · H shader · X exported", 64), &footClip);
+        std::string hint = "1-9 outfit · L lib · K bones · P pose · Y physics · N shake · D reset clothing";
         const ProgSnapshot ps = GetProgSnapshot();
         if (ps.active) hint = ps.cancelRequested ? "cancelling ..." : (ps.stage.empty() ? "working ... (Esc or Cancel to stop)" : ps.stage + "  (Esc cancels)");
         else if (g.busy) hint = "working ...";
@@ -384,6 +373,15 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
     lap(6);
 }
 
+// A rounded fill on a raw GDI DC (no pen), for the overlay's bars.
+static void FillRounded(HDC dc, const RECT& r, int radius, HBRUSH brush) {
+    HGDIOBJ oldB = SelectObject(dc, brush);
+    HGDIOBJ oldP = SelectObject(dc, GetStockObject(NULL_PEN));
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, oldP);
+    SelectObject(dc, oldB);
+}
+
 // The loading overlay over the 3D view: title, stage, determinate bar (or a
 // sliding indeterminate chunk) and Cancel. Drawn into the viewport-sized
 // comp DC (origin at the view's top-left, NOT the client's), so `card` is
@@ -395,15 +393,12 @@ void DrawProgressOverlay(HDC dc, int clientW, int clientH) {
     // The comp DC is viewport-sized: its (0,0) is kPanel, so shift the card.
     const RECT card{client.left - kPanel, client.top, client.right - kPanel, client.bottom};
     if (card.right <= card.left || card.bottom <= card.top) return;
-    // Dim the view behind the card (solid, GDI cannot alpha-blend easily).
-    HBRUSH dim = CreateSolidBrush(RGB(8, 10, 16));
-    FillRect(dc, &card, dim);
-    DeleteObject(dim);
+    // The card is a rounded panel; its corners show the view behind (raw GDI has no alpha).
     HBRUSH vs = CreateSolidBrush(ui::kCard);
-    HPEN border = CreatePen(PS_SOLID, 1, ui::kLineHi);
+    HPEN border = CreatePen(PS_SOLID, 1, ui::kLine);
     HGDIOBJ olds = SelectObject(dc, vs);
     HGDIOBJ oldp = SelectObject(dc, border);
-    RoundRect(dc, card.left, card.top, card.right, card.bottom, 16, 16);
+    RoundRect(dc, card.left, card.top, card.right, card.bottom, 12, 12);
     SelectObject(dc, olds);
     SelectObject(dc, oldp);
     DeleteObject(vs);
@@ -417,20 +412,20 @@ void DrawProgressOverlay(HDC dc, int clientW, int clientH) {
         ExtTextOutW(dc, x, y, ETO_CLIPPED, &card, w.c_str(), static_cast<UINT>(w.size()), nullptr);
         SelectObject(dc, old);
     };
-    text(g.fontBold, ui::kAccent, card.left + 14, card.top + 10, ps.title);
+    text(g.fontSemi, ui::kText, card.left + 14, card.top + 10, ps.title);
     text(g.fontSmall, ps.cancelRequested ? ui::kAmber : ui::kSub, card.left + 14, card.top + 32,
          ps.cancelRequested ? std::string("cancelling...") : (ps.stage.empty() ? std::string("working...") : ps.stage));
     // Bar.
     const RECT bar{card.left + 14, card.top + 56, card.right - 14, card.top + 68};
     HBRUSH track = CreateSolidBrush(ui::kLine);
-    FillRect(dc, &bar, track);
+    FillRounded(dc, bar, 6, track);
     DeleteObject(track);
     if (ps.frac >= 0.0) {
         const double f = std::clamp(ps.frac, 0.0, 1.0);
         if (f > 0.001) {
             RECT fill{bar.left, bar.top, bar.left + static_cast<int>((bar.right - bar.left) * f), bar.bottom};
             HBRUSH acc = CreateSolidBrush(ui::kAccent);
-            FillRect(dc, &fill, acc);
+            FillRounded(dc, fill, 6, acc);
             DeleteObject(acc);
         }
     } else {
@@ -442,7 +437,7 @@ void DrawProgressOverlay(HDC dc, int clientW, int clientH) {
         RECT clipped;
         if (IntersectRect(&clipped, &seg, &bar)) {
             HBRUSH acc = CreateSolidBrush(ui::kAccent);
-            FillRect(dc, &clipped, acc);
+            FillRounded(dc, clipped, 6, acc);
             DeleteObject(acc);
         }
     }
@@ -453,11 +448,11 @@ void DrawProgressOverlay(HDC dc, int clientW, int clientH) {
     text(g.fontSmall, ui::kSub, card.left + 14, card.top + 76, pct);
     text(g.fontSmall, ui::kDim, card.left + 60, card.top + 76, "Esc cancels");
     const RECT cancel = ProgCancelRect(card);
-    HBRUSH cb = CreateSolidBrush(ps.cancelRequested ? ui::kLine : (g.progHoverCancel ? ui::kLineHi : ui::kCardHi));
+    HBRUSH cb = CreateSolidBrush(ps.cancelRequested ? ui::kCard : (g.progHoverCancel ? ui::kSelect : ui::kCardHi));
     HPEN cp = CreatePen(PS_SOLID, 1, ui::kLine);
     HGDIOBJ ob = SelectObject(dc, cb);
     HGDIOBJ op = SelectObject(dc, cp);
-    RoundRect(dc, cancel.left, cancel.top, cancel.right, cancel.bottom, 10, 10);
+    RoundRect(dc, cancel.left, cancel.top, cancel.right, cancel.bottom, 6, 6);
     SelectObject(dc, ob);
     SelectObject(dc, op);
     DeleteObject(cb);

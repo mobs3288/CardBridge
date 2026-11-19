@@ -231,15 +231,6 @@ void Surface::StrokeRound(const RECT& r, int radius, COLORREF c, int alpha) {
     impl_->G().DrawPath(&pen, &p);
 }
 
-void Surface::FillGradient(const RECT& r, int radius, COLORREF left, COLORREF right) {
-    if (r.right <= r.left || r.bottom <= r.top) return;
-    Gdiplus::GraphicsPath p;
-    const Gdiplus::RectF rf(static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(r.right - r.left), static_cast<float>(r.bottom - r.top));
-    RoundPath(p, rf.X, rf.Y, rf.Width, rf.Height, static_cast<float>(radius));
-    Gdiplus::LinearGradientBrush b(rf, Col(left), Col(right), Gdiplus::LinearGradientModeHorizontal);
-    impl_->G().FillPath(&b, &p);
-}
-
 void Surface::FillDisc(float cx, float cy, float radius, COLORREF c, int alpha) {
     Gdiplus::SolidBrush b(Col(c, alpha));
     impl_->G().FillEllipse(&b, cx - radius, cy - radius, radius * 2.0f, radius * 2.0f);
@@ -271,7 +262,7 @@ void Surface::ProgressBar(const RECT& r, double fraction, double phase) {
         const double f = std::clamp(fraction, 0.0, 1.0);
         if (f > 0.001) {
             RECT fill{r.left, r.top, r.left + static_cast<int>((r.right - r.left) * f), r.bottom};
-            FillGradient(fill, h / 2, kAccent, kAccent2);
+            FillRound(fill, h / 2, kAccent);
         }
     } else {
         // Indeterminate: a chunk sliding across, wrapping on its own length.
@@ -281,7 +272,7 @@ void Surface::ProgressBar(const RECT& r, double fraction, double phase) {
         const double x = (t * (w + chunk)) - chunk;
         RECT seg{static_cast<int>(r.left + x), r.top, static_cast<int>(r.left + x + chunk), r.bottom};
         RECT clipped;
-        if (IntersectRect(&clipped, &seg, &r)) FillGradient(clipped, h / 2, kAccent, kAccent2);
+        if (IntersectRect(&clipped, &seg, &r)) FillRound(clipped, h / 2, kAccent);
     }
     StrokeRound(r, h / 2, kLineHi);
 }
@@ -377,7 +368,7 @@ void Surface::TextCentered(HFONT font, COLORREF c, const RECT& box, const std::s
     SetTextColor(impl_->dc, c);
     SetBkMode(impl_->dc, TRANSPARENT);
     RECT t = box;
-    DrawTextW(impl_->dc, w.c_str(), static_cast<int>(w.size()), &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(impl_->dc, w.c_str(), static_cast<int>(w.size()), &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(impl_->dc, old);
     impl_->gdiPending = true;
 }

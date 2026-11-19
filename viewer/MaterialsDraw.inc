@@ -22,7 +22,7 @@ void DrawMatList(ui::Surface& s, const RECT& clip, int x0, int x1, int top, int 
         const bool sel = mi == g.selMaterial;
         const bool edited = mi >= 0 && static_cast<size_t>(mi) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(mi)] && !g.mat.overrides[static_cast<size_t>(mi)]->empty();
         if (sel || idx == hoverRow) {
-            s.FillRound(RECT{x0 + 2, y + 1, x1 - 2, y + kRowH - 1}, 5, sel ? RGB(36, 50, 78) : ui::kCardHi);
+            s.FillRound(RECT{x0 + 2, y + 1, x1 - 2, y + kRowH - 1}, ui::kRad, sel ? ui::kSelect : ui::kCardHi);
             if (sel) s.FillRound(RECT{x0 + 2, y + 4, x0 + 5, y + kRowH - 4}, 1, ui::kAccent);
         }
         material::EffectiveMaterial eff = material::EffectiveOf(g.mat, static_cast<size_t>(mi));
@@ -30,7 +30,7 @@ void DrawMatList(ui::Surface& s, const RECT& clip, int x0, int x1, int top, int 
         const int shared = material::CountSubmeshesForMaterial(scene, mi);
         if (shared > 1) txt += " x" + std::to_string(shared);
         const RECT textClip{x0 + 4, y, x1 - 12, y + kRowH};
-        s.Text(g.fontUi, edited ? ui::kAmber : sel ? RGB(240, 246, 255) : ui::kText, x0 + 8, y + 2, ClipText(txt, chars), &textClip);
+        s.Text(g.fontUi, edited ? ui::kAmber : ui::kText, x0 + 8, y + 2, ClipText(txt, chars), &textClip);
     }
     ScrollBar(s, top, bottom, static_cast<int>(rows.size()), visible, pos, x1 - 1);
     s.Begin(clip);
@@ -47,14 +47,14 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
     {
         std::string fl = "Filter: All v";
         if (g.matFilter >= 0) fl = std::string("Filter: ") + material::ClassName(static_cast<material::MaterialClass>(g.matFilter)) + " v";
-        s.FillRound(l.matFilter, 5, g.matFilterDropOpen ? ui::kLineHi : ui::kCardHi);
+        s.FillRound(l.matFilter, ui::kRad, g.matFilterDropOpen ? ui::kSelect : ui::kCardHi);
         s.TextCentered(g.fontUi, g.matFilter >= 0 ? ui::kAmber : ui::kText, l.matFilter, fl);
         const int total = static_cast<int>(scene.materials.size());
         const std::string n = std::to_string(BuildMatRows(L).size()) + " / " + std::to_string(total);
         s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.partsTop + 4, n);
     }
     // The launcher button (hover id 20, see ButtonAt): it opens the workbench window.
-    Button(s, l.matOpen, "Open Material Workbench", g.hoverButton == 20, false, true, true);
+    Button(s, l.matOpen, "Open Material Workbench", g.hoverButton == 20, false, true, Btn::Primary);
     // The list; the editor of the selected material is in the workbench window.
     const std::vector<int> rows = BuildMatRows(L);
     const int visible = std::max(1, (l.matListBottom - l.matListTop) / kRowH);

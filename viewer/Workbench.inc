@@ -126,7 +126,7 @@ void RevealSelectedMaterial() {
 // code drags exactly what this draws.
 void DrawMatPicker(ui::Surface& s, const WbLayout& l) {
     const RECT outer = MatPickerOuter(l);
-    s.FillRound(outer, 6, ui::kCard);
+    s.FillRound(outer, ui::kRadLg, ui::kCard);
     s.StrokeRound(outer, 6, ui::kLineHi);
     auto toColor = [](const Vec3& v) {
         return RGB(static_cast<int>(std::lround(std::clamp(v.x, 0.0f, 1.0f) * 255.0f)),
@@ -149,8 +149,8 @@ void DrawMatPicker(ui::Surface& s, const WbLayout& l) {
     }
     s.StrokeRound(sv, 3, ui::kLineHi);
     const float cx = sv.left + hsv.y * float(sv.right - sv.left), cy = sv.top + (1.0f - hsv.z) * float(sv.bottom - sv.top);
-    s.FillDisc(cx, cy, 5, RGB(255, 255, 255));
-    s.FillDisc(cx, cy, 2, RGB(10, 10, 10));
+    s.FillDisc(cx, cy, 5, ui::kText);
+    s.FillDisc(cx, cy, 2, ui::kOnAccent);
     const RECT hb = MatPickerHue(outer);
     const int hseg = 12;
     for (int i = 0; i < hseg; ++i) {
@@ -160,14 +160,14 @@ void DrawMatPicker(ui::Surface& s, const WbLayout& l) {
     }
     s.StrokeRound(hb, 6, ui::kLineHi);
     const float hx = hb.left + hsv.x * float(hb.right - hb.left);
-    s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 6, RGB(255, 255, 255));
-    s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 3, RGB(10, 10, 10));
+    s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 6, ui::kText);
+    s.FillDisc(hx, hb.top + float(hb.bottom - hb.top) / 2.0f, 3, ui::kOnAccent);
     const RECT pv = MatPickerPreview(outer);
     s.FillRound(pv, 4, toColor(cur));
     s.StrokeRound(pv, 4, ui::kLineHi);
     s.Text(g.fontMono, ui::kText, pv.left, pv.bottom + 4, MatHexOf(ceff), nullptr);
     const RECT dn = MatPickerDone(outer);
-    s.FillRound(dn, 5, g.wbHoverBtn == kWbPick ? ui::kLineHi : ui::kCardHi);
+    s.FillRound(dn, ui::kRad, g.wbHoverBtn == kWbPick ? ui::kSelect : ui::kCardHi);
     s.TextCentered(g.fontUi, ui::kText, dn, "Done");
 }
 
@@ -181,7 +181,7 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
     const assemble::Scene& scene = L.scene;
     const int x = l.edX, top = l.edTop, w = l.edW;
     auto ghost = [&](const RECT& r, const std::string& label, bool enabled, int id) {
-        s.FillRound(r, 5, g.wbHoverBtn == id ? ui::kLineHi : ui::kCardHi);
+        s.FillRound(r, ui::kRad, g.wbHoverBtn == id ? ui::kSelect : ui::kCardHi);
         s.TextCentered(g.fontUi, enabled ? ui::kText : ui::kFaint, r, label);
     };
     if (g.selMaterial < 0 || static_cast<size_t>(g.selMaterial) >= g.mat.originals.size()) {
@@ -195,7 +195,7 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
     {
         const RECT headClip{x, top, x + w, top + kRowH};
         const bool edited = static_cast<size_t>(g.selMaterial) < g.mat.overrides.size() && g.mat.overrides[static_cast<size_t>(g.selMaterial)] && !g.mat.overrides[static_cast<size_t>(g.selMaterial)]->empty();
-        s.Text(g.fontBold, edited ? ui::kAmber : ui::kAccent, x + 2, top + 2,
+        s.Text(g.fontSemi, edited ? ui::kAmber : ui::kText, x + 2, top + 3,
                ClipText(eff.displayName + " [" + material::ClassName(eff.cls) + "]", 48), &headClip);
         std::string shaderName = sm.shader;
         const std::string prefix = "Shader Forge/";
@@ -205,7 +205,7 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
     }
     // Class / preset / texture row.
     {
-        s.FillRound(l.classBtn, 5, g.matClassDropOpen || g.wbHoverBtn == kWbClass ? ui::kLineHi : ui::kCardHi);
+        s.FillRound(l.classBtn, ui::kRad, g.matClassDropOpen || g.wbHoverBtn == kWbClass ? ui::kSelect : ui::kCardHi);
         s.TextCentered(g.fontUi, ui::kText, l.classBtn, "Class: " + std::string(material::ClassName(eff.cls)) + " v");
         ghost(l.presetBtn, "Preset", true, kWbPreset);
         bool texOn = sm.texture >= 0;
@@ -229,12 +229,12 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
             s.Text(g.fontUi, ui::kText, x + 2, y + 2, "HEX", nullptr);
             RECT sw{x + 36, y + 2, x + 68, y + kRowH - 2};
             COLORREF col = RGB(static_cast<int>(std::lround(eff.baseColor.x * 255.0f)), static_cast<int>(std::lround(eff.baseColor.y * 255.0f)), static_cast<int>(std::lround(eff.baseColor.z * 255.0f)));
-            s.FillRound(sw, 4, col);
-            s.StrokeRound(sw, 4, ui::kLineHi);
+            s.FillRound(sw, ui::kRadSm, col);
+            s.StrokeRound(sw, ui::kRadSm, ui::kLine);
             s.Text(g.fontMono, g.matHexEditing ? ui::kAmber : ui::kText, x + 76, y + 2, g.matHexEditing ? (g.matHexBuf + "_") : hex, nullptr);
-            s.FillRound(l.pickBtn, 5, g.matPickerOpen || g.wbHoverBtn == kWbPick ? ui::kLineHi : ui::kCardHi);
+            s.FillRound(l.pickBtn, ui::kRad, g.matPickerOpen || g.wbHoverBtn == kWbPick ? ui::kSelect : ui::kCardHi);
             s.TextCentered(g.fontUi, ui::kText, l.pickBtn, "Color");
-            s.FillRound(l.inspectBtn, 5, g.wbHoverBtn == kWbInspect ? ui::kLineHi : ui::kCardHi);
+            s.FillRound(l.inspectBtn, ui::kRad, g.wbHoverBtn == kWbInspect ? ui::kSelect : ui::kCardHi);
             s.TextCentered(g.fontUi, ui::kText, l.inspectBtn, g.matInspectOpen ? "Shading" : "Texture");
         }
     }
@@ -256,10 +256,10 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
             static const char* const ch[5] = {"All", "R", "G", "B", "A"};
             for (int i = 0; i < 5; ++i) {
                 const RECT r = l.chan[i];
-                s.FillRound(r, 5, (i == g.matTexChannel || g.wbHoverBtn == kWbChan0 + i) ? ui::kLineHi : ui::kCardHi);
-                s.TextCentered(g.fontUi, (i == g.matTexChannel) ? ui::kAmber : ui::kText, r, ch[i]);
+                s.FillRound(r, ui::kRad, (i == g.matTexChannel || g.wbHoverBtn == kWbChan0 + i) ? ui::kSelect : ui::kCardHi);
+                s.TextCentered(g.fontUi, (i == g.matTexChannel) ? ui::kAccentHi : ui::kText, r, ch[i]);
             }
-            s.FillRound(l.slotBtn, 5, g.matTexSlotDropOpen || g.wbHoverBtn == kWbSlot ? ui::kLineHi : ui::kCardHi);
+            s.FillRound(l.slotBtn, ui::kRad, g.matTexSlotDropOpen || g.wbHoverBtn == kWbSlot ? ui::kSelect : ui::kCardHi);
             s.TextCentered(g.fontUi, ui::kText, l.slotBtn, "Slot: " + sel.prop + " v");
             const RECT det{x, cy + kRowH, x + w, cy + 3 * kRowH};
             s.Text(g.fontSmall, ui::kSub, det.left, det.top + 2, texNameLine(scene, sel), &det);
@@ -299,14 +299,9 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
         // The slot dropdown (modal, over the canvases).
         if (g.matTexSlotDropOpen) {
             const int n = std::min(6, static_cast<int>(slots.size()));
-            const RECT drop = MatTexDropRect(l, n);
-            s.FillRound(drop, 5, ui::kCard);
-            s.StrokeRound(drop, 5, ui::kLineHi);
-            for (int i = 0; i < n; ++i) {
-                const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
-                if (i == g.matTexSlot || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
-                s.Text(g.fontUi, (i == g.matTexSlot) ? ui::kAmber : ui::kText, row.left + 4, row.top + 2, slots[static_cast<size_t>(i)].prop, &row);
-            }
+            std::vector<std::string> items;
+            for (int i = 0; i < n; ++i) items.push_back(slots[static_cast<size_t>(i)].prop);
+            DrawMenu(s, MatTexDropRect(l, n), items, g.matTexSlot, g.matDropHover);
         }
     }
     // Reset / undo, with save / load of a materials file on the right.
@@ -320,15 +315,10 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
     }
     // The class dropdown and the colour picker, drawn last: they sit over the rows.
     if (g.matClassDropOpen) {
-        const RECT drop = MatClassDropRect(l);
-        s.FillRound(drop, 5, ui::kCard);
-        s.StrokeRound(drop, 5, ui::kLineHi);
-        for (int i = 0; i < 11; ++i) {
-            const RECT row{drop.left + 3, drop.top + i * kRowH, drop.right - 3, drop.top + (i + 1) * kRowH};
-            if (i == static_cast<int>(eff.cls) || i == g.matDropHover) s.FillRound(row, 4, (i == g.matDropHover) ? ui::kLineHi : RGB(36, 50, 78));
-            s.Text(g.fontUi, (i == static_cast<int>(eff.cls)) ? ui::kAmber : ui::kText, row.left + 4, row.top + 2,
-                   std::string(material::ClassName(static_cast<material::MaterialClass>(i))) + (static_cast<material::MaterialClass>(i) == eff.cls ? "  ✓" : ""), &row);
-        }
+        std::vector<std::string> items;
+        for (int i = 0; i < 11; ++i)
+            items.push_back(std::string(material::ClassName(static_cast<material::MaterialClass>(i))) + (static_cast<material::MaterialClass>(i) == eff.cls ? "  \u2713" : ""));
+        DrawMenu(s, MatClassDropRect(l), items, static_cast<int>(eff.cls), g.matDropHover);
     }
     if (g.matPickerOpen) DrawMatPicker(s, l);
 }
@@ -340,7 +330,7 @@ void DrawWorkbenchEditor(ui::Surface& s, const RECT& clip, const WbLayout& l, co
 // afterwards so the rest of the frame draws normally.
 void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scene, const RECT& clip) {
     const RECT uv = l.uv;
-    s.FillRound(uv, 4, RGB(14, 16, 24));
+    s.FillRound(uv, ui::kRadSm, ui::kBg);
     s.StrokeRound(uv, 4, ui::kLineHi);
     s.Begin(uv);   // everything below stays inside the canvas; restored to `clip` at the end
     const int meshIdx = MatUvMeshIndex(scene);
@@ -401,7 +391,7 @@ void DrawUvCanvas(ui::Surface& s, const WbLayout& l, const assemble::Scene& scen
         }
         if (!ok) continue;
         const bool sel = flat - 1 < g.matUvSelMask.size() && g.matUvSelMask[flat - 1];
-        const COLORREF c = sel ? RGB(90, 200, 255) : out ? ui::kBad : RGB(190, 200, 220);
+        const COLORREF c = sel ? ui::kAccent : out ? ui::kBad : ui::kSub;
         for (int i = 0; i < 3; ++i) {
             const int j = (i + 1) % 3;
             s.Line(x[i], y[i], x[j], y[j], c, 1.0f);
@@ -426,12 +416,14 @@ void DrawWorkbench(ui::Surface& s, const RECT& clip) {
     }
     // Header: what this window is, and the keys it answers.
     if (TouchesY(clip, 0, 40)) {
-        s.Text(g.fontBold, ui::kAccent, 12, 8, "Material Workbench", nullptr);
-        s.TextRight(g.fontSmall, ui::kDim, W - 12, 12, "Ctrl+Z undo   Ctrl+S save   Ctrl+O load", nullptr);
+        s.Text(g.fontSemi, ui::kText, 12, 8, "Material Workbench", nullptr);
+        s.TextRight(g.fontSmall, ui::kDim, W - 12, 11, "Ctrl+Z undo   Ctrl+S save   Ctrl+O load", nullptr);
+        s.Fill(RECT{0, 39, W, 40}, ui::kLine);
     }
     // Left column: the filter, then the material list in its own card.
-    s.FillRound(RECT{l.listX0, 68, l.listX1, H - 8}, 8, ui::kCard);
-    s.FillRound(l.filter, 5, g.matFilterDropOpen ? ui::kLineHi : g.wbHoverBtn == kWbFilter ? ui::kLineHi : ui::kCardHi);
+    s.FillRound(RECT{l.listX0, 68, l.listX1, H - 8}, ui::kRadLg, ui::kCard);
+    s.StrokeRound(RECT{l.listX0, 68, l.listX1, H - 8}, ui::kRadLg, ui::kLine);
+    s.FillRound(l.filter, ui::kRad, g.matFilterDropOpen || g.wbHoverBtn == kWbFilter ? ui::kSelect : ui::kCardHi);
     {
         std::string fl = "Filter: All v";
         if (g.matFilter >= 0) fl = std::string("Filter: ") + material::ClassName(static_cast<material::MaterialClass>(g.matFilter)) + " v";
@@ -451,7 +443,8 @@ void DrawWorkbench(ui::Surface& s, const RECT& clip) {
         DrawMatList(s, clip, l.listX0, l.listX1, l.listTop, l.listBottom, g.wbMatPos, g.wbHoverRow, rows, L->scene);
     }
     // Right: the editor in its own card.
-    s.FillRound(RECT{l.edX - 6, 40, W - 8, H - 8}, 8, ui::kCard);
+    s.FillRound(RECT{l.edX - 6, 40, W - 8, H - 8}, ui::kRadLg, ui::kCard);
+    s.StrokeRound(RECT{l.edX - 6, 40, W - 8, H - 8}, ui::kRadLg, ui::kLine);
     if (L) DrawWorkbenchEditor(s, clip, l, *L);
     else s.Text(g.fontUi, ui::kDim, l.edX + 2, l.edTop + 2, g.busy ? "loading the card ..." : "open a card first", nullptr);
     // The filter dropdown of this list last: it opens over the list.
@@ -1017,10 +1010,10 @@ void OpenWorkbench() {
         }
         if (testQuiet) {
             // the private test instance: the workbench stays off-screen and never activates
-            g.matHwnd = CreateWindowExW(WS_EX_NOACTIVATE, kWbClassName, L"Material Workbench - CardBridge", WS_OVERLAPPEDWINDOW,
+            g.matHwnd = CreateWindowExW(WS_EX_NOACTIVATE, kWbClassName, L"CardBridge \u2014 Material Workbench", WS_OVERLAPPEDWINDOW,
                                         x, y, w, h, g.hwnd, nullptr, g.hinst, nullptr);
         } else {
-            g.matHwnd = CreateWindowExW(0, kWbClassName, L"Material Workbench - CardBridge", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            g.matHwnd = CreateWindowExW(0, kWbClassName, L"CardBridge \u2014 Material Workbench", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                         x, y, w, h, g.hwnd, nullptr, g.hinst, nullptr);
         }
         if (!g.matHwnd) {

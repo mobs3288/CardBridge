@@ -8,7 +8,7 @@
 
 struct ModeStripCell { RECT r; int mode; };   // mode: the ViewMode enum value, or -1 for the Isolate toggle
 
-constexpr int kModeStripH = 22, kModeStripSide = 6, kModeStripGap = 8, kModeIsolateW = 64;
+constexpr int kModeStripH = 24, kModeStripSide = 6, kModeStripGap = 8, kModeIsolateW = 64;
 
 // The layout of the strip for a given viewport: one cell per diagnostic mode, plus the
 // Isolate toggle at the right. Empty when the view is too narrow to show any cell.
@@ -70,8 +70,8 @@ void DrawModeStrip(HDC dc, int x0, int W, int H) {
     const int y0 = cells[0].r.top;
     const int stripLeft = cells[0].r.left - 4, stripRight = cells.back().r.right + 4;
     // the backdrop: a dark rounded bar (GDI; the viewport has no off-screen surface)
-    if (HRGN rgn = CreateRoundRectRgn(stripLeft, y0 - 3, stripRight, cells[0].r.bottom + 3, 8, 8)) {
-        HBRUSH bg = CreateSolidBrush(RGB(24, 26, 34));
+    if (HRGN rgn = CreateRoundRectRgn(stripLeft, y0 - 4, stripRight, cells[0].r.bottom + 4, 8, 8)) {
+        HBRUSH bg = CreateSolidBrush(ui::kCard);
         FillRgn(dc, rgn, bg);
         DeleteObject(bg);
         DeleteObject(rgn);
@@ -83,14 +83,14 @@ void DrawModeStrip(HDC dc, int x0, int W, int H) {
         const bool isolate = c.mode < 0;
         const bool active = isolate ? g.viewIsolate : (c.mode == g.viewMode);
         const bool hover = g.viewHoverCell == static_cast<int>(i);
-        HBRUSH cb = CreateSolidBrush(active ? RGB(58, 82, 122) : hover ? RGB(44, 46, 58) : RGB(32, 34, 44));
-        if (HRGN rc = CreateRoundRectRgn(c.r.left, c.r.top, c.r.right, c.r.bottom, 4, 4)) {
+        HBRUSH cb = CreateSolidBrush(active ? ui::kSelect : hover ? ui::kCardHi : ui::kCard);
+        if (HRGN rc = CreateRoundRectRgn(c.r.left, c.r.top, c.r.right, c.r.bottom, 6, 6)) {
             FillRgn(dc, rc, cb);
             if (active) {
-                HPEN pen = CreatePen(PS_SOLID, 1, RGB(120, 170, 230));
+                HPEN pen = CreatePen(PS_SOLID, 1, ui::kAccent);
                 HPEN oldPen = static_cast<HPEN>(SelectObject(dc, pen));
                 HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, GetStockObject(NULL_BRUSH)));
-                RoundRect(dc, c.r.left, c.r.top, c.r.right, c.r.bottom, 4, 4);
+                RoundRect(dc, c.r.left, c.r.top, c.r.right, c.r.bottom, 6, 6);
                 SelectObject(dc, oldPen); SelectObject(dc, oldBrush);
                 DeleteObject(pen);
             }
@@ -99,7 +99,7 @@ void DrawModeStrip(HDC dc, int x0, int W, int H) {
         DeleteObject(cb);
         const char* label = isolate ? "Isolate" : labels[c.mode];
         RECT tr = c.r;
-        SetTextColor(dc, active ? RGB(238, 244, 255) : RGB(196, 199, 212));
+        SetTextColor(dc, active ? ui::kAccentHi : ui::kSub);
         SetBkMode(dc, TRANSPARENT);
         DrawTextA(dc, label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
@@ -117,17 +117,17 @@ void DrawModeLegend(HDC dc, int x0, int W, int H) {
     const int maxRows = std::max(0, std::min(static_cast<int>(scene.materials.size()), (H - 64) / rowH));
     if (maxRows < 1) return;
     const int boxX = x0 + 8, boxY = 8, boxH = titleH + maxRows * rowH + pad;
-    if (HRGN rgn = CreateRoundRectRgn(boxX, boxY, boxX + boxW, boxY + boxH, 6, 6)) {
-        HBRUSH bg = CreateSolidBrush(RGB(18, 19, 26));
+    if (HRGN rgn = CreateRoundRectRgn(boxX, boxY, boxX + boxW, boxY + boxH, 8, 8)) {
+        HBRUSH bg = CreateSolidBrush(ui::kCard);
         FillRgn(dc, rgn, bg);
         DeleteObject(bg);
         DeleteObject(rgn);
     }
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, g.fontSmall));
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(150, 190, 240));
+    SetTextColor(dc, ui::kSub);
     RECT tr{boxX + 8, boxY + 4, boxX + boxW - 8, boxY + titleH};
-    DrawTextA(dc, "MaterialID", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextA(dc, "MATERIALID", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     for (int i = 0; i < maxRows; ++i) {
         const int y = boxY + titleH + i * rowH;
         const Vec3 c = material::MaterialIdColor(i);
@@ -136,7 +136,7 @@ void DrawModeLegend(HDC dc, int x0, int W, int H) {
         HBRUSH sb = CreateSolidBrush(swatch);
         FillRect(dc, &sw, sb);
         DeleteObject(sb);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(60, 62, 74));
+        HPEN pen = CreatePen(PS_SOLID, 1, ui::kLine);
         HPEN oldPen = static_cast<HPEN>(SelectObject(dc, pen));
         HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, GetStockObject(NULL_BRUSH)));
         Rectangle(dc, sw.left, sw.top, sw.right, sw.bottom);
@@ -147,7 +147,7 @@ void DrawModeLegend(HDC dc, int x0, int W, int H) {
         std::string txt = std::to_string(i) + " " + eff.displayName + " [" + material::ClassName(eff.cls) + "]";
         if (shared > 1) txt += " x" + std::to_string(shared);
         RECT t{boxX + 26, y, boxX + boxW - 6, y + rowH};
-        SetTextColor(dc, i == g.selMaterial ? RGB(240, 246, 255) : RGB(170, 175, 190));
+        SetTextColor(dc, i == g.selMaterial ? ui::kText : ui::kSub);
         DrawTextA(dc, txt.c_str(), -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
     if (oldFont) SelectObject(dc, oldFont);

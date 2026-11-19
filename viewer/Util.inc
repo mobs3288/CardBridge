@@ -142,18 +142,30 @@ void SaveSettings(const Settings& s) {
 }
 
 // ---- dialogs and first-run defaults ------------------------------------------------------------------------------------
+// The modern folder picker (Explorer-style: address bar, search, navigation pane) instead of the legacy
+// SHBrowseForFolderW tree. `title` becomes the picker's heading, e.g. "Choose your Koikatsu mods folder".
+// Returns forward-slashed UTF-8, empty on cancel.
 std::string PickFolder(HWND owner, const wchar_t* title) {
-    BROWSEINFOW bi{};
-    bi.hwndOwner = owner;
-    bi.lpszTitle = title;
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return {};
-    wchar_t path[MAX_PATH];
-    std::string r;
-    if (SHGetPathFromIDListW(pidl, path)) r = Slashes(WideToUtf8(path));
-    CoTaskMemFree(pidl);
-    return r;
+    IFileOpenDialog* dlg = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) return {};
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+    dlg->SetTitle(title);   // the heading inside the dialog
+    dlg->SetOkButtonLabel(L"Select Folder");
+    std::string out;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out = Slashes(WideToUtf8(path));
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return out;
 }
 
 std::string PickCard(HWND owner) {

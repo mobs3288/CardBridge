@@ -13,10 +13,13 @@
 
 namespace ui {
 
-// Theme: deep blue-black surfaces, the logo's blue and violet as accents, amber for "changed from the card".
-constexpr COLORREF kBg = RGB(15, 17, 25), kCard = RGB(23, 26, 38), kCardHi = RGB(31, 36, 52), kLine = RGB(40, 46, 64), kLineHi = RGB(62, 72, 98);
-constexpr COLORREF kText = RGB(228, 232, 245), kSub = RGB(150, 159, 182), kDim = RGB(94, 102, 126), kFaint = RGB(66, 73, 94);
-constexpr COLORREF kAccent = RGB(86, 168, 255), kAccent2 = RGB(172, 110, 255), kAmber = RGB(244, 192, 94), kGood = RGB(112, 210, 142), kBad = RGB(244, 112, 112);
+// Design tokens. Neutral charcoal surfaces, soft white text, one restrained steel-blue accent used for primary actions,
+// selection and focus; amber is reserved for values that changed from the card, red/green for error/success.
+// Radius scale: 4 (small controls), 6 (controls), 8 (cards). Spacing follows an 8 px grid.
+constexpr COLORREF kBg = RGB(17, 18, 22), kCard = RGB(24, 25, 31), kCardHi = RGB(31, 32, 39), kSelect = RGB(37, 45, 56), kLine = RGB(42, 43, 51), kLineHi = RGB(58, 59, 70);
+constexpr COLORREF kText = RGB(233, 233, 236), kSub = RGB(160, 161, 170), kDim = RGB(126, 127, 138), kFaint = RGB(102, 103, 114);
+constexpr COLORREF kAccent = RGB(96, 156, 214), kAccentHi = RGB(124, 176, 224), kOnAccent = RGB(16, 26, 34), kAmber = RGB(224, 173, 88), kGood = RGB(106, 190, 130), kBad = RGB(222, 106, 106);
+constexpr int kRadSm = 4, kRad = 6, kRadLg = 8;   // small control / control / card
 
 // One-time GDI+ start and stop (call around the window's life).
 bool Startup();
@@ -46,7 +49,6 @@ public:
     void Fill(const RECT& r, COLORREF c, int alpha = 255);
     void FillRound(const RECT& r, int radius, COLORREF c, int alpha = 255);
     void StrokeRound(const RECT& r, int radius, COLORREF c, int alpha = 255);
-    void FillGradient(const RECT& r, int radius, COLORREF left, COLORREF right);
     void FillDisc(float cx, float cy, float radius, COLORREF c, int alpha = 255);
     void FillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, COLORREF c);
     void Line(float x0, float y0, float x1, float y1, COLORREF c, float width = 1.0f);
