@@ -78,9 +78,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
 [InstallDelete]
 ; pre-installer release naming: the old plain-copy layout put these in {app} on dev machines.
-Type: files; Names: "cardbridge_viewer.exe"
-Type: files; Names: "cardbridge.exe"
-Type: files; Names: "cardbridge_cli.exe"
+Type: files; Name: "{app}\cardbridge_viewer.exe"
+Type: files; Name: "{app}\cardbridge.exe"
+Type: files; Name: "{app}\cardbridge_cli.exe"
 
 [Files]
 ; The installer and the portable ZIP carry the same two executables, built from the same source in the

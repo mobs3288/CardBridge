@@ -75,6 +75,8 @@ Useful switches:
   download from <https://jrsoftware.org/isdl.php>, or `winget install --id JRSoftware.InnoSetup`.
   `build_installer.ps1` finds `ISCC.exe` on `PATH`, at the standard install locations, or via the
   `CARDBRIDGE_INNOSETUP` environment variable; failing that it stops with a clear message.
+  CardBridge is built with [Inno Setup](https://jrsoftware.org/isinfo.php) by Jordan Russell and
+  Martijn Laan — thanks for a great tool.
 
 ### The version
 
