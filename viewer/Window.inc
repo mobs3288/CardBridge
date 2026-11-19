@@ -541,23 +541,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.boneWorld.clear();
         g.poseWorld.clear();
         g.sim = assemble::PhysicsSim{};
-        if (L && g.gpu.ready()) {
-            ProgSet(0.97, "uploading shaders to GPU");
-            ProgFlush();
-            std::string gpuWhy;
-            if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
-                g.gpuScene = L;
-                g.gpuOk = true;
-                const size_t fb = g.gpu.fallbackMaterials();
-                Log(std::string("game shaders uploaded to Direct3D 11") + (fb ? "; " + std::to_string(fb) + " material(s) use the simple shader (their game shader did not upload) - normal-mapped, but the game's own look is unavailable" : ""), fb ? LogKind::Warn : LogKind::Good);
-            } else if (gpuWhy == "cancelled by user") {
-                Log("GPU upload cancelled; showing the software renderer", LogKind::Warn);
-            } else {
-                Log("Direct3D 11 upload failed; using the software renderer", LogKind::Warn);
-            }
-        } else if (L) {
-            Log("no Direct3D 11 device; using the software renderer", LogKind::Warn);
-        }
+        // The Lit-view GPU upload is deliberately not done here: the viewer goes straight to the
+        // "as exported" (MMD look) view on load, so paying to upload the game shaders would be dead weight.
+        // The Lit view uploads on demand when the user presses X (toggle Lit back on), see UploadLitGpu.
         // Default the viewport to the "as exported" (MMD look) view — the same image the PMX export produces.
         // The bake runs in the background; WM_EXP_READY switches the view on once it is ready. X (the MMD button) toggles back.
         if (L && g.gpu.ready()) ToggleAsExported();

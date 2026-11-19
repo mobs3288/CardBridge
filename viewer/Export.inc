@@ -232,11 +232,41 @@ void StartExportClothing() {
     InvalidatePanel();
 }
 
+// Upload the card's scene to the GPU (the game's own shaders, for the Lit view). Split out of WM_LOADED
+// so the default "straight to the as exported view" path can skip it entirely — the Lit GPU upload would
+// be dead weight there. Called on demand when the user switches back to the Lit view (X), so it is paid
+// only when it is actually needed.
+static bool UploadLitGpu(const std::shared_ptr<Loaded>& L) {
+    if (!L) return false;
+    ProgBegin("Uploading shaders to GPU");
+    ProgSet(0.97, "uploading shaders to GPU");
+    ProgFlush();
+    std::string gpuWhy;
+    if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
+        g.gpuScene = L;
+        g.gpuOk = true;
+        const size_t fb = g.gpu.fallbackMaterials();
+        Log(std::string("game shaders uploaded to Direct3D 11") + (fb ? "; " + std::to_string(fb) + " material(s) use the simple shader (their game shader did not upload) - normal-mapped, but the game's own look is unavailable" : ""), fb ? LogKind::Warn : LogKind::Good);
+        ProgEnd();
+        return true;
+    }
+    if (gpuWhy == "cancelled by user") Log("GPU upload cancelled; showing the software renderer", LogKind::Warn);
+    else Log("Direct3D 11 upload failed; using the software renderer", LogKind::Warn);
+    ProgEnd();
+    return false;
+}
+
 // X: show the character the way the exported PMX looks (baked textures, plain materials). The bake takes a while, so it runs// on a thread once per character and grading state; later presses only switch.
 void ToggleAsExported() {
     std::shared_ptr<Loaded> L = Current();
     if (!L || L->scene.parts.empty()) return;
-    if (g.showExp) { g.showExp = false; g.dirty = true; Log("as exported: off"); return; }
+    if (g.showExp) { 
+        // Switching back to the Lit view: the Lit GPU upload was skipped on the default path
+        // (straight to the as-exported view); upload now, on demand, with a bar on screen.
+        const std::shared_ptr<Loaded> cur = Current();
+        if (cur && g.gpu.ready() && g.gpuScene != cur) UploadLitGpu(cur);
+        g.showExp = false; g.dirty = true; Log("as exported: off"); return; 
+    }
     if (!g.gpu.ready()) { Log("as exported needs the Direct3D 11 view", LogKind::Warn); return; }
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
