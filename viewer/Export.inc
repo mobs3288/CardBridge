@@ -294,7 +294,7 @@ void ToggleAsExported() {
             }
             ProgSet(0.05, "baking shader textures");
             std::string expNote;
-            exporter::BakeShaderTextures(*sc, 1024, false, &expNote,
+            exporter::BakeShaderTextures(*sc, 1024, true, &expNote,
                 [](const std::string& m) {
                     const double f = ParseBakeFrac(m);
                     ProgSet(f >= 0.0 ? 0.05 + f * 0.80 : -1.0, m);

@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.7] - 2026-11-20
+
+### Fixed
+
+- **MMD ("as exported") view**: the viewer's as-exported bake now uses the lit (game-shade) treatment for materials, so the MMD preview's hair colour/shade matches the standard (game) view instead of re-shading a flat sheet through MMD's own light/ramp. The exported PMX is unaffected (it keeps its own toon-ramp bake).
+
 ## [0.4.6] - 2026-11-20
 
 ### Fixed
