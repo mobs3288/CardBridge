@@ -38,6 +38,18 @@ bool readManifest(const std::string& path, ModEntry& e) {
     e.name = tagText(xml, "name");
     e.version = tagText(xml, "version");
     e.author = tagText(xml, "author");
+    // Sideloader manifest: <game>Koikatsu Sunshine</game> (one per supported
+    // game). No tags = legacy mod, loaded by both games.
+    e.games.clear();
+    size_t gp = 0;
+    while ((gp = xml.find("<game>", gp)) != std::string::npos) {
+        const size_t end = xml.find("</game>", gp);
+        if (end == std::string::npos) break;
+        std::string v = xml.substr(gp + 6, end - (gp + 6));
+        const size_t a = v.find_first_not_of(" \t\r\n"), b = v.find_last_not_of(" \t\r\n");
+        if (a != std::string::npos) { v = v.substr(a, b - a + 1); if (!v.empty()) e.games.push_back(v); }
+        gp = end + 7;
+    }
     // <MaterialEditor><Shader Name="IBL_Shader_alpha" AssetBundle="chara/IBLShader_alpha.unity3d">: the shader the
     // game's Shader.Find would bind. Flat machine-written XML, so a tag scan is enough.
     e.shaders.clear();
@@ -101,7 +113,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
         try {
             Bytes raw = fileio::ReadFile(cachePath);
             auto j = nlohmann::json::parse(raw.begin(), raw.end());
-            if (j.value("version", 0) == 3)
+            if (j.value("version", 0) == 4)
                 for (const auto& e : j["entries"]) {
                     ModEntry m;
                     m.path = e.value("path", "");
@@ -115,6 +127,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
                     if (e.contains("shaders") && e["shaders"].is_array())
                         for (const auto& s : e["shaders"])
                             if (s.is_array() && s.size() >= 2) m.shaders.emplace_back(s[0].get<std::string>(), s[1].get<std::string>());
+                    m.games = e.value("games", std::vector<std::string>{});
                     cached[m.path] = m;
                 }
         } catch (const std::exception&) {
@@ -174,7 +187,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
 
     ModIndex idx;
     nlohmann::json out;
-    out["version"] = 3;
+    out["version"] = 4;
     out["root"] = root;
     auto& arr = out["entries"] = nlohmann::json::array();
     for (size_t i = 0; i < results.size(); ++i) {
@@ -196,6 +209,7 @@ ModIndex ModIndex::Build(const std::string& root, const std::string& cachePath, 
             for (const auto& kv : e.shaders) sh.push_back({kv.first, kv.second});
             entry["shaders"] = std::move(sh);
         }
+        if (!e.games.empty()) entry["games"] = e.games;
         arr.push_back(std::move(entry));
     }
     if (!cachePath.empty()) {
@@ -218,7 +232,7 @@ std::vector<const ModEntry*> ModIndex::findByListId(int category, int64_t id) co
     if (it == byListId_.end()) return out;
     for (const auto& [guid, idx] : it->second) {
         auto g = byGuid_.find(guid);
-        if (g != byGuid_.end() && idx < g->second.size()) out.push_back(&g->second[idx]);
+        if (g != byGuid_.end() && idx < g->second.size() && g->second[idx].compatibleWith(game_)) out.push_back(&g->second[idx]);
     }
     return out;
 }
@@ -234,6 +248,7 @@ const ModEntry* ModIndex::findShader(const std::string& name, std::string* bundl
     auto g = byGuid_.find(it->second.first);
     if (g == byGuid_.end() || it->second.second >= g->second.size()) return nullptr;
     const ModEntry& e = g->second[it->second.second];
+    if (!e.compatibleWith(game_)) return nullptr;
     for (const auto& kv : e.shaders)
         if (kv.first == name) { if (bundle) *bundle = kv.second; return &e; }
     return nullptr;

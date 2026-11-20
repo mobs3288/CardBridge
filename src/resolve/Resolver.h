@@ -1,6 +1,7 @@
 #pragma once
 
 #include "card/CardFile.h"
+#include "library/Library.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "unity/UnityScene.h"
@@ -59,7 +60,12 @@ std::vector<ItemRef> ItemsFromCard(const card::Card& card, int outfitIndex);
 class Resolver {
 public:
     // `abdataRoot` is <game>/abdata. The mod index and list table outlive the resolver.
-    Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoot);
+    // `game` is the source-game profile read from library.json; format detection
+    // inside individual bundles still takes precedence for mixed-engine mods.
+    Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoot,
+             library::GameInfo game = {});
+
+    const library::GameInfo& gameInfo() const { return game_; }
 
     ResolvedItem resolve(const card::Card& card, const ItemRef& ref);
 
@@ -126,6 +132,7 @@ private:
     const ModIndex& mods_;
     ListTable& lists_;
     std::string abdata_;
+    library::GameInfo game_;
     std::map<std::string, bool> modListsLoaded_;
     // Bounded LRU of decoded textures, most-recent first. Shares the bundle cache's lock. Key: "<source>|<size>|<mtime>#<pathId>".
     std::list<std::pair<std::string, std::shared_ptr<unity::TextureData>>> textureCache_;

@@ -3,18 +3,63 @@
 #include "core/FileIo.h"
 #include "core/ZipArchive.h"
 #include "unity/UnityScene.h"
+#include "unity/UnitySerialized.h"
 
 #include <stb_image_write.h>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace cardbridge::library {
 
 std::string AbdataRoot(const std::string& libraryRoot) { return fileio::Join(libraryRoot, "abdata"); }
 
+GameInfo ReadGameInfo(const std::string& libraryRoot) {
+    GameInfo g;
+    try {
+        Bytes raw = fileio::ReadFile(fileio::Join(libraryRoot, "library.json"));
+        auto j = nlohmann::json::parse(raw.begin(), raw.end());
+        std::string game = j.value("game", "");
+        if (game == "koikatsu") g.game = SourceGame::Koikatsu;
+        else if (game == "koikatsu-sunshine") g.game = SourceGame::KoikatsuSunshine;
+        g.unityVersion = j.value("unity_version", "");
+        g.serializedFormat = j.value("serialized_format", 0);
+    } catch (const std::exception&) {
+        // Pre-KKS libraries have no game fields; callers treat them as Unknown.
+    }
+    return g;
+}
+
 namespace {
+
+// The engine version is written in the bundle header; it is the most direct
+// evidence of which game the abdata came from, and it survives a library copy.
+GameInfo DetectGameInfo(const std::string& gameRoot) {
+    GameInfo g;
+    const std::string path = fileio::Join(fileio::Join(gameRoot, "abdata"), "chara/oo_base.unity3d");
+    try {
+        auto bundle = unity::UnityBundle::Open(fileio::ReadFile(path), path);
+        g.unityVersion = bundle->engineVersion();
+        if (const auto* sn = bundle->serializedNode()) {
+            unity::SerializedFile sf(bundle, *sn);
+            g.serializedFormat = sf.formatVersion();
+        }
+        const size_t dot = g.unityVersion.find('.');
+        const int major = std::atoi(g.unityVersion.substr(0, dot).c_str());
+        if (major >= 2019) g.game = SourceGame::KoikatsuSunshine;
+        else if (major >= 5 && major < 2019) g.game = SourceGame::Koikatsu;
+    } catch (const std::exception&) {
+        // Fall back to the install's data folder name below.
+    }
+    if (g.game == SourceGame::Unknown) {
+        if (fileio::Exists(fileio::Join(gameRoot, "KoikatsuSunshine_Data"))) g.game = SourceGame::KoikatsuSunshine;
+        else if (fileio::Exists(fileio::Join(gameRoot, "Koikatu_Data"))) g.game = SourceGame::Koikatsu;
+    }
+    return g;
+}
+
 // Reads the footer of an exe with an embedded library; false when there is none.
 bool ReadFooter(const std::string& exePath, uint64_t& offset, uint64_t& size) {
     try {
@@ -122,9 +167,14 @@ ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(si
     std::sort(rels.begin(), rels.end());
     rels.erase(std::unique(rels.begin(), rels.end()), rels.end());
 
+    const GameInfo game = DetectGameInfo(opt.gameRoot);
+
     nlohmann::json manifest;
     manifest["schema_version"] = 1;
     manifest["profile"] = opt.profile == Profile::Full ? "full" : "minimal";
+    manifest["game"] = game.name();
+    manifest["unity_version"] = game.unityVersion;
+    manifest["serialized_format"] = game.serializedFormat;
     manifest["created_by"] = "cardbridge library import";
     auto& files = manifest["files"] = nlohmann::json::array();
 
@@ -177,6 +227,7 @@ CheckResult CheckLibrary(const std::string& libraryRoot, bool verifyHashes) {
         Bytes raw = fileio::ReadFile(mf);
         auto j = nlohmann::json::parse(raw.begin(), raw.end());
         r.profile = j.value("profile", "");
+        r.game = ReadGameInfo(libraryRoot);
         for (const auto& f : j["files"]) {
             std::string rel = f.value("path", "");
             std::string p = fileio::Join(AbdataRoot(libraryRoot), rel);

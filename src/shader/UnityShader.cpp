@@ -1,6 +1,7 @@
 #include "shader/UnityShader.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 
 namespace cardbridge::shader {
@@ -115,6 +116,117 @@ void ParseHeader(const Bytes& sp, size_t dxbcAt, UnityProgram& prog) {
     }
 }
 
+// Unity 2019 (KKS) writes the binding table as length-prefixed strings with
+// four-byte padding, unlike the KK token stream ParseTail expects. A cbuffer
+// record is name, size, variable count, then that many variables (name + six
+// words, of which word 6 is the byte offset). After all cbuffers comes one
+// separator word, a resource count, and that many records: a cbuffer name plus
+// its slot, or a texture name plus four words (register, sampler, _, dimension).
+struct KksReader {
+    const Bytes& b;
+    size_t p = 0;
+    bool u32(uint32_t& v) {
+        if (p + 4 > b.size()) return false;
+        v = U32(b, p);
+        p += 4;
+        return true;
+    }
+    bool ident(std::string& s) {
+        uint32_t n = 0;
+        if (!u32(n) || n == 0 || n > 64 || p + n > b.size()) return false;
+        s.assign(reinterpret_cast<const char*>(b.data() + p), n);
+        for (char c : s)
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' || c == '.')) return false;
+        p += (n + 3) & ~3u;
+        return true;
+    }
+};
+
+void ParseKksTail(const Bytes& sp, size_t tailAt, UnityProgram& prog) {
+    if (tailAt >= sp.size()) return;
+    Bytes t(sp.begin() + static_cast<std::ptrdiff_t>(tailAt), sp.end());
+    KksReader r{t, 0};
+
+    // The tail starts with a few bookkeeping words; find the first cbuffer
+    // definition by looking for a plausible name+size+count triple.
+    bool found = false;
+    for (size_t start = 0; start + 4 <= t.size(); ++start) {
+        KksReader probe{t, start};
+        std::string nm;
+        uint32_t size = 0, count = 0;
+        if (probe.ident(nm) && probe.u32(size) && size > 0 && probe.u32(count) && count > 0 && count <= 64) {
+            r.p = start;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
+
+    while (r.p + 4 <= t.size()) {
+        std::string name;
+        if (!r.ident(name)) break;
+        uint32_t size = 0, count = 0;
+        if (!r.u32(size) || !r.u32(count) || size == 0 || count > 64) break;
+        CbLayout cb;
+        cb.name = name;
+        cb.size = size;
+        // KKS 2019 shaders address every constant through cb0 (verified from
+        // the decoded SM4 operands); the binding record's trailing word is not
+        // a register slot. FillConstants indexes by this slot.
+        cb.slot = 0;
+        bool variablesOk = true;
+        for (uint32_t k = 0; k < count; ++k) {
+            std::string vn;
+            uint32_t f[6] = {};
+            if (!r.ident(vn)) { variablesOk = false; break; }
+            for (uint32_t j = 0; j < 6; ++j) if (!r.u32(f[j])) { variablesOk = false; break; }
+            if (!variablesOk) break;
+            CbParam p;
+            p.name = vn;
+            p.rows = f[2] ? f[2] : 1;
+            p.cols = 4;
+            p.isMatrix = false;
+            p.offset = f[5];
+            cb.params.push_back(std::move(p));
+        }
+        if (!variablesOk) break;
+        prog.cbuffers.push_back(std::move(cb));
+
+        uint32_t sep = 0;
+        r.u32(sep);   // one separator word (usually 0)
+        KksReader look{t, r.p};
+        std::string next;
+        if (look.ident(next)) continue;   // another cbuffer definition
+
+        uint32_t resources = 0;
+        if (!r.u32(resources)) break;
+        for (uint32_t i = 0; i < resources && r.p + 4 <= t.size(); ++i) {
+            std::string rn;
+            if (!r.ident(rn)) break;
+            int cbIndex = -1;
+            for (size_t c = 0; c < prog.cbuffers.size(); ++c)
+                if (prog.cbuffers[c].name == rn) { cbIndex = static_cast<int>(c); break; }
+            if (cbIndex >= 0) {
+                uint32_t slot = 0;
+                if (!r.u32(slot)) break;
+                (void)slot;   // the word after a cbuffer name is not a cb register; KKS uses cb0
+                while (r.p + 4 <= t.size() && U32(t, r.p) == 0) r.p += 4;   // padding before the next record
+            } else {
+                uint32_t f[4] = {};
+                for (uint32_t j = 0; j < 4; ++j) if (!r.u32(f[j])) { f[0] = 0xffffffffu; break; }
+                if (f[0] == 0xffffffffu) break;
+                TextureBinding tb;
+                tb.name = rn;
+                tb.reg = f[1];
+                tb.sampler = f[2];
+                tb.dimension = f[3] ? f[3] : 2;
+                prog.textures.push_back(std::move(tb));
+            }
+        }
+        break;   // the resource table ends the KKS tail
+    }
+}
+
 } // namespace
 
 std::vector<UnityProgram> ParseUnityShaderBlob(const Bytes& blob, std::vector<std::string>* why) {
@@ -139,7 +251,10 @@ std::vector<UnityProgram> ParseUnityShaderBlob(const Bytes& blob, std::vector<st
         size_t total = U32(sp, at + 24);
         prog.dxbc.assign(sp.begin() + static_cast<std::ptrdiff_t>(at), sp.begin() + static_cast<std::ptrdiff_t>(at + total));
         ParseHeader(sp, at, prog);
-        ParseTail(Tokenize(sp, at + total), prog);
+        if (at >= 32)   // Unity 2019 preamble (KKS); KK's header is 24 bytes
+            ParseKksTail(sp, at + total, prog);
+        else
+            ParseTail(Tokenize(sp, at + total), prog);
         out.push_back(std::move(prog));
     }
     return out;

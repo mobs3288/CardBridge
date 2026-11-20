@@ -2,6 +2,18 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [Unreleased] - 2026-11-20
+
+### Added
+
+- **Koikatsu Sunshine (KKS) as a first-class source format** in the same offline engine: card acceptance for `【KoiKatuCharaSun】` (4 outfits, Face 0.0.3, Parameter 0.0.6), source-game profile in `library.json`, KKS mesh skinning from vertex channels 12/13 (UInt32 format 10), a KKS shader-blob reader (nested descriptors, 2019 program header, KKS binding table) so all five create materials run on the SM4 VM, family-aware hair/alpha shader mappings, third clothing texture and `HideShorts`, `<game>` tag filtering for mods, 1,968 KKS list rows, `rendNormal03`, KKS shape corrections, and online-independent conversion unchanged.
+- Research and validation documents: `docs/KKS_FORMAT_FEASIBILITY.md`, `docs/KKS_IMPLEMENTATION_ROADMAP.md`, `docs/KKS_TEST_MATRIX.md`.
+
+### Known limitations
+
+- KKS `Koikano/*` materials are not re-baked through the UV-flat material bake; their verified create-job textures are kept and the skip is reported. KK `Shader Forge/*` baking is unchanged.
+- `MabUV` and KKS-exclusive accessory component fields (`objSleeves*`, `exRendEmblem*`) are not modelled.
+
 ## [0.3.0] - 2026-11-19
 
 The first installer release. From here on, CardBridge-Setup is the recommended download; the portable ZIP stays available for the same binaries without an installer.

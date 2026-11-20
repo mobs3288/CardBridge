@@ -1335,14 +1335,19 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                         const std::function<bool()>& cancelled) {
     grade = grade && ColourGradeEnabled();
     toon = toon && !lit;
+    const bool dbg = std::getenv("CARDBRIDGE_BAKE_TIME") != nullptr;
     ViewState st;
     st.mips.assign(scene.textures.size(), Mips{});
     st.built.assign(scene.textures.size(), false);
-    // Build every mip chain before any worker runs: a texture a shader samples that was not in its material's
-    // texProps would otherwise be built lazily inside workers, where two workers can build/read the same chain
-    // at once and a texel can sample white/partial mips instead of the real texture.
-    for (size_t ti = 0; ti < scene.textures.size(); ++ti) BuildTexMips(scene, st, static_cast<int>(ti));
-    for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        // Build every mip chain before any worker runs: a texture a shader samples that was not in its material's
+        // texProps would otherwise be built lazily inside workers, where two workers can build/read the same chain
+        // at once and a texel can sample white/partial mips instead of the real texture.
+        for (size_t ti = 0; ti < scene.textures.size(); ++ti) BuildTexMips(scene, st, static_cast<int>(ti));
+        for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
+        if (dbg) std::fprintf(stderr, "bake: mips built for %zu textures in %.3fs\n", scene.textures.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
     float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
     if (lit) {   // the light and camera of the front view the shaded picture uses, so the texture holds the same shading
         // Framed on what the viewer shows (visible final parts), not on hidden
@@ -1366,11 +1371,21 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
     }
     const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
-    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0;
+    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0, skipKksShader = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
+        // KKS character shaders (Koikano/*) parse and run for CREATE jobs, but
+        // this UV-flattened material bake cannot reproduce their screen-space
+        // lighting: it produces transparent sheets that would hide the parts.
+        // Keep the verified baked create-job textures and record the skip.
+        // KK (Shader Forge) shaders still go through the original bake.
+        if (mat.shader.rfind("Koikano/", 0) == 0) {
+            ++skipKksShader;
+            continue;
+        }
+        const auto tMat0 = std::chrono::steady_clock::now();
         // Translucent materials are baked like any other: the bake preserves the shader's alpha (the game's authored opacity is its
         // output alpha), so the PMX shows what the game shows for them â€” shaded, colour-graded, with the material's own toon ramp.
         // Keeping the raw texture here instead dropped the shader's whole look (the card's studio-alpha shell drew a flat charcoal
@@ -1645,12 +1660,16 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         mat.diffuse = {1.0f, 1.0f, 1.0f, mat.diffuse.w};
         mat.bakedLit = lit;
         ++baked;
+        if (dbg) std::fprintf(stderr, "bake: material %zu '%s' (%dx%d) in %.3fs\n", mi, mat.name.c_str(), W, H, std::chrono::duration<double>(std::chrono::steady_clock::now() - tMat0).count());
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
+    if (skipKksShader)
+        scene.warn("materials", std::to_string(skipKksShader) +
+                                " Koikano (KKS) materials kept their baked create-job textures; the UV-flat material bake is not used for them");
     if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders" +
-                          ((skipTranslucent || skipEmptyBake || skipNoShader)
-                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader)"
+                          ((skipTranslucent || skipEmptyBake || skipNoShader || skipKksShader)
+                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader, " + std::to_string(skipKksShader) + " KKS shader)"
                                : "");
 }
 

@@ -32,6 +32,9 @@ struct AssembleLayerSpec {
 
 struct AssembleOptions {
     int outfit = -1;                       // -1: the card's current outfit (Status.coordinateType)
+    // Source library profile from library.json. Format detection inside each
+    // bundle still wins for mixed-engine mods; this is the library's base game.
+    library::GameInfo sourceGame;
     std::string bodyPrefab = "p_cf_body_00";
     std::string bodyRigPrefab = "p_cf_body_bone";
     std::string headRigPrefab = "p_cf_head_bone";
@@ -90,6 +93,11 @@ struct AssembleOptions {
 // The game draws its garment and eye "create" materials in linear light (sRGB textures decoded, linear colours, encoded result); the skin ones
 // were measured against the game as stored. Checked against the game's own render textures: the iris result was 16/255 off drawn as stored, 1 in linear.
 bool CreateRunsInLinearLight(const std::string& materialName);
+
+// True for both KK (Shader Forge/main_hair[_front]) and KKS
+// (Koikano/hair_main_sun_front, hair_main_low_sun) hair shader families.
+// Exposed so the tint rule can be regression-tested without game files.
+bool IsHairShaderFamily(const std::string& shaderName);
 
 // Softens the nose-line overlay stroke the same way the assembly does for the "cf_O_noseline" texture (see the .cpp):
 // two gaussian taps (a tight one keeps the stroke soft but present, a wide one feathers it out into the surrounding skin),

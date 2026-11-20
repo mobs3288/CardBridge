@@ -1,5 +1,7 @@
 #pragma once
 
+#include "library/Library.h"
+
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -21,6 +23,17 @@ struct ModEntry {
     // outfit authored against a mod shader (IBL_Shader_alpha & friends) renders with the shader it was made for
     // instead of a fallback with the same blending mode.
     std::vector<std::pair<std::string, std::string>> shaders;
+    // <game> tags in manifest.xml. Empty means a legacy/untagged mod, which
+    // Sideloader still loads in both games.
+    std::vector<std::string> games;
+    bool compatibleWith(const library::GameInfo& g) const {
+        if (g.game == library::SourceGame::Unknown || games.empty()) return true;
+        if (g.game == library::SourceGame::KoikatsuSunshine)
+            for (const auto& x : games) if (x == "Koikatsu Sunshine") return true;
+        if (g.game == library::SourceGame::Koikatsu)
+            for (const auto& x : games) if (x == "Koikatsu") return true;
+        return false;
+    }
 };
 
 // Index of the Sideloader mods under a folder: GUID -> .zipmod/.zip files.
@@ -39,6 +52,11 @@ public:
                           const std::function<void(size_t, size_t)>& progress = {},
                           const std::function<bool()>& cancelled = {});
 
+    // Restrict lookups to mods compatible with the imported library's game.
+    // Unknown (older libraries) keeps every mod, preserving the KK behaviour.
+    void setGame(const library::GameInfo& g) { game_ = g; }
+    const library::GameInfo& game() const { return game_; }
+
     const std::vector<ModEntry>* find(const std::string& guid) const;
     // The mods whose lists define (category, id). A card saved without Sideloader's resolve info names its mod items by this raw id.
     std::vector<const ModEntry*> findByListId(int category, int64_t id) const;
@@ -52,6 +70,7 @@ private:
     std::map<std::string, std::vector<ModEntry>> byGuid_;
     std::map<std::pair<int, int64_t>, std::vector<std::pair<std::string, size_t>>> byListId_;   // -> (guid, index in byGuid_[guid])
     std::map<std::string, std::pair<std::string, size_t>> byShaderName_;                        // shader name -> (guid, index in byGuid_[guid])
+    library::GameInfo game_;
     size_t count_ = 0;
 };
 

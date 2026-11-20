@@ -71,8 +71,8 @@ std::vector<ItemRef> ItemsFromCard(const card::Card& card, int outfit) {
     return out;
 }
 
-Resolver::Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoot)
-    : mods_(mods), lists_(lists), abdata_(std::move(abdataRoot)) {}
+Resolver::Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoot, library::GameInfo game)
+    : mods_(mods), lists_(lists), abdata_(std::move(abdataRoot)), game_(std::move(game)) {}
 
 ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     // In the viewer, Reshape (UI thread) can resolve while a card load (worker thread) is assembling. Both walk
@@ -130,23 +130,28 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     if (row) {
         r.modGuid = row->modId;
         const auto* files = mods_.find(row->modId);
-        if (!files || files->empty()) {
+        std::vector<const ModEntry*> compatible;
+        if (files)
+            for (const ModEntry& cand : *files)
+                if (cand.compatibleWith(mods_.game())) compatible.push_back(&cand);
+        if (compatible.empty()) {
             if (byRawId()) return r;
             r.status = ItemStatus::MissingMod;
-            r.detail = "mod '" + row->modId + "' is not installed under the mods folder";
+            r.detail = "mod '" + row->modId + "' is not installed or is not compatible with this game";
             return r;
         }
         // Several installed files can carry one GUID (versions of a pack); take one whose lists define the item, the newest by path.
-        const ModEntry* pick = &(*files)[0];
+        const ModEntry* pick = compatible[0];
         bool pickHas = false;
-        for (const ModEntry& cand : *files) {
+        for (const ModEntry* candPtr : compatible) {
+            const ModEntry& cand = *candPtr;
             bool has = false;
             for (size_t k = 0; k + 1 < cand.listIds.size() && !has; k += 2) has = cand.listIds[k] == ref.category && cand.listIds[k + 1] == ref.id;
             if ((has && !pickHas) || (has == pickHas && cand.path > pick->path)) { pick = &cand; pickHas = has; }
         }
         const ModEntry& m = *pick;
         r.modName = m.name; r.modVersion = m.version; r.modAuthor = m.author; r.modPath = m.path;
-        if (files->size() > 1) r.ambiguous = true;
+        if (compatible.size() > 1) r.ambiguous = true;
         if (!modListsLoaded_[m.path]) {
             modListsLoaded_[m.path] = true;
             lists_.addMod(m.path, row->modId, nullptr);

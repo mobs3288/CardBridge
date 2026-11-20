@@ -45,7 +45,10 @@ std::string Card::displayName() const {
 
 std::string Card::outfitName(int index) const {
     // The seven coordinate slots of a Koikatsu character, in the order the
-    // game's outfit menu lists them (the card itself stores no names).
+    // game's outfit menu lists them (the card itself stores no names). KKS
+    // cards carry four coordinates; their slot names are not stored in the
+    // card either, so they use the one-based generic name (same as any other
+    // family/index outside the seven KK slots).
     static const char* kNames[] = {
         "School Uniform (In School)",
         "School Uniform (Going Home)",
@@ -92,6 +95,15 @@ CardFamily familyOf(const std::string& marker, bool& isClothes) {
     if (marker == "\xE3\x80\x90" "EroMakeChara\xE3\x80\x91") return CardFamily::EmotionCreators;       // 【EroMakeChara】
     if (marker.rfind("\xE3\x80\x90KoiKatuClothes", 0) == 0) isClothes = true;                        // 【KoiKatuClothes】 and variants
     return CardFamily::Other;
+}
+
+// The character families this build converts. Keep this next to familyOf so
+// the card gate and the outfit-source detection cannot drift apart.
+bool IsSupportedCharacterMarker(const std::string& marker) {
+    return marker == "\xE3\x80\x90KoiKatuChara\xE3\x80\x91" ||      // 【KoiKatuChara】
+           marker == "\xE3\x80\x90KoiKatuCharaS\xE3\x80\x91" ||     // 【KoiKatuCharaS】
+           marker == "\xE3\x80\x90KoiKatuCharaSP\xE3\x80\x91" ||    // 【KoiKatuCharaSP】
+           marker == "\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91";     // 【KoiKatuCharaSun】
 }
 
 Value decodeCoordinate(const Bytes& blob, Outfit& out) {
@@ -231,11 +243,9 @@ bool IsKoikatsuClothesMarker(const std::string& marker) {
 }
 
 bool IsKoikatsuCharacterMarker(const std::string& marker) {
-    // The families this build converts. Sunshine/EmotionCreators cards are not
-    // usable as coordinate sources yet and stay on the character path.
-    return marker == "\xE3\x80\x90KoiKatuChara\xE3\x80\x91" ||
-           marker == "\xE3\x80\x90KoiKatuCharaS\xE3\x80\x91" ||
-           marker == "\xE3\x80\x90KoiKatuCharaSP\xE3\x80\x91";
+    // The character families this build converts; all of them use the same
+    // coordinate payload for outfit sources. EmotionCreators stays unsupported.
+    return IsSupportedCharacterMarker(marker);
 }
 
 ImageSourceKind DetectImageSource(const std::string& path) {
@@ -664,9 +674,13 @@ Card LoadCard(const std::string& path) {
             c.blocks.push_back(b);
         }
 
-        if (c.family == CardFamily::KoikatsuSunshine || c.family == CardFamily::EmotionCreators) {
+        // EmotionCreators uses a different section layout and is still not a
+        // conversion target. Koikatsu Sunshine shares the KK container and
+        // section keys (verified on real cards) and is converted by the same
+        // pipeline; only its asset library and a few mappings differ.
+        if (c.family == CardFamily::EmotionCreators) {
             c.supported = false;
-            c.supportNote = std::string("recognised as ") + FamilyName(c.family) + ", not converted yet (no matching game install to verify its asset bundles)";
+            c.supportNote = std::string("recognised as ") + FamilyName(c.family) + ", not converted yet";
             c.sha256 = Sha256Hex(file);
             return c;
         }

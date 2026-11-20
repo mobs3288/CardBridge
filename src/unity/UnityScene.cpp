@@ -36,6 +36,7 @@ size_t channelFormatSize(int format) {
     case 2: return 1;   // colour, 4 x uint8
     case 3: return 1;   // byte
     case 4: return 4;   // uint32
+    case 10: return 4;  // UInt32 (Unity 2019 blend indices on KKS meshes)
     default: throw FormatError("unknown vertex channel format " + std::to_string(format));
     }
 }
@@ -50,6 +51,91 @@ float halfToFloat(uint16_t h) {
 }
 
 } // namespace
+
+bool DecodeBlendChannels(const std::vector<VertexChannel>& channels, const Bytes& data,
+                         size_t vertexCount, std::vector<BoneInfluence>& out, std::string* why) {
+    auto fail = [&](const std::string& s) { if (why) *why = s; out.clear(); return false; };
+    if (vertexCount == 0 || channels.size() <= 13) return fail("no KKS blend channels");
+    const VertexChannel& wc = channels[12];
+    const VertexChannel& ic = channels[13];
+    // Single-bone KKS meshes (eyes, tongue) omit ch12 entirely: Unity stores
+    // only the bone index in ch13 and the weight is implicitly 1. ch13 without
+    // ch12 is therefore still valid skin data, not an unskinned mesh.
+    const bool haveWeights = wc.dimension > 0;
+    if (!haveWeights && ic.dimension <= 0) return fail("KKS blend channels have no data");
+
+    int streamCount = 0;
+    for (const auto& c : channels)
+        if (c.dimension > 0 && c.stream >= 0) streamCount = std::max(streamCount, c.stream + 1);
+    if (wc.stream < 0 || ic.stream < 0 || wc.stream >= streamCount || ic.stream >= streamCount)
+        return fail("KKS blend channels use an invalid stream");
+
+    std::vector<size_t> sOff(static_cast<size_t>(streamCount)), sStride(static_cast<size_t>(streamCount));
+    try {
+        size_t off = 0;
+        for (int s = 0; s < streamCount; ++s) {
+            size_t stride = 0;
+            for (const auto& c : channels)
+                if (c.stream == s && c.dimension > 0) stride += static_cast<size_t>(c.dimension) * channelFormatSize(c.format);
+            sOff[static_cast<size_t>(s)] = off;
+            sStride[static_cast<size_t>(s)] = stride;
+            off += vertexCount * stride;
+            off = (off + 15) & ~static_cast<size_t>(15);
+        }
+    } catch (const FormatError& e) {
+        return fail(e.what());
+    }
+
+    auto read = [&](const VertexChannel& k, std::vector<float>& dst) -> bool {
+        const size_t csz = channelFormatSize(k.format);
+        const size_t base = sOff[static_cast<size_t>(k.stream)] + static_cast<size_t>(k.offset);
+        const size_t stride = sStride[static_cast<size_t>(k.stream)];
+        if (base + (vertexCount - 1) * stride + static_cast<size_t>(k.dimension) * csz > data.size())
+            throw FormatError("vertex data shorter than its channels imply");
+        dst.assign(vertexCount * 4, 0.0f);
+        for (size_t i = 0; i < vertexCount; ++i)
+            for (int d = 0; d < std::min(k.dimension, 4); ++d) {
+                const uint8_t* src = data.data() + base + i * stride + static_cast<size_t>(d) * csz;
+                float f = 0.0f;
+                switch (k.format) {
+                case 0: std::memcpy(&f, src, 4); break;
+                case 1: { uint16_t h; std::memcpy(&h, src, 2); f = halfToFloat(h); break; }
+                case 2: case 3: f = *src / 255.0f; break;
+                default: { uint32_t u; std::memcpy(&u, src, 4); f = static_cast<float>(u); break; }
+                }
+                dst[i * 4 + static_cast<size_t>(d)] = f;
+            }
+        return true;
+    };
+
+    std::vector<float> weights, indices;
+    try {
+        if (haveWeights && !read(wc, weights)) return fail("KKS blend weight channel is empty");
+        if (!read(ic, indices)) return fail("KKS blend index channel is empty");
+    } catch (const FormatError& e) {
+        return fail(e.what());
+    }
+
+    const int influences = haveWeights ? std::max(1, std::min(4, std::min(wc.dimension, ic.dimension))) : 1;
+    out.resize(vertexCount);
+    for (size_t vi = 0; vi < vertexCount; ++vi) {
+        BoneInfluence b;
+        float sum = 0.0f;
+        for (int k = 0; k < influences; ++k) {
+            const float f = indices[vi * 4 + static_cast<size_t>(k)];
+            b.idx[k] = f > 2147483647.0f ? -1 : static_cast<int>(f);
+            b.w[k] = haveWeights ? std::max(0.0f, weights[vi * 4 + static_cast<size_t>(k)])
+                                 : (k == 0 ? 1.0f : 0.0f);
+            sum += b.w[k];
+        }
+        if (sum > 1e-6f)
+            for (int k = 0; k < influences; ++k) b.w[k] /= sum;
+        else
+            for (int k = 0; k < influences; ++k) { b.idx[k] = 0; b.w[k] = 0.0f; }
+        out[vi] = b;
+    }
+    return true;
+}
 
 UnityFile::UnityFile(std::shared_ptr<UnityBundle> bundle) : bundle_(std::move(bundle)) {
     const auto* node = bundle_->serializedNode();
@@ -396,6 +482,18 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
     }
     if (!m.skin.empty() && m.skin.size() != count) m.skin.clear();
 
+    // Unity 2019 (Koikatsu Sunshine) no longer serialises m_Skin: blend weights
+    // and bone indices live in vertex channels 12 and 13 instead. KK meshes keep
+    // the m_Skin path above, so this is strictly a fallback for empty m_Skin.
+    if (m.skin.empty()) {
+        std::vector<VertexChannel> vc;
+        vc.reserve(ch.size());
+        for (const auto& k : ch) vc.push_back({k.stream, k.offset, k.format, k.dim});
+        std::string skinWhy;
+        if (!DecodeBlendChannels(vc, data, count, m.skin, &skinWhy) && std::getenv("CARDBRIDGE_DEBUG_CHANNELS"))
+            std::fprintf(stderr, "mesh %s: no KKS blend channels (%s)\n", m.name.c_str(), skinWhy.c_str());
+    }
+
     for (const auto& bp : v.at("m_BindPose").asArray()) {
         Mat4 mt;
         for (int r = 0; r < 4; ++r)
@@ -510,14 +608,65 @@ std::optional<Bytes> UnityFile::readShaderBlob(int64_t shaderPathId, std::string
     if (!o) return fail("shader object not found");
     Value v = sf_->read(*o);
     const Value& platforms = v.at("platforms");
+    const Value& offsets = v.at("offsets");
+    const Value& clens = v.at("compressedLengths");
+    const Value& dlens = v.at("decompressedLengths");
+    const Bytes& blob = v.at("compressedBlob").asBin();
     size_t pick = platforms.size();
     for (size_t i = 0; i < platforms.size(); ++i) if (platforms.at(i).asInt() == 4) pick = i;   // 4 = Direct3D 11
     if (pick == platforms.size()) return fail("the shader has no Direct3D 11 program");
-    // Programs of every platform are stored back to back in one blob; this platform's part starts at offsets[pick].
-    uint64_t off = static_cast<uint64_t>(v.at("offsets").at(pick).asInt());
-    uint64_t clen = static_cast<uint64_t>(v.at("compressedLengths").at(pick).asInt());
-    uint64_t dlen = static_cast<uint64_t>(v.at("decompressedLengths").at(pick).asInt());
-    const Bytes& blob = v.at("compressedBlob").asBin();
+
+    if (offsets.size() && offsets.at(0).isArray()) {
+        // Unity 2019 (KKS): offsets/lengths are [subshader][platform]. Each
+        // slice is a whole program blob (count + 3-word descriptors + data).
+        // Normalise to the KK layout (count + 2-word descriptors + concatenated
+        // data) so ParseUnityShaderBlob can treat both games identically.
+        struct Entry { uint64_t off, len; };
+        std::vector<Entry> entries;
+        Bytes all;
+        auto partU32 = [](const Bytes& b, size_t at) -> uint32_t {
+            uint32_t v = 0;
+            if (at + 4 <= b.size()) std::memcpy(&v, b.data() + at, 4);
+            return v;
+        };
+        for (size_t s = 0; s < offsets.size(); ++s) {
+            const Value& so = offsets.at(s);
+            const Value& sc = clens.at(s), & sd = dlens.at(s);
+            if (!so.isArray() || pick >= so.size() || pick >= sc.size() || pick >= sd.size()) continue;
+            const uint64_t off = static_cast<uint64_t>(so.at(pick).asInt());
+            const uint64_t cl = static_cast<uint64_t>(sc.at(pick).asInt());
+            const uint64_t dl = static_cast<uint64_t>(sd.at(pick).asInt());
+            if (off + cl > blob.size() || cl == 0) continue;
+            try {
+                Bytes part = Lz4DecompressBlock(blob.data() + off, static_cast<size_t>(cl), static_cast<size_t>(dl));
+                const uint32_t nProg = partU32(part, 0);
+                if (nProg == 0 || nProg > 4096 || 4 + size_t(nProg) * 12 > part.size()) continue;
+                for (uint32_t i = 0; i < nProg; ++i) {
+                    const uint32_t po = partU32(part, 4 + size_t(i) * 12);
+                    const uint32_t pl = partU32(part, 8 + size_t(i) * 12);
+                    if (po + pl > part.size() || pl == 0) continue;
+                    entries.push_back({all.size(), pl});
+                    all.insert(all.end(), part.begin() + po, part.begin() + po + pl);
+                }
+            } catch (const std::exception& e) {
+                return fail(std::string("shader subshader ") + std::to_string(s) + " does not decompress: " + e.what());
+            }
+        }
+        if (entries.empty()) return fail("no Direct3D 11 shader subshader could be decoded");
+        Bytes normalized;
+        auto u32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) normalized.push_back(static_cast<uint8_t>(x >> (8 * i))); };
+        const uint64_t headerSize = 4 + static_cast<uint64_t>(entries.size()) * 8;
+        u32(static_cast<uint32_t>(entries.size()));
+        for (const auto& e : entries) { u32(static_cast<uint32_t>(headerSize + e.off)); u32(static_cast<uint32_t>(e.len)); }
+        normalized.insert(normalized.end(), all.begin(), all.end());
+        return normalized;
+    }
+
+    // KK: one flat descriptor per platform; programs of that platform are
+    // stored back to back starting at offsets[pick].
+    uint64_t off = static_cast<uint64_t>(offsets.at(pick).asInt());
+    uint64_t clen = static_cast<uint64_t>(clens.at(pick).asInt());
+    uint64_t dlen = static_cast<uint64_t>(dlens.at(pick).asInt());
     if (off + clen > blob.size()) return fail("shader blob is truncated");
     try {
         return Lz4DecompressBlock(blob.data() + off, static_cast<size_t>(clen), static_cast<size_t>(dlen));

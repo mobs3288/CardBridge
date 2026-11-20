@@ -40,21 +40,27 @@ size_t ListTable::loadBaseGame(const std::string& abdataRoot, std::vector<std::s
             auto bundle = unity::UnityBundle::Open(fileio::ReadFile(f), fileio::FileName(f));
             unity::UnityFile uf(bundle);
             for (const auto& [name, bytes] : uf.readTextAssets()) {
-                Value doc = MsgPackParse(bytes);
-                int category = static_cast<int>(doc.at("categoryNo").asInt());
-                std::vector<std::string> keys;
-                for (const auto& k : doc.at("lstKey").asArray()) keys.push_back(k.asStr());
-                for (const auto& [idv, rowv] : doc.at("dictList").asMap()) {
-                    ListItem it;
-                    it.origin = ListItem::Origin::BaseGame;
-                    it.category = category;
-                    it.container = abdataRoot;
-                    const auto& row = rowv.asArray();
-                    for (size_t i = 0; i < keys.size() && i < row.size(); ++i) it.keys[keys[i]] = row[i].asStr();
-                    it.id = idv.asInt();
-                    it.name = it.get("Name");
-                    auto [pos, inserted] = base_.emplace(std::make_pair(category, it.id), it);
-                    if (inserted) ++added;
+                // One non-table TextAsset must not silently discard the other
+                // tables in the same bundle (KKS mix tables and shape anime).
+                try {
+                    Value doc = MsgPackParse(bytes);
+                    int category = static_cast<int>(doc.at("categoryNo").asInt());
+                    std::vector<std::string> keys;
+                    for (const auto& k : doc.at("lstKey").asArray()) keys.push_back(k.asStr());
+                    for (const auto& [idv, rowv] : doc.at("dictList").asMap()) {
+                        ListItem it;
+                        it.origin = ListItem::Origin::BaseGame;
+                        it.category = category;
+                        it.container = abdataRoot;
+                        const auto& row = rowv.asArray();
+                        for (size_t i = 0; i < keys.size() && i < row.size(); ++i) it.keys[keys[i]] = row[i].asStr();
+                        it.id = idv.asInt();
+                        it.name = it.get("Name");
+                        auto [pos, inserted] = base_.emplace(std::make_pair(category, it.id), it);
+                        if (inserted) ++added;
+                    }
+                } catch (const std::exception& e) {
+                    if (issues) issues->push_back(f + " / " + name + ": " + e.what());
                 }
             }
         } catch (const std::exception& e) {

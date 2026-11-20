@@ -418,8 +418,8 @@ Overrides headShapeOverrides(const card::Card& card, resolve::Resolver& resolver
 // MainTex and ColorMaskTex plus the card's colours and assigns them to the first material of the renderers its
 // ChaClothesComponent lists; accessories keep the prefab texture and are tinted through their colour mask.
 struct ItemLook {
-    int tex1 = -1, tex2 = -1;             // baked scene textures for the clothing main / second texture
-    std::set<int64_t> use1, use2;         // renderer component ids that get tex1 / tex2 on material 0
+    int tex1 = -1, tex2 = -1, tex3 = -1;  // baked scene textures for the clothing first / second / third texture
+    std::set<int64_t> use1, use2, use3;   // renderer component ids that get texN on material 0
     bool materialTint = false;            // accessories: tint each material's own texture by its _ColorMask
     std::set<int64_t> tintOnly;           // accessories: the renderers the game colours (rendNormal / rendHair / the custom-hair component); empty = all
     // accessories: the colour triple the game applies to that renderer (ChaControl.ChangeAccessoryColor, then HairAccessoryCustomizer at run time;
@@ -946,6 +946,7 @@ struct Builder {
             if (look && matIndex == 0) {   // a renderer whose material lives elsewhere still gets the texture the game assigns it
                 if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
                 else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
+                else if (look->use3.count(r.componentId) && look->tex3 >= 0) sm.texture = look->tex3;
             }
             if (sm.texture < 0) scene.warn(partId, "material not loaded (" + why + "); using a plain material");
             if (sm.texture >= 0) sm.alpha = true;
@@ -969,11 +970,18 @@ struct Builder {
             }
             // The outfit's slot colours are already baked into the clothing texture the create step built: applying them a
             // second time through the prefab's stored _Color (the outfit's default colour) crushes the outfit to black.
-            if (look && look->bakedOutfitColors && matIndex == 0 && ((look->use1.count(r.componentId) && look->tex1 >= 0) || (look->use2.count(r.componentId) && look->tex2 >= 0)))
+            if (look && look->bakedOutfitColors && matIndex == 0 &&
+                ((look->use1.count(r.componentId) && look->tex1 >= 0) ||
+                 (look->use2.count(r.componentId) && look->tex2 >= 0) ||
+                 (look->use3.count(r.componentId) && look->tex3 >= 0)))
                 for (auto& pr : sm.props)
                     if (pr.first == "_Color" || pr.first == "_Color2" || pr.first == "_Color3") pr.second = Vec4{1, 1, 1, 1};
+            // Family-aware hair test: KK uses Shader Forge/main_hair[_front],
+            // KKS uses Koikano/hair_main_sun_front / hair_main_low_sun. Both
+            // must receive the character's hair colour.
+            const bool hairShader = IsHairShaderFamily(sm.shader);
             if (const Vec4* tint = hairTintColor ? hairTintColor
-                                                 : (fallbackColor && (sm.shader == "Shader Forge/main_hair" || sm.shader == "Shader Forge/main_hair_front")
+                                                 : (fallbackColor && hairShader
                                                         ? fallbackColor
                                                         : nullptr)) {
                 // In the game the character maker's hair colour overwrites the _Color of every hair material
@@ -1042,6 +1050,7 @@ struct Builder {
             if (look && matIndex == 0) {
                 if (look->use1.count(r.componentId) && look->tex1 >= 0) sm.texture = look->tex1;
                 else if (look->use2.count(r.componentId) && look->tex2 >= 0) sm.texture = look->tex2;
+                else if (look->use3.count(r.componentId) && look->tex3 >= 0) sm.texture = look->tex3;
             }
             // The colour triple the game applies to this renderer (accessory rules; a channel with w < 0 keeps the prefab's own value).
             auto resolveTint = [&]() -> std::array<Vec4, 3> {
@@ -1111,8 +1120,12 @@ struct Builder {
                 // anything without a workable twin stays on the original shader.
                 std::string fallback;
                 if (si < 0) {
-                    if (contains(e->property, "alpha")) fallback = "Shader Forge/main_alpha";
-                    else if (contains(e->property, "item")) fallback = "Shader Forge/main_item";
+                    // The KK fallbacks name Shader Forge shaders that do not
+                    // exist in a KKS library; pick the Koikano twin when the
+                    // material came from a KKS bundle.
+                    const bool kksShader = sm.shader.rfind("Koikano/", 0) == 0 || (m && contains(m->shaderName, "Koikano/"));
+                    if (contains(e->property, "alpha")) fallback = kksShader ? "Koikano/main_clothes_alpha" : "Shader Forge/main_alpha";
+                    else if (contains(e->property, "item")) fallback = kksShader ? "Koikano/main_clothes_item" : "Shader Forge/main_item";
                     if (!fallback.empty()) si = shaderByName(fallback);
                 }
                 if (si < 0) { scene.warn(partId, "MaterialEditor shader " + e->property + " for " + sm.name + " is not in the library: kept " + sm.shader); continue; }
@@ -1603,6 +1616,7 @@ struct Builder {
         for (size_t i = 0; i < boneIdx.size(); ++i) invBone[i] = inverse(scene.bones[static_cast<size_t>(boneIdx[i])].world);
         const Mat4 invStatic = inverse(scene.bones[static_cast<size_t>(staticBind)].world);
         sm.reshapable = true;
+        size_t badSkinIndices = 0;   // influences dropped because their bone index is outside this renderer's bone list
         for (size_t v = 0; v < n; ++v) {
             SceneVertex& out = sm.vertices[v];
             Vec3 p = mesh->positions[v];
@@ -1622,7 +1636,7 @@ struct Builder {
                 Vec3 lp[4], ln[4];
                 for (int k = 0; k < 4; ++k) {
                     if (bi.w[k] <= 0.0f) continue;
-                    if (bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) continue;
+                    if (bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) { ++badSkinIndices; continue; }
                     const size_t bk = static_cast<size_t>(bi.idx[k]);
                     const Mat4& m = boneMat[bk];
                     pos = pos + m.point(p) * bi.w[k];
@@ -1651,6 +1665,9 @@ struct Builder {
             }
         }
 
+        if (badSkinIndices)
+            scene.warn(partId, "renderer '" + r.name + "' has " + std::to_string(badSkinIndices) +
+                               " skinned influences with bone indices outside its bone list; those influences were dropped");
         {   // blend shape offsets in model space: the mesh-space delta goes through the same skinning (rotation and scale part) as the vertex
             auto modelDelta = [&](size_t v, Vec3 d, std::array<Vec3, 4>& local) {
                 local = {};
@@ -2155,6 +2172,10 @@ void SettleHeels(Scene& scene) { settleHeels(scene); }
 
 bool CreateRunsInLinearLight(const std::string& materialName) {
     return materialName == "cf_m_clothesN_create" || materialName == "cf_m_eye_create" || materialName == "cf_m_eyewhite_create";
+}
+
+bool IsHairShaderFamily(const std::string& shaderName) {
+    return contains(shaderName, "hair");
 }
 
 Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale) {
@@ -2852,6 +2873,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     if (sk2.size() >= 3) skinColor = vec4Of(sk2);
 
     bool topCoversBra = false;
+    bool bottomHidesShorts = false;   // KKS list field HideShorts on a bottom
     std::vector<std::string> kokanHiders;   // outfit part ids whose list row has KokanHide=1 (they hide the crotch, as the game does)
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
     std::vector<MaskSource> bodyMasks, braMasks;
@@ -2983,7 +3005,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 part.heelShoeShearZ = hc.shoeShearZ; part.heelConfigSource = hc.source;
             }
         }
-        const int64_t itemRoot = uf->findPrefabRoot(item.assetName());
+        std::string prefabName = item.assetName();
+        int64_t itemRoot = uf->findPrefabRoot(prefabName);
+        // KKS bundles also contain _low LOD roots. A list row should name the
+        // full prefab, but prefer it if a row ever points at the LOD copy.
+        if (itemRoot && prefabName.size() > 4 && prefabName.compare(prefabName.size() - 4, 4, "_low") == 0) {
+            const std::string full = prefabName.substr(0, prefabName.size() - 4);
+            const int64_t fullRoot = uf->findPrefabRoot(full);
+            if (fullRoot) {
+                scene.warn(ref.partId, "list row named the LOD prefab '" + prefabName + "'; using '" + full + "' instead");
+                prefabName = full;
+                itemRoot = fullRoot;
+            }
+        }
         if (!itemRoot) {
             part.status = "missing-bundle";
             part.detail = "prefab '" + item.assetName() + "' not found in " + item.bundleRel() + " (" + itemWhere(ref, item) + ")";
@@ -3101,7 +3135,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 if (std::getenv("CARDBRIDGE_DEBUG_CLOTHES")) std::fprintf(stderr, "clothes texture %s %s = %s\n", ref.partId.c_str(), name.c_str(), keyOut.c_str());
                 return b.decode(*tb, tp, ref.partId);
             };
-            std::string k1, k2, k3, k4;
+            std::string k1, k2, k3, k4, k5, k6;
             auto main1 = listTex("MainTexAB", "MainTex", k1);
             auto mask1 = listTex("ColorMaskAB", "ColorMaskTex", k2);
             auto main2 = listTex("MainTex02AB", "MainTex02", k3);
@@ -3156,7 +3190,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             };
             if (main1 && mask1) { look.tex1 = clothesTexture(main1, k1, mask1, k2); haveLook = true; }
             if (main2 && mask2) { look.tex2 = clothesTexture(main2, k3, mask2, k4); haveLook = true; }
-            if (look.tex1 >= 0 || look.tex2 >= 0) look.bakedOutfitColors = true;
+            // KKS adds a third texture pair on a handful of tops/bottoms. The
+            // game colours it with the same three slot colours and assigns it
+            // to rendNormal03; keep the first two paths untouched for KK.
+            auto main3 = listTex("MainTex03AB", "MainTex03", k5);
+            auto mask3 = listTex("ColorMask03AB", "ColorMask03Tex", k6);
+            if (main3 && mask3) { look.tex3 = clothesTexture(main3, k5, mask3, k6); haveLook = true; }
+            if (look.tex1 >= 0 || look.tex2 >= 0 || look.tex3 >= 0) look.bakedOutfitColors = true;
             if (haveLook) {
                 for (const auto& mb : uf->monoBehavioursUnder(itemRoot)) {
                     if (mb.className != "ChaClothesComponent") continue;
@@ -3173,6 +3213,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     collect("rendAlpha01", look.use1);
                     collect("rendNormal02", look.use2);
                     collect("rendAlpha02", look.use2);
+                    collect("rendNormal03", look.use3);   // KKS third clothing texture
                     collect("rendAccessory", look.use1);
                 }
             }
@@ -3912,6 +3953,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             else scene.warn(ref.partId, "no renderable geometry found in the prefab");
         }
         if (ref.group == "Outfit" && ref.slot == 0 && item.listItem.get("NotBra") == "1") topCoversBra = true;
+        if (ref.group == "Outfit" && ref.slot == 1 && item.listItem.get("HideShorts") == "1") bottomHidesShorts = true;
         if (ref.group == "Outfit" && item.listItem.get("KokanHide") == "1") kokanHiders.push_back(part.id);
         b.localOv = nullptr;
         b.goMesh.clear();
@@ -4007,6 +4049,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 p.includeInExport = false;
                 p.visibleInPreview = false;
                 p.detail = "hidden: the top covers the bra (list NotBra=1); the game does not draw it either";
+            }
+
+    // A KKS bottom whose list row says HideShorts=1 makes the game skip the shorts underneath.
+    if (bottomHidesShorts)
+        for (auto& p : scene.parts)
+            if (p.group == "Outfit" && p.id.size() >= 7 && p.id.compare(p.id.size() - 7, 7, ".shorts") == 0 && !p.meshes.empty()) {
+                p.includeInExport = false;
+                p.visibleInPreview = false;
+                p.detail = "hidden: the bottom hides shorts (list HideShorts=1); the game does not draw them either";
             }
 
     // The triangles the worn garments cover. Masks live in the covered mesh's own UV space (red channel 255 = keep): the game masks

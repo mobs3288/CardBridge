@@ -29,6 +29,29 @@ enum class Profile {
     Full,      // plus every base-game item bundle in abdata/chara (~0.9 GB)
 };
 
+// Which game a library was imported from. Recorded at import time so a KKS
+// card is never silently converted against a KK library (and vice versa).
+// Unknown is kept for libraries imported before this field existed.
+enum class SourceGame { Unknown, Koikatsu, KoikatsuSunshine };
+
+struct GameInfo {
+    SourceGame game = SourceGame::Unknown;
+    std::string unityVersion;            // e.g. "2019.4.9f1" / "5.6.2f1"
+    int serializedFormat = 0;            // SerializedFile version of oo_base (21 / 17)
+    const char* name() const {
+        switch (game) {
+        case SourceGame::Koikatsu: return "koikatsu";
+        case SourceGame::KoikatsuSunshine: return "koikatsu-sunshine";
+        default: return "unknown";
+        }
+    }
+};
+
+// Reads the game fields of <library>/library.json. Missing fields (older
+// libraries) yield SourceGame::Unknown with no issue: nothing in the KK path
+// depends on them.
+GameInfo ReadGameInfo(const std::string& libraryRoot);
+
 struct ImportOptions {
     std::string gameRoot;      // folder containing abdata/
     std::string libraryRoot;   // destination
@@ -61,6 +84,7 @@ ImportResult ImportLibrary(const ImportOptions& opt, const std::function<void(si
 struct CheckResult {
     bool ok = false;
     std::string profile;
+    GameInfo game;
     size_t files = 0;
     std::vector<std::string> issues;
 };

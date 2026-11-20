@@ -51,6 +51,8 @@
 #include "mesh/Simplify.h"
 #include "pmx/PmxWriter.h"
 #include "unity/TextureDecode.h"
+#include "unity/UnityScene.h"
+#include "shader/UnityShader.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "shape/Shape.h"
@@ -254,10 +256,13 @@ static void putDotnetString(Bytes& b, const std::string& s) {
 // Encodes a minimal character card; `coordinateBins` is the Coordinate block's array of bins
 // (a Value array), `kkex` the full KKEx map (or nil() to omit the block).
 std::string writeTestCardFile(const std::string& name, const Value& coordinateBins,
-                              const Value& parameter, const Value& status, const Value& hair, const Value& kkex) {
+                              const Value& parameter, const Value& status, const Value& hair, const Value& kkex,
+                               const std::string& marker = "\xE3\x80\x90KoiKatuChara\xE3\x80\x91",
+                               const std::string& parameterVersion = "0.0.0", bool withAbout = false,
+                               const Value& face = Value(Value::Map{}), const Value& body = Value(Value::Map{})) {
     Bytes file = tinyPng();
     put32(file, 100);
-    putDotnetString(file, "\xE3\x80\x90KoiKatuChara\xE3\x80\x91");   // 【KoiKatuChara】
+    putDotnetString(file, marker);   // 【KoiKatuChara】
     putDotnetString(file, "0.0.0");
     put32(file, 0);   // face thumbnail: empty
     auto chunkSized = [&](const Value& v) {
@@ -270,7 +275,6 @@ std::string writeTestCardFile(const std::string& name, const Value& coordinateBi
     // Custom block: face, body, hair, each length-prefixed
     Bytes custom;
     {
-        Value face(Value::Map{}), body(Value::Map{});
         std::vector<const Value*> values{&face, &body, &hair};
         for (const Value* v : values) {
             Bytes x = chunkSized(*v);
@@ -284,13 +288,20 @@ std::string writeTestCardFile(const std::string& name, const Value& coordinateBi
     blocks.push_back({"Parameter", MsgPackPack(parameter)});
     blocks.push_back({"Status", MsgPackPack(status)});
     if (!kkex.isNil()) blocks.push_back({"KKEx", MsgPackPack(kkex)});
+    if (withAbout) {
+        Value::Map about;
+        about.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        about.emplace_back(Value(std::string("language")), Value(int64_t{0}));
+        blocks.push_back({"About", MsgPackPack(Value(std::move(about)))});
+    }
     int64_t pos = 0;
     Value::Array lst;
     Bytes data;
     for (auto& blk : blocks) {
         Value::Map info;
+        const std::string blockVersion = blk.name == "Parameter" ? parameterVersion : "0.0.0";
         info.emplace_back(Value(std::string("name")), Value(blk.name));
-        info.emplace_back(Value(std::string("version")), Value(std::string("0.0.0")));
+        info.emplace_back(Value(std::string("version")), Value(blockVersion));
         info.emplace_back(Value(std::string("pos")), Value(pos));
         info.emplace_back(Value(std::string("size")), Value(static_cast<int64_t>(blk.data.size())));
         lst.emplace_back(Value(std::move(info)));
@@ -1727,6 +1738,183 @@ void unitTests() {
         // A family whose coordinate order is not known gets neutral names.
         c.family = card::CardFamily::KoikatsuSunshine;
         CHECK(c.outfitName(0) == "Outfit 1");
+    });
+    test("KKS card: accepted with four outfits, KKS versions and an About block", [] {
+        Value::Array coords;
+        for (int i = 0; i < 4; ++i)
+            coords.push_back(testCoordinateBin(testClothesMap({100 + i}), testAccessoryMap({}), false, Value(Value::Map{})));
+        Value::Array faceSliders, bodySliders;
+        for (int i = 0; i < 52; ++i) faceSliders.push_back(Value(0.5));
+        for (int i = 0; i < 44; ++i) bodySliders.push_back(Value(0.5));
+        Value::Map face, body, prm, st;
+        face.emplace_back(Value(std::string("version")), Value(std::string("0.0.3")));
+        face.emplace_back(Value(std::string("shapeValueFace")), Value(std::move(faceSliders)));
+        body.emplace_back(Value(std::string("version")), Value(std::string("0.0.2")));
+        body.emplace_back(Value(std::string("shapeValueBody")), Value(std::move(bodySliders)));
+        prm.emplace_back(Value(std::string("version")), Value(std::string("0.0.6")));
+        prm.emplace_back(Value(std::string("firstname")), Value(std::string("Sun")));
+        st.emplace_back(Value(std::string("coordinateType")), Value(int64_t{2}));
+        const std::string marker = "\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91";
+        const std::string path = writeTestCardFile("kks_stage1.png", Value(std::move(coords)),
+                                                   Value(std::move(prm)), Value(std::move(st)), Value(Value::Map{}), Value(),
+                                                   marker, "0.0.6", true, Value(std::move(face)), Value(std::move(body)));
+        card::Card c = card::LoadCard(path);
+        CHECK(c.supported && c.supportNote.empty());
+        CHECK(c.family == card::CardFamily::KoikatsuSunshine);
+        CHECK(c.marker == marker);
+        CHECK(c.outfits.size() == 4);
+        CHECK(c.face.at("version").asStr() == "0.0.3");
+        CHECK(c.face.at("shapeValueFace").asArray().size() == 52);
+        CHECK(c.body.at("shapeValueBody").asArray().size() == 44);
+        CHECK(c.parameter.at("version").asStr() == "0.0.6");
+        bool hasAbout = false;
+        for (const auto& b : c.blocks) if (b.name == "About") hasAbout = true;
+        CHECK(hasAbout);
+        CHECK(card::IsKoikatsuCharacterMarker(marker));
+        CHECK(card::DetectImageSource(path) == card::ImageSourceKind::Coordinate);
+    });
+    test("KKS mesh: blend weights/indices decoded from vertex channels 12/13", [] {
+        auto putF = [](Bytes& b, size_t at, float v) {
+            uint32_t u; std::memcpy(&u, &v, 4);
+            for (int i = 0; i < 4; ++i) b[at + static_cast<size_t>(i)] = static_cast<uint8_t>((u >> (8 * i)) & 0xff);
+        };
+        auto putU = [](Bytes& b, size_t at, uint32_t u) {
+            for (int i = 0; i < 4; ++i) b[at + static_cast<size_t>(i)] = static_cast<uint8_t>((u >> (8 * i)) & 0xff);
+        };
+        std::vector<unity::VertexChannel> ch(14);
+        ch[12] = {0, 0, 0, 4};    // weights: float4
+        ch[13] = {0, 16, 10, 4};  // bone indices: UInt32 x4
+        Bytes data(2 * 32, 0);
+        putF(data, 0, 0.5f); putF(data, 4, 0.25f); putF(data, 8, 0.25f); putF(data, 12, 0.0f);
+        putU(data, 16, 1); putU(data, 20, 2); putU(data, 24, 3); putU(data, 28, 7);
+        putF(data, 32, 1.0f); putF(data, 36, 1.0f);
+        putU(data, 48, 4); putU(data, 52, 5);
+        std::vector<unity::BoneInfluence> skin;
+        std::string why;
+        CHECK(unity::DecodeBlendChannels(ch, data, 2, skin, &why));
+        CHECK(skin.size() == 2);
+        CHECK(skin[0].idx[0] == 1 && skin[0].idx[1] == 2 && skin[0].idx[2] == 3 && skin[0].idx[3] == 7);
+        CHECK(std::fabs(skin[0].w[0] - 0.5f) < 1e-6f && std::fabs(skin[0].w[1] - 0.25f) < 1e-6f);
+        CHECK(skin[0].w[3] == 0.0f);
+        CHECK(std::fabs(skin[1].w[0] - 0.5f) < 1e-6f && std::fabs(skin[1].w[1] - 0.5f) < 1e-6f);
+        CHECK(skin[1].w[2] == 0.0f && skin[1].idx[2] == 0);
+
+        // Two-influence garments: padded slots stay at zero weight/index 0.
+        std::vector<unity::VertexChannel> ch2(14);
+        ch2[12] = {0, 0, 0, 2};
+        ch2[13] = {0, 8, 10, 2};
+        Bytes data2(16, 0);
+        putF(data2, 0, 0.3f); putF(data2, 4, 0.7f);
+        putU(data2, 8, 11); putU(data2, 12, 12);
+        CHECK(unity::DecodeBlendChannels(ch2, data2, 1, skin, &why));
+        CHECK(skin.size() == 1 && skin[0].idx[0] == 11 && skin[0].idx[1] == 12);
+        CHECK(std::fabs(skin[0].w[0] - 0.3f) < 1e-6f && std::fabs(skin[0].w[1] - 0.7f) < 1e-6f);
+        CHECK(skin[0].w[2] == 0.0f && skin[0].idx[2] == 0);
+
+        // Single-bone meshes (KKS iris/tongue) have ch12 dim 0 and ch13 dim 1:
+        // the implicit weight is 1, exactly like KK's one-influence m_Skin.
+        std::vector<unity::VertexChannel> ch1(14);
+        ch1[13] = {0, 0, 10, 1};
+        Bytes data1(4, 0);
+        putU(data1, 0, 9);
+        CHECK(unity::DecodeBlendChannels(ch1, data1, 1, skin, &why));
+        CHECK(skin.size() == 1 && skin[0].idx[0] == 9 && std::fabs(skin[0].w[0] - 1.0f) < 1e-6f);
+        CHECK(skin[0].w[1] == 0.0f && skin[0].idx[1] == 0);
+
+        // Truncated / absent data fails rather than silently producing an unweighted mesh.
+        Bytes trunc(data.begin(), data.begin() + 20);
+        skin.clear(); why.clear();
+        CHECK(!unity::DecodeBlendChannels(ch, trunc, 2, skin, &why));
+        CHECK(skin.empty() && !why.empty());
+        std::vector<unity::VertexChannel> none(8);
+        skin.clear(); why.clear();
+        CHECK(!unity::DecodeBlendChannels(none, data, 2, skin, &why));
+        CHECK(skin.empty());
+    });
+    test("zipmod game tags filter mod lookups by library profile", [] {
+        library::GameInfo kks; kks.game = library::SourceGame::KoikatsuSunshine;
+        library::GameInfo kk; kk.game = library::SourceGame::Koikatsu;
+        library::GameInfo legacy;
+        resolve::ModEntry sun, both, kkOnly, untagged;
+        sun.games = {"Koikatsu Sunshine"};
+        both.games = {"Koikatsu", "Koikatsu Sunshine"};
+        kkOnly.games = {"Koikatsu"};
+        CHECK(sun.compatibleWith(kks) && !sun.compatibleWith(kk));
+        CHECK(both.compatibleWith(kks) && both.compatibleWith(kk));
+        CHECK(!kkOnly.compatibleWith(kks) && kkOnly.compatibleWith(kk));
+        CHECK(untagged.compatibleWith(kks) && untagged.compatibleWith(kk) && untagged.compatibleWith(legacy));
+    });
+    test("hair shader family covers KK and KKS names", [] {
+        CHECK(assemble::IsHairShaderFamily("Shader Forge/main_hair"));
+        CHECK(assemble::IsHairShaderFamily("Shader Forge/main_hair_front"));
+        CHECK(assemble::IsHairShaderFamily("Koikano/hair_main_sun_front"));
+        CHECK(assemble::IsHairShaderFamily("Koikano/hair_main_low_sun"));
+        CHECK(!assemble::IsHairShaderFamily("Koikano/main_clothes_opaque"));
+        CHECK(!assemble::IsHairShaderFamily("Shader Forge/main_skin"));
+    });
+    test("KKS shader blob: DXBC stage, cbuffer slots and texture bindings", [] {
+        auto put32 = [](Bytes& b, uint32_t v) { for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>(v >> (8 * i))); };
+        auto text = [&](Bytes& b, const char* s) {
+            size_t n = std::strlen(s);
+            put32(b, static_cast<uint32_t>(n));
+            b.insert(b.end(), s, s + n);
+            while (b.size() % 4) b.push_back(0);
+        };
+        Bytes tail;
+        text(tail, "$Globals");
+        put32(tail, 64); put32(tail, 2);           // cbuffer size, variable count
+        text(tail, "_MainTex_ST");
+        for (uint32_t v : {0u, 1u, 4u, 0u, 0u, 32u}) put32(tail, v);
+        text(tail, "_Color");
+        for (uint32_t v : {0u, 1u, 4u, 0u, 0u, 48u}) put32(tail, v);
+        put32(tail, 0);                            // separator
+        put32(tail, 3);                            // 2 textures + 1 cbuffer binding
+        text(tail, "_MainTex");
+        for (uint32_t v : {0u, 0u, 0u, 4u}) put32(tail, v);
+        text(tail, "_ColorMask");
+        for (uint32_t v : {0u, 1u, 1u, 4u}) put32(tail, v);
+        text(tail, "$Globals");
+        put32(tail, 1);
+        for (int i = 0; i < 8; ++i) put32(tail, 0);   // binding padding
+
+        Bytes dxbc;
+        dxbc.insert(dxbc.end(), {'D', 'X', 'B', 'C'});
+        for (int i = 0; i < 16; ++i) dxbc.push_back(0);
+        put32(dxbc, 0);
+        put32(dxbc, 48);   // total container size
+        put32(dxbc, 1);    // one chunk
+        put32(dxbc, 36);   // SHDR chunk offset (after the 4-byte chunk table)
+        dxbc.insert(dxbc.end(), {'S', 'H', 'D', 'R'});
+        put32(dxbc, 4);
+        put32(dxbc, 0x00000040u);   // SM4 pixel shader version token
+        CHECK(dxbc.size() == 48);
+
+        Bytes program(42, 0);   // Unity 2019 preamble
+        program.insert(program.end(), dxbc.begin(), dxbc.end());
+        program.insert(program.end(), tail.begin(), tail.end());
+        Bytes blob;
+        put32(blob, 1);
+        put32(blob, 12);                       // descriptor: offset (after 4+8 header)
+        put32(blob, static_cast<uint32_t>(program.size()));
+        blob.insert(blob.end(), program.begin(), program.end());
+
+        auto progs = cardbridge::shader::ParseUnityShaderBlob(blob);
+        CHECK(progs.size() == 1);
+        if (progs.empty()) return;
+        CHECK(progs[0].isPixel());
+        CHECK(progs[0].cbuffers.size() == 1);
+        if (!progs[0].cbuffers.empty()) {
+            const auto& cb = progs[0].cbuffers[0];
+            CHECK(cb.name == "$Globals" && cb.slot == 0 && cb.params.size() == 2);
+            bool colorAt48 = false;
+            for (const auto& p : cb.params) if (p.name == "_Color" && p.offset == 48) colorAt48 = true;
+            CHECK(colorAt48);
+        }
+        CHECK(progs[0].textures.size() == 2);
+        if (progs[0].textures.size() == 2) {
+            CHECK(progs[0].textures[0].name == "_MainTex" && progs[0].textures[0].reg == 0);
+            CHECK(progs[0].textures[1].name == "_ColorMask" && progs[0].textures[1].reg == 1);
+        }
     });
     test("pmx writer: counts, validation errors", [] {
         pmx::Model m;
@@ -5197,7 +5385,7 @@ void unitTests() {
         CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuChara\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
         CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaS\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
         CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaSP\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);
-        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91")) == card::ImageSourceKind::Invalid);   // not converted yet: plain load path
+        CHECK(kindOf(withMarker("\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91")) == card::ImageSourceKind::Coordinate);   // KKS cards share the coordinate layout
         CHECK(kindOf(withMarker("\xE3\x80\x90" "EroMakeChara\xE3\x80\x91")) == card::ImageSourceKind::Invalid);
         CHECK(kindOf(withMarker("not-a-card")) == card::ImageSourceKind::Invalid);
         // A Coordinate PNG never silently enters the clothing parser as a regular outfit file.

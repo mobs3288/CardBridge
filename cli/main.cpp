@@ -289,6 +289,7 @@ struct Context {
     resolve::ModIndex mods;
     resolve::ListTable lists;
     std::unique_ptr<resolve::Resolver> resolver;
+    library::GameInfo game;
     bool haveLibrary = false;
 };
 
@@ -321,13 +322,35 @@ bool buildContext(const Args& a, Context& ctx) {
             return false;
         }
         abdata = library::AbdataRoot(lib);
+        ctx.game = chk.game;
         size_t rows = ctx.lists.loadBaseGame(abdata, &issues);
         printIssues(issues, "  note: ");
-        std::fprintf(stderr, "library: %s profile, %zu list rows\n", chk.profile.c_str(), rows);
+        std::fprintf(stderr, "library: %s profile", chk.profile.c_str());
+        if (ctx.game.game != library::SourceGame::Unknown) {
+            std::fprintf(stderr, " (%s", ctx.game.name());
+            if (!ctx.game.unityVersion.empty()) std::fprintf(stderr, ", Unity %s", ctx.game.unityVersion.c_str());
+            if (ctx.game.serializedFormat) std::fprintf(stderr, ", serialized %d", ctx.game.serializedFormat);
+            std::fprintf(stderr, ")");
+        }
+        std::fprintf(stderr, ", %zu list rows\n", rows);
         ctx.haveLibrary = true;
     }
-    ctx.resolver = std::make_unique<resolve::Resolver>(ctx.mods, ctx.lists, abdata);
+    ctx.mods.setGame(ctx.game);
+    ctx.resolver = std::make_unique<resolve::Resolver>(ctx.mods, ctx.lists, abdata, ctx.game);
     return true;
+}
+
+// A KKS card must be converted against a KKS library (and a KK card against a
+// KK one) to find its base-game assets. Older libraries have no game field, so
+// Unknown is silent. This is a diagnostic, never a hard failure: a user may
+// deliberately convert a card with a library that has only mod items.
+void noteGameMismatch(const card::Card& c, const Context& ctx) {
+    if (!ctx.haveLibrary || ctx.game.game == library::SourceGame::Unknown) return;
+    const bool kksCard = c.family == card::CardFamily::KoikatsuSunshine;
+    const bool kksLib = ctx.game.game == library::SourceGame::KoikatsuSunshine;
+    if (kksCard != kksLib)
+        std::fprintf(stderr, "note: card is %s but the library was imported from %s; base-game assets may not resolve\n",
+                     card::FamilyName(c.family), ctx.game.name());
 }
 
 int cmdLibrary(const Args& a) {
@@ -479,6 +502,8 @@ int cmdInspect(const Args& a) {
         Context ctx;
         if (a.has("json") || !a.get("mods").empty() || !a.get("library").empty()) {
             if (!buildContext(a, ctx)) return 3;
+            noteGameMismatch(c, ctx);
+            if (ctx.haveLibrary) j["library_game"] = ctx.game.name();
         }
         int outfit = a.opt.count("outfit") ? std::atoi(a.get("outfit").c_str()) : static_cast<int>(c.status.at("coordinateType").asInt());
         j["outfit"] = outfit;
@@ -531,6 +556,7 @@ int cmdClothes(const Args& a) {
         if (!buildContext(a, ctx)) return 3;
         card::Card mc = c;   // assemble mutates in place (pose baked, briefs re-coloured); never touch the caller's card
         assemble::AssembleOptions ao;
+        ao.sourceGame = ctx.game;
         if (a.get("outfit").empty()) ao.outfit = -1;
         else ao.outfit = opt.outfit;
         if (!a.get("clothes").empty()) {
@@ -741,6 +767,8 @@ int cmdConvert(const Args& a) {
     LogMemory("after context (lists)");
 
     assemble::AssembleOptions ao;
+    ao.sourceGame = ctx.game;
+    noteGameMismatch(c, ctx);
     if (a.opt.count("outfit")) ao.outfit = std::atoi(a.get("outfit").c_str());
     if (!a.get("clothes").empty()) {
         try {

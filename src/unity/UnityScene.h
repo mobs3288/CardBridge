@@ -20,6 +20,20 @@ struct PPtr {
 
 struct BoneInfluence { int idx[4] = {0, 0, 0, 0}; float w[4] = {0, 0, 0, 0}; };
 
+// One entry of Mesh.m_VertexData.m_Channels. Exposed so the KKS blend-channel
+// decoder can be unit-tested with synthetic meshes without building a bundle.
+struct VertexChannel {
+    int stream = 0, offset = 0, format = 0, dimension = 0;
+};
+
+// Decodes Unity 2019 (KKS) skinning from vertex channels 12 (float weights)
+// and 13 (UInt32 bone indices) into four-slot BoneInfluence rows. Returns false
+// when the channels are absent or their data is truncated; `why` says which.
+// The influence count is min(dim12, dim13), clamped to 1..4; unused slots are
+// zero-weight. Exposed for tests; readMesh calls it when m_Skin is empty.
+bool DecodeBlendChannels(const std::vector<VertexChannel>& channels, const Bytes& data,
+                         size_t vertexCount, std::vector<BoneInfluence>& out, std::string* why = nullptr);
+
 // A decoded Unity Mesh: float vertex streams plus triangle lists per submesh.
 // Only the channels CardBridge uses are kept (position, normal, uv0..uv3, colour,
 // skin weights, bind poses).

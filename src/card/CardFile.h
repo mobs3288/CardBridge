@@ -63,7 +63,8 @@ struct Card {
     std::vector<BlockInfo> blocks;
 
     // false when the container was read but the family is not converted yet
-    // (Sunshine): the sections below are then left empty.
+    // (EmotionCreators): the sections below are then left empty. Koikatsu
+    // Sunshine is supported and carries the same section values as KK.
     bool supported = false;
     std::string supportNote;
 
@@ -84,9 +85,9 @@ struct Card {
     std::string displayName() const;
 
     // The game's own name for one of a Koikatsu card's coordinate slots:
-    // "School Uniform (In School)" through "Sleeping Over" (0..6). Any other
-    // family, and any index outside those seven, falls back to "Outfit N"
-    // (one-based), so the caller can always show something.
+    // "School Uniform (In School)" through "Sleeping Over" (0..6). Sunshine
+    // (four slots) and any other family/index outside those seven fall back to
+    // "Outfit N" (one-based), so the caller can always show something.
     std::string outfitName(int index) const;
 };
 
@@ -150,15 +151,16 @@ struct ClothingFile {
 
 // Reads an outfit file (【KoiKatuClothes】). Throws CardError for non-cards
 // and for damage inside the payload; a Sunshine outfit file parses but is
-// reported unsupported (supported == false), never thrown.
+// still reported unsupported (supported == false), never thrown. KKS
+// *character* cards are supported and can be used as coordinate sources.
 ClothingFile LoadClothingFile(const std::string& path);
 
 // What a PNG dropped on the importer actually is, decided from the bytes
 // alone (never the file name): the Koikatsu PNG families all carry a marker
 // string appended after the PNG's IEND chunk, and that marker is what this
-// reports. Sunshine/EmotionCreators character markers are deliberately not
-// reported as Coordinate: their payload layouts differ and neither is
-// converted yet, so they travel the character path exactly as they do today.
+// reports. EmotionCreators is deliberately not reported as Coordinate (its
+// payload layout differs); Sunshine character cards are supported and may be
+// used as coordinate sources.
 enum class ImageSourceKind {
     Invalid,            // unreadable PNG, or bytes/marker we do not know
     PlainPng,           // a PNG with no card data after it (a plain picture)
@@ -172,8 +174,8 @@ const char* ImageSourceKindName(ImageSourceKind k);
 // reported as Invalid (callers fall back to their previous behaviour).
 ImageSourceKind DetectImageSource(const std::string& path);
 
-// True when `marker` is one of the Koikatsu character-card markers this
-// build converts (Koikatsu / Party / PartySP). Used by DetectImageSource.
+// True when `marker` is one of the character-card markers this build converts
+// (Koikatsu / Party / PartySP / Sunshine). Used by DetectImageSource.
 bool IsKoikatsuCharacterMarker(const std::string& marker);
 bool IsKoikatsuClothesMarker(const std::string& marker);
 
