@@ -119,6 +119,8 @@ constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 2000
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
 constexpr int kSetProfileKK = 20021, kSetProfileKKS = 20022;
+// Direct per-profile folder pickers (no need to switch profiles first).
+constexpr int kSetKKLib = 20023, kSetKKMods = 20024, kSetKKSMods = 20025, kSetKKSLib = 20026, kSetModsBoth = 20027;
 constexpr int kTransClear = 20019;   // the Look tab's "clear the brush from every garment" button
 // The Optimize tab's controls (its own range; nothing else uses it). 31000..31005 presets, 31010..31013 LOD checkboxes,
 // 31020 Generate LODs, 31021 Apply, 31022 Reset, 31030..31035 preview chips (original, simplified, LOD 1..4).

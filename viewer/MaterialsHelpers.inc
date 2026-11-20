@@ -491,13 +491,19 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
     }
     else if (tab == TabSettings) {
         auto shown = [](const std::string& v, const char* none) { return v.empty() ? std::string(none) : Shorten(v, 50); };
-        rows.push_back({0, -1, "Source profile (auto-selected when a card opens)", "Profile"});
+        rows.push_back({0, -1, "Source profiles - one library AND ONE MODS FOLDER per game", "Profile"});
         rows.push_back({4, 0, std::string("active: ") + ProfileLabel(g.settings.activeProfile), "Profile"});
         for (const char* key : {kProfileKK, kProfileKKS}) {
             ProfilePaths p = g.settings.profiles.count(key) ? g.settings.profiles[key] : ProfilePaths{};
-            rows.push_back({4, 0, std::string(ProfileLabel(key)) + ": library " + shown(p.library, "(not set)") +
-                                     ", mods " + (p.noMods ? std::string("(none)") : shown(p.mods, "(not set)")), "Profile"});
+            rows.push_back({4, 0, std::string(ProfileLabel(key)) + " library: " + shown(p.library, "(not set)"), "Profile"});
+            rows.push_back({4, 0, std::string(ProfileLabel(key)) + " mods:   " + (p.noMods ? std::string("(none)") : shown(p.mods, "(not set)")), "Profile"});
         }
+        rows.push_back({5, kSetKKLib, "Choose KK library folder ...", "Profile"});
+        rows.push_back({5, kSetKKMods, "Choose KK mods folder ...", "Profile"});
+        rows.push_back({5, kSetKKSLib, "Choose KKS library folder ...", "Profile"});
+        rows.push_back({5, kSetKKSMods, "Choose KKS mods folder ...", "Profile"});
+        rows.push_back({5, kSetModsBoth, "Use the active mods folder for BOTH games (shared/untagged mods work in both)", "Profile"});
+        rows.push_back({4, 0, "Cross-use is filtered by <game> tags: KK-only zipmods are ignored for KKS.", "Profile"});
         rows.push_back({5, kSetProfileKK, "Switch to Koikatsu (KK) folders", "Profile"});
         rows.push_back({5, kSetProfileKKS, "Switch to Koikatsu Sunshine (KKS) folders", "Profile"});
         rows.push_back({0, -1, "Asset library (the game's data)", "Library"});

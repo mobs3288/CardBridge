@@ -1901,6 +1901,8 @@ void unitTests() {
         CHECK(dxbc.size() == 48);
 
         Bytes program(42, 0);   // Unity 2019 preamble
+        const uint32_t kksMagic = 0x0C07513Cu;
+        for (int i = 0; i < 4; ++i) program[static_cast<size_t>(i)] = static_cast<uint8_t>(kksMagic >> (8 * i));
         program.insert(program.end(), dxbc.begin(), dxbc.end());
         program.insert(program.end(), tail.begin(), tail.end());
         Bytes blob;

@@ -251,7 +251,13 @@ std::vector<UnityProgram> ParseUnityShaderBlob(const Bytes& blob, std::vector<st
         size_t total = U32(sp, at + 24);
         prog.dxbc.assign(sp.begin() + static_cast<std::ptrdiff_t>(at), sp.begin() + static_cast<std::ptrdiff_t>(at + total));
         ParseHeader(sp, at, prog);
-        if (at >= 32)   // Unity 2019 preamble (KKS); KK's header is 24 bytes
+        // KK programs have a 24-byte header followed by keywords (DXBC can
+        // still start at 54), while KKS 2019 programs start with a fixed
+        // preamble magic. Discriminate on that magic, not on the DXBC offset:
+        // using at >= 32 sent KK shaders through the KKS tail parser and broke
+        // KK create-job textures.
+        const bool kksProgram = at >= 4 && U32(sp, 0) == 0x0C07513Cu;
+        if (kksProgram)
             ParseKksTail(sp, at + total, prog);
         else
             ParseTail(Tokenize(sp, at + total), prog);

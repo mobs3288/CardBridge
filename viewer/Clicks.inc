@@ -304,6 +304,66 @@ void WarnLibraryMismatch(card::CardFamily family) {
             " library in Setup.", LogKind::Warn);
 }
 
+// Pick a library for one profile directly, without switching to it first.
+void ChooseLibraryFor(const std::string& key) {
+    if (key != kProfileKK && key != kProfileKKS) return;
+    const std::string d = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder (it contains abdata)");
+    if (d.empty()) return;
+    if (!Exists(d + "/abdata")) { Log("that folder has no abdata inside: " + d, LogKind::Error); return; }
+    g.settings.profiles[key].library = d;
+    const bool active = key == g.settings.activeProfile;
+    if (active) {
+        g.settings.library = d;
+        g.resolver.reset();
+    }
+    SaveSettings(g.settings);
+    const auto info = library::ReadGameInfo(d);
+    Log(std::string(ProfileLabel(key)) + " library: " + d +
+        (info.game == library::SourceGame::Unknown ? std::string() : std::string(" (") + info.name() + ")"), LogKind::Good);
+    if (info.game != library::SourceGame::Unknown && ProfileKey(info.game) != key)
+        Log("WARNING: that library was imported for " + std::string(info.name()) + " but is stored in the " +
+            std::string(ProfileLabel(key)) + " profile", LogKind::Warn);
+    if (active && !g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
+    else InvalidatePanel();
+}
+
+void ChooseModsFor(const std::string& key) {
+    if (key != kProfileKK && key != kProfileKKS) return;
+    const std::string d = PickFolder(g.hwnd, L"Choose a mods folder (.zipmod files) for this game profile");
+    if (d.empty()) return;
+    g.settings.profiles[key].mods = d;
+    g.settings.profiles[key].noMods = false;
+    const bool active = key == g.settings.activeProfile;
+    if (active) {
+        g.settings.mods = d;
+        g.settings.noMods = false;
+        g.resolver.reset();
+    }
+    SaveSettings(g.settings);
+    Log(std::string(ProfileLabel(key)) + " mods: " + d, LogKind::Good);
+    if (active && !g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
+    else InvalidatePanel();
+}
+
+// Cross-use: shared and untagged mods are compatible with both games. This
+// copies the active profile's mods folder into the other one; Sideloader
+// <game> tags still decide which individual zipmods are actually loaded.
+void ShareModsWithBoth() {
+    const std::string src = g.settings.profiles[g.settings.activeProfile].mods;
+    if (src.empty()) { Log("set a mods folder for the active profile first", LogKind::Warn); return; }
+    for (const char* key : {kProfileKK, kProfileKKS}) {
+        g.settings.profiles[key].mods = src;
+        g.settings.profiles[key].noMods = false;
+    }
+    g.settings.mods = src;
+    g.settings.noMods = false;
+    SaveSettings(g.settings);
+    g.resolver.reset();
+    Log("both profiles now use mods: " + src + " (KK-only zipmods are still ignored for KKS)", LogKind::Good);
+    if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
+    else InvalidatePanel();
+}
+
 void ChooseMods() {
     std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder");
     if (d.empty()) return;
@@ -549,6 +609,11 @@ void SettingsAction(int id) {
         ApplyProfile(kProfileKKS);
         reloadCard();
         break;
+    case kSetKKLib: ChooseLibraryFor(kProfileKK); break;
+    case kSetKKSLib: ChooseLibraryFor(kProfileKKS); break;
+    case kSetKKMods: ChooseModsFor(kProfileKK); break;
+    case kSetKKSMods: ChooseModsFor(kProfileKKS); break;
+    case kSetModsBoth: ShareModsWithBoth(); break;
     case kSetExportDir: {
         const std::string d = PickFolder(g.hwnd, L"Choose the folder exports go into");
         if (d.empty()) break;

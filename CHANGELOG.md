@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.2] - 2026-11-20
+
+### Fixed
+
+- **KK look regression from the KKS shader reader**: KK shaders place DXBC at offset 54, so the KKS tail parser was being used on them and corrupted KK create-job baking (white hair, dark skin, wrong textures). Program-format detection now uses the KKS preamble magic; verified against the pre-KKS build on `KK_236802`.
+- Viewer: direct per-game KK/KKS library and mods pickers plus a "share this mods folder with both games" action, without needing to switch profiles first.
+
 ## [0.4.1] - 2026-11-20
 
 ### Added
