@@ -1,6 +1,6 @@
 # HairAccessoryCustomizer (HAC) support
 
-Status: **implemented** (2026-11-20). Version 0.4.3.
+Status: **implemented** (2026-11-20). Version 0.4.4.
 
 ## Verified data mapping
 
@@ -28,6 +28,8 @@ When `ColorMatch = true`, the game overrides the hair accessory's `rendHair` mat
 | `_GlossColor` | `card.hair.parts[0].glossColor` |
 
 When `ColorMatch = false`, the stored `OutlineColor` / `GlossColor` are used for hair renderers and `AccessoryColor` for `rendAccessory`, matching the plugin's run-time order. Ordinary accessory colors are unchanged. HAC data is decoded once per assembly from the current KKEx map, so an in-memory coordinate import is reflected immediately.
+
+**Override order (fixed in 0.4.4):** in the game HAC applies its colours at run time, *after* MaterialEditor's stored material edits. CardBridge previously applied MaterialEditor edits after the HAC colours, so a card with a MaterialEditor `Color2` override on a back-hair material looked washed out. HAC colours now win for `ColorMatch=true` hair accessory renderers; other materials keep MaterialEditor's edits.
 
 ## Gloss and hair length
 

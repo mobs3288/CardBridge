@@ -610,6 +610,10 @@ struct Builder {
     // Colours the game's ChaControl writes into the item's materials at run time (ChangeAccessoryColor, ChangeSettingHairColor ...),
     // by Unity property; the shader reads them. Set per renderer before it is added.
     std::vector<std::pair<std::string, Vec4>> runtime;
+    // HairAccessoryCustomizer applies at run time, after the maker's MaterialEditor
+    // overrides. When a hair accessory has ColorMatch=true its colours must win
+    // over MaterialEditor's stored Color/Color2/Color3 edits.
+    bool hacWins = false;
     bool glossForThisRenderer = false;
     bool stripHairGloss = false;   // HairAccessoryCustomizer HairGloss=false: clear the prefab's _HairGloss like the game does
     int hairGlossTexture = -1;   // the card's hair gloss map (_HairGloss of hair renderers)
@@ -1196,6 +1200,13 @@ struct Builder {
                 if (e->hasOffset) { bind->st.z = e->offset[0]; bind->st.w = e->offset[1]; }
             }
         }
+        if (hacWins) {   // game order: MaterialEditor edits, then HAC's run-time colours
+            for (const auto& rp : runtime) {
+                bool found = false;
+                for (auto& pr : sm.props) if (pr.first == rp.first) { pr.second = rp.second; found = true; break; }
+                if (!found) sm.props.emplace_back(rp);
+            }
+        }
         // A material binding no texture at all whose shader default for _MainTex is black renders nothing in the game
         // (every fragment discarded: the jacket crest's paint of a black default texture with no material binding).
         // Hide it everywhere too, instead of drawing a flat white plate.
@@ -1712,20 +1723,18 @@ struct Builder {
             SceneSubmesh ss;
             ss.indices = mesh->subMeshTriangles[s];
             // Unity's submesh carries its own material index; prefer it over the submesh ordinal, which
-            // was historically assumed to match the renderer material slot (KUsher/modded meshes: submesh
-            // 0 can carry the second material, extra submeshes can point at a slot only reached by index,
-            // and a lone submesh can be material slot N, not 0). The fallback keeps the old mapping for
-            // assets that serialized none. A disagreement is rare and always safe to explain.
-            size_t mi = s < r.materials.size() ? s : (r.materials.empty() ? 0 : r.materials.size() - 1);
-            size_t remat = s < mesh->subMeshMaterials.size() ? static_cast<size_t>(std::max(0, mesh->subMeshMaterials[s])) : mi;
-            if (mesh->subMeshMaterials[s] >= 0 && remat != mi && remat < r.materials.size()) {
+            // was historically assumed to match the renderer material slot (modded meshes: a mesh's
+            // submesh 0 can carry the second material, extra submeshes can point at a slot only reached
+            // by index, a lone submesh can be material slot N, not 0). The ordinal is the fallback for
+            // assets that serialize no index, and out-of-range indices never escape the renderer's list.
+            size_t mi = SubmeshMaterialSlot(*mesh, s, r);
+            const size_t ordinal = s < r.materials.size() ? s : (r.materials.empty() ? 0 : r.materials.size() - 1);
+            if (!r.materials.empty() && s < mesh->subMeshMaterials.size() && mesh->subMeshMaterials[s] >= 0 && mi != ordinal)
                 scene.warn(partId, "renderer '" + r.name + "': submesh " + std::to_string(s) + " is material slot " +
-                                  std::to_string(remat) + ", not the ordinal slot " + std::to_string(mi) + "; using the asset's index");
-                mi = remat;
-            }
+                                  std::to_string(mi) + ", not the ordinal slot " + std::to_string(ordinal) + "; using the asset's index");
             if (std::getenv("CARDBRIDGE_DEBUG_SUBMAT"))
                 std::fprintf(stderr, "submat %-24s sub=%zu ordinal=%zu asset=%d materials=%zu using=%zu\n",
-                             r.name.c_str(), s, mi, mesh->subMeshMaterials.empty() ? -1 : mesh->subMeshMaterials[s],
+                             r.name.c_str(), s, ordinal, s < mesh->subMeshMaterials.size() ? mesh->subMeshMaterials[s] : -1,
                              r.materials.size(), mi);
             if (r.materials.empty()) {
                 scene.warn(partId, "renderer '" + r.name + "' has no materials");
@@ -1735,6 +1744,14 @@ struct Builder {
                 ss.material = static_cast<int>(scene.materials.size()) - 1;
             } else {
                 ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, look, r, mi, hairTintColor);
+                if (std::getenv("CARDBRIDGE_DEBUG_HAIRCOL")) {
+                    const auto& m = scene.materials.back();
+                    std::fprintf(stderr, "haircol %-22s %-24s shader=%-36s tex=%d", partId.c_str(), r.name.c_str(), m.shader.c_str(), m.texture);
+                    for (const auto& pr : m.props)
+                        if (pr.first == "_Color" || pr.first == "_Color2" || pr.first == "_Color3" || pr.first == "_LineColor" || pr.first == "_GlossColor" || pr.first == "_HairLength")
+                            std::fprintf(stderr, " %s=(%.3f %.3f %.3f %.3f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
+                    std::fprintf(stderr, "\n");
+                }
             }
             sm.submeshes.push_back(std::move(ss));
         }
@@ -3723,6 +3740,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         }
         size_t before = scene.meshes.size();
         for (const auto& r : uf->renderersUnder(itemRoot)) {
+            b.hacWins = false;
             if (std::getenv("CARDBRIDGE_DEBUG_PATHS"))
                 std::fprintf(stderr, "renderer %s: %s enabled=%d active=%d cid=%lld\n", ref.partId.c_str(), uf->pathOf(r.xformId).c_str(), r.enabled ? 1 : 0, r.active ? 1 : 0, r.componentId);
             if (!r.enabled) continue;
@@ -3867,6 +3885,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     // scaling geometry.
                     b.runtime.emplace_back("_HairLength", Vec4{hacSlot->hairLength, 0, 0, 0});
                     b.stripHairGloss = !hacSlot->hairGloss;
+                    b.hacWins = hacMatch;   // HAC runs last in the game, after MaterialEditor
                 }
                 if (hac && rtHairAcs.count(cid)) {
                     const auto ac = HacAccessoryColors(*hacSlot, eff);

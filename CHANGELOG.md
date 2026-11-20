@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.4] - 2026-11-20
+
+### Fixed
+
+- **HAC vs MaterialEditor override order**: `ColorMatch=true` hair accessories now apply their colours after MaterialEditor edits (matching the game), fixing washed-out back hair on cards where MaterialEditor stored a different `Color2`.
+- HAC regression fixture/test matrix updated with the real-card A/B evidence.
+
 ## [0.4.3] - 2026-11-20
 
 ### Added

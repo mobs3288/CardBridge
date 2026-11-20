@@ -165,7 +165,7 @@ After implementation these must all pass or be replaced by an explicit, document
 | H5 | Gloss/length | **PASS** | `HairGloss` toggles `_HairGloss`; `_GlossColor` is written into the material bake; `HairLength` preserved in scene material properties, no geometry scaling (PMX limitation documented). |
 | H6 | Partial/malformed HAC | **PASS** | Missing plugin entry, malformed MessagePack, or missing fields are ignored safely; `valid=false` so no silent repaint. |
 | H7 | Coordinates | **PASS** | Decoding covers all coordinates in the card; `find(coordinate, slot)` selects per-coordinate settings. |
-| H8 | Real-card visual check | **PASS (with interpretation)** | A/B against pre-0.4.3 build on `y80oZjpGdRAUJZrQAy2LBNUO.png` (coordinate 6): head images are byte-identical (mean abs diff 0.0). The "washed-out" hair the user saw was the earlier KK-shader-regression issue (0.4.2), already fixed; HAC (`ColorMatch=true` → character hair colors) is verified present in both builds via `CARDBRIDGE_DEBUG_HAC` on `outfit6.acc03/05/09/10`. |
+| H8 | Real-card visual check | **PASS** | On `y80oZjpGdRAUJZrQAy2LBNUO.png` (coordinate 6), back-hair material `cf_hair_b_21_*` had `_Color2=(0.362,0.350,0.380)` from a MaterialEditor `Color2` override. 0.4.4 applies HAC colours last (game order): `_Color2=(0.085,0.082,0.090)` and the washed-out purple is gone (head-image diff: 32,887 pixels, max 67). Verified with `CARDBRIDGE_DEBUG_HAIRCOL`. |
 | H9 | KK regression | **PASS** | HAC is decode-only; KK conversion path is unchanged (`Assembler` consumes the same typed data the old ad-hoc parse produced). |
 | H10 | Determinism | **PASS** | HAC decode/input are deterministic (same card + library → same PMX bytes, verified in Stage 8 later). |
 
