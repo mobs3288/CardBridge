@@ -2,7 +2,7 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
-## [0.4.8] - 2026-11-20
+## [0.4.10] - 2026-11-20
 
 ### Fixed
 
