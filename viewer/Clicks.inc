@@ -261,11 +261,55 @@ void MaterialsTabClick(int x, int y, const PanelLayout& l, bool right) {
     }
 }
 
+// Persist the effective library/mods paths into the currently active profile.
+// UI folder pickers call this before SaveSettings; CLI overrides never do.
+void StoreActiveProfile() {
+    g.settings.profiles[g.settings.activeProfile] = ProfilePaths{g.settings.library, g.settings.mods, g.settings.noMods};
+}
+
+// Switch the active source profile and make its paths effective for this run.
+void ApplyProfile(const std::string& key, bool announce) {
+    if (key != kProfileKK && key != kProfileKKS) return;
+    g.settings.activeProfile = key;
+    ProfilePaths p = g.settings.profiles.count(key) ? g.settings.profiles[key] : ProfilePaths{};
+    g.settings.library = p.library;
+    g.settings.mods = p.mods;
+    g.settings.noMods = p.noMods;
+    SaveSettings(g.settings);
+    g.resolver.reset();   // the next load builds a resolver over the new pair
+    if (announce) Log(std::string("source profile: ") + ProfileLabel(key), LogKind::Good);
+}
+
+// Opening a different card selects its game profile, unless CLI overrides are
+// in force (those must remain authoritative for the whole session).
+void ActivateProfileForCard(card::CardFamily family) {
+    if (g.cliLibraryOverride || g.cliModsOverride) return;
+    if (family == card::CardFamily::Other || family == card::CardFamily::EmotionCreators) return;
+    const std::string key = ProfileKey(family);
+    if (key == g.settings.activeProfile) return;
+    ApplyProfile(key, false);
+    Log(std::string("card is ") + card::FamilyName(family) + "; switched to " + ProfileLabel(key) + " profile", LogKind::Good);
+}
+
+void WarnLibraryMismatch(card::CardFamily family) {
+    if (family == card::CardFamily::Other || family == card::CardFamily::EmotionCreators) return;
+    const auto info = library::ReadGameInfo(g.settings.library);
+    if (info.game == library::SourceGame::Unknown) return;   // pre-profile library: nothing to compare
+    const library::SourceGame expected = family == card::CardFamily::KoikatsuSunshine
+                                             ? library::SourceGame::KoikatsuSunshine : library::SourceGame::Koikatsu;
+    if (info.game != expected)
+        Log(std::string("WARNING: the active library was imported from ") + info.name() +
+            " but the card is " + card::FamilyName(family) +
+            "; base-game assets will not match. Set the " + std::string(ProfileLabel(ProfileKey(expected))) +
+            " library in Setup.", LogKind::Warn);
+}
+
 void ChooseMods() {
     std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder");
     if (d.empty()) return;
     g.settings.mods = d;
     g.settings.noMods = false;
+    StoreActiveProfile();
     SaveSettings(g.settings);
     g.resolver.reset();   // the next load indexes the new folder
     Log("mods folder: " + d, LogKind::Good);
@@ -354,6 +398,7 @@ void SetupLibrary(bool offerExisting) {
             const std::string d = PickFolder(g.hwnd, L"Choose the CardBridge asset library folder");
             if (d.empty()) return;
             g.settings.library = d;
+            StoreActiveProfile();
             SaveSettings(g.settings);
             Log("asset library: " + d, LogKind::Good);
             if (!g.cardPath.empty()) StartLoad(g.cardPath, -1, true);
@@ -361,9 +406,9 @@ void SetupLibrary(bool offerExisting) {
             return;
         }
     } else {
-        MessageBoxW(g.hwnd, L"CardBridge needs a copy of the base-game data (skeleton, body, shaders, hair and clothes: about 0.9 GB).\nIt is copied once from your own Koikatsu install and never needs the game again.\n\nNext: choose your Koikatsu folder (the one that contains \"abdata\").", L"CardBridge - first run", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g.hwnd, L"CardBridge needs a copy of the base-game data (skeleton, body, shaders, hair and clothes: about 0.9 GB).\nIt is copied once from your own Koikatsu or Koikatsu Sunshine install and never needs the game again.\n\nNext: choose the game folder (the one that contains \"abdata\").", L"CardBridge - first run", MB_OK | MB_ICONINFORMATION);
     }
-    const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu folder (it contains abdata)");
+    const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu / Koikatsu Sunshine folder (it contains abdata)");
     if (game.empty()) { g.status = "no asset library: press L to set one up"; InvalidatePanel(); return; }
     StartLibraryImport(game);
 }
@@ -466,13 +511,19 @@ void SettingsAction(int id) {
         if (d.empty()) break;
         if (!Exists(d + "/abdata")) { Log("that folder has no abdata inside: " + d, LogKind::Error); break; }
         g.settings.library = d;
+        StoreActiveProfile();
         SaveSettings(g.settings);
         Log("asset library: " + d, LogKind::Good);
+        {   // tell the user when the folder they picked belongs to the other game
+            const auto info = library::ReadGameInfo(d);
+            if (info.game != library::SourceGame::Unknown)
+                Log("that library is " + std::string(info.name()) + " (active profile: " + ProfileLabel(g.settings.activeProfile) + ")", LogKind::Info);
+        }
         reloadCard();
         break;
     }
     case kSetLibBuild: {
-        const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu folder (it contains abdata)");
+        const std::string game = PickFolder(g.hwnd, L"Choose your Koikatsu / Koikatsu Sunshine folder (it contains abdata)");
         if (!game.empty()) StartLibraryImport(game);
         break;
     }
@@ -485,8 +536,17 @@ void SettingsAction(int id) {
     case kSetModsClear:
         g.settings.mods.clear();
         g.settings.noMods = true;
+        StoreActiveProfile();
         SaveSettings(g.settings);
         Log("no mods folder: base-game items only", LogKind::Info);
+        reloadCard();
+        break;
+    case kSetProfileKK:
+        ApplyProfile(kProfileKK);
+        reloadCard();
+        break;
+    case kSetProfileKKS:
+        ApplyProfile(kProfileKKS);
         reloadCard();
         break;
     case kSetExportDir: {

@@ -137,8 +137,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g.viewMode = static_cast<int>(exporter::ViewModeFromName(g.settings.viewMode.c_str()));   // the persisted viewport diagnostic mode (spec S13)
     for (int i = 1; i < argc; ++i) {
         std::string a = WideToUtf8(argvw[i]);
-        if (a == "--library" && i + 1 < argc) g.settings.library = Slashes(WideToUtf8(argvw[++i]));
-        else if (a == "--mods" && i + 1 < argc) g.settings.mods = Slashes(WideToUtf8(argvw[++i]));
+        if (a == "--library" && i + 1 < argc) {
+            g.settings.library = Slashes(WideToUtf8(argvw[++i]));
+            g.cliLibraryOverride = true;   // never persist this or auto-switch profiles
+            const auto info = library::ReadGameInfo(g.settings.library);
+            if (info.game != library::SourceGame::Unknown) g.settings.activeProfile = ProfileKey(info.game);
+        } else if (a == "--mods" && i + 1 < argc) {
+            g.settings.mods = Slashes(WideToUtf8(argvw[++i]));
+            g.cliModsOverride = true;
+        }
         else if (a == "--pose" && i + 1 < argc) g.wantPose = Slashes(WideToUtf8(argvw[++i]));
         else if (a == "--outfit" && i + 1 < argc) g.wantOutfit = std::atoi(WideToUtf8(argvw[++i]).c_str());
         else if (a == "--clothes" && i + 1 < argc) {
@@ -215,11 +222,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     if (!g.settings.noMods && (g.settings.mods.empty() || !Exists(g.settings.mods))) g.settings.mods = Exists(CachedModsRoot()) ? CachedModsRoot() : std::string();
     if (g.settings.mods.empty() && !g.settings.noMods) {
         // Optional: without mods only base-game items resolve.
-        std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu mods folder (Cancel to use base-game items only)");
+        std::string d = PickFolder(g.hwnd, L"Choose your Koikatsu / Koikatsu Sunshine mods folder (Cancel to use base-game items only)");
         if (!d.empty()) g.settings.mods = d;
         else g.settings.noMods = true;   // asked once; the Setup tab changes it
     }
-    SaveSettings(g.settings);
+    if (!g.cliLibraryOverride && !g.cliModsOverride) {
+        StoreActiveProfile();   // persist first-run defaults into the active game profile
+        SaveSettings(g.settings);
+    }
     Log("library: " + (g.settings.library.empty() ? std::string("(not set)") : g.settings.library));
     Log("mods: " + (g.settings.mods.empty() ? std::string("(not set)") : g.settings.mods));
     ReloadLayers(false);

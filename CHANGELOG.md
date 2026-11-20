@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.1] - 2026-11-20
+
+### Added
+
+- **Per-game viewer profiles**: independent KK and KKS library/mods folder pairs, automatic profile selection from the card marker, a mismatch warning when the active library belongs to the other game, and manual switching in the Setup tab. Existing single-library configs are migrated without losing paths; `--library` / `--mods` overrides remain authoritative for the session.
+
 ## [Unreleased] - 2026-11-20
 
 ### Added

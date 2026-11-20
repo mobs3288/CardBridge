@@ -612,7 +612,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.status = "library setup cancelled: press L to try again";
         } else if (lp) {
             g.settings.library = DefaultLibraryDir();
-            SaveSettings(g.settings);
+            const auto imported = library::ReadGameInfo(g.settings.library);
+            if (imported.game != library::SourceGame::Unknown) {
+                g.settings.activeProfile = ProfileKey(imported.game);
+                Log("library built for " + std::string(ProfileLabel(g.settings.activeProfile)), LogKind::Good);
+            }
+            if (!g.cliLibraryOverride && !g.cliModsOverride) {
+                StoreActiveProfile();
+                SaveSettings(g.settings);
+            }
             g.resolver.reset();   // the next load builds its resolver over the new library
             if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
             g.status = "drop a Koikatsu card on this window";

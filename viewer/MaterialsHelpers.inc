@@ -491,6 +491,15 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
     }
     else if (tab == TabSettings) {
         auto shown = [](const std::string& v, const char* none) { return v.empty() ? std::string(none) : Shorten(v, 50); };
+        rows.push_back({0, -1, "Source profile (auto-selected when a card opens)", "Profile"});
+        rows.push_back({4, 0, std::string("active: ") + ProfileLabel(g.settings.activeProfile), "Profile"});
+        for (const char* key : {kProfileKK, kProfileKKS}) {
+            ProfilePaths p = g.settings.profiles.count(key) ? g.settings.profiles[key] : ProfilePaths{};
+            rows.push_back({4, 0, std::string(ProfileLabel(key)) + ": library " + shown(p.library, "(not set)") +
+                                     ", mods " + (p.noMods ? std::string("(none)") : shown(p.mods, "(not set)")), "Profile"});
+        }
+        rows.push_back({5, kSetProfileKK, "Switch to Koikatsu (KK) folders", "Profile"});
+        rows.push_back({5, kSetProfileKKS, "Switch to Koikatsu Sunshine (KKS) folders", "Profile"});
         rows.push_back({0, -1, "Asset library (the game's data)", "Library"});
         rows.push_back({4, 0, shown(g.settings.library, "(not set)"), "Library"});
         rows.push_back({5, kSetLibChoose, "Use another library folder ...", "Library"});

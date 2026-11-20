@@ -118,6 +118,7 @@ const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morph
 constexpr int kSetLibChoose = 20000, kSetLibBuild = 20001, kSetModsChoose = 20002, kSetModsReindex = 20003, kSetModsClear = 20004, kSetExportDir = 20006,
               kSetExportAsk = 20007, kSetLayers = 20008, kSetLayersDefault = 20009, kSetOpenFolder = 20010, kSetForget = 20011;
 constexpr int kSetGpuAuto = 20012, kSetGpuHardware = 20013, kSetGpuWarp = 20014, kSetGpuSoftware = 20015, kSetSkinGpu = 20016, kSetSkinCpu = 20017, kSetSkinAuto = 20018;
+constexpr int kSetProfileKK = 20021, kSetProfileKKS = 20022;
 constexpr int kTransClear = 20019;   // the Look tab's "clear the brush from every garment" button
 // The Optimize tab's controls (its own range; nothing else uses it). 31000..31005 presets, 31010..31013 LOD checkboxes,
 // 31020 Generate LODs, 31021 Apply, 31022 Reset, 31030..31035 preview chips (original, simplified, LOD 1..4).
@@ -307,6 +308,8 @@ struct ClothingPin {
 struct App {
     HWND hwnd = nullptr;
     Settings settings;
+    bool cliLibraryOverride = false;   // --library on the command line: never auto-switch profiles or persist its path
+    bool cliModsOverride = false;      // --mods on the command line
     std::string cardPath;
     std::vector<ClothingPin> clothingPins;   // the imported-clothing layers of the outfit on screen, in apply order (first to last); empty = none
     int wantOutfit = -1;
@@ -696,6 +699,13 @@ void SelectiveInvalidateView();
 void SelectivePoseChanged();                   // called when the pose moved: reskins the static previews
 void SelApply();                               // apply the selective import (through the validation guard)
 constexpr UINT_PTR kTimerApplyTweaks = 2;
+
+// Defined in Clicks.inc; declared here because Pose.inc (the card loader) runs
+// before the click handlers in the viewer's include order.
+void StoreActiveProfile();
+void ApplyProfile(const std::string& key, bool announce = true);
+void ActivateProfileForCard(card::CardFamily family);
+void WarnLibraryMismatch(card::CardFamily family);
 
 std::shared_ptr<Loaded> Current() {
     std::lock_guard<std::recursive_mutex> lk(g.mu);

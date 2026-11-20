@@ -190,3 +190,17 @@ After implementation these must all pass or be replaced by an explicit, document
 | K30 | **PASS** | Diagnostics list unresolved items with reasons; missing mods reported as incompatible when needed. |
 | K31 | **PASS** | Full KK integration suite: 19,109 checks, 0 failed; KK create baking still 23 materials. |
 | K32 | **PASS** | Two consecutive F1 conversions produced byte-identical PMX (SHA-256 match). |
+
+## J. Viewer per-game profiles (additional requirement)
+
+| Requirement | Status | Where |
+| --- | --- | --- |
+| Independent KK/KKS library+mods paths | **PASS** | `Settings::profiles` in `viewer/Util.inc`, Setup tab rows in `viewer/MaterialsHelpers.inc`. |
+| Detect card family on open/switch | **PASS** | `card::DetectCardFamily` + `ActivateProfileForCard` in `viewer/Pose.inc`. |
+| Auto-activate matching profile | **PASS** | New card path triggers `ActivateProfileForCard` before `EnsureResolver`. |
+| Warn on library/card mismatch | **PASS** | `WarnLibraryMismatch` logs a warning from `library.json` profile vs card family. |
+| Manual profile switching preserved | **PASS** | Setup tab actions `kSetProfileKK/KKS`; reloading the same card does not auto-switch. |
+| CLI overrides still work | **PASS** | `--library`/`--mods` set override flags; auto-switch and persistence are skipped for them. |
+| Migrate single-library config | **PASS** | `LoadSettings` seeds both profiles from legacy top-level paths; all other settings unchanged. |
+
+Verification: full release build succeeded; 18,616 unit checks pass, including a new card-family detection test. CLI `--library`/`--mods` paths are unchanged.

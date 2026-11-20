@@ -51,6 +51,27 @@ std::string CachedModsRoot() {
     } catch (...) { return {}; }
 }
 
+// Independent folder pairs per source game. The legacy top-level library/mods
+// fields remain as the *effective* paths for this run, so older viewer.json
+// files and --library/--mods overrides keep working unchanged.
+struct ProfilePaths {
+    std::string library, mods;
+    bool noMods = false;
+};
+
+constexpr const char* kProfileKK = "koikatsu";
+constexpr const char* kProfileKKS = "koikatsu-sunshine";
+
+const char* ProfileKey(library::SourceGame g) {
+    return g == library::SourceGame::KoikatsuSunshine ? kProfileKKS : kProfileKK;
+}
+const char* ProfileKey(card::CardFamily f) {
+    return f == card::CardFamily::KoikatsuSunshine ? kProfileKKS : kProfileKK;
+}
+const char* ProfileLabel(const std::string& key) {
+    return key == kProfileKKS ? "Koikatsu Sunshine (KKS)" : "Koikatsu (KK)";
+}
+
 struct Settings {
     std::string library, mods;
     std::string exportDir;   // where exports go without asking; empty = ask every time
@@ -58,6 +79,10 @@ struct Settings {
     std::string gpu = "auto";   // "auto" (discrete GPU first), "hardware", "warp" (CPU), "software" (software renderer); next start
     std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
     bool noMods = false;     // the user chose "no mods folder": do not fall back to the one the index cache remembers
+    // Per-game folder pairs. Keys are kProfileKK / kProfileKKS. Missing entries
+    // are migrated from the legacy effective paths by LoadSettings.
+    std::map<std::string, ProfilePaths> profiles;
+    std::string activeProfile = kProfileKK;
     std::string viewMode = "lit";   // the viewport diagnostic mode (spec S13): see exporter::ViewModeName/FromName
     // Automatic skin shading (garment of the body): independent settings, persisted here for new cards and the CLI:
     // how strong the cleavage is, how strong the fold under the breasts is, how far up the chest the cleavage shading
@@ -83,6 +108,30 @@ Settings LoadSettings() {
         s.gpu = j.value("gpu", "auto");
         s.skin = j.value("skin", "gpu");
         s.noMods = j.value("noMods", false);
+        // Migration: an older config has only the effective library/mods paths.
+        // Seed both profiles with them so no setting is lost, then let the
+        // stored profiles (if any) override. The effective paths stay as-is.
+        ProfilePaths legacy{s.library, s.mods, s.noMods};
+        s.profiles[kProfileKK] = legacy;
+        s.profiles[kProfileKKS] = legacy;
+        if (const auto it = j.find("profiles"); it != j.end() && it->is_object())
+            for (const auto& [key, val] : it->items()) {
+                if (!val.is_object() || (key != kProfileKK && key != kProfileKKS)) continue;
+                ProfilePaths p;
+                p.library = val.value("library", "");
+                p.mods = val.value("mods", "");
+                p.noMods = val.value("noMods", false);
+                s.profiles[key] = p;
+            }
+        std::string wanted = j.value("activeProfile", "");
+        if (wanted.empty()) {
+            // A library imported by this build records its game; use it to
+            // choose the initial profile instead of guessing from path names.
+            const auto info = library::ReadGameInfo(s.library);
+            wanted = ProfileKey(info.game);
+            if (info.game == library::SourceGame::Unknown) wanted = kProfileKK;
+        }
+        s.activeProfile = (wanted == kProfileKKS) ? kProfileKKS : kProfileKK;
         s.viewMode = j.value("viewMode", "lit");
         s.skinShade = static_cast<float>(j.value("skinShade", 1.5));
         s.skinShadeUnder = static_cast<float>(j.value("skinShadeUnder", 1.0));
@@ -126,6 +175,14 @@ void SaveSettings(const Settings& s) {
         j["gpu"] = s.gpu;
         j["skin"] = s.skin;
         j["noMods"] = s.noMods;
+        j["activeProfile"] = s.activeProfile;
+        nlohmann::json profiles = nlohmann::json::object();
+        for (const char* key : {kProfileKK, kProfileKKS}) {
+            auto it = s.profiles.find(key);
+            ProfilePaths p = it != s.profiles.end() ? it->second : ProfilePaths{};
+            profiles[key] = {{"library", p.library}, {"mods", p.mods}, {"noMods", p.noMods}};
+        }
+        j["profiles"] = std::move(profiles);
         j["viewMode"] = s.viewMode;
         j["skinShade"] = s.skinShade;
         j["skinShadeUnder"] = s.skinShadeUnder;

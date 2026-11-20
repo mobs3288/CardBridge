@@ -13,6 +13,11 @@ namespace cardbridge::card {
 enum class CardFamily { Koikatsu, KoikatsuParty, KoikatsuPartySP, KoikatsuSunshine, EmotionCreators, Other };
 const char* FamilyName(CardFamily f);
 
+// Reads only the PNG trailer (product number + marker), not the card sections.
+// Used by the viewer to pick the right library/mods profile before it resolves
+// any assets. Returns Other for a plain PNG, an outfit file or damaged data.
+CardFamily DetectCardFamily(const std::string& path);
+
 enum class CardErrorKind {
     NotPng,            // not a PNG at all (JPG, text, ...)
     TruncatedPng,      // PNG chunks run off the end of the file

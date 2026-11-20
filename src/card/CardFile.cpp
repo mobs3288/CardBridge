@@ -248,6 +248,21 @@ bool IsKoikatsuCharacterMarker(const std::string& marker) {
     return IsSupportedCharacterMarker(marker);
 }
 
+CardFamily DetectCardFamily(const std::string& path) {
+    try {
+        Bytes file = fileio::ReadFile(path);
+        const size_t end = pngEnd(file);
+        if (end >= file.size()) return CardFamily::Other;
+        ByteReader r(file.data() + end, file.size() - end, false);
+        r.i32();                       // product number
+        const std::string marker = r.dotnetString();
+        bool isClothes = false;
+        return familyOf(marker, isClothes);
+    } catch (const std::exception&) {
+        return CardFamily::Other;
+    }
+}
+
 ImageSourceKind DetectImageSource(const std::string& path) {
     try {
         Bytes file = fileio::ReadFile(path);

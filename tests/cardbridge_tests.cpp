@@ -1773,6 +1773,17 @@ void unitTests() {
         CHECK(card::IsKoikatsuCharacterMarker(marker));
         CHECK(card::DetectImageSource(path) == card::ImageSourceKind::Coordinate);
     });
+    test("card family detection by marker (viewer profile selection)", [] {
+        const std::string kk = writeTestCardFile("family_kk.png", testToruCoords(), testToruParameter(), testToruStatus(), testToruHair(), Value());
+        const std::string sun = writeTestCardFile("family_sun.png", testToruCoords(), testToruParameter(), testToruStatus(), testToruHair(), Value(),
+                                                  "\xE3\x80\x90KoiKatuCharaSun\xE3\x80\x91");
+        CHECK(card::DetectCardFamily(kk) == card::CardFamily::Koikatsu);
+        CHECK(card::DetectCardFamily(sun) == card::CardFamily::KoikatsuSunshine);
+        Bytes plain = tinyPng();
+        const std::string p = tempPath("family_plain.png");
+        fileio::WriteFile(p, plain.data(), plain.size());
+        CHECK(card::DetectCardFamily(p) == card::CardFamily::Other);
+    });
     test("KKS mesh: blend weights/indices decoded from vertex channels 12/13", [] {
         auto putF = [](Bytes& b, size_t at, float v) {
             uint32_t u; std::memcpy(&u, &v, 4);

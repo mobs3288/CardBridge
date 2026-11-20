@@ -538,10 +538,13 @@ bool EnsureResolver(std::string& err) {
     ProgSet(0.16, "checking asset library");
     auto chk = library::CheckLibrary(g.settings.library, false);
     if (!chk.ok) { err = "asset library problem: " + (chk.issues.empty() ? std::string("unusable") : chk.issues[0]); return false; }
-    Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile", LogKind::Good);
+    const auto gameInfo = library::ReadGameInfo(g.settings.library);
+    Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile (" +
+        std::string(gameInfo.name()) + (gameInfo.unityVersion.empty() ? std::string() : ", Unity " + gameInfo.unityVersion) + ")", LogKind::Good);
+    g.mods.setGame(gameInfo);   // KK-only mods are excluded when the library is KKS
     g.lists = resolve::ListTable();
     g.lists.loadBaseGame(library::AbdataRoot(g.settings.library), &issues);
-    g.resolver = std::make_shared<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library));
+    g.resolver = std::make_shared<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library), gameInfo);
     if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
     g.resolverKey = key;
     return true;
@@ -551,6 +554,12 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     const std::string prevCardPath = g.cardPath;
     g.cardPath = path;
+    // Select the source profile from the card marker BEFORE the worker builds
+    // the resolver, so mods and base assets are indexed from the right pair.
+    // A reload of the same card keeps a manual profile switch intact.
+    const card::CardFamily openingFamily = card::DetectCardFamily(path);
+    if (path != prevCardPath) ActivateProfileForCard(openingFamily);
+    WarnLibraryMismatch(openingFamily);
     std::vector<ClothingPin> clothingPins;   // the stack copy StartLoad applies, first to last
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
