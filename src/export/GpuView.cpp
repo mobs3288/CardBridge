@@ -263,7 +263,7 @@ float4 ps() : SV_Target { return color; }
         auto compile = reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile")));
         if (!compile) return false;
         static const char src[] = R"HLSL(
-cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; float4 l0, l1, l2, mmd, sph; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit)
+cbuffer C : register(b0) { float4 r0, r1, r2, r3, diffuse, shadow, light; float4 ramp[32]; float4 l0, l1, l2, mmd, sph; float4 alphaGate; };   // shadow.w = 2: shade through ramp (a material's toon ramp, top = lit); alphaGate.x = 1: discard fragments at c.a < 0.5 (opaque path)
 // sph.x: the PMX sphere map in t2, 1 multiplies, 2 adds (looked up by the normal's screen x and y, as MMD does).
 // MikuMikuDance's look (the "as exported" view): mmd.x = 1 the material takes self-shadow (l0..l2: world -> shadow map, z = depth),
 // mmd.y = 1 the ground shadow pass (the mesh flattened along the light onto the floor at height mmd.z, drawn in `diffuse`), mmd.w the model's radius.
@@ -292,6 +292,10 @@ float4 ps(VO i) : SV_Target {
         return diffuse;
     }
     float4 c = t0.Sample(s0, i.uv) * diffuse;
+    // The opaque path (alphaGate.x = 1, bucket 0 in the draw loop): discard transparent fragments so a cutout mesh does not
+    // draw as a solid polygon - a bra's diamond pasties, a top's alpha-tested panels, a black-fallback stripe. The shadow
+    // passes above already test alpha for the same reason; the main path must too, or every fragment with c.a < 0.5 renders.
+    if (alphaGate.x > 0.5) clip(c.a - 0.5);   // the opaque path: discard fragments under half alpha (matches the CPU renderer)
     // The normal map's tangent-space normal, folded into the vertex frame. Unity DXT5nm: X in alpha, Y in green, Z reconstructed
     // (a flat default normal map has alpha = green = 0.5, which yields (0, 0, 1)). Shading by the perturbed normal is what the
     // game's own shaders do, and what keeps the card's cloth folds, hair strands and face gradient in the simple shader.
@@ -336,7 +340,7 @@ float4 ps(VO i) : SV_Target {
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GVert, uv), D3D11_INPUT_PER_VERTEX_DATA, 0}};
         ok = ok && SUCCEEDED(dev->CreateInputLayout(el, 4, vb->GetBufferPointer(), vb->GetBufferSize(), &fbIl));
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = (7 + 32 + 5) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.ByteWidth = (7 + 32 + 5 + 1) * 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &fbCb));
         Rel(vb); Rel(pb); Rel(err);
         return ok;
@@ -1574,7 +1578,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
             for (int col = 0; col < 3; ++col) LS[r][col] = axes[r][col] * k;
             LS[r][3] = -(LS[r][0] * ctr[0] + LS[r][1] * ctr[1] + LS[r][2] * ctr[2]) + (r == 2 ? 0.5f : 0.0f);
         }
-        float cbv[(7 + 32 + 5) * 4] = {};
+        float cbv[(7 + 32 + 5 + 1) * 4] = {};
         ctx->IASetInputLayout(I.fbIl);
         ctx->VSSetShader(I.fbVs, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &I.fbCb);
@@ -1722,8 +1726,9 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     }
                     if (!sh || !sh->ok) {
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
-                        float cbv[(7 + 32 + 5) * 4] = {};
+                        float cbv[(7 + 32 + 5 + 1) * 4] = {};
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
+                        cbv[44] = bucket == 0 ? 1.0f : 0.0f;   // alphaGate.x: the fallback shader discards c.a < 0.5 on the opaque path
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
                         const MmdLook* look = I.plain && gs.material >= 0 && static_cast<size_t>(gs.material) < I.looks.size() ? &I.looks[static_cast<size_t>(gs.material)] : nullptr;

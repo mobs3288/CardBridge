@@ -48,6 +48,12 @@ struct MeshData {
     std::vector<BoneInfluence> skin;      // empty if the mesh is not skinned
     std::vector<Mat4> bindPoses;
     std::vector<std::vector<uint32_t>> subMeshTriangles;   // 3 indices per triangle
+    // Unity assigns a material to each submesh (m_SubMeshes[].m_Material), but the number of
+    // materials on the renderer is not guaranteed to equal the number of submeshes, and the
+    // indices are not guaranteed to be sequential. The authoritative per-submesh slot is this
+    // list (-1 where the asset did not serialize one); a caller that has no per-submesh index
+    // falls back to the submesh ordinal, as before.
+    std::vector<int> subMeshMaterials;   // parallel to subMeshTriangles
     // Blend shapes (m_Shapes): one frame per shape in these meshes, so a shape index is a channel's frameIndex.
     struct BlendVertex { uint32_t index = 0; Vec3 dPos, dNormal; };
     struct BlendShape { uint32_t first = 0, count = 0; std::string name; };
@@ -109,6 +115,12 @@ struct RendererInfo {
     std::vector<PPtr> materials;
     std::vector<int64_t> boneXforms;   // SkinnedMeshRenderer.m_Bones resolved to Transform ids (0 = missing)
 };
+
+// The renderer's material slot for submesh `s`: the mesh's own m_SubMeshes[s].m_Material when it serialized
+// one and it is a valid index into the renderer's material list, else the submesh ordinal clamped into range
+// (the legacy assumption, kept for assets that serialize no index). `r.materials.empty()` returns 0 - the
+// caller decides what that means (see addRenderer). Exposed for tests.
+size_t SubmeshMaterialSlot(const MeshData& mesh, size_t s, const RendererInfo& r);
 
 struct MonoInfo {
     std::string className;     // from the MonoScript, e.g. "ChaClothesComponent"

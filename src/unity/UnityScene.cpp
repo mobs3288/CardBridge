@@ -346,6 +346,13 @@ void MeshData::applyBlendShape(size_t shape, float weight) {
     }
 }
 
+size_t SubmeshMaterialSlot(const MeshData& mesh, size_t s, const RendererInfo& r) {
+    if (s < mesh.subMeshMaterials.size() && mesh.subMeshMaterials[s] >= 0 &&
+        static_cast<size_t>(mesh.subMeshMaterials[s]) < r.materials.size())
+        return static_cast<size_t>(mesh.subMeshMaterials[s]);
+    return s < r.materials.size() ? s : (r.materials.empty() ? 0 : r.materials.size() - 1);
+}
+
 std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) const {
     auto fail = [&](const std::string& m) -> std::optional<MeshData> { if (why) *why = m; return std::nullopt; };
     if (p.isNull()) return fail("no mesh assigned");
@@ -534,6 +541,7 @@ std::optional<MeshData> UnityFile::readMesh(const PPtr& p, std::string* why) con
             size_t first = static_cast<size_t>(sm.at("firstByte").asInt()) / isz;
             size_t n = static_cast<size_t>(sm.at("indexCount").asInt());
             int topo = static_cast<int>(sm.at("topology").asInt());
+            m.subMeshMaterials.push_back(sm.has("m_Material") ? static_cast<int>(sm.at("m_Material").asInt()) : -1);
             std::vector<uint32_t> tris;
             if (topo == 0) {
                 for (size_t i = 0; i + 3 <= n; i += 3) {

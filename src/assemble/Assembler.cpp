@@ -991,11 +991,14 @@ struct Builder {
                                                         : nullptr)) {
                 // In the game the character maker's hair colour overwrites the _Color of every hair material
                 // (ChaController). Accessories follow their own rules instead (see the colour block further down). The tint is
-                // already lifted off flat black (see hairTint) so the texture keeps its strand gradient.
+                // already lifted off flat black (see hairTint) so the texture keeps its strand gradient. The alpha is the tint's
+                // own (1 for a lifted hair colour): a hair fragment is opaque in the game (the shader reads _Color.a with the
+                // strand texture's alpha) and the plain (as-exported) look must take the same alpha, or the fragment alpha
+                // comes out 0 and the two views - the game's shaders and the MMD look - disagree about the surface.
                 bool set = false;
                 for (auto& pr : sm.props) if (pr.first == "_Color") { pr.second = *tint; set = true; }
                 if (!set) sm.props.emplace_back("_Color", *tint);
-                sm.diffuse = {tint->x, tint->y, tint->z, 0.0f};
+                sm.diffuse = {tint->x, tint->y, tint->z, tint->w};
                 sm.hairTinted = true;
             }
             if (blushAlpha >= 0)

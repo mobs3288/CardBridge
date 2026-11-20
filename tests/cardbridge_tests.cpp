@@ -127,6 +127,20 @@ Bytes tinyPng() {
               0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82});
 }
 
+// Golden fixtures live under the cardbridge repo root's tests/golden/. Builders run the suite from the
+// repo root (build.ps1), but scripts/cardbridge.ps1 sets the CWD to the workspace root, so ascend from
+// the CWD until the repo root is found ("cardbridge/" subdirectory of the current dir, or the path that
+// already exists from here).
+std::string fixturePath(const std::string& rel) {
+    static const char* kPre[] = {"", "../", "../../", "../../../", "../../../../", "../../../../../"};
+    for (const char* pre : kPre) {
+        for (const std::string& p : {pre + rel, std::string(pre) + "cardbridge/" + rel}) {
+            if (fileio::Exists(p)) return p;
+        }
+    }
+    return rel;
+}
+
 std::string tempPath(const std::string& name) {
     std::string base = env("CARDBRIDGE_TEST_OUT");
     if (base.empty()) base = env("TEMP");
@@ -1881,7 +1895,7 @@ void unitTests() {
 
     test("HairAccessoryCustomizer: real card payload fixture (coordinate 6)", [] {
         Bytes blob;
-        try { blob = fileio::ReadFile("tests/golden/hac_reference.bin"); } catch (const std::exception&) {}
+        try { blob = fileio::ReadFile(fixturePath("tests/golden/hac_reference.bin")); } catch (const std::exception&) {}
         CHECK(!blob.empty());
         if (blob.empty()) return;
         Value::Map payload;
@@ -10105,6 +10119,39 @@ void customHairTests() {
         for (const auto& m : v.infos) saidRigid = saidRigid || m.find("rigid as authored") != std::string::npos;
         CHECK(saidRigid);
         CHECK(v.warnings.empty());
+    });
+
+    test("mesh assembly: submesh material slots follow Unity's m_SubMeshes[].m_Material when present", [] {
+        using namespace unity;
+        RendererInfo r;
+        r.name = "o_test";
+        r.materials = {PPtr{0}, PPtr{0}, PPtr{0}};   // 3 renderer materials
+        // Asset present and valid: submesh 0 carries material slot 1 (not ordinal 0), submesh 1 carries slot 0,
+        // submesh 2 serializes none -> ordinal 2.
+        MeshData mesh;
+        mesh.subMeshTriangles = {std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{0, 1, 2}};
+        mesh.subMeshMaterials = {1, 0, -1};
+        CHECK(SubmeshMaterialSlot(mesh, 0, r) == 1);
+        CHECK(SubmeshMaterialSlot(mesh, 1, r) == 0);
+        CHECK(SubmeshMaterialSlot(mesh, 2, r) == 2);
+        // Asset index out of the renderer's list: fall back to the ordinal slot.
+        MeshData meshBad;
+        meshBad.subMeshTriangles = {std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{0, 1, 2}};
+        meshBad.subMeshMaterials = {2, 99};   // 99 is out of range (3 materials: 0..2)
+        CHECK(SubmeshMaterialSlot(meshBad, 0, r) == 2);
+        CHECK(SubmeshMaterialSlot(meshBad, 1, r) == 1);
+        // No per-submesh data at all (assets that serialize none): the legacy ordinal mapping holds.
+        MeshData meshNone;
+        meshNone.subMeshTriangles = {std::vector<uint32_t>{0, 1, 2}, std::vector<uint32_t>{0, 1, 2}};
+        CHECK(SubmeshMaterialSlot(meshNone, 0, r) == 0);
+        CHECK(SubmeshMaterialSlot(meshNone, 1, r) == 1);
+        // More submeshes than the renderer's material list: the ordinal is clamped to the last slot.
+        RendererInfo rOne;
+        rOne.name = "o_one";
+        rOne.materials = {PPtr{0}};
+        CHECK(SubmeshMaterialSlot(meshNone, 0, rOne) == 0);
+        CHECK(SubmeshMaterialSlot(meshNone, 1, rOne) == 0);
+        CHECK(SubmeshMaterialSlot(meshNone, 1, RendererInfo{} /* no materials */) == 0);
     });
 }
 

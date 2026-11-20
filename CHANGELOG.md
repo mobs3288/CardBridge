@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.6] - 2026-11-20
+
+### Fixed
+
+- **MMD ("as exported") view vs the game view**: hair materials now keep the character/accessory hair tint's alpha, and the plain (MMD-look) fallback shader gates cutout fragments, so the viewer's MMD-mode preview draws hair the same opaque way the game's own shaders do — the MMD viewer now matches the non-MMD viewer (back hair included).
+- Submesh materials: the renderer material slot now follows Unity's `m_SubMeshes[].m_Material` when the asset serializes it (falling back to the submesh ordinal), so the material the right submesh draws with is the material the card meant.
+
 ## [0.4.4] - 2026-11-20
 
 ### Fixed
