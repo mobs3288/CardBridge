@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.11] - 2026-11-20
+
+### Fixed
+
+- **Overlapping layered clothing / capes**: two copies of the same garment - a shell and its coloured lining, or one cape worn in two accessory slots - are authored a hair apart, so CardBridge drew them as one flickering, intersecting mesh. A new shared assembly pass (`SeparateCoincidentLayers`) detects such pairs from geometry and card metadata alone (same source item id, matching topology and silhouette, >=85% surface coverage within 2 cm) and shifts the outer copy a few millimetres off the inner one as one rigid piece. Both garments, their colours, weights, UVs and authored drape are preserved; normal layered clothing, footwear and parts from different items are untouched. The correction runs before both the preview and the PMX export, so they stay identical, and per-bone frames are re-derived so re-shaping agrees. `CARDBRIDGE_NO_LAYER_SEPARATION=1` restores the old behaviour for A/B comparison.
+
 ## [0.4.10] - 2026-11-20
 
 ### Fixed

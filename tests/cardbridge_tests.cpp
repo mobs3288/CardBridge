@@ -8866,6 +8866,91 @@ void meshTests() {
         CHECK(stats2.verticesMoved == 0 && stats2.partsFixed == 0 && stats2.maxMove == 0.0f);
     });
 
+    test("coincident clothing layers: a duplicate shell is lifted off its lining, both kept, skinning frames updated", [] {
+        using namespace assemble;
+        Scene s;
+        SceneBone root; root.name = "root"; root.world = Mat4(); s.bones.push_back(root);
+        auto quad = [&](const char* name, float z) {
+            SceneMesh m; m.name = name; m.reshapable = true;
+            const Vec3 p[4] = {{-0.5f, -0.5f, z}, {0.5f, -0.5f, z}, {0.5f, 0.5f, z}, {-0.5f, 0.5f, z}};
+            for (int i = 0; i < 4; ++i) {
+                SceneVertex v; v.pos = p[i]; v.normal = {0, 0, 1}; v.uv = {0, 0};
+                v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv;
+                v.bone[0] = 0; v.weight[0] = 1.0f; v.local[0] = v.pos; v.nlocal[0] = v.normal;
+                m.vertices.push_back(v);
+            }
+            SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
+            return m;
+        };
+        s.meshes.push_back(quad("lining", 0.0f));
+        s.meshes.push_back(quad("shell", 0.002f));
+        ScenePart lining; lining.id = "outfit0.acc31"; lining.group = "Accessories"; lining.meshes = {0};
+        lining.sourceItemId = 12345; s.parts.push_back(lining);
+        ScenePart shell; shell.id = "outfit0.acc32"; shell.group = "Accessories"; shell.meshes = {1};
+        shell.sourceItemId = 12345; s.parts.push_back(shell);   // the same card item worn twice
+        const auto stats = SeparateCoincidentLayers(s);
+        CHECK(stats.pairsFound == 1);
+        CHECK(stats.partsFixed == 1);
+        CHECK(stats.verticesMoved == 4);
+        CHECK(stats.maxMove > 0.0f && stats.maxMove < 0.01f);
+        // the inner layer is bit-identical; the outer one now clears it by 3 mm
+        for (int i = 0; i < 4; ++i) {
+            CHECK(s.meshes[0].vertices[i].pos.z == 0.0f);
+            CHECK(std::fabs(s.meshes[1].vertices[i].pos.z - 0.003f) < 1e-5f);
+            // the per-bone frame was re-derived from the moved position
+            CHECK(std::fabs(s.meshes[1].vertices[i].local[0].z - s.meshes[1].vertices[i].pos.z) < 1e-6f);
+            CHECK(s.meshes[1].vertices[i].bone[0] == 0 && s.meshes[1].vertices[i].weight[0] == 1.0f);
+        }
+        // a second pass has nothing left to do: the three-millimetre band is stable
+        const auto again = SeparateCoincidentLayers(s);
+        CHECK(again.verticesMoved == 0);
+        bool reported = false;
+        for (const auto& is : s.issues) reported = reported || (is.part == "clothing layers" && is.message.find("coincident clothing") != std::string::npos);
+        CHECK(reported);
+    });
+
+    test("coincident clothing layers: ordinary layering, other groups and mismatched meshes are left alone", [] {
+        using namespace assemble;
+        Scene s;
+        SceneBone root; root.name = "root"; root.world = Mat4(); s.bones.push_back(root);
+        auto quad = [&](float z, size_t extra) {
+            SceneMesh m; m.reshapable = true;
+            const Vec3 p[4] = {{-0.5f, -0.5f, z}, {0.5f, -0.5f, z}, {0.5f, 0.5f, z}, {-0.5f, 0.5f, z}};
+            for (int i = 0; i < 4; ++i) {
+                SceneVertex v; v.pos = p[i]; v.normal = {0, 0, 1};
+                v.bone[0] = 0; v.weight[0] = 1.0f; v.local[0] = v.pos; v.nlocal[0] = v.normal;
+                m.vertices.push_back(v);
+            }
+            for (size_t i = 0; i < extra; ++i) {
+                SceneVertex v; v.pos = {0.25f + 0.05f * float(i), 0.25f, z}; v.normal = {0, 0, 1};
+                v.bone[0] = 0; v.weight[0] = 1.0f; v.local[0] = v.pos; v.nlocal[0] = v.normal;
+                m.vertices.push_back(v);
+            }
+            SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
+            return m;
+        };
+        // two normal layers 12 cm apart: not a coincidence
+        s.meshes.push_back(quad(0.0f, 0));
+        s.meshes.push_back(quad(0.12f, 0));
+        ScenePart a; a.id = "outfit0.top"; a.group = "Outfit"; a.meshes = {0}; a.sourceItemId = 1; s.parts.push_back(a);
+        ScenePart b; b.id = "outfit0.acc01"; b.group = "Accessories"; b.meshes = {1}; b.sourceItemId = 2; s.parts.push_back(b);
+        // a coincident pair in a non-clothing group is never touched
+        s.meshes.push_back(quad(0.0f, 0));
+        s.meshes.push_back(quad(0.002f, 0));
+        ScenePart h1; h1.id = "hair.back"; h1.group = "Hair"; h1.meshes = {2}; s.parts.push_back(h1);
+        ScenePart h2; h2.id = "hair.front"; h2.group = "Hair"; h2.meshes = {3}; s.parts.push_back(h2);
+        // different topology: a small brooch on a coat is not a duplicate of it
+        s.meshes.push_back(quad(0.002f, 2));
+        ScenePart brooch; brooch.id = "outfit0.acc02"; brooch.group = "Accessories"; brooch.meshes = {4}; s.parts.push_back(brooch);
+        const auto stats = SeparateCoincidentLayers(s);
+        CHECK(stats.pairsFound == 0);
+        CHECK(stats.verticesMoved == 0);
+        CHECK(s.meshes[0].vertices[0].pos.z == 0.0f);
+        CHECK(s.meshes[1].vertices[0].pos.z == 0.12f);
+        CHECK(s.meshes[3].vertices[0].pos.z == 0.002f);
+        CHECK(s.meshes[4].vertices[0].pos.z == 0.002f);
+    });
+
     test("body suppression fallback: an opaque garment over the sphere hides it; the exposed slit stays on the body", [] {
         using namespace assemble;
         Scene s;
@@ -9389,6 +9474,23 @@ void integrationTests() {
         std::printf("[ SKIP ] integration tests (set CARDBRIDGE_TEST_LIBRARY / _MODS / _CARD)\n");
         return;
     }
+    test("coincident clothing layers: the shared pass is idempotent on a real card", [&] {
+        card::Card c = card::LoadCard(cardPath);
+        CHECK(c.supported);
+        std::vector<std::string> issues;
+        resolve::ModIndex mi = resolve::ModIndex::Build(mods, env("CARDBRIDGE_TEST_MODCACHE"), &issues);
+        resolve::ListTable lists;
+        lists.loadBaseGame(library::AbdataRoot(lib), &issues);
+        resolve::Resolver resolver(mi, lists, library::AbdataRoot(lib));
+        assemble::AssembleOptions plain;
+        assemble::Scene scene = assemble::Assemble(c, resolver, plain);
+        // Assemble already ran the separation pass. A second run must find nothing left to do, otherwise the
+        // correction would creep outward every time a viewer re-assembles the same card.
+        const auto again = assemble::SeparateCoincidentLayers(scene);
+        CHECK(again.pairsFound == 0);
+        CHECK(again.verticesMoved == 0);
+        CHECK(again.maxMove == 0.0f);
+    });
     test("layer import: the layered garment follows the same rig bones as the base outfit", [&] {
         const std::string srcEnvStr = env("CARDBRIDGE_TEST_LAYER_SRC");
         if (srcEnvStr.empty()) { ++g_skipped; std::printf("[ SKIP ] no CARDBRIDGE_TEST_LAYER_SRC\n"); return; }

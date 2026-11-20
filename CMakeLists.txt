@@ -83,6 +83,7 @@ add_library(cardbridge_core STATIC
     src/assemble/DynamicBone.cpp
     src/assemble/CustomHairDiag.cpp
     src/assemble/GarmentFix.cpp
+    src/assemble/GarmentLayers.cpp
     src/assemble/BodySuppression.cpp
     src/pmx/PmxWriter.cpp
     src/export/Exporter.cpp

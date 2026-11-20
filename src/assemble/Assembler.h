@@ -147,6 +147,23 @@ struct GarmentFixStats {
 // without a body part is left untouched (stats all zero).
 GarmentFixStats FixGarmentIntersections(Scene& scene, float clearance = 0.002f);
 
+struct LayerSeparationStats {
+    size_t pairsFound = 0;      // pairs of near-coincident garment parts detected from geometry
+    size_t partsFixed = 0;      // outer parts with at least one vertex moved
+    size_t verticesMoved = 0;
+    size_t skipped = 0;         // vertices whose required move exceeded the safety cap
+    float maxMove = 0.0f;       // largest push, in metres
+};
+// Separates clothing pieces that are the same layer twice - an outer shell and its coloured lining, two copies of a
+// cape in two accessory slots, a garment worn both as clothes and through Accessory Clothes. Such pieces are authored
+// a hair apart and z-fight when both are drawn. A pair qualifies only when >=85% of sampled vertices of the inner
+// copy lie within 2 cm of the outer surface, and both parts come from the same card item with matching topology and
+// silhouette. The outer copy is shifted a few millimetres off the inner one as one rigid piece; the inner copy, the
+// bone weights, UVs, topology, materials and blend shapes stay exactly as authored. Per-bone locals are re-derived
+// for moved meshes, so a later Reshape agrees. Derived from geometry and card metadata only - no slot numbers, item
+// names or per-card data. On by default. CARDBRIDGE_NO_LAYER_SEPARATION=1 disables it for before/after comparison.
+LayerSeparationStats SeparateCoincidentLayers(Scene& scene);
+
 // Bakes the heeled-footwear rest pose (Stiletto: foot pitched about cf_j_foot,
 // toes about cf_j_toes, lift onto y=0) for the heeled shoe(s) in the scene.
 // Runs at the end of Assemble/Reshape; exported for tests so the flat/heeled

@@ -301,6 +301,10 @@ struct ScenePart {
     float heelShoeAngleDeg = 0, heelShoeTranslateY = 0, heelShoeTranslateZ = 0;
     float heelShoeShearY = 0, heelShoeShearZ = 0;
     std::string heelConfigSource;   // "zipmod <guid>" / "known <Name>" for the manifest
+    // Set by SeparateCoincidentLayers once this part has been shifted off a duplicated layer. Keeps a part in at
+    // most one pair (a card can repeat one item in several slots), so the correction is deterministic and a second
+    // pass over the same scene is a no-op.
+    bool layerSeparated = false;
 };
 
 // What BakePose wrote into the scene as its new rest pose, for the manifest.

@@ -4424,6 +4424,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             scene.warn("proportions", "proportion corrections are active (" + std::to_string(opt.proportionLayer.ops.size()) + " op(s)); faithful export = reset them (Proportions tab)");
     }
     if (opt.autoCloth && !std::getenv("CARDBRIDGE_NO_AUTO_CLOTH")) SynthesizeAutoCloth(scene, log);
+    // Two copies of one garment (a shell plus its lining, or a cape in two accessory slots) are authored almost on
+    // top of each other. Shift the outer copy a few millimetres so both render without z-fighting. Geometry- and
+    // metadata-derived, on by default: normal layered clothing never qualifies. CARDBRIDGE_NO_LAYER_SEPARATION=1
+    // restores the old behaviour for A/B comparison.
+    SeparateCoincidentLayers(scene);
     report(1.0, "done");
     return scene;
 }
