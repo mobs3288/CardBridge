@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.8] - 2026-11-20
+
+### Fixed
+
+- **Hair washed out in MMD / exported PMX**: the shader bake feeds sRGB hair-colour properties (`_Color2`/`_Color3`) raw, so its output is already sRGB. A ToSrgb encode added with HAC support double-converted that output for materials with a non-sRGB main texture (the HAC back-hair gradient mask, the create-job body overlay), turning the game's dark hair into pale lavender in both the as-exported view and MikuMikuDance. Removed the erroneous encode so the bake is gamma in / gamma out.
+
 ## [0.4.7] - 2026-11-20
 
 ### Fixed

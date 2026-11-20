@@ -1643,15 +1643,12 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         bt.width = W; bt.height = H;
         bt.clamp = clampMain;   // the viewer sampler must clamp the baked texture exactly as the game clamps its source
         bt.rgba.resize(static_cast<size_t>(W) * H * 4);
-        // Materials whose colour lives in a linear-stored texture (an embedded MaterialEditor image) compute in linear
-        // light: encode the result to sRGB bytes, like the framebuffer does, or the grading toe crushes it.
-        const bool encode = detail::LinearLight() && mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
-                            !scene.textures[static_cast<size_t>(mat.texture)].srgb;
-        for (size_t i = 0; i < bt.rgba.size(); ++i) {
-            float v = img[i];
-            if (encode && (i % 4) < 3) v = detail::ToSrgb(v);
-            bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f)));
-        }
+        // The bake is a gamma-space pipeline: colour props are fed raw (see the note above) and sRGB textures are
+        // sampled as stored, so the shader output is already sRGB bytes. Do NOT encode it again - a ToSrgb here
+        // double-converts any material whose main texture is not sRGB-flagged (the HAC hair-gradient mask, the
+        // create-job body overlay), washing saturated back hair out to pale lavender in MMD.
+        for (size_t i = 0; i < bt.rgba.size(); ++i)
+            bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, img[i] * 255.0f + 0.5f)));
         if (grade) {   // the same look-up the preview applies to its frame; alpha stays
             std::vector<uint32_t> px(static_cast<size_t>(W) * H);
             for (size_t i = 0; i < px.size(); ++i)
