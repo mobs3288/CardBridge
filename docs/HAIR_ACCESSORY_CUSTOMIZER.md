@@ -1,6 +1,6 @@
 # HairAccessoryCustomizer (HAC) support
 
-Status: **implemented** (2026-11-20). Version 0.4.11.
+Status: **implemented** (2026-11-20). Version 0.4.12.
 
 ## Verified data mapping
 

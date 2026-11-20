@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.12] - 2026-11-21
+
+### Fixed
+
+- **Clothing stuck in T-pose while the body is posed (KK and KKS)**: some garments ship a `SkinnedMeshRenderer` whose bone list is longer than the mesh's inverse bind-pose table (the reproduction KKS sailor top has 115 bones but only 100 bind poses, with no vertex actually using the extra slots). The shared skinning gate rejected the whole mesh whenever the table was shorter, so the garment was placed rigidly on the prefab root and never followed the pose — the sleeves stayed horizontal while the arms moved down, and the garment could sit misaligned. The gate now accepts any mesh with weights, bones and a non-empty bind table; influences naming a bone past the table are dropped (and reported), while all other vertices keep their correct bind and follow the same evaluated skeleton as the body. This is one shared correction for every clothing slot, garment-as-accessory and both game formats — no per-card or per-slot workaround. Regression tests cover the mismatch, the rigid fallbacks and pose-following; the PMX export carries the restored arm-bone weights.
+
 ## [0.4.11] - 2026-11-20
 
 ### Fixed

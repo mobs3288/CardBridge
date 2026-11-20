@@ -16,6 +16,14 @@ namespace cardbridge::assemble {
 // warm pastel salmon-pink). An explicit colour overrides it (see AssembleOptions); w <= 0 keeps the card's own colour.
 inline constexpr Vec4 kDefaultNippleColour{0.992f, 0.655f, 0.592f, 1.0f};
 
+// Whether a renderer's mesh carries skinning we can use. A SkinnedMeshRenderer's bone list may be longer than
+// the mesh's inverse-bind table (KK/KKS garments ship bones the mesh never weighs); that is not a reason to
+// drop the skin wholesale. Influences naming a bone past the table are discarded during assembly, the rest
+// keep their bind. Only an empty skin or an empty bind table makes a renderer truly rigid. Exposed for tests.
+inline bool HasUsableSkin(const unity::RendererInfo& r, const unity::MeshData& mesh) {
+    return r.skinned && !r.boneXforms.empty() && !mesh.skin.empty() && !mesh.bindPoses.empty();
+}
+
 // One layer to build on top of the outfit: a garment source (outfit file, or a Coordinate PNG) the assembly
 // grafts onto the scene after the outfit itself is built. The source is assembled against a disposable copy of
 // the card (ONLY the chosen clothes slots, the rest is discarded), and the parts land in the scene with

@@ -3221,6 +3221,50 @@ void unitTests() {
         CHECK(c.aposeApplied);
     });
 
+    test("skinning: an inverse bind table shorter than the bone list still skins the garment", [] {
+        // KK/KKS garments ship SkinnedMeshRenderer.m_Bones with unused extra joints: the mesh's m_BindPose
+        // table is shorter. A rigid fallback here leaves a whole sleeve in T-pose while the body is posed.
+        unity::RendererInfo r;
+        r.skinned = true;
+        for (int i = 0; i < 5; ++i) r.boneXforms.push_back(100 + i);
+        unity::MeshData m;
+        m.skin.resize(3);
+        for (int i = 0; i < 3; ++i) m.bindPoses.push_back(Mat4{});
+        CHECK(assemble::HasUsableSkin(r, m));                 // 3 binds, 5 bones: still skinned
+        auto saved = m.bindPoses;
+        m.bindPoses.clear();
+        CHECK(!assemble::HasUsableSkin(r, m));                // no bind table at all: genuinely rigid
+        m.bindPoses = saved;
+        m.skin.clear();
+        CHECK(!assemble::HasUsableSkin(r, m));                // no weights: rigid
+        m.skin.resize(3);
+        r.skinned = false;
+        CHECK(!assemble::HasUsableSkin(r, m));                // plain MeshRenderer: rigid
+        r.skinned = true;
+        r.boneXforms.clear();
+        CHECK(!assemble::HasUsableSkin(r, m));                // no bones: rigid
+
+        // The invariant the fix restores: a garment vertex on an arm bone follows a pose, one stuck on the
+        // prefab root does not. This is what separated the T-pose sleeve from the posed body.
+        assemble::Scene s;
+        auto addBone = [&](const char* name, int parent, Vec3 p) {
+            assemble::SceneBone b; b.name = name; b.parent = parent; b.pos = p; b.source = "rig";
+            b.world = Mat4::TRS(p, Quat{}, Vec3{1, 1, 1});
+            s.bones.push_back(b); return static_cast<int>(s.bones.size()) - 1;
+        };
+        const int root = addBone("p_cf_body_bone", -1, {0, 0, 0});
+        const int arm = addBone("cf_j_arm00_L", root, {0.2f, 1.4f, 0});
+        assemble::SceneVertex v;
+        v.pos = {0.35f, 1.4f, 0}; v.normal = {0, 1, 0}; v.bone[0] = arm; v.weight[0] = 1;
+        assemble::Pose pose;
+        pose.edit(static_cast<size_t>(arm)).rot = {0, 0, 90};
+        const auto skin = assemble::SkinMatrices(s, pose);
+        CHECK(assemble::SkinPoint(v, skin).y > 1.5f);         // the arm-bound vertex swings
+        assemble::SceneVertex rigid = v;
+        rigid.bone[0] = root;
+        CHECK(std::fabs(assemble::SkinPoint(rigid, skin).y - 1.4f) < 1e-6f);   // root-bound stays put
+    });
+
     test("software renderer: the pose moves what is drawn, the framing stays", [] {
         using namespace assemble;
         Scene s;

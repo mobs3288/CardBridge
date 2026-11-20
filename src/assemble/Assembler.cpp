@@ -1528,7 +1528,14 @@ struct Builder {
 
         Mat4 rendererW = Wp(uf, r.xformId);
         Mat4 rootInv = inverse(W(uf, prefabRoot));
-        bool skinned = r.skinned && !r.boneXforms.empty() && !mesh->skin.empty() && mesh->bindPoses.size() >= r.boneXforms.size();
+        // A Unity mesh's m_BindPose table counts the bones that actually have a bind; SkinnedMeshRenderer.m_Bones
+        // can be longer (KK/KKS garments ship extras the mesh never weighs). A shorter table is not a reason to
+        // throw away the skinning: the influences that name a bone past the table are dropped below, and all the
+        // rest keep their bind. Requiring bindPoses >= boneXforms here used to turn such a garment into a rigid
+        // prefab-root shell - a T-pose blouse while the body was posed. It is the same path for KK and KKS, and
+        // for garments worn through an accessory slot, so the correction belongs in this shared gate.
+        const size_t bindCount = mesh->bindPoses.size();
+        bool skinned = HasUsableSkin(r, *mesh);
         if (skinned) ++diagSkinned;
         if (r.skinned && !skinned && !r.boneXforms.empty())
             scene.warn(partId, "renderer '" + r.name + "' has bones but no usable skin data; placed rigidly");
@@ -1578,8 +1585,11 @@ struct Builder {
                 const unity::Xform* bx = uf.xform(bid);
                 const std::string bname = bx ? bx->name : std::string();
                 const bool isFoot = bname == "cf_j_foot_L" || bname == "cf_j_foot_R";
-                diagBind(bid, mesh->bindPoses[i]);
-                Mat4 bp = mesh->bindPoses[i];
+                // Extra renderer bones past the mesh's bind table have no inverse bind. Keep the index alignment
+                // (the vertex loop drops any influence that names one) and never index past the table.
+                const bool haveBind = i < bindCount;
+                if (haveBind) diagBind(bid, mesh->bindPoses[i]);
+                Mat4 bp = haveBind ? mesh->bindPoses[i] : Mat4{};
                 if (warpOn && isFoot) bp = warpMat * bp;
                 // A garment worn through an accessory slot is bound to the body skeleton: Unity ignores the accessory node's
                 // transform for skinned meshes, so the attach anchor must not move it. Only a bone this item creates of its own
@@ -1599,7 +1609,8 @@ struct Builder {
             for (size_t i = 0; i < r.boneXforms.size(); ++i) {
                 const unity::Xform* bx = uf.xform(r.boneXforms[i]);
                 std::string bname = bx ? bx->name : std::string();
-                diagBind(r.boneXforms[i], mesh->bindPoses[i]);
+                const bool haveBind = i < bindCount;
+                if (haveBind) diagBind(r.boneXforms[i], mesh->bindPoses[i]);
                 int bi = bname.empty() ? -1 : scene.boneIndex(bname);
                 auto rw = rig.world.find(bname);
                 if (rw == rig.world.end() && bx && bi < 0) {   // a bone only this item has (a mod's necklace joint ...)
@@ -1609,7 +1620,7 @@ struct Builder {
                 const Mat4 bw = rw != rig.world.end() ? rw->second : itemBoneWorld(uf, r.boneXforms[i], prefabRoot, placement);
                 if (bi < 0) bi = 0;
                 boneIdx.push_back(bi);
-                Mat4 bp = mesh->bindPoses[i];
+                Mat4 bp = haveBind ? mesh->bindPoses[i] : Mat4{};
                 if (warpOn && (bname == "cf_j_foot_L" || bname == "cf_j_foot_R")) bp = warpMat * bp;
                 boneMat.push_back(bw * bp);
             }
@@ -1651,7 +1662,8 @@ struct Builder {
                 Vec3 lp[4], ln[4];
                 for (int k = 0; k < 4; ++k) {
                     if (bi.w[k] <= 0.0f) continue;
-                    if (bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) { ++badSkinIndices; continue; }
+                    if (bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size() ||
+                        static_cast<size_t>(bi.idx[k]) >= bindCount) { ++badSkinIndices; continue; }
                     const size_t bk = static_cast<size_t>(bi.idx[k]);
                     const Mat4& m = boneMat[bk];
                     pos = pos + m.point(p) * bi.w[k];
@@ -1682,7 +1694,7 @@ struct Builder {
 
         if (badSkinIndices)
             scene.warn(partId, "renderer '" + r.name + "' has " + std::to_string(badSkinIndices) +
-                               " skinned influences with bone indices outside its bone list; those influences were dropped");
+                               " skinned influences with indices outside its bone list or inverse bind-pose table; those influences were dropped");
         {   // blend shape offsets in model space: the mesh-space delta goes through the same skinning (rotation and scale part) as the vertex
             auto modelDelta = [&](size_t v, Vec3 d, std::array<Vec3, 4>& local) {
                 local = {};
@@ -1692,7 +1704,8 @@ struct Builder {
                     float wsum = 0;
                     int slot = 0;
                     for (int k = 0; k < 4; ++k) {
-                        if (bi.w[k] <= 0.0f || bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size()) continue;
+                        if (bi.w[k] <= 0.0f || bi.idx[k] < 0 || static_cast<size_t>(bi.idx[k]) >= boneMat.size() ||
+                            static_cast<size_t>(bi.idx[k]) >= bindCount) continue;
                         const size_t bk = static_cast<size_t>(bi.idx[k]);
                         const Vec3 md = boneMat[bk].dir(d);
                         acc = acc + md * bi.w[k];
