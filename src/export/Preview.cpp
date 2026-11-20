@@ -4,6 +4,7 @@
 #include "export/Translucency.h"
 
 #include "assemble/Pose.h"
+#include "assemble/Assembler.h"
 
 #include <stb_image_write.h>
 
@@ -1348,11 +1349,11 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         for (const auto& tb : scene.globalTextures) BuildTexMips(scene, st, tb.texture);
         if (dbg) std::fprintf(stderr, "bake: mips built for %zu textures in %.3fs\n", scene.textures.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
-    float L[3] = {0.0f, 0.4f, 0.9165f}, camPos[3] = {0.0f, 0.0f, 5.0f};
-    if (lit) {   // the light and camera of the front view the shaded picture uses, so the texture holds the same shading
-        // Framed on what the viewer shows (visible final parts), not on hidden
-        // items that were removed from the export.
+    float flatL[3] = {0.0f, 0.4f, 0.9165f}, flatCamPos[3] = {0.0f, 0.0f, 5.0f};
+    float litL[3] = {0.0f, 0.4f, 0.9165f}, litCamPos[3] = {0.0f, 0.0f, 5.0f};
+    {
         Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+        bool any = false;
         for (const auto& part : scene.parts) {
             if (!part.includeInExport || part.startHidden) continue;
             if (!part.underPiece && !part.visibleInPreview) continue;
@@ -1360,16 +1361,20 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                 for (const auto& v : scene.meshes[static_cast<size_t>(me)].vertices) {
                     mn = {std::min(mn.x, v.pos.x), std::min(mn.y, v.pos.y), std::min(mn.z, v.pos.z)};
                     mx = {std::max(mx.x, v.pos.x), std::max(mx.y, v.pos.y), std::max(mx.z, v.pos.z)};
+                    any = true;
                 }
         }
-        const float pit = 4.0f * 3.14159265f / 180.0f, toCam[3] = {0.0f, std::sin(pit), std::cos(pit)};
-        float n = 0;
-        for (int c = 0; c < 3; ++c) L[c] = toCam[c] + (c == 1 ? 0.45f : 0.0f);
-        for (float c : L) n += c * c;
-        for (float& c : L) c /= std::sqrt(n);
-        const float ctr[3] = {(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
-        for (int c = 0; c < 3; ++c) camPos[c] = ctr[c] + toCam[c] * 5.0f;
+        if (any) {
+            const float pit = 4.0f * 3.14159265f / 180.0f, toCam[3] = {0.0f, std::sin(pit), std::cos(pit)};
+            float n = 0;
+            for (int c = 0; c < 3; ++c) litL[c] = toCam[c] + (c == 1 ? 0.45f : 0.0f);
+            for (float c : litL) n += c * c;
+            for (float& c : litL) c /= std::sqrt(n);
+            const float ctr[3] = {(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
+            for (int c = 0; c < 3; ++c) litCamPos[c] = ctr[c] + toCam[c] * 5.0f;
+        }
     }
+    float L[3] = {flatL[0], flatL[1], flatL[2]}, camPos[3] = {flatCamPos[0], flatCamPos[1], flatCamPos[2]};
     const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
     int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0, skipKksShader = 0;
     const size_t originalTextures = scene.textures.size();
@@ -1385,6 +1390,9 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             ++skipKksShader;
             continue;
         }
+        const bool thisLit = lit || assemble::IsHairShaderFamily(mat.shader);
+        const bool thisToon = toon && !thisLit;
+        for (int _c = 0; _c < 3; ++_c) { L[_c] = thisLit ? litL[_c] : flatL[_c]; camPos[_c] = thisLit ? litCamPos[_c] : flatCamPos[_c]; }
         const auto tMat0 = std::chrono::steady_clock::now();
         // Translucent materials are baked like any other: the bake preserves the shader's alpha (the game's authored opacity is its
         // output alpha), so the PMX shows what the game shows for them â€” shaded, colour-graded, with the material's own toon ramp.
@@ -1572,7 +1580,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             }
         }
 
-        if (toon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
+        if (thisToon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
                 std::vector<float> ti;
                 std::vector<uint8_t> tc;
@@ -1658,7 +1666,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // The shader's colour is now in the texture: the PMX material multiplies by white and keeps its alpha.
         mat.texture = static_cast<int>(scene.textures.size()) - 1;
         mat.diffuse = {1.0f, 1.0f, 1.0f, mat.diffuse.w};
-        mat.bakedLit = lit;
+        mat.bakedLit = thisLit;
         ++baked;
         if (dbg) std::fprintf(stderr, "bake: material %zu '%s' (%dx%d) in %.3fs\n", mi, mat.name.c_str(), W, H, std::chrono::duration<double>(std::chrono::steady_clock::now() - tMat0).count());
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +

@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.7] - 2026-11-20
+
+### Fixed
+
+- **MMD ("as exported") view for hair**: hair materials are now baked with the game's own front light (per-material lit bake) so the MMD preview carries the game's hair colour/shade instead of a flat sheet re-shaded by MMD's light/ramp. Non-hair materials keep the flat + MMD-ramp treatment so the MMD look stays faithful.
+
 ## [0.4.6] - 2026-11-20
 
 ### Fixed
