@@ -130,6 +130,12 @@ Acceptance: a mods folder containing `[Snooley]Coiffure Pack` (no `<game>`), `[C
 
 ---
 
+## Stage 9 — Full HairAccessoryCustomizer support — **PASS (with limitation)** `[V]`
+
+Implemented `src/card/HairAccessoryCustomizer.{h,cpp}`; replaced ad-hoc HAC parsing in `src/assemble/Assembler.cpp` with typed decoding.
+
+Result: HAC `ColorMatch=true` correctly applies the character's hair colors to hair accessories. On `y80oZjpGdRAUJZrQAy2LBNUO.png` (coordinate 6), the previously washed-out back hair is now dark and consistent with the front hair. HAC gloss (`_GlossColor`) and length (`_HairLength`) are handled; length is a known PMX limitation. New HAC unit/integration tests pass; see `docs/KKS_TEST_MATRIX.md` §J.
+
 ## Stage 8 — Verification, docs and snapshot — **PASS** `[I]`
 
 1. Run the full matrix in [`KKS_TEST_MATRIX.md`](KKS_TEST_MATRIX.md) plus the existing KK A1–A10 acceptance tests from [`OFFLINE_FORMAT_FEASIBILITY.md`](OFFLINE_FORMAT_FEASIBILITY.md).

@@ -25,6 +25,7 @@
 #include "card/SelectiveImport.h"
 #include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"
+#include "card/HairAccessoryCustomizer.h"
 #include "core/FileIo.h"
 #include "core/Inflate.h"
 #include "core/Lz4.h"
@@ -1784,6 +1785,129 @@ void unitTests() {
         fileio::WriteFile(p, plain.data(), plain.size());
         CHECK(card::DetectCardFamily(p) == card::CardFamily::Other);
     });
+    test("HairAccessoryCustomizer: nested payload decoding and slot mapping", [] {
+        auto color = [](double r, double g, double b, double a = 1.0) {
+            Value::Array v; v.emplace_back(Value(r)); v.emplace_back(Value(g)); v.emplace_back(Value(b)); v.emplace_back(Value(a));
+            return Value(std::move(v));
+        };
+        auto settings = [&](bool match, bool gloss, const char* name) {
+            Value::Map m;
+            m.emplace_back(Value(std::string("ColorMatch")), Value(match));
+            m.emplace_back(Value(std::string("HairGloss")), Value(gloss));
+            m.emplace_back(Value(std::string("AccessoryColor")), color(name[0] / 100.0, name[1] / 100.0, name[2] / 100.0));
+            m.emplace_back(Value(std::string("OutlineColor")), color(0.1, 0.2, 0.3));
+            m.emplace_back(Value(std::string("GlossColor")), color(0.4, 0.5, 0.6));
+            m.emplace_back(Value(std::string("HairLength")), Value(0.75));
+            return Value(std::move(m));
+        };
+        auto kkexWith = [&](const Value& blob, const char* key = "HairAccessories") {
+            Value::Map payload;
+            payload.emplace_back(Value(std::string(key)), Value(MsgPackPack(blob)));
+            Value::Array entry;   // [version, payload] — an array, not a map
+            entry.emplace_back(Value(int64_t{0}));
+            entry.emplace_back(Value(std::move(payload)));
+            Value::Map ext;
+            ext.emplace_back(Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")), Value(std::move(entry)));
+            return Value(std::move(ext));
+        };
+        Value::Map coord6;
+        coord6.emplace_back(Value(int64_t{3}), settings(true, true, "abc"));
+        coord6.emplace_back(Value(int64_t{20}), settings(false, false, "def"));   // moreAccessories slot
+        Value::Map nested;
+        nested.emplace_back(Value(int64_t{6}), Value(std::move(coord6)));
+        Value::Map coord0;
+        coord0.emplace_back(Value(int64_t{3}), settings(false, true, "xyz"));     // same slot, other coordinate
+        nested.emplace_back(Value(int64_t{0}), Value(std::move(coord0)));
+
+        card::HairAccessorySettings hac = card::LoadHairAccessoryCustomizer(kkexWith(Value(std::move(nested))));
+        CHECK(!hac.empty());
+        const auto* s6 = hac.find(6, 3);
+        CHECK(s6 && s6->valid && s6->colorMatch && s6->hairGloss);
+        CHECK(std::fabs(s6->hairLength - 0.75f) < 1e-6f);
+        CHECK(std::fabs(s6->glossColor.x - 0.4f) < 1e-6f);
+        const auto* s20 = hac.find(6, 20);
+        CHECK(s20 && s20->valid && !s20->colorMatch && !s20->hairGloss);
+        CHECK(std::fabs(s20->accessoryColor.x - 1.0f) < 1e-6f);   // 'd' = 100 -> 1.0
+        const auto* s0 = hac.find(0, 3);
+        CHECK(s0 && s0->valid && !s0->colorMatch);                 // coordinate-specific, not shared
+        CHECK(hac.find(6, 9) == nullptr);                          // missing slot -> null
+
+        // Colour helpers: ColorMatch uses the character's three hair colours;
+        // otherwise hair renderers keep the prefab colours and accessory
+        // renderers use the HAC AccessoryColor.
+        const Vec4 hair[3] = {{0.2f, 0.3f, 0.4f, 1}, {0.1f, 0.2f, 0.3f, 1}, {0.5f, 0.6f, 0.7f, 1}};
+        const Vec4 prefab[3] = {{1, 1, 1, 1}, {1, 1, 1, 1}, {1, 1, 1, 1}};
+        const auto matched = card::HacHairColors(*s6, hair, prefab);
+        CHECK(matched[0].x == hair[0].x && matched[1].y == hair[1].y && matched[2].z == hair[2].z);
+        const auto untouched = card::HacHairColors(*s20, hair, prefab);
+        CHECK(untouched[0].x == 1.0f);   // ColorMatch=false keeps prefab colour on hair renderers
+        const auto acc = card::HacAccessoryColors(*s20, prefab);
+        CHECK(std::fabs(acc[0].x - s20->accessoryColor.x) < 1e-6f);
+        CHECK(card::HacHairColors(*s6, hair, prefab)[0].w == 1.0f);
+
+        // Flat shape (outfit file) is stored as a wildcard coordinate.
+        Value::Map flat;
+        flat.emplace_back(Value(int64_t{7}), settings(true, false, "ghi"));
+        card::HairAccessorySettings hacFlat = card::LoadHairAccessoryCustomizer(kkexWith(Value(std::move(flat))));
+        const auto* sf = hacFlat.find(2, 7);
+        CHECK(sf && sf->valid && sf->colorMatch);
+
+        // Alternate key name used by some cards.
+        Value::Map alt;
+        alt.emplace_back(Value(int64_t{1}), settings(true, true, "jkl"));
+        card::HairAccessorySettings hacAlt = card::LoadHairAccessoryCustomizer(kkexWith(Value(std::move(alt)), "CoordinateHairAccessories"));
+        CHECK(hacAlt.find(1, 1) != nullptr);
+
+        // Missing plugin entry, malformed blob and incomplete settings are safe.
+        CHECK(card::LoadHairAccessoryCustomizer(Value(Value::Map{})).empty());
+        Value::Map badPayload;
+        badPayload.emplace_back(Value(std::string("HairAccessories")), Value(Bytes{0xff, 0x00, 0x13}));
+        Value::Array badEntry;
+        badEntry.emplace_back(Value(int64_t{0}));
+        badEntry.emplace_back(Value(std::move(badPayload)));
+        Value::Map badExt;
+        badExt.emplace_back(Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")), Value(std::move(badEntry)));
+        CHECK(card::LoadHairAccessoryCustomizer(Value(std::move(badExt))).empty());
+        Value::Map partial;
+        partial.emplace_back(Value(std::string("ColorMatch")), Value(true));
+        Value::Map pcoord;
+        pcoord.emplace_back(Value(int64_t{2}), Value(std::move(partial)));
+        Value::Map pblob;
+        pblob.emplace_back(Value(int64_t{0}), Value(std::move(pcoord)));
+        card::HairAccessorySettings hacPartial = card::LoadHairAccessoryCustomizer(kkexWith(Value(std::move(pblob))));
+        const auto* sp = hacPartial.find(0, 2);
+        CHECK(sp != nullptr && !sp->valid);   // must not be treated as a valid override
+    });
+
+    test("HairAccessoryCustomizer: real card payload fixture (coordinate 6)", [] {
+        Bytes blob;
+        try { blob = fileio::ReadFile("tests/golden/hac_reference.bin"); } catch (const std::exception&) {}
+        CHECK(!blob.empty());
+        if (blob.empty()) return;
+        Value::Map payload;
+        payload.emplace_back(Value(std::string("HairAccessories")), Value(blob));
+        Value::Array entry;
+        entry.emplace_back(Value(int64_t{0}));
+        entry.emplace_back(Value(std::move(payload)));
+        Value::Map ext;
+        ext.emplace_back(Value(std::string("com.deathweasel.bepinex.hairaccessorycustomizer")), Value(std::move(entry)));
+
+        const card::HairAccessorySettings hac = card::LoadHairAccessoryCustomizer(Value(std::move(ext)));
+        CHECK(hac.find(6, 3) && hac.find(6, 3)->valid && hac.find(6, 3)->colorMatch);
+        CHECK(hac.find(6, 5) && hac.find(6, 5)->valid && hac.find(6, 5)->colorMatch);
+        CHECK(hac.find(6, 9) && hac.find(6, 9)->valid && hac.find(6, 9)->colorMatch);
+        CHECK(hac.find(6, 10) && hac.find(6, 10)->valid && hac.find(6, 10)->colorMatch);
+        CHECK(hac.find(6, 20) && hac.find(6, 20)->valid && hac.find(6, 20)->colorMatch);   // moreAccessories slot
+        const auto* s = hac.find(6, 3);
+        if (s) {
+            CHECK(std::fabs(s->glossColor.x - 0.65274f) < 1e-4f);
+            CHECK(std::fabs(s->glossColor.y - 0.6279f) < 1e-4f);
+            CHECK(std::fabs(s->glossColor.z - 0.69f) < 1e-4f);
+            CHECK(s->hairGloss);
+        }
+        CHECK(hac.find(6, 6) == nullptr);   // card has no setting for this slot
+    });
+
     test("KKS mesh: blend weights/indices decoded from vertex channels 12/13", [] {
         auto putF = [](Bytes& b, size_t at, float v) {
             uint32_t u; std::memcpy(&u, &v, 4);

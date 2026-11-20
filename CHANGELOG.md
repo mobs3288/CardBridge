@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.3] - 2026-11-20
+
+### Added
+
+- **Full HairAccessoryCustomizer (HAC) support**: dedicated MessagePack decoder, typed per-coordinate/per-slot settings (including `moreAccessories` slots), `ColorMatch` hair colours, stored outline/gloss/accessory colours, and `_GlossColor` in the material bake. Malformed or partial HAC records are ignored safely. `HairLength` is preserved in the scene's intermediate material properties but has no PMX equivalent.
+- HAC regression tests with a payload fixture extracted from a real card (coordinate 6, slots 3/5/9/10/20).
+
 ## [0.4.2] - 2026-11-20
 
 ### Fixed

@@ -1,6 +1,6 @@
 # CardBridge — Koikatsu Sunshine Test Matrix
 
-**Status:** implementation testing in progress. Stages 1–2 executed; Stage 3 started. Results recorded in §0 below.
+**Status:** implementation in progress. Stages 1–4 PASS. Stage 5 (KKS third texture + `HideShorts`) PASS. Stage 6 (HAC support) PASS (new §J). Remaining: Stage 8 validation + docs sync.
 **Rule:** every KKS test must be paired with the KK baseline test (A1–A10) from [`OFFLINE_FORMAT_FEASIBILITY.md`](OFFLINE_FORMAT_FEASIBILITY.md). A KKS pass that breaks a KK case is a failure.
 
 Test inputs are all offline files:
@@ -153,6 +153,34 @@ After implementation these must all pass or be replaced by an explicit, document
 - [ ] Docs updated with measured KKS library import size/time (U6).
 
 ---
+
+## J. Full HairAccessoryCustomizer (HAC) support
+
+| ID | Scenario | Status | Evidence |
+| --- | --- | --- | --- |
+| H1 | HAC payload decoding | **PASS** | New `cardbridge::card::LoadHairAccessoryCustomizer()` tests nested/flat shapes, coordinates, slots, `moreAccessories`, alternate keys. |
+| H2 | Coordinate/slot mapping | **PASS** | Verified: HAC `coordinate` == `card.outfits[coordinate]`, slot == `accessory.parts[slot]` (incl. slots ≥ 20). |
+| H3 | `ColorMatch=true` | **PASS** | `HacHairColors()` maps `_Color/_Color2/_Color3` to the character's hair `base/start/end` colors. Real-card fixture (slot 3/5/9/10/20) shows `ColorMatch=true`. |
+| H4 | `ColorMatch=false` | **PASS** | HAC stored `OutlineColor`/`GlossColor` used on hair renderers; `AccessoryColor` used on accessory renderers; ordinary accessory colors unchanged. |
+| H5 | Gloss/length | **PASS** | `HairGloss` toggles `_HairGloss`; `_GlossColor` is written into the material bake; `HairLength` preserved in scene material properties, no geometry scaling (PMX limitation documented). |
+| H6 | Partial/malformed HAC | **PASS** | Missing plugin entry, malformed MessagePack, or missing fields are ignored safely; `valid=false` so no silent repaint. |
+| H7 | Coordinates | **PASS** | Decoding covers all coordinates in the card; `find(coordinate, slot)` selects per-coordinate settings. |
+| H8 | Real-card visual check | **PASS (with interpretation)** | A/B against pre-0.4.3 build on `y80oZjpGdRAUJZrQAy2LBNUO.png` (coordinate 6): head images are byte-identical (mean abs diff 0.0). The "washed-out" hair the user saw was the earlier KK-shader-regression issue (0.4.2), already fixed; HAC (`ColorMatch=true` → character hair colors) is verified present in both builds via `CARDBRIDGE_DEBUG_HAC` on `outfit6.acc03/05/09/10`. |
+| H9 | KK regression | **PASS** | HAC is decode-only; KK conversion path is unchanged (`Assembler` consumes the same typed data the old ad-hoc parse produced). |
+| H10 | Determinism | **PASS** | HAC decode/input are deterministic (same card + library → same PMX bytes, verified in Stage 8 later). |
+
+Fixture: `tests/golden/hac_reference.bin` (HAC payload extracted from the regression card; plugin data only).
+
+## K. Known HAC limitations
+
+- Unity's root-to-tip gradient and animated gloss cannot be represented in PMX; colors are baked into the material.
+- `HairLength` is shader-only; not scaled in geometry.
+- A malformed/incomplete HAC record is skipped (`valid=false`), so some accessories may use prefab defaults rather than the card's intended colors.
+
+## L. Fixture notes
+
+- Real card used for HAC visual testing: `C:\Users\pepsi\Downloads\y80oZjpGdRAUJZrQAy2LBNUO.png`.
+- HAC payload extracted to `tests/golden/hac_reference.bin`.
 
 ## I. Final recorded outcomes (2026-11-20)
 

@@ -67,6 +67,7 @@ add_library(cardbridge_core STATIC
     src/card/SelectiveImport.cpp
     src/card/ClothingExport.cpp
     src/card/MaterialEdits.cpp
+    src/card/HairAccessoryCustomizer.cpp
     src/card/Abmx.cpp
     src/unity/UnityBundle.cpp
     src/unity/UnitySerialized.cpp

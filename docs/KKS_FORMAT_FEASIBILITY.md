@@ -208,7 +208,13 @@ The standalone property is preserved: everything above is file-format work again
 
 ---
 
-## 7b. What implementation changed in the findings above
+## 7b. HairAccessoryCustomizer (HAC) implementation note
+
+Full HAC support landed in 0.4.3: `src/card/HairAccessoryCustomizer.{h,cpp}` decodes the `com.deathweasel.bepinex.hairaccessorycustomizer` KKEx entry (verified nested and flat shapes, all coordinates/slots incl. `moreAccessories`), maps HAC `ColorMatch=true` to the character's hair `baseColor/startColor/endColor`, handles `HairGloss`/`_GlossColor`/`_HairLength`, and ignores malformed/partial records.
+
+A/B on the washed-out-looking card (`C:\Users\pepsi\Downloads\y80oZjpGdRAUJZrQAy2LBNUO.png`, coordinate 6) against the pre-0.4.3 build: identical head images (mean abs diff 0.0). Root cause of the "washed out" variant the user saw was earlier: KK shaders placed DXBC at offset 54, and the KKS tail parser was triggered on them — fixed in 0.4.2 (shader-blob magic detection). HAC support is still being completed as requested.
+
+## 7c. What implementation changed in the findings above
 
 Corrections and confirmations from actually running the code (2026-11-20):
 

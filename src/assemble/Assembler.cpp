@@ -11,6 +11,7 @@
 #include "shape/Shape.h"
 #include "card/Abmx.h"
 #include "card/MaterialEdits.h"
+#include "card/HairAccessoryCustomizer.h"
 #include "card/SelectiveImport.h"
 #include "material/MaterialWorkbench.h"
 #include "core/MemoryProbe.h"
@@ -1710,7 +1711,22 @@ struct Builder {
             if (mesh->subMeshTriangles[s].empty()) continue;
             SceneSubmesh ss;
             ss.indices = mesh->subMeshTriangles[s];
+            // Unity's submesh carries its own material index; prefer it over the submesh ordinal, which
+            // was historically assumed to match the renderer material slot (KUsher/modded meshes: submesh
+            // 0 can carry the second material, extra submeshes can point at a slot only reached by index,
+            // and a lone submesh can be material slot N, not 0). The fallback keeps the old mapping for
+            // assets that serialized none. A disagreement is rare and always safe to explain.
             size_t mi = s < r.materials.size() ? s : (r.materials.empty() ? 0 : r.materials.size() - 1);
+            size_t remat = s < mesh->subMeshMaterials.size() ? static_cast<size_t>(std::max(0, mesh->subMeshMaterials[s])) : mi;
+            if (mesh->subMeshMaterials[s] >= 0 && remat != mi && remat < r.materials.size()) {
+                scene.warn(partId, "renderer '" + r.name + "': submesh " + std::to_string(s) + " is material slot " +
+                                  std::to_string(remat) + ", not the ordinal slot " + std::to_string(mi) + "; using the asset's index");
+                mi = remat;
+            }
+            if (std::getenv("CARDBRIDGE_DEBUG_SUBMAT"))
+                std::fprintf(stderr, "submat %-24s sub=%zu ordinal=%zu asset=%d materials=%zu using=%zu\n",
+                             r.name.c_str(), s, mi, mesh->subMeshMaterials.empty() ? -1 : mesh->subMeshMaterials[s],
+                             r.materials.size(), mi);
             if (r.materials.empty()) {
                 scene.warn(partId, "renderer '" + r.name + "' has no materials");
                 SceneMaterial plain;
@@ -2387,6 +2403,9 @@ static void GraftLayerScene(Scene& dst, Scene src, const std::vector<std::string
 Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const AssembleOptions& opt) {
     Scene scene;
     scene.name = card.displayName();
+    // HairAccessoryCustomizer is decoded once per assembly from the current
+    // KKEx map (a clothing/coordinate import may have rewritten it in memory).
+    const card::HairAccessorySettings hac = card::LoadHairAccessoryCustomizer(card.extended);
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     auto report = [&](double frac, const std::string& stage) { if (opt.progress) opt.progress(frac, stage); };
     auto checkCancel = [&]() { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; };
@@ -3655,11 +3674,14 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 haveHairColor = true;
             }
         }
-        Value hacInfo;   // HairAccessoryCustomizer data of this accessory slot (a map when the card has it)
-        if (accessoryMode && ref.outfit >= 0 && ref.accIndex >= 0) {
-            const Value& payload = card.extended.at("com.deathweasel.bepinex.hairaccessorycustomizer").at(size_t(1)).at("HairAccessories");
-            if (payload.isBin()) hacInfo = MsgPackParse(payload.asBin()).atInt(ref.outfit).atInt(ref.accIndex);
-        }
+        // Verified mapping: HAC's coordinate index equals the coordinate index
+        // of card.outfits, and its slot index equals the index into
+        // outfit.accessory.parts (including moreAccessories slots >= 20),
+        // which is also ItemRef::accIndex. find() also handles the flat
+        // single-coordinate shape written by the maker.
+        const card::HairAccessoryCustomizerSettings* hacSlot = nullptr;
+        if (accessoryMode && ref.outfit >= 0 && ref.accIndex >= 0)
+            hacSlot = hac.find(ref.outfit, ref.accIndex);
         std::vector<std::string> skipped, skippedByEditor;
         // A garment's optional pieces (ChaClothesComponent objOpt01 / objOpt02): the maker's two option switches, which the card keeps as
         // the garment's hideOpt; a switched-off option's objects are inactive in the game.
@@ -3810,7 +3832,7 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                : -1.0f;
             // Hair accessories: the HairAccessoryCustomizer slot setting decides gloss and colours (ColorMatch = the character's hair colours); a slot
             // without that data keeps the prefab's own.
-            b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0 && (ref.group == "Hair" || (hacInfo.isMap() && hacInfo.at("HairGloss").asBool()));
+            b.glossForThisRenderer = rtHairItem.count(r.componentId) > 0 && (ref.group == "Hair" || (hacSlot && hacSlot->valid && hacSlot->hairGloss));
             b.stripHairGloss = false;
             auto rawColor = [&](const Value& c) { Vec4 v = vec4Of(c); if (v.w < 1.0f) v.w = 1.0f; return v; };
             const int64_t cid = r.componentId;
@@ -3823,8 +3845,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 const Value& col = card.outfits[static_cast<size_t>(ref.outfit)].accessory.at("parts").at(static_cast<size_t>(ref.accIndex)).at("color");
                 const Value& hp0 = card.hair.at("parts").at(size_t(0));
                 const Vec4 base0 = rawColor(hp0.at("baseColor")), start0 = rawColor(hp0.at("startColor")), end0 = rawColor(hp0.at("endColor"));
-                const bool hac = hacInfo.isMap();
-                const bool hacMatch = hac && hacInfo.at("ColorMatch").asBool();
+                const bool hac = hacSlot && hacSlot->valid;
+                const bool hacMatch = hac && hacSlot->colorMatch;
                 Vec4 eff[3] = {{-1.0f, 0, 0, -1.0f}, {-1.0f, 0, 0, -1.0f}, {-1.0f, 0, 0, -1.0f}};   // w < 0: the game leaves the prefab's own value
                 if (rtNormal.count(cid)) {
                     if (useC[0]) eff[0] = rawColor(col.at(size_t(0)));
@@ -3833,13 +3855,22 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
                 if (rtHair.count(cid)) { eff[0] = eff[1] = eff[2] = start0; }
                 if (hac && rtHairItem.count(cid)) {
-                    if (hacMatch) { eff[0] = base0; eff[1] = start0; eff[2] = end0; }
-                    b.runtime.emplace_back("_LineColor", hacMatch ? rawColor(hp0.at("outlineColor")) : vec4Of(hacInfo.at("OutlineColor")));
-                    b.stripHairGloss = !hacInfo.at("HairGloss").asBool();
+                    const Vec4 hair[3] = {base0, start0, end0};
+                    const Vec4 prefab[3] = {eff[0], eff[1], eff[2]};
+                    const auto matched = HacHairColors(*hacSlot, hair, prefab);
+                    eff[0] = matched[0]; eff[1] = matched[1]; eff[2] = matched[2];
+                    b.runtime.emplace_back("_LineColor", hacMatch ? rawColor(hp0.at("outlineColor")) : hacSlot->outlineColor);
+                    b.runtime.emplace_back("_GlossColor", hacMatch ? rawColor(hp0.at("glossColor")) : hacSlot->glossColor);
+                    // HairLength is shader-only in the game (no PMX equivalent).
+                    // Keep it in the material's intermediate property table so
+                    // the value survives into the scene/manifest without ever
+                    // scaling geometry.
+                    b.runtime.emplace_back("_HairLength", Vec4{hacSlot->hairLength, 0, 0, 0});
+                    b.stripHairGloss = !hacSlot->hairGloss;
                 }
                 if (hac && rtHairAcs.count(cid)) {
-                    const Vec4 ac = vec4Of(hacInfo.at("AccessoryColor"));
-                    eff[0] = eff[1] = eff[2] = ac;
+                    const auto ac = HacAccessoryColors(*hacSlot, eff);
+                    eff[0] = ac[0]; eff[1] = ac[1]; eff[2] = ac[2];
                 }
                 for (int k = 0; k < 3; ++k)
                     if (eff[k].w >= 0.0f) b.runtime.emplace_back(kNames[k], eff[k]);
