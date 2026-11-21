@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.5.0] - 2026-11-21
+
+### Added
+
+- **Native PMX import with lossless round-trip (Phase 1 of the unified PMX editor).** `cardbridge pmx info <model.pmx>` reports a file's format and feature counts; `cardbridge pmx roundtrip <in.pmx> <out.pmx>` imports, re-exports and verifies structural preservation. The new `cardbridge::pmx::ReadPmx` reads PMX 2.0/2.1 in either text encoding with all index sizes, all five deform types (BDEF1/2/4, SDEF, QDEF), all eleven morph types, IK and bone flags, additional UV channels, display frames, rigid bodies and joints. `pmx::Model` now carries the source format and raw trailing sections so import → export preserves data CardBridge does not edit. Verified byte-for-byte on a real 3.78 MB PMX (31,942 vertices, 2 additional UV channels, 41 local-axis bones, 83 morphs, 14 display frames, 500 joints) and cross-checked with the engine's independent loader. New regression tests cover 2.0/2.1, both encodings, every deform and morph type and real-model round-trip (`CARDBRIDGE_TEST_PMX`). See `docs/PMX_IMPORT_ROADMAP.md`.
+
 ## [0.4.20] - 2026-11-21
 
 ### Fixed

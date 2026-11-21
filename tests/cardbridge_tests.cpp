@@ -36,6 +36,7 @@
 #include "export/BoneLabels.h"
 #include "export/FaceMorphs.h"
 #include "export/Exporter.h"         
+#include "export/GpuView.h"
 #include "export/ColourGrade.h"
 #include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
@@ -52,6 +53,7 @@
 #include "material/UvDiagnostics.h"
 #include "mesh/Simplify.h"
 #include "pmx/PmxWriter.h"
+#include "pmx/PmxReader.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
 #include "shader/UnityShader.h"
@@ -81,6 +83,15 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+// Declared directly instead of including <windows.h>: its legacy `near` macro
+// collides with local variables in this test file.
+extern "C" {
+__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableW(const wchar_t*, wchar_t*, unsigned long);
+__declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const wchar_t*, int, char*, int, const char*, int*);
+}
+#endif
 
 using namespace cardbridge;
 
@@ -117,6 +128,24 @@ void test(const char* name, const std::function<void()>& f) {
 }
 
 std::string env(const char* k) { const char* v = std::getenv(k); return v ? v : ""; }
+
+// Environment variables are UTF-16 on Windows; std::getenv loses non-ANSI
+// paths (a PMX sample can live in a folder with a Japanese name).
+std::string envUtf8(const char* k) {
+#ifdef _WIN32
+    std::wstring wk(k, k + std::strlen(k));
+    const unsigned long n = GetEnvironmentVariableW(wk.c_str(), nullptr, 0);
+    if (n == 0) return "";
+    std::wstring w(n, L'\0');
+    GetEnvironmentVariableW(wk.c_str(), w.data(), n);
+    const int len = WideCharToMultiByte(65001u /* CP_UTF8 */, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(65001u, 0, w.c_str(), -1, s.data(), len, nullptr, nullptr);
+    return s;
+#else
+    return env(k);
+#endif
+}
 
 Bytes B(std::initializer_list<int> l) { Bytes b; for (int x : l) b.push_back(static_cast<uint8_t>(x)); return b; }
 
@@ -1543,6 +1572,47 @@ void unitTests() {
         CHECK((exporter::MmdMaterialLook(dbl, dbl.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (garment)
         CHECK((exporter::MmdMaterialLook(hair, hair.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (hair: it would clip)
         CHECK((exporter::MmdMaterialLook(sgl, sgl.materials[0]).drawFlags & 0x10) != 0);   // the single surface keeps its edge
+    });
+    test("MMD/plain view: the edge is a rim behind the surface, not a tint over a blended skin material", [] {
+        // A skin material exports with alpha 0.99 (MMD's blended pass: no depth write) and keeps its PMX edge.
+        // Drawing that edge after the surface passes the depth test everywhere and paints the whole face with the
+        // edge colour - the dark-face bug. The edge must be drawn first so the surface covers its interior.
+        using namespace assemble;
+        exporter::GpuOptions go;
+        go.preference = "warp"; go.skin = "cpu";
+        exporter::GpuView gpu;
+        std::string why;
+        if (!gpu.Init(go, &why) || !gpu.ready()) return;   // no D3D11 (WARP) here: nothing to assert
+        Scene s;
+        SceneTexture tex;
+        tex.name = "red"; tex.width = 1; tex.height = 1;
+        tex.rgba = {255, 0, 0, 255};
+        s.textures.push_back(tex);
+        SceneMaterial m;
+        m.name = "skin"; m.shader = "Shader Forge/main_skin";
+        m.diffuse = {1, 1, 1, 1};
+        m.outlineColor = {0.1f, 0.1f, 0.1f};   // a dark PMX edge, distinct from the red surface
+        m.translucent = true;                   // exports alpha 0.99: MMD blends it and writes no depth
+        m.texture = 0;
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; mesh.vertices.push_back(v);
+        }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        ScenePart part; part.id = "head"; part.group = "Head"; part.meshes = {0};
+        s.parts.push_back(part);
+        const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
+        CHECK(look.diffuse.w < 0.999f && (look.drawFlags & 0x10) != 0);   // the precondition: blended and edged
+        if (!gpu.Load(s, &why)) return;   // an unexpected device limitation is not a rendering regression
+        gpu.SetPlain(true);
+        std::vector<uint32_t> px;
+        if (!gpu.Render(exporter::ViewCamera{}, 128, 128, nullptr, px) || px.empty()) return;
+        const uint32_t p = px[px.size() / 2];
+        const unsigned r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+        CHECK(r > 150 && r > g * 3 && r > b * 3);   // the surface colour, not the dark edge colour
     });
     test("MMD shadow flags: cloth, hair, shoes and accessories cast the silhouette; transparent cloth only loses receive", [] {
         using namespace assemble;
@@ -10469,10 +10539,261 @@ void customHairTests() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Native PMX import / round-trip (Phase 1 of the unified PMX editor).
+// The fixture below deliberately uses the parts the legacy writer could not
+// express: 2.1 + UTF-8, additional UVs, SDEF/QDEF, every morph type, local
+// axes, external parent keys, interleaved display frames and a joint type 1.
+// ---------------------------------------------------------------------------
+pmx::Model makeRoundTripFixture(bool utf8) {
+    pmx::Model m;
+    m.name = "\xE3\x83\x86\xE3\x82\xB9\xE3\x83\x88";   // テスト
+    m.nameEn = "Test";
+    m.comment = "round-trip fixture";
+    m.commentEn = "round-trip fixture (en)";
+    m.format.preserve = true;
+    m.format.version = utf8 ? 2.1f : 2.0f;
+    m.format.globals[0] = utf8 ? 1 : 0;
+    m.format.globals[1] = 4;                              // four additional UV channels
+    for (int i = 2; i < 8; ++i) m.format.globals[i] = 4;  // force 4-byte indices everywhere
+    m.format.trailing = {0xAA, 0xBB, 0xCC, 0xDD, 0x07};  // stand-in for PMX 2.1 soft bodies
+
+    for (int i = 0; i < 6; ++i) {
+        pmx::Bone b;
+        b.name = "bone" + std::to_string(i);
+        b.nameEn = "Bone" + std::to_string(i);
+        b.position = {static_cast<float>(i) * 0.1f, 1.0f, -static_cast<float>(i)};
+        b.parent = i ? i - 1 : -1;
+        b.layer = i;
+        b.flagsFromSource = true;
+        b.flags = 0x001E;
+        if (i == 1) {
+            b.flags |= 0x0001 | 0x0100 | 0x0400 | 0x0800 | 0x2000 | 0x0020;
+            b.tailBone = 2;
+            b.appendParent = 0; b.appendRatio = 0.25f;
+            b.fixedAxis = {0, 1, 0};
+            b.localAxisX = {1, 0, 0}; b.localAxisZ = {0, 0, 1};
+            b.externalParentKey = 1234;
+            b.ikTarget = 0; b.ikLoop = 7; b.ikLimit = 0.5f;
+            b.ikLinks.push_back({2, true, {0.1f, 0.2f, 0.3f}, {0.4f, 0.5f, 0.6f}});
+        } else {
+            b.tailOffset = {0, 1, 0};
+        }
+        m.bones.push_back(b);
+    }
+
+    pmx::Vertex v;
+    v.deformType = 0; v.bone[0] = 0; m.vertices.push_back(v);
+    v = pmx::Vertex{}; v.deformType = 1; v.bone[0] = 0; v.bone[1] = 1; v.weight[0] = 0.25f;
+    m.vertices.push_back(v);
+    v = pmx::Vertex{}; v.deformType = 2;
+    for (int k = 0; k < 4; ++k) v.bone[k] = k;
+    v.weight[0] = 0.4f; v.weight[1] = 0.3f; v.weight[2] = 0.2f; v.weight[3] = 0.1f;
+    m.vertices.push_back(v);
+    v = pmx::Vertex{}; v.deformType = 3; v.bone[0] = 0; v.bone[1] = 1; v.weight[0] = 0.6f;
+    v.sdefC = {1, 2, 3}; v.sdefR0 = {4, 5, 6}; v.sdefR1 = {7, 8, 9};
+    m.vertices.push_back(v);
+    v = pmx::Vertex{}; v.deformType = 4;
+    for (int k = 0; k < 4; ++k) v.bone[k] = 5 - k;
+    v.weight[0] = 0.1f; v.weight[1] = 0.2f; v.weight[2] = 0.3f; v.weight[3] = 0.4f;
+    m.vertices.push_back(v);
+    v = pmx::Vertex{}; v.deformType = 2; v.bone[0] = 0; v.bone[1] = 1;
+    v.weight[0] = 0.5f; v.weight[1] = 0.5f;
+    m.vertices.push_back(v);
+    for (int i = 0; i < 6; ++i) {
+        m.vertices[i].position = {static_cast<float>(i), 0, 0};
+        m.vertices[i].normal = {0, 1, 0};
+        m.vertices[i].uv = {static_cast<float>(i) * 0.1f, 0.5f};
+        for (int k = 0; k < 4; ++k) m.vertices[i].additionalUv[k] = {0.1f * k, 0.2f * k, 0.3f * k, 0.4f * k};
+        m.vertices[i].edgeScale = 1.0f + static_cast<float>(i);
+    }
+    m.indices = {0, 1, 2, 3, 4, 5};
+
+    m.textures = {"tex.png", "sphere.png", "toon.png"};
+    pmx::Material mat0;
+    mat0.name = "material0"; mat0.nameEn = "Material0";
+    mat0.diffuse = {1, 0.5f, 0.25f, 1}; mat0.specular = {0.2f, 0.3f, 0.4f};
+    mat0.specularPower = 8.0f; mat0.ambient = {0.5f, 0.5f, 0.5f};
+    mat0.drawFlags = 0x0E; mat0.edgeColor = {0, 0, 0, 1}; mat0.edgeSize = 1.25f;
+    mat0.texture = 0; mat0.sphere = 1; mat0.sphereMode = 2;
+    mat0.toonFlag = 0; mat0.toon = -1;   // a real source file can store -1 here
+    mat0.indexCount = 3;
+    pmx::Material mat1 = mat0;
+    mat1.name = "material1"; mat1.nameEn = "Material1";
+    mat1.toonFlag = 1; mat1.sharedToon = 3; mat1.sphereMode = 0;
+    m.materials = {mat0, mat1};
+
+    for (int i = 0; i <= 10; ++i) {
+        pmx::Morph mo;
+        mo.name = "morph" + std::to_string(i); mo.nameEn = "Morph" + std::to_string(i);
+        mo.panel = 1 + (i % 4); mo.type = static_cast<uint8_t>(i);
+        switch (i) {
+            case 0: mo.group.emplace_back(1, 0.75f); break;
+            case 1: mo.vertices.emplace_back(2, Vec3{0.1f, 0.2f, 0.3f}); break;
+            case 2: mo.bones.push_back({1, {0.1f, 0.2f, 0.3f}, {0, 0, 0, 1}}); break;
+            case 3: case 4: case 5: case 6: case 7:
+                mo.uv.emplace_back(1, Vec4{0.1f, 0.2f, 0.3f, 0.4f}); break;
+            case 8: {
+                pmx::MaterialOffset off;
+                off.material = 0; off.add = false;
+                off.diffuse = {0.1f, 0.2f, 0.3f, 0.4f};
+                off.specular = {0.2f, 0.3f, 0.4f}; off.specularPower = 2.0f;
+                off.ambient = {0.3f, 0.4f, 0.5f};
+                off.edgeColor = {0.4f, 0.5f, 0.6f, 0.7f}; off.edgeSize = 3.0f;
+                off.texture = {1, 1, 1, 1}; off.sphere = {2, 2, 2, 2}; off.toon = {3, 3, 3, 3};
+                mo.materials.push_back(off);
+                break;
+            }
+            case 9: mo.flips.emplace_back(1, 0.5f); break;
+            case 10: mo.impulses.push_back({0, 1, {1, 2, 3}, {4, 5, 6}}); break;
+        }
+        m.morphs.push_back(mo);
+    }
+
+    pmx::DisplayFrame f;
+    f.name = "frame"; f.nameEn = "Frame"; f.special = true;
+    f.items = {{0, 0}, {1, 2}, {0, 1}, {1, 0}};
+    m.frames.push_back(f);
+
+    for (int i = 0; i < 2; ++i) {
+        pmx::RigidBody rb;
+        rb.name = "body" + std::to_string(i); rb.nameEn = "Body" + std::to_string(i);
+        rb.bone = i; rb.group = static_cast<uint8_t>(i); rb.mask = 0xFFFF; rb.shape = 2;
+        rb.size = {1, 2, 3}; rb.position = {static_cast<float>(i), 0, 0}; rb.rotation = {0.1f, 0.2f, 0.3f};
+        rb.mass = 1.0f; rb.moveDamping = 0.5f; rb.rotDamping = 0.6f;
+        rb.restitution = 0.1f; rb.friction = 0.4f; rb.mode = static_cast<uint8_t>(i % 3);
+        m.rigidBodies.push_back(rb);
+    }
+    for (int i = 0; i < 2; ++i) {
+        pmx::Joint j;
+        j.name = "joint" + std::to_string(i); j.nameEn = "Joint" + std::to_string(i);
+        j.type = static_cast<uint8_t>(i); j.bodyA = 0; j.bodyB = 1;
+        j.position = {0, 1, 0}; j.rotation = {0, 0.5f, 0};
+        j.moveLower = {-1, -1, -1}; j.moveUpper = {1, 1, 1};
+        j.rotLower = {-0.5f, -0.5f, -0.5f}; j.rotUpper = {0.5f, 0.5f, 0.5f};
+        j.springMove = {1, 2, 3}; j.springRot = {4, 5, 6};
+        m.joints.push_back(j);
+    }
+    return m;
+}
+
+void pmxImportTests() {
+    test("pmx import: bad magic, truncation and unknown deform types are rejected clearly", [] {
+        bool threw = false;
+        try { pmx::ReadPmx(reinterpret_cast<const uint8_t*>("NOPE"), 4); } catch (const FormatError& e) {
+            threw = std::string(e.what()).find("magic") != std::string::npos;
+        }
+        CHECK(threw);
+        threw = false;
+        try { pmx::ReadPmx(reinterpret_cast<const uint8_t*>("PMX "), 4); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+        Bytes valid = pmx::WritePmx(makeRoundTripFixture(true));
+        Bytes cut(valid.begin(), valid.end() - 10);
+        threw = false;
+        try { pmx::ReadPmx(cut); } catch (const FormatError&) { threw = true; }
+        CHECK(threw);
+    });
+
+    auto checkFixture = [](bool utf8, const char* name) {
+        test(name, [utf8] {
+            pmx::Model src = makeRoundTripFixture(utf8);
+            Bytes bytes = pmx::WritePmx(src);
+            CHECK(bytes.size() > 0);
+            pmx::Model got = pmx::ReadPmx(bytes);
+            CHECK(got.format.preserve);
+            CHECK(std::fabs(got.format.version - (utf8 ? 2.1f : 2.0f)) < 1e-6f);
+            CHECK(got.format.encoding() == (utf8 ? 1 : 0));
+            CHECK(got.format.additionalUv() == 4);
+            CHECK(got.format.trailing == src.format.trailing);
+            CHECK(got.name == src.name && got.nameEn == src.nameEn);
+            CHECK(got.vertices.size() == src.vertices.size());
+            CHECK(got.indices == src.indices);
+            CHECK(got.textures == src.textures);
+            CHECK(got.materials.size() == src.materials.size());
+            CHECK(got.bones.size() == src.bones.size());
+            CHECK(got.morphs.size() == src.morphs.size());
+            CHECK(got.frames.size() == src.frames.size());
+            CHECK(got.rigidBodies.size() == src.rigidBodies.size());
+            CHECK(got.joints.size() == src.joints.size());
+            for (size_t i = 0; i < got.vertices.size(); ++i) {
+                CHECK(got.vertices[i].deformType == src.vertices[i].deformType);
+                for (int k = 0; k < 4; ++k) {
+                    CHECK(got.vertices[i].bone[k] == src.vertices[i].bone[k]);
+                    CHECK(got.vertices[i].weight[k] == src.vertices[i].weight[k]);
+                    CHECK(got.vertices[i].additionalUv[k].x == src.vertices[i].additionalUv[k].x);
+                }
+                CHECK(got.vertices[i].sdefC.x == src.vertices[i].sdefC.x);
+            }
+            CHECK(got.vertices[3].sdefR1.z == src.vertices[3].sdefR1.z);
+            CHECK(got.vertices[4].deformType == 4);
+            CHECK(got.materials[0].toonFlag == 0 && got.materials[0].toon == -1);
+            CHECK(got.materials[1].toonFlag == 1 && got.materials[1].sharedToon == 3);
+            CHECK(got.bones[1].flags == src.bones[1].flags);
+            CHECK(got.bones[1].localAxisZ.z == src.bones[1].localAxisZ.z);
+            CHECK(got.bones[1].externalParentKey == 1234);
+            CHECK(got.bones[1].ikLinks.size() == 1 && got.bones[1].ikLinks[0].upper.z == 0.6f);
+            for (size_t i = 0; i < got.morphs.size(); ++i) CHECK(got.morphs[i].type == i);
+            CHECK(got.morphs[2].bones.size() == 1 && got.morphs[2].bones[0].bone == 1);
+            CHECK(got.morphs[8].materials.size() == 1 && got.morphs[8].materials[0].texture.w == 1.0f);
+            CHECK(got.morphs[9].flips.size() == 1 && got.morphs[10].impulses.size() == 1);
+            CHECK(got.morphs[10].impulses[0].torque.z == 6.0f);
+            CHECK(got.frames[0].items == src.frames[0].items);
+            CHECK(got.joints[1].type == 1);
+            CHECK(pmx::WritePmx(got) == bytes);  // a second round trip is stable
+        });
+    };
+    checkFixture(true, "pmx roundtrip: 2.1/UTF-8, add UVs, SDEF/QDEF, all morphs, flags and trailing bytes");
+    checkFixture(false, "pmx roundtrip: 2.0/UTF-16 with 4-byte indices and the same feature set");
+
+    test("pmx import: the independent test reader agrees with the native importer", [] {
+        pmx::Model src = makeRoundTripFixture(false);
+        src.format.trailing.clear();   // the old reader only tolerates trailing bytes in 2.1
+        for (auto& j : src.joints) j.type = 0;  // the old reader always reads spring parameters
+        Bytes bytes = pmx::WritePmx(src);
+        pmxread::Model theirs = pmxread::Read(bytes.data(), bytes.size());
+        CHECK(theirs.vertices.size() == src.vertices.size());
+        CHECK(theirs.indices.size() == src.indices.size());
+        CHECK(theirs.morphs.size() == src.morphs.size());
+        CHECK(theirs.frames.size() == src.frames.size());
+        CHECK(theirs.bodies.size() == src.rigidBodies.size());
+        CHECK(theirs.joints.size() == src.joints.size());
+        CHECK(theirs.vertices[3].weightType == 3);   // SDEF
+        CHECK(theirs.vertices[4].weightType == 4);   // QDEF
+        CHECK(theirs.morphs[10].type == 10);         // impulse
+    });
+
+    test("pmx roundtrip: real model (set CARDBRIDGE_TEST_PMX)", [] {
+        const std::string path = envUtf8("CARDBRIDGE_TEST_PMX");
+        if (path.empty()) { ++g_skipped; return; }
+        Bytes original = fileio::ReadFile(path);
+        pmx::Model m = pmx::ReadPmx(original);
+        Bytes written = pmx::WritePmx(m);
+        pmx::Model again = pmx::ReadPmx(written);
+        CHECK(again.vertices.size() == m.vertices.size());
+        CHECK(again.indices.size() == m.indices.size());
+        CHECK(again.textures == m.textures);
+        CHECK(again.materials.size() == m.materials.size());
+        CHECK(again.bones.size() == m.bones.size());
+        CHECK(again.morphs.size() == m.morphs.size());
+        CHECK(again.frames.size() == m.frames.size());
+        CHECK(again.rigidBodies.size() == m.rigidBodies.size());
+        CHECK(again.joints.size() == m.joints.size());
+        size_t frameItems = 0, frameItems2 = 0;
+        for (const auto& f : m.frames) frameItems += f.items.size();
+        for (const auto& f : again.frames) frameItems2 += f.items.size();
+        CHECK(frameItems2 == frameItems);
+        CHECK(pmx::WritePmx(again) == written);
+        if (original != written)
+            std::printf("  note: %s re-encoded (%zu -> %zu bytes) but structure was preserved\n",
+                        path.c_str(), original.size(), written.size());
+    });
+}
+
 } // namespace
 
 int main() {
     unitTests();
+    pmxImportTests();
     meshTests();
     lodPreserveTests();
     customHairTests();

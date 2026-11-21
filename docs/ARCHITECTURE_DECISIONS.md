@@ -320,3 +320,33 @@ lost ~300 lines. The scripted run drives the second window by class name
 section beside `materials`. Known cost: `g.matFilterDropOpen` is one flag for
 two windows — acceptable because the dropdown is modal and only one list is
 clickable at a time.
+
+---
+
+## ADR-011 — One PMX document model, extended for import rather than replaced
+
+**Date:** native PMX import (2026-11-21).
+**Status:** accepted — implemented and round-trip tested.
+
+**Context.** `pmx::Model` (`src/pmx/PmxWriter.h`) was already the flat representation the Koikatsu exporter fills. Adding a PMX importer raised the choice of a second "native document" type versus extending the existing one. The engine's `assets::PmxFile` is a complete reader but uses glm and engine `FileIo`, discards display frames and lives outside this repository; `tests/PmxReader.h` is header-only test scaffolding that throws away additional UVs, local axes and most morph payloads.
+
+**Decision.** `pmx::Model` becomes the single import/edit/export document. Import-only fields are inert by default so a generated export is byte-identical: `Vertex::deformType/additionalUv/sdef*`, `Bone::localAxis*/externalParentKey/flagsFromSource`, explicit morph `type` plus bone/flip/impulse offsets, `Material::toonFlag/sharedToon`, `Joint::type`, `DisplayFrame::items` and `Model::format` (version, globals, index sizes, extra globals, trailing bytes). `src/pmx/PmxReader.cpp` is self-contained in `cardbridge_core`; the engine loader stays the independent cross-check oracle.
+
+**Alternatives rejected.** A parallel native document type (duplicates every mesh/material/bone representation and forces a conversion layer at every edit); making the engine loader a runtime dependency (breaks the standalone build, pulls in glm, still loses display frames); routing an imported PMX through `assemble::Scene`/`WritePmx` (loses source-specific flags and morph kinds by construction).
+
+**Consequences.** Existing callers need no change. Import → export re-emits the source version/encoding/index sizes and all preserved payloads; verified byte-identical on a 3.78 MB real PMX with 2 additional UV channels, 41 local-axis bones, 83 morphs, 14 display frames and 500 joints. Editing an imported field that has a preservation counterpart (e.g. `DisplayFrame::bones` versus `items`) must clear the authoritative field — documented at the struct.
+
+---
+
+## ADR-012 — Unknown PMX data is retained verbatim or rejected explicitly
+
+**Date:** native PMX import (2026-11-21).
+**Status:** accepted — implemented and tested.
+
+**Context.** PMX 2.1 appends soft bodies after the joints, and flag words carry bits whose meaning CardBridge does not interpret (physics-after-deform, reserved bits). The brief forbids silently discarding such data.
+
+**Decision.** The reader copies every byte after the joints into `Model::format.trailing` and writes it back; it stores raw global parameters (including globals beyond the first eight) and raw bone flag words. An unknown *structural* token (deform type, morph type, joint type, frame item type, text encoding) is rejected with a `FormatError` naming the section and byte offset — guessing a record length would corrupt everything after it.
+
+**Alternatives rejected.** Skipping unknown sections (data loss); treating unknown types as BDEF4/material morphs (stream drift and corruption); warning but continuing (an exported file would silently differ).
+
+**Consequences.** CardBridge can open any valid PMX 2.0/2.1 file it understands, and a file it does not understand fails loudly with an actionable message instead of exporting damage. A future soft-body editor can decode `format.trailing` without re-importing the source file.

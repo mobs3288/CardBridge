@@ -5,6 +5,8 @@
 //   cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [options]
 //   cardbridge library import --game <install> --library <dir> [--minimal]
 //   cardbridge library check  --library <dir> [--hashes]
+//   cardbridge pmx info <model.pmx> [--json]
+//   cardbridge pmx roundtrip <in.pmx> <out.pmx>
 //
 // Only `library import` ever reads a game install. Every other command works
 // from the card, the CardBridge library folder and the user's mods folder.
@@ -23,6 +25,7 @@
 #include "card/ClothingExport.h"
 #include "core/FileIo.h"
 #include "core/MemoryProbe.h"
+#include "pmx/PmxReader.h"
 #include "core/Timing.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
@@ -209,6 +212,8 @@ void usage() {
         "  cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "  cardbridge library import --game <install> --library <dir> [--minimal]\n"
         "  cardbridge library check --library <dir> [--hashes]\n"
+        "  cardbridge pmx info <model.pmx> [--json]      report a PMX's format and feature counts\n"
+        "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
         "\n"
         "Only 'library import' reads a game install (once, to copy files into the library).\n"
         "Exit codes: 0 ok, 1 usage, 2 not a supported card, 3 conversion failed.");
@@ -1248,6 +1253,100 @@ int cmdSimplifyBench(const Args& a) {
 
 } // namespace
 
+nlohmann::json pmxDescribe(const pmx::Model& m) {
+    nlohmann::json j;
+    j["version"] = m.format.version;
+    j["encoding"] = m.format.encoding();
+    j["globals"] = std::vector<int>(std::begin(m.format.globals), std::end(m.format.globals));
+    j["additionalUv"] = m.format.additionalUv();
+    j["trailingBytes"] = static_cast<size_t>(m.format.trailing.size());
+    j["counts"] = {
+        {"vertices", m.vertices.size()}, {"indices", m.indices.size()},
+        {"textures", m.textures.size()}, {"materials", m.materials.size()},
+        {"bones", m.bones.size()}, {"morphs", m.morphs.size()},
+        {"frames", m.frames.size()}, {"rigidBodies", m.rigidBodies.size()},
+        {"joints", m.joints.size()},
+    };
+    size_t frameItems = 0;
+    for (const auto& f : m.frames) frameItems += f.items.size();
+    j["counts"]["frameItems"] = frameItems;
+    std::map<std::string, int> deform, morphs, joints;
+    for (const auto& v : m.vertices) deform[std::to_string(static_cast<int>(v.deformType))]++;
+    for (const auto& mo : m.morphs) morphs[std::to_string(static_cast<int>(mo.type))]++;
+    for (const auto& jt : m.joints) joints[std::to_string(static_cast<int>(jt.type))]++;
+    j["deformTypes"] = deform;
+    j["morphTypes"] = morphs;
+    j["jointTypes"] = joints;
+    int localAxis = 0, fixedAxis = 0, ikBones = 0, appendBones = 0;
+    for (const auto& b : m.bones) {
+        if (b.flags & 0x0800) ++localAxis;
+        if (b.flags & 0x0400) ++fixedAxis;
+        if (b.flags & 0x0020) ++ikBones;
+        if (b.flags & 0x0300) ++appendBones;
+    }
+    j["boneFlags"] = {{"localAxis", localAxis}, {"fixedAxis", fixedAxis}, {"ik", ikBones}, {"append", appendBones}};
+    return j;
+}
+
+void pmxPrintDescribe(const nlohmann::json& j) {
+    const auto& c = j["counts"];
+    std::printf("PMX %.2f, encoding %d, globals", j["version"].get<float>(), j["encoding"].get<int>());
+    for (int g : j["globals"].get<std::vector<int>>()) std::printf(" %d", g);
+    std::printf("; additional UV %d; trailing %zu bytes\n", j["additionalUv"].get<size_t>(), j["trailingBytes"].get<size_t>());
+    std::printf("vertices %zu indices %zu textures %zu materials %zu bones %zu morphs %zu frames %zu (%zu items) rigid bodies %zu joints %zu\n",
+                c["vertices"].get<size_t>(), c["indices"].get<size_t>(), c["textures"].get<size_t>(),
+                c["materials"].get<size_t>(), c["bones"].get<size_t>(), c["morphs"].get<size_t>(),
+                c["frames"].get<size_t>(), c["frameItems"].get<size_t>(),
+                c["rigidBodies"].get<size_t>(), c["joints"].get<size_t>());
+    auto printMap = [](const char* label, const nlohmann::json& map) {
+        std::printf("%s:", label);
+        for (auto it = map.begin(); it != map.end(); ++it) std::printf(" %s=%d", it.key().c_str(), it.value().get<int>());
+        std::printf("\n");
+    };
+    printMap("deform types", j["deformTypes"]);
+    printMap("morph types", j["morphTypes"]);
+    printMap("joint types", j["jointTypes"]);
+    const auto& bf = j["boneFlags"];
+    std::printf("bone flags: localAxis=%d fixedAxis=%d IK=%d append=%d\n",
+                bf["localAxis"].get<int>(), bf["fixedAxis"].get<int>(),
+                bf["ik"].get<int>(), bf["append"].get<int>());
+}
+
+int cmdPmx(const Args& a) {
+    if (a.positional.size() < 3) { usage(); return 1; }
+    const std::string& sub = a.positional[1];
+    const std::string path = normalizeSlashes(a.positional[2]);
+    try {
+        Bytes original = fileio::ReadFile(path);
+        pmx::Model m = pmx::ReadPmx(original.data(), original.size());
+        nlohmann::json info = pmxDescribe(m);
+        if (sub == "info") {
+            if (a.has("json")) std::printf("%s\n", info.dump(2).c_str());
+            else pmxPrintDescribe(info);
+            return 0;
+        }
+        if (sub == "roundtrip") {
+            if (a.positional.size() < 4) { usage(); return 1; }
+            const std::string out = normalizeSlashes(a.positional[3]);
+            Bytes written = pmx::WritePmx(m);
+            fileio::WriteFile(out, written.data(), written.size());
+            pmx::Model again = pmx::ReadPmx(written.data(), written.size());
+            nlohmann::json info2 = pmxDescribe(again);
+            const bool same = info == info2;
+            std::printf("read %zu bytes -> wrote %zu bytes (%s); reimport structure: %s\n",
+                        original.size(), written.size(),
+                        original == written ? "byte-identical" : "re-encoded", same ? "preserved" : "CHANGED");
+            if (!same) std::printf("before: %s\nafter:  %s\n", info.dump().c_str(), info2.dump().c_str());
+            return same ? 0 : 3;
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 3;
+    }
+    usage();
+    return 1;
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     std::vector<std::string> wide = utf8Args();
@@ -1267,6 +1366,7 @@ int main(int argc, char** argv) {
         else if (cmd == "inspect") rc = cmdInspect(a);
         else if (cmd == "clothes") rc = cmdClothes(a);
         else if (cmd == "library") rc = cmdLibrary(a);
+        else if (cmd == "pmx") rc = cmdPmx(a);
         else if (cmd == "shader") rc = cmdShader(a);
         else if (cmd == "shader-run") rc = cmdShaderRun(a);
         else if (cmd == "simplify-bench") { rc = cmdSimplifyBench(a); return rc; }

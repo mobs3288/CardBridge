@@ -1,6 +1,8 @@
 # CardBridge
 
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
 [![XERJ Corpus Hub](https://hub.xerj.org/contributors/mobs3288/badge.svg)](https://hub.xerj.org/contributors/mobs3288)
+<img src="https://img.shields.io/badge/Status-Active%20Development-orange" alt="Active Development">
 
 <p align="center">
   <img src="image/CB.png" alt="CardBridge logo: a character card and a wireframe 3D model joined by a bridge" width="420">
@@ -8,7 +10,7 @@
 
 **CardBridge turns a Koikatsu character card into a rigged PMX model** — offline, on your own machine. The game does not need to be running, no plugin or BepInEx is involved, and nothing is uploaded anywhere. Drop a card onto the window, press `E`, and out comes a PMX with its textures, physics, morphs and a `.cardbridge.json` manifest — an alternative to KKPMX with a standalone workflow.
 
-> **Version 0.4.20.** It converts **Koikatsu and Koikatsu Sunshine** cards with one offline pipeline. It works **100% for the base game**: stock items convert and look right. **Several modded cards also work**, but not all of them — expect rough edges and see [Known limitations](#known-limitations).
+> **Version 0.5.0.** It converts **Koikatsu and Koikatsu Sunshine** cards with one offline pipeline. It works **100% for the base game**: stock items convert and look right. **Several modded cards also work**, but not all of them — expect rough edges and see [Known limitations](#known-limitations).
 >
 > **Starting 1 December 2026, development will slow down — but CardBridge is still in active development.** If you run into any issue, [open an issue](https://github.com/mobs3288/CardBridge/issues). That is the best way to get it looked at.
 
@@ -156,6 +158,10 @@ cardbridge inspect "<card.png>" --library "<library>" --mods "<mods>"
 
 # convert
 cardbridge convert "<card.png>" --library "<library>" --mods "<mods>" --out "<output folder>"
+
+# inspect a PMX without a card, or verify a lossless import -> export round trip
+cardbridge pmx info "<model.pmx>"
+cardbridge pmx roundtrip "<model.pmx>" "<copy.pmx>"
 ```
 
 Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memory), `--outfit N`, `--apose-degrees N` / `--tpose`, `--simplify 40`, `--lods`, `--skin-shade F`, `--skin-ao F`, `--pose <file>`, `--print-diagnostics`, `--normalize-*` for the opt-in proportion fixes. `cardbridge clothes` writes an outfit file back out from a card. Exit codes: `0` ok, `1` usage, `2` unsupported/rejected card, `3` conversion failed.
