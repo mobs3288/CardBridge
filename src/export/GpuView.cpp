@@ -25,6 +25,16 @@
 
 namespace cardbridge::exporter {
 
+namespace {
+// GPU-preview diagnostics. Off by default (normal output stays quiet); CARDBRIDGE_DEBUG_GPU=1 prints one line per
+// resource-upload and render stage, with the material/texture/mesh identifiers needed to trace a stale binding or a
+// missing resource. Kept as a permanent diagnostic rather than a one-off probe: a driver crash after shader upload
+// gives no useful call stack once the device is in a bad state, but the last stage line says which binding was being
+// prepared when it happened.
+bool GpuDebug() { static const bool on = std::getenv("CARDBRIDGE_DEBUG_GPU") != nullptr; return on; }
+#define GPUDBG(...) do { if (GpuDebug()) std::fprintf(stderr, "[gpu] " __VA_ARGS__); } while (0)
+} // namespace
+
 namespace detail {   // Preview.cpp: the constant-buffer filler and tangents the software renderer uses too
 void FillShaderConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3],
                          std::vector<std::vector<float>>& data, const std::vector<std::pair<std::string, Vec4>>* globals);
@@ -1260,6 +1270,9 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
     I.Clear();
     I.morphDelta.clear();   // a new scene: whatever deltas the previous one carried mean nothing now (the viewer re-applies its weights on load)
     I.scene = &scene;
+    GPUDBG("load begin: shaders=%zu materials=%zu textures=%zu meshes=%zu parts=%zu globals=%zu\n",
+           scene.shaders.size(), scene.materials.size(), scene.textures.size(), scene.meshes.size(),
+           scene.parts.size(), scene.globalTextures.size());
 
     // Shaders: the forward pass of each, straight from the bundle's DXBC.
     I.shaders.resize(scene.shaders.size());
@@ -1295,6 +1308,21 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
         if (FAILED(I.dev->CreateInputLayout(el.data(), static_cast<UINT>(el.size()), vp.dxbc.data(), vp.dxbc.size(), &g.il))) { Rel(g.vs); Rel(g.ps); continue; }
         g.ok = true;
     }
+    {
+        size_t ok = 0;
+        for (size_t i = 0; i < I.shaders.size(); ++i) {
+            const auto& g = I.shaders[i];
+            if (!g.ok) continue;
+            ++ok;
+            // A malformed binding table (an out-of-range t/s register) must never reach the D3D11 calls below: the driver
+            // indexes its slot arrays with that number and an invalid index is an access violation, not a clean failure.
+            size_t bad = 0;
+            for (const auto& tb : g.progs[g.pi].textures) if (!shader::ValidTextureBinding(tb)) ++bad;
+            if (bad) std::fprintf(stderr, "[gpu] warning: shader '%s' has %zu texture binding(s) with invalid resource/sampler slots; those binds are skipped\n",
+                                  scene.shaders[i].name.c_str(), bad);
+        }
+        GPUDBG("shaders uploaded: %zu of %zu (the rest fall back to the plain shader)\n", ok, I.shaders.size());
+    }
 
     // Textures the shaders can read. A failed upload must fail the Load
     // (the caller falls back to the software renderer) instead of leaving the
@@ -1315,6 +1343,11 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
         upload(m.texture);
     }
     for (const auto& tb : scene.globalTextures) upload(tb.texture);
+    {
+        size_t uploaded = 0;
+        for (const auto& t : I.textures) if (t.srv) ++uploaded;
+        GPUDBG("textures uploaded: %zu of %zu (failed=%d)\n", uploaded, I.textures.size(), texFailed ? 1 : 0);
+    }
     report(0.5, "textures");
     if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     if (texFailed) { I.Clear(); I.scene = nullptr; return fail("a texture upload failed"); }
@@ -1421,6 +1454,12 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
             g.subs.push_back(gs);
         }
     }
+    {
+        size_t subs = 0, withVb = 0;
+        for (const auto& g : I.meshes) { subs += g.subs.size(); if (g.vb) ++withVb; }
+        GPUDBG("geometry: %zu meshes (%zu with buffers), %zu submeshes, %zu fallback materials, dual-skin %d\n",
+               I.meshes.size(), withVb, subs, I.fallbackMats, dual ? 1 : 0);
+    }
     if (std::getenv("CARDBRIDGE_DEBUG_SKIN")) {
         const SkinMemoryStats m = SkinMemory();
         std::fprintf(stderr, "skin buffers: %zu verts, rest %zuKB skin-in %zuKB skin-out %zuKB posed %zuKB bones %zuKB total GPU %zuKB CPU mirror %zuKB (%zu buffers)\n",
@@ -1445,7 +1484,10 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
     Impl& I = *impl_;
     if (!I.dev || !I.scene || W < 8 || H < 8) return false;
     const assemble::Scene& scene = *I.scene;
+    GPUDBG("render begin: %dx%d plain=%d parts=%zu materials=%zu textures=%zu\n",
+           W, H, I.plain ? 1 : 0, scene.parts.size(), scene.materials.size(), I.textures.size());
     if (!I.EnsureTargets(W, H)) return false;
+    GPUDBG("render targets ready\n");
 
     // Same framing as RenderView: bounds of what is drawn, an orthographic camera orbiting its centre.
     float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
@@ -1503,6 +1545,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
     const float bf[4] = {0, 0, 0, 0};
     ctx->OMSetBlendState(I.blend, bf, 0xFFFFFFFFu);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    GPUDBG("render state set; preparing passes\n");
 
     UINT stride = sizeof(GVert), offset = 0;
     // The silhouette ring: the mesh drawn again pushed out along its normals in screen space, in one colour.
@@ -1546,6 +1589,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
     float LS[4][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 1}};   // world -> shadow map (x, y in -1..1, depth 0..1)
     bool selfShadow = false;
     const bool fallbackOk = I.fbVs && I.fbPs && I.fbIl && I.fbCb;
+    GPUDBG("pass setup: plain=%d fallbackOk=%d fallbackMaterials=%zu\n", I.plain ? 1 : 0, fallbackOk ? 1 : 0, I.fallbackMats);
     if (I.plain && fallbackOk) {
         if (I.looks.size() != scene.materials.size()) {
             // The PMX's garment pass is a property of the part, not of the material: ask the exporter for the same per-material map it
@@ -1663,6 +1707,9 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                                        : (mat.translucent || (mat.alpha && detail::RenderQueueOf(scene, mat) >= 2500)) ? 1
                                        : (mat.alpha ? 2 : (detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
                     if (bucket != pass) continue;
+                    GPUDBG("draw pass=%d part=%s mesh=%d material=%d shader='%s' shaderIndex=%d tex=%d tris=%u\n",
+                           pass, scene.parts[pi].id.c_str(), mi, gs.material, mat.shader.c_str(),
+                           mat.shaderIndex, mat.texture, gs.count);
                     // The game's forward pass writes depth for materials whose shader says ZWrite On (Shader Forge/main_alpha):
                     // layered garments then resolve by depth, not draw order. ZWrite-off compositing keeps the tint state.
                     // The plain (as exported / MMD) view keeps the no-write tint: MikuMikuDance does not write depth for blended materials.
@@ -1812,9 +1859,25 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         }
                     }
                     for (const auto& tb : sh->progs[sh->pi].textures) {
+                        GPUDBG("bind tex '%s' material='%s' shader='%s' t=%u s=%u dim=%u hasSampler=%d\n",
+                               tb.name.c_str(), mat.name.c_str(),
+                               mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size() ? scene.shaders[static_cast<size_t>(mat.shaderIndex)].name.c_str() : "?",
+                               tb.reg, tb.sampler, tb.dimension, tb.hasSampler ? 1 : 0);
+                        if (!shader::ValidTextureRegister(tb)) {   // never hand an out-of-range t register to the driver
+                            GPUDBG("  skipping invalid t register %u\n", tb.reg);
+                            continue;
+                        }
                         bool clamp = false;
                         const GpuTex* t = I.TextureFor(mat, *sh, tb.name, clamp);
                         ctx->PSSetShaderResources(tb.reg, 1, &t->srv);
+                        // KKS records can carry 0xFFFFFFFF ("no sampler"): the texture shares a previously bound
+                        // sampler state, so leave it bound. A plain out-of-range s register is skipped as well — the
+                        // original crash was PSSetSamplers(0xFFFFFFFF) indexing d3d11.dll's sampler array.
+                        if (!tb.hasSampler) continue;
+                        if (tb.sampler >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) {
+                            GPUDBG("  skipping invalid s register %u\n", tb.sampler);
+                            continue;
+                        }
                         ID3D11SamplerState* ss = clamp ? I.samplerClamp : I.samplerWrap;
                         ctx->PSSetSamplers(tb.sampler, 1, &ss);
                     }
@@ -1828,6 +1891,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
         }
 
     ctx->RSSetState(I.raster);
+    GPUDBG("main draw pass complete\n");
     // Extra shading layers over what the game's shaders drew: the visible opaque submeshes again with the layer's pixel shader,
     // blended, depth-tested against the finished frame and never written.
     for (const auto& layer : I.layers) {
@@ -1914,12 +1978,14 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
         }
     }
 
+    GPUDBG("post passes complete; resolving frame\n");
     ctx->ResolveSubresource(I.resolve, 0, I.msaa, 0, LinearLight() ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM);
     ctx->CopyResource(I.staging, I.resolve);
     D3D11_MAPPED_SUBRESOURCE mp{};
     if (FAILED(ctx->Map(I.staging, 0, D3D11_MAP_READ, 0, &mp))) return false;
     for (int y = 0; y < H; ++y) std::memcpy(&bgra[static_cast<size_t>(y) * W], static_cast<const uint8_t*>(mp.pData) + static_cast<size_t>(y) * mp.RowPitch, static_cast<size_t>(W) * 4);
     ctx->Unmap(I.staging, 0);
+    GPUDBG("frame read back (%zu pixels)\n", bgra.size());
     for (auto& px : bgra) px |= 0xFF000000u;
     if (!I.plain) ApplyColourGrade(bgra, 0xFFE2E4E8u);
     return true;

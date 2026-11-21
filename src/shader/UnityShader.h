@@ -24,12 +24,24 @@ struct CbLayout {
     std::vector<CbParam> params;
     int slot = -1;           // constant-buffer register (cbN)
 };
+// KKS resource records use this as the sampler word when a texture has no sampler state of its own (a cube map that
+// reuses another binding's sampler). It is a sentinel, not a shader register: passing it to PSSetSamplers is an
+// out-of-range access in the D3D11 driver.
+constexpr uint32_t kNoSampler = 0xFFFFFFFFu;
+
 struct TextureBinding {
     std::string name;        // Unity property name, e.g. "_MainTex"
     uint32_t reg = 0;        // t register
-    uint32_t sampler = 0;    // s register
+    uint32_t sampler = 0;    // s register (meaningless when hasSampler is false)
     uint32_t dimension = 2;  // 2 = 2D, 4 = 3D, 5 = cube
+    bool hasSampler = true;  // false = the shader record carries no sampler; keep whatever sampler is already bound
 };
+
+// D3D11 caps (D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT / _SAMPLER_SLOT_COUNT) without making the shader module
+// depend on a graphics header. The GPU view still validates against the real D3D11 constants before binding.
+inline bool ValidTextureRegister(const TextureBinding& tb) { return tb.reg < 128u; }
+inline bool ValidSamplerRegister(const TextureBinding& tb) { return !tb.hasSampler || tb.sampler < 16u; }
+inline bool ValidTextureBinding(const TextureBinding& tb) { return ValidTextureRegister(tb) && ValidSamplerRegister(tb); }
 
 struct UnityProgram {
     Dxbc code;

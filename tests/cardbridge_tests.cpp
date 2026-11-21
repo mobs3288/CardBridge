@@ -2018,11 +2018,14 @@ void unitTests() {
         text(tail, "_Color");
         for (uint32_t v : {0u, 1u, 4u, 0u, 0u, 48u}) put32(tail, v);
         put32(tail, 0);                            // separator
-        put32(tail, 3);                            // 2 textures + 1 cbuffer binding
+        put32(tail, 4);                            // 3 textures + 1 cbuffer binding
         text(tail, "_MainTex");
         for (uint32_t v : {0u, 0u, 0u, 4u}) put32(tail, v);
         text(tail, "_ColorMask");
         for (uint32_t v : {0u, 1u, 1u, 4u}) put32(tail, v);
+        // A KKS cube map with no sampler state of its own: 0xFFFFFFFF is a sentinel, not register 4294967295.
+        text(tail, "unity_SpecCube1");
+        for (uint32_t v : {0u, 2u, cardbridge::shader::kNoSampler, 8u}) put32(tail, v);
         text(tail, "$Globals");
         put32(tail, 1);
         for (int i = 0; i < 8; ++i) put32(tail, 0);   // binding padding
@@ -2062,10 +2065,19 @@ void unitTests() {
             for (const auto& p : cb.params) if (p.name == "_Color" && p.offset == 48) colorAt48 = true;
             CHECK(colorAt48);
         }
-        CHECK(progs[0].textures.size() == 2);
-        if (progs[0].textures.size() == 2) {
+        CHECK(progs[0].textures.size() == 3);
+        if (progs[0].textures.size() == 3) {
             CHECK(progs[0].textures[0].name == "_MainTex" && progs[0].textures[0].reg == 0);
             CHECK(progs[0].textures[1].name == "_ColorMask" && progs[0].textures[1].reg == 1);
+            const auto& cube = progs[0].textures[2];
+            CHECK(cube.name == "unity_SpecCube1" && cube.reg == 2 && !cube.hasSampler && cube.sampler == 0);
+            // The sentinel must not be treated as a live sampler register: that is exactly what crashed d3d11.dll.
+            CHECK(cardbridge::shader::ValidTextureBinding(cube));
+            cardbridge::shader::TextureBinding bad = cube;
+            bad.hasSampler = true; bad.sampler = cardbridge::shader::kNoSampler;
+            CHECK(!cardbridge::shader::ValidTextureBinding(bad));
+            bad.sampler = 0; bad.reg = 128;
+            CHECK(!cardbridge::shader::ValidTextureBinding(bad));
         }
     });
     test("pmx writer: counts, validation errors", [] {

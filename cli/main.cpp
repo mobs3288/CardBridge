@@ -1058,14 +1058,20 @@ int cmdConvert(const Args& a) {
 
     std::vector<uint8_t> gpuRgba, plainRgba;   // written after the export, which with --overwrite clears the folder first
     if (a.has("gpu-view")) {   // debugging aid: the same scene through Direct3D 11, written next to the other pictures
+        const bool gpuDbg = std::getenv("CARDBRIDGE_DEBUG_GPU") != nullptr;
+        if (gpuDbg) std::fprintf(stderr, "[gpu] card %s: family=%s materials=%zu textures=%zu shaders=%zu meshes=%zu parts=%zu\n",
+                                 c.path.c_str(), card::FamilyName(c.family), scene.materials.size(),
+                                 scene.textures.size(), scene.shaders.size(), scene.meshes.size(), scene.parts.size());
         exporter::GpuView gpu;
         std::string why;
         exporter::GpuOptions go;
         go.preference = a.get("gpu", "auto");
         go.skin = a.get("gpu-skin", "gpu");
         if (a.opt.count("skin-threshold")) go.skinThresholdVerts = static_cast<size_t>(std::atoll(a.get("skin-threshold").c_str()));
-        if (!gpu.Init(go, &why) || !gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: %s\n", why.c_str());
+        if (!gpu.Init(go, &why)) std::fprintf(stderr, "  gpu view: device init failed: %s\n", why.c_str());
+        else if (!gpu.Load(scene, &why)) std::fprintf(stderr, "  gpu view: load failed: %s\n", why.c_str());
         else {
+            if (gpuDbg) std::fprintf(stderr, "[gpu] init and load complete; entering first render\n");
             if (!liveSkin.empty()) gpu.SetSkin(&liveSkin);
             std::fprintf(stderr, "  gpu view: %s (%s, skin %s)\n", gpu.adapter().c_str(), gpu.kind() == exporter::GpuKind::Hardware ? "GPU" : "CPU fallback", gpu.gpuSkin() ? "on GPU" : "on CPU");
             if (a.opt.count("layers-dir")) {   // the extra shader layers in that folder, all switched on for the picture
@@ -1082,6 +1088,7 @@ int cmdConvert(const Args& a) {
             std::vector<uint32_t> px;
             auto g0 = std::chrono::steady_clock::now();
             bool ok = gpu.Render(cam, 640, 800, &effHidden, px);
+            if (gpuDbg) std::fprintf(stderr, "[gpu] first render returned %d\n", ok ? 1 : 0);
             ok = ok && gpu.Render(cam, 640, 800, &effHidden, px);
             if (ok && a.has("gpu-bones")) {   // the skeleton over the picture (--gpu-bones-helpers: the driven, shape and attach nodes too)
                 std::vector<Vec3> posed;

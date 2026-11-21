@@ -219,6 +219,10 @@ void ParseKksTail(const Bytes& sp, size_t tailAt, UnityProgram& prog) {
                 tb.name = rn;
                 tb.reg = f[1];
                 tb.sampler = f[2];
+                // A KKS record with no sampler state carries 0xFFFFFFFF (seen on unity_SpecCube1 in Koikano shaders).
+                // It is a "reuse the bound sampler" marker, never a register; treating it as one made the GPU view call
+                // PSSetSamplers(0xFFFFFFFF, ...) and crash inside d3d11.dll.
+                if (tb.sampler == kNoSampler) { tb.sampler = 0; tb.hasSampler = false; }
                 tb.dimension = f[3] ? f[3] : 2;
                 prog.textures.push_back(std::move(tb));
             }

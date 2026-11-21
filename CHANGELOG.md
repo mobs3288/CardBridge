@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.15] - 2026-11-21
+
+### Fixed
+
+- **KKS `--gpu-view` access violation after shader upload**: Koikano shaders describe a texture that has no sampler state of its own with the sentinel `0xFFFFFFFF` in its resource record. `ParseKksTail` stored that sentinel as a real sampler register, and the GPU view passed it straight to `PSSetSamplers`; the D3D11 driver indexes its sampler array with that value and faulted with `0xC0000005`. The sentinel is now recorded as "no sampler" (the already-bound sampler is reused, which is what the shader intends), and all shader-derived texture/sampler registers are validated against the D3D11 slot limits before any bind, with a load-time warning for a malformed table. Both KK and KKS use the same validation; KK shaders carry ordinary sampler indices and are unaffected. Added stage/resource diagnostics behind `CARDBRIDGE_DEBUG_GPU` (game family, shader/texture/material/mesh counts, per-draw shader and binding registers) so a future driver fault can be traced to the last successful operation without a debugger. No material, texture, shader feature or colour-processing path was disabled.
+
 ## [0.4.14] - 2026-11-21
 
 ### Fixed
