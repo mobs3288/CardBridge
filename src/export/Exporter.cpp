@@ -649,6 +649,11 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     }
     j["parts"] = std::move(parts);
     j["morphs"] = morphNames;
+    // Facial features are reported from the source textures, each on its own: a card with nostrils but no nose line
+    // reports exactly that, and neither feature is ever inferred from the other's presence.
+    const auto& ff = scene.facialFeatures;
+    j["facial_features"] = {{"nose_line", ff.noseLine}, {"nostrils", ff.nostrils},
+                            {"upper_lip_line", ff.upperLipLine}, {"lower_lip_line", ff.lowerLipLine}};
 
     json tex = json::array();
     for (size_t i = 0; i < scene.textures.size(); ++i) {

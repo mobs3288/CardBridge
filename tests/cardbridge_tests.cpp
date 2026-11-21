@@ -14,6 +14,7 @@
 
 #include "assemble/BodySuppression.h"
 #include "assemble/Assembler.h"
+#include "assemble/FaceFeatures.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/DynamicBone.h"
 #include "assemble/CustomHairDiag.h"
@@ -875,6 +876,87 @@ void unitTests() {
         std::vector<uint8_t> tiny;
         SoftenNoseLineAlpha(tiny, 0, 0);
         SoftenNoseLineAlpha(img, 0, 0);
+    });
+    test("nostrils and nose lines are independent: detection and preservation for all four combinations", [] {
+        using namespace assemble;
+        const int S = 128;
+        auto blank = [] { return std::vector<uint8_t>(static_cast<size_t>(S) * S * 4, 0); };
+        auto put = [&](std::vector<uint8_t>& img, int x0, int x1, int y0, int y1, uint8_t a) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * S + x) * 4;
+                    img[i] = 20; img[i + 1] = 20; img[i + 2] = 20; img[i + 3] = a;
+                }
+        };
+        // The shapes the game actually paints: a tall centre stroke (line), two short wide arcs (nostrils).
+        auto withLine = [&](std::vector<uint8_t>& img) { put(img, 61, 67, 20, 110, 255); };
+        auto withNostrils = [&](std::vector<uint8_t>& img) { put(img, 30, 55, 96, 105, 146); put(img, 73, 98, 96, 105, 146); };
+
+        std::vector<std::vector<uint8_t>> imgs(4, blank());
+        withLine(imgs[0]);                    // line only
+        withNostrils(imgs[1]);                // nostrils only
+        withLine(imgs[2]); withNostrils(imgs[2]);  // both
+        // imgs[3] stays empty: neither
+        const bool expectLine[4] = {true, false, true, false};
+        const bool expectNostrils[4] = {false, true, true, false};
+        for (int k = 0; k < 4; ++k) {
+            const NoseFeatures f = DetectNoseFeatures(imgs[k], S, S);
+            CHECK(f.line == expectLine[k]);
+            CHECK(f.nostrils == expectNostrils[k]);
+            const std::vector<uint8_t> before = imgs[k];
+            SoftenNoseLineOnly(imgs[k], S, S, f);
+            bool rgbSame = true, nostrilAlphaSame = true, lineSoftened = false;
+            for (size_t i = 0; i < before.size(); i += 4) {
+                rgbSame = rgbSame && imgs[k][i] == before[i] && imgs[k][i + 1] == before[i + 1] && imgs[k][i + 2] == before[i + 2];
+                const int x = static_cast<int>((i / 4) % S), y = static_cast<int>((i / 4) / S);
+                const bool nostrilPixel = (x >= 30 && x < 55 || x >= 73 && x < 98) && y >= 96 && y < 105;
+                if (nostrilPixel) nostrilAlphaSame = nostrilAlphaSame && imgs[k][i + 3] == before[i + 3];
+                if (x >= 61 && x < 67 && y >= 20 && y < 110 && imgs[k][i + 3] < before[i + 3]) lineSoftened = true;
+            }
+            CHECK(rgbSame);
+            CHECK(nostrilAlphaSame);                                   // a nostril is never a prerequisite of a line
+            CHECK(lineSoftened == expectLine[k]);                      // a line is only softened when actually present
+        }
+        // The stock base-game line is only 8x43 inside a 512x512 atlas (~8% of the height). It must still be seen as a
+        // line - an earlier height threshold of 12% misclassified it and removed the softening of real nose lines.
+        const int B = 512;
+        std::vector<uint8_t> stock(static_cast<size_t>(B) * B * 4, 0);
+        for (int y = 381; y < 424; ++y)
+            for (int x = 250; x < 258; ++x) stock[(static_cast<size_t>(y) * B + x) * 4 + 3] = 255;
+        auto stockFeatures = DetectNoseFeatures(stock, B, B);
+        CHECK(stockFeatures.line && !stockFeatures.nostrils);
+        SoftenNoseLineOnly(stock, B, B, stockFeatures);
+        CHECK(stock[(static_cast<size_t>(400) * B + 253) * 4 + 3] < 255);   // still softened
+        // A faint nostril arc (alpha 146, like the supplied card) must keep its exact alpha: dropping it below the
+        // material's cutout is what made the overlay bake to nothing and got the whole mesh hidden.
+        auto faint = blank();
+        withNostrils(faint);
+        const NoseFeatures nf = DetectNoseFeatures(faint, S, S);
+        CHECK(nf.nostrils && !nf.line);
+        SoftenNoseLineOnly(faint, S, S, nf);
+        CHECK(faint[(static_cast<size_t>(100) * S + 40) * 4 + 3] == 146);
+        // Degenerate inputs stay safe.
+        std::vector<uint8_t> tiny;
+        CHECK(!DetectNoseFeatures(tiny, 0, 0).line);
+        SoftenNoseLineOnly(tiny, 0, 0, NoseFeatures{true, true});
+    });
+    test("lip-line detection separates the upper and lower outlines", [] {
+        using namespace assemble;
+        const int W = 80, H = 36;
+        std::vector<uint8_t> img(static_cast<size_t>(W) * H * 4, 0);
+        auto put = [&](int y0, int y1) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = 20; x < 60; ++x) img[(static_cast<size_t>(y) * W + x) * 4 + 3] = 231;
+        };
+        put(10, 13);
+        auto one = DetectLipLineFeatures(img, W, H);
+        CHECK(one.upper && !one.lower);
+        put(23, 26);
+        auto both = DetectLipLineFeatures(img, W, H);
+        CHECK(both.upper && both.lower);
+        std::vector<uint8_t> empty(static_cast<size_t>(W) * H * 4, 0);
+        auto none = DetectLipLineFeatures(empty, W, H);
+        CHECK(!none.upper && !none.lower);
     });
     test("item prefab roots keep their own transform under the node the game parents them to", [] {
         // SetParent(parent, worldPositionStays: false): a hair or accessory root with an offset and scale keeps both.

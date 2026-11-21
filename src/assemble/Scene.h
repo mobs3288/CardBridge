@@ -370,6 +370,15 @@ struct SceneIssue {
     std::string message;
 };
 
+// Facial features DETECTED from the card's own textures, independent of one another. Recorded on the scene so the
+// manifest can state exactly what the source authored (and what the pipeline preserved) without guessing from ids.
+struct FacialFeatureDetection {
+    bool noseLine = false;
+    bool nostrils = false;
+    bool upperLipLine = false;
+    bool lowerLipLine = false;
+};
+
 struct Scene {
     std::string name;
     std::vector<SceneBone> bones;
@@ -390,6 +399,7 @@ struct Scene {
     std::vector<SceneChain> chains;
     std::vector<SceneCollider> colliders;
     std::vector<ScenePoseEntry> pose;   // the bone edits baked into this scene (see BakePose), empty for the rest pose
+    FacialFeatureDetection facialFeatures;
     bool aposeApplied = false;          // BakePose included the automatic A-pose
     bool chainsSettled = false;         // an item's DynamicBone chains were run to rest (CARDBRIDGE_DYNBONE): they depend on the body's shape, so Reshape cannot redo them
     std::vector<SceneIssue> issues;

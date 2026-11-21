@@ -1,4 +1,5 @@
 #include "assemble/Assembler.h"
+#include "assemble/FaceFeatures.h"
 #include "assemble/AutoCloth.h"
 #include "assemble/BodySuppression.h"
 #include "assemble/DynamicBone.h"
@@ -3328,16 +3329,28 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     return b.addSceneTexture(out.name, "card (KoiSkinOverlayX)", out.width, out.height, std::move(out.rgba));
                 }
                 if (!tex) return -1;
-                // The nose line: the stock stroke is a hard black dash; feather and quieten it so it reads as a soft shadow on the
-                // skin (see SoftenNoseLineAlpha). RGB keeps the authored black — blending it over the skin is what darkens the skin
-                // toward its own hue, so the fix fits every skin tone and every authored nose texture style.
+                // The nose texture carries two INDEPENDENT features (see FaceFeatures.h): a hard nose line and/or nostril
+                // arcs. Feathering was written for the line alone; applying it to a nostril-only texture used to blur and
+                // dim the arcs below the material's alpha cutoff, so the overlay baked to nothing and was hidden entirely.
+                // Detect the features from the texture's own alpha shape, soften ONLY the line pixels and leave every
+                // nostril pixel byte-for-byte as authored. A nostril-only row keeps its exact alpha and now survives;
+                // a nose-line row is still softened; a row with both keeps both; an empty row contributes nothing.
+                const NoseFeatures nose = rendererName == "cf_O_noseline"
+                                               ? DetectNoseFeatures(tex->rgba, tex->width, tex->height) : NoseFeatures{};
+                if (rendererName == "cf_O_noseline") {
+                    scene.facialFeatures.noseLine = nose.line;
+                    scene.facialFeatures.nostrils = nose.nostrils;
+                }
                 if (rendererName == "cf_O_noseline" && !std::getenv("CARDBRIDGE_NO_NOSE_SOFTEN")) {
-                    unity::TextureData soft = *tex;
-                    SoftenNoseLineAlpha(soft.rgba, soft.width, soft.height);
-                    int idx = b.addSceneTexture(tex->name + "_soft", uf->name(), soft.width, soft.height, std::move(soft.rgba));
-                    scene.textures[static_cast<size_t>(idx)].clamp = tex->wrapMode == 1;   // sampled exactly like its source
-                    scene.textures[static_cast<size_t>(idx)].srgb = tex->colorSpace == 1;
-                    return idx;
+                    if (nose.line || nose.nostrils) {
+                        unity::TextureData soft = *tex;
+                        SoftenNoseLineOnly(soft.rgba, soft.width, soft.height, nose);
+                        const std::string name = tex->name + (nose.line ? "_line_soft" : "_authored");
+                        int idx = b.addSceneTexture(name, uf->name(), soft.width, soft.height, std::move(soft.rgba));
+                        scene.textures[static_cast<size_t>(idx)].clamp = tex->wrapMode == 1;   // sampled exactly like its source
+                        scene.textures[static_cast<size_t>(idx)].srgb = tex->colorSpace == 1;
+                        return idx;
+                    }
                 }
                 // The iris and the white of the eye are drawn through the game's own create shaders (iris: gradient between the two
                 // colours by the gradation mask; white: base and sub colour).
@@ -3424,7 +3437,15 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 }
                 texs.push_back({"_Texture4", rowTexture(402, mk.at("cheekId").asInt(), pre + "ChaFileMakeup.cheekId", "CheekTex", "cheek")});
                 props.emplace_back("_Color4", vec4Of(mk.at("cheekColor")));
-                texs.push_back({"_Texture5", rowTexture(404, faceV.at("lipLineId").asInt(), "ChaFileFace.lipLineId", "LiplineTex", "lipline")});
+                auto lip = rowTexture(404, faceV.at("lipLineId").asInt(), "ChaFileFace.lipLineId", "LiplineTex", "lipline");
+                if (lip) {
+                    // Both strokes of the lip-line texture are preserved as authored: detecting them separately lets the
+                    // manifest state which ones the card actually has instead of assuming every card has both (or none).
+                    const LipLineFeatures lips = DetectLipLineFeatures(lip->rgba, lip->width, lip->height);
+                    scene.facialFeatures.upperLipLine = lips.upper;
+                    scene.facialFeatures.lowerLipLine = lips.lower;
+                }
+                texs.push_back({"_Texture5", lip});
                 props.emplace_back("_Color5", vec4Of(faceV.at("lipLineColor")));
                 texs.push_back({"_Texture6", rowTexture(415, faceV.at("moleId").asInt(), "ChaFileFace.moleId", "MoleTex", "mole")});
                 props.emplace_back("_Color6", vec4Of(faceV.at("moleColor")));

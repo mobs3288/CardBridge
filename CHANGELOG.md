@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.5.3] - 2026-11-22
+
+### Fixed
+
+- **Missing nostrils on cards whose nose texture has no nose line (KK/KKS)**: the `cf_O_noseline` texture carries two independent features — a tall centre nose line and short wide nostril arcs — but a single shared rule feathered every nose texture as if it were a line. On `KK_235599.png` the modded nose row has nostril arcs whose authored alpha peaks at 146/255; feathering dropped them to 84/255, below the material's alpha cutoff. The shader bake then produced fewer than 16 solid fragments, so CardBridge's "draws nothing" rule hid the whole noseline mesh in the viewer and the PMX. Nose features are now detected from the texture's own alpha shape: only line pixels are softened, nostril pixels keep their exact authored RGBA, and a card with nostrils but no nose line no longer loses them or gains a fabricated line. Face-paint decals additionally skip the depth test and sample level 0 (thin strokes were hidden behind head mods' 3D noses and lost to mip-averaging) and are exempt from the empty-bake hiding rule, which had also hidden genuine nose lines on other cards. Upper and lower lip-line strokes are detected separately and reported, with no feature gated on another. Presence/absence is exported in the manifest's `facial_features` block. Added unit tests for all four nostril/nose-line combinations, the stock base-game line shape and lip-line detection; verified on the supplied card plus two other cards. 19,034 unit checks pass. See `out/nostril_fix/before_after.png`.
+
 ## [0.5.2] - 2026-11-22
 
 ### Fixed

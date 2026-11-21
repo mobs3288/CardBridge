@@ -98,6 +98,15 @@ bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMateri
     return !scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite && q >= 2500;
 }
 
+// The nose texture is a paint decal, not a solid part of the face. Head mods build the nose into the face mesh, so the
+// separate cf_O_noseline mesh can end up a fraction of a millimetre BEHIND that surface: a normal depth test then loses
+// the nostrils even though the source texture still has them. The game draws these face paints in its transparent queue
+// over the skin, so do the same here - skip the depth test and sample level 0 (thin strokes must not be mip-averaged
+// below the material's cutoff). This is a property of the toon_nose shader family, not of any particular card.
+bool IsNoseDecal(const assemble::SceneMaterial& mat) {
+    return mat.shader.find("toon_nose") != std::string::npos;
+}
+
 // The orthographic framing, shared by the renderers and the translucency brush (see Preview.h).
 bool ComputeViewFraming(const assemble::Scene& scene, const std::vector<char>* hiddenParts, float W, float H, const ViewCamera& cam, ViewFraming& out) {
     Pt mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
@@ -331,6 +340,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                     float scrArea = std::fabs(den) * 0.5f;
                     if (scrArea > 1e-6f && uvArea > scrArea)
                         lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                    if (blend && detail::IsNoseDecal(mat)) lod = 0;   // keep thin authored strokes above the cutoff
                 }
                 for (int y = y0; y <= y1; ++y)
                     for (int x = x0; x <= x1; ++x) {
@@ -342,7 +352,8 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * opt.viewWidth + x;
                         const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
-                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
+                        const bool decal = blend && detail::IsNoseDecal(mat);
+                        if (!decal && (blend ? (z < zbuf[zi]) : (z <= zbuf[zi]))) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         if (tex) {
                             const auto& u0 = mesh.vertices[i0].uv; const auto& u1 = mesh.vertices[i1].uv; const auto& u2 = mesh.vertices[i2].uv;
@@ -878,6 +889,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                     float scrArea = std::fabs(den) * 0.5f;
                     if (scrArea > 1e-6f && uvArea > scrArea)
                         lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
+                    if (blend && detail::IsNoseDecal(mat)) lod = 0;
                 }
                 for (int y = y0 - (y0 % step); y <= y1; y += step)
                     for (int x = x0 - (x0 % step); x <= x1; x += step) {
@@ -890,7 +902,8 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         float z = l0 * a.z + l1 * b.z + l2 * c.z;
                         size_t zi = static_cast<size_t>(y) * W + x;
                         const bool writeZ = !blend || detail::ShaderWritesDepth(scene, mat);
-                        if (blend ? (z < zbuf[zi]) : (z <= zbuf[zi])) continue;
+                        const bool decal = blend && detail::IsNoseDecal(mat);
+                        if (!decal && (blend ? (z < zbuf[zi]) : (z <= zbuf[zi]))) continue;
                         float r = mat.diffuse.x, g = mat.diffuse.y, bl = mat.diffuse.z, al = 1.0f;
                         // Diagnostic view modes (spec S13): per-pixel substitution of the shading, never touching
                         // the game's shader path. They fall through to the same write-out below. Lit is unchanged.
@@ -1588,7 +1601,12 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                 if (cov[ti] && img[ti * 4 + 3] >= 0.5f) {
                     if (++solid >= 16) break;
                 }
-            if (solid < 16) {
+            // A face-paint decal is deliberately a few sparse, translucent strokes - that low solid count is its authored
+            // appearance, not a failed bake. Hiding it here erased nostrils and softened nose lines whose alpha sits near
+            // the material's cutout. The "draws nothing" rule exists for solid parts that would become white sheets in MMD;
+            // a transparent overlay is correct for a decal, so exempt this shader family.
+            const bool faceDecal = detail::IsNoseDecal(mat);
+            if (!faceDecal && solid < 16) {
                 // The game's shader discards every fragment here (a crest drawn with a black fallback texture and no binding of its own):
                 // the game shows nothing for it, so we skip it in the views and in the export too - drawing a flat white plate is wrong.
                 scene.materials[mi].hidden = true;
