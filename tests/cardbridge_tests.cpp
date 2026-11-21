@@ -1596,10 +1596,12 @@ void unitTests() {
         m.texture = 0;
         s.materials.push_back(m);
         SceneMesh mesh;
-        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
-            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; mesh.vertices.push_back(v);
-        }
-        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3};
+        // Two coincident quads with opposite normals: a real skin shell has back faces for MMD's edge, and giving
+        // them their own (matching) normals keeps this from reading as a co-located lining with no edge.
+        const Vec3 quad[4] = {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}};
+        for (Vec3 p : quad) { SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; mesh.vertices.push_back(v); }
+        for (Vec3 p : quad) { SceneVertex v; v.pos = p; v.normal = {0, 0, -1}; mesh.vertices.push_back(v); }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6};
         mesh.submeshes.push_back(sub);
         s.meshes.push_back(mesh);
         ScenePart part; part.id = "head"; part.group = "Head"; part.meshes = {0};
@@ -1610,9 +1612,14 @@ void unitTests() {
         gpu.SetPlain(true);
         std::vector<uint32_t> px;
         if (!gpu.Render(exporter::ViewCamera{}, 128, 128, nullptr, px) || px.empty()) return;
-        const uint32_t p = px[px.size() / 2];
-        const unsigned r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
-        CHECK(r > 150 && r > g * 3 && r > b * 3);   // the surface colour, not the dark edge colour
+        size_t red = 0, dark = 0, nonBg = 0;
+        for (uint32_t p : px) {
+            const unsigned r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+            if (r > 150 && r > g * 3 && r > b * 3) ++red;
+            if (r < 80 && g < 80 && b < 80) ++dark;
+            if (!(r > 220 && g > 220 && b > 220)) ++nonBg;
+        }
+        CHECK(red > 100 && dark < red / 2);   // the surface colour, not the dark edge colour, fills the mesh
     });
     test("MMD shadow flags: cloth, hair, shoes and accessories cast the silhouette; transparent cloth only loses receive", [] {
         using namespace assemble;

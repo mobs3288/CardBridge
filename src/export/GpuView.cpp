@@ -1555,8 +1555,8 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
 
     UINT stride = sizeof(GVert), offset = 0;
     // The silhouette ring: the mesh drawn again pushed out along its normals in screen space, in one colour.
-    auto ring = [&](const GpuMesh& gm, const GpuSub& gs, const Vec3& col, float px) {
-        ctx->RSSetState(I.raster);
+    auto ring = [&](const GpuMesh& gm, const GpuSub& gs, const Vec3& col, float px, ID3D11RasterizerState* rs = nullptr) {
+        ctx->RSSetState(rs ? rs : I.raster);
         float cbv[24];
         for (int r = 0; r < 4; ++r) for (int k = 0; k < 4; ++k) cbv[r * 4 + k] = M[r][k];
         const float colr[4] = {LinearLight() ? ToLinear(col.x) : col.x, LinearLight() ? ToLinear(col.y) : col.y, LinearLight() ? ToLinear(col.z) : col.z, 1.0f};
@@ -1740,9 +1740,10 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     const bool innerLiningOut = liningCode == kLiningOutward;
                     const bool innerLining = IsInteriorLining(liningCode);
                     // A single-sided material's back faces are not drawn, as in the game and MikuMikuDance (drawn, the inside of a shell showed through).
-                    ctx->RSSetState(innerLiningOut && I.rasterCullFront ? I.rasterCullFront
+                    ID3D11RasterizerState* bodyRs = innerLiningOut && I.rasterCullFront ? I.rasterCullFront
                                                                      : innerLining                  ? I.rasterCull
-                                                                     : (twoSided || !I.rasterCull   ? I.raster : I.rasterCull));
+                                                                     : (twoSided || !I.rasterCull   ? I.raster : I.rasterCull);
+                    ctx->RSSetState(bodyRs);
                     // Viewport diagnostics GPU path (ADR-003/ADR-008): one runtime-compiled shader instead of the game's shaders.
                     // Lit stays on the path below; every other mode draws here, game shaders unused.
                     if (I.diagMode != static_cast<int>(ViewMode::Lit)) {
@@ -1835,9 +1836,19 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         ctx->PSSetSamplers(2, 1, &ns);
                         ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);
                         ctx->IASetIndexBuffer(gs.ib, DXGI_FORMAT_R32_UINT, 0);
+                        // The PMX edge is a rim behind the surface: draw it first (back faces, pushed out in screen space), then the
+                        // surface over it. Drawn after, it would cover the whole mesh whenever the surface wrote no depth (MMD's
+                        // blended materials), tinting a face with its edge colour instead of outlining it.
+                        if (look && (look->drawFlags & 0x10) && look->edgeSize > 0.0f && I.olVs && I.olPs && I.olIl && I.olCb)
+                            ring(gm, gs, {look->edgeColor.x, look->edgeColor.y, look->edgeColor.z}, 1.5f * look->edgeSize * H / 800.0f, I.rasterCullFront);
+                        // ring() binds its own shader, input layout and constant buffer; restore the surface's before drawing it.
+                        ctx->RSSetState(bodyRs);
+                        ctx->IASetInputLayout(I.fbIl);
+                        ctx->VSSetShader(I.fbVs, nullptr, 0);
+                        ctx->PSSetShader(I.fbPs, nullptr, 0);
+                        ctx->VSSetConstantBuffers(0, 1, &I.fbCb);
+                        ctx->PSSetConstantBuffers(0, 1, &I.fbCb);
                         ctx->DrawIndexed(gs.count, 0, 0);
-                        if (look && (look->drawFlags & 0x10) && look->edgeSize > 0.0f && I.olVs && I.olPs && I.olIl && I.olCb)   // the PMX edge
-                            ring(gm, gs, {look->edgeColor.x, look->edgeColor.y, look->edgeColor.z}, 1.5f * look->edgeSize * H / 800.0f);
                         continue;
                     }
                     const size_t m = static_cast<size_t>(gs.material);

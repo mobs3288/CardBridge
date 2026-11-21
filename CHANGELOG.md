@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.5.1] - 2026-11-21
+
+### Fixed
+
+- **Dark face and black exposed skin in the MMD ("as exported") view (KK/KKS)**: the PMX edge was drawn after the surface. Skin materials export with alpha 0.99 (MMD's blended pass), so the viewer deliberately does not write depth for them — the edge then passed the depth test over the whole mesh and painted the face with its dark brown edge colour and the body with its black edge colour. The painted facial overlays have no edge flag, so they were correct, which isolated the defect to the plain renderer rather than the card, the bake or the PMX. The edge is now drawn before the surface as a back-face silhouette rim that the surface covers; the shared ring helper takes an optional rasterizer state so the standard viewer's outline path is byte-for-byte unchanged. Added a WARP-rendered regression test (blended, edged skin quad must show its surface colour, not the edge colour); 18,990 unit checks pass. No material defaults, grading, baking or PMX-writer code changed.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added
