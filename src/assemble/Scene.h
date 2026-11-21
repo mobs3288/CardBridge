@@ -50,6 +50,40 @@ struct SceneTexture {
     bool colourGraded = false;
 };
 
+// True when a texture has no authored transparency at all (every alpha byte is 255). An "alpha"
+// shader over such a texture is an alpha-CUTOUT in the game (it discards below _Cutoff but draws
+// the remaining fragments with depth writes), not a translucent surface: baking it must not
+// invent alpha holes, and the PMX must keep it opaque so MMD writes depth for it too.
+inline bool TextureIsFullyOpaque(const SceneTexture& t) {
+    if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * static_cast<size_t>(t.height) * 4) return false;
+    for (size_t i = 3; i < t.rgba.size(); i += 4)
+        if (t.rgba[i] != 255) return false;
+    return true;
+}
+
+// True when a shader bake came back as a solid black plate over the texels its mesh covered, while the
+// authored texture it sampled carried real colour. That means the shader failed to reproduce the material
+// (typically it multiplies the source by a colour constant the material does not declare, so it reads zero):
+// baking it would replace the card's texture with black — a hair accessory that should be red turns into a
+// black plate. Callers must keep the authored texture instead, like an empty bake. `cov` marks covered texels;
+// `img` is the bake's RGBA float buffer.
+inline bool BakeLostColour(const std::vector<float>& img, const std::vector<uint8_t>& cov, const SceneTexture& src) {
+    const size_t n = src.rgba.size() / 4;
+    if (n == 0 || cov.empty() || img.size() < cov.size() * 4) return false;
+    double bakeLum = 0.0;
+    size_t bakedTexels = 0;
+    for (size_t i = 0; i < cov.size(); ++i)
+        if (cov[i] && img[i * 4 + 3] >= 0.5f) {
+            bakeLum += (static_cast<double>(img[i * 4]) + img[i * 4 + 1] + img[i * 4 + 2]) / 3.0;
+            ++bakedTexels;
+        }
+    if (bakedTexels < 16) return false;
+    double srcLum = 0.0;
+    for (size_t i = 0; i < n; ++i)
+        srcLum += (static_cast<double>(src.rgba[i * 4]) + src.rgba[i * 4 + 1] + src.rgba[i * 4 + 2]) / (3.0 * 255.0);
+    return bakeLum / bakedTexels < 0.02 && srcLum / n > 0.05;
+}
+
 struct SceneTexBinding {
     std::string name;            // Unity property, e.g. "_MainTex"
     int texture = -1;            // index into Scene::textures
@@ -91,6 +125,16 @@ struct SceneMaterial {
     Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)
     bool hairTinted = false;                 // _Color holds the card's measured hair tint (sRGB): the standard views linearise it like any colour, the bake feeds it raw like every other colour (see BakeShaderTextures)
 };
+
+// True when the game draws this material with the texture's alpha ignored: the
+// "opaque" shader family — Shader Forge/main_opaque, Koikano/main_clothes_opaque,
+// Koikano/low_clothes_opaque — is the default queue and reads no alpha test. Some
+// garment textures still carry stray low-alpha texels (the game draws them anyway),
+// so callers that decide "transparent" (exporter, software and GPU viewers) must not
+// mark these materials transparent — that turns intact garments into look-throughs.
+inline bool IsOpaqueShaded(const SceneMaterial& mat) {
+    return mat.shader.find("opaque") != std::string::npos;
+}
 
 // A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and
 // white, face and body skin: Graphics.Blit into a render texture). `material` carries the shader, colours and input textures;

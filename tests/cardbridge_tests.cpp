@@ -1264,6 +1264,96 @@ void unitTests() {
         s.materials[0].shader = "Shader Forge/main_opaque";
         CHECK(!exporter::HasCutout(s, s.materials[0]));
     });
+    test("accessory mats: the bake-marked (bakedLit) accessory mats keep the mat's diffuse, so MMD shows the accessory, not a black plate", [] {
+        using namespace assemble;
+        // The accessory mats are hair mats, so the shader bake marks them bakedLit like the character's hair.
+        // Before the fix the exporter zeroed their diffuse and the accessory came out black in MMD; the accessory's
+        // baked texture (the DXBC produced it) shows when the diffuse is the bake's (1,1,1,w).
+        Scene s;
+        SceneMaterial acc; acc.shader = "Shader Forge/main_hair_front"; acc.name = "cf_m_hair_f_19_00";
+        acc.bakedLit = true; acc.diffuse = {1, 1, 1, 1};   // what BakeShaderTextures sets for the accessory mats
+        s.materials.push_back(acc);
+        SceneMaterial hair; hair.shader = "Shader Forge/main_hair"; hair.name = "cf_m_hair_b_16_00";
+        hair.bakedLit = true; hair.diffuse = {1, 1, 1, 1};
+        s.materials.push_back(hair);
+        const auto accLook = exporter::MmdMaterialLook(s, s.materials[0], false, exporter::kLiningNone, true);
+        CHECK(accLook.diffuse.x > 0.99f && accLook.diffuse.y > 0.99f && accLook.diffuse.z > 0.99f);
+        // A character hair mat keeps the designed (0,0,0,w): its shade lives in the baked texture, which MMD shows as-is.
+        const auto hairLook = exporter::MmdMaterialLook(s, s.materials[1]);
+        CHECK(hairLook.diffuse.x < 0.01f && hairLook.diffuse.y < 0.01f && hairLook.diffuse.z < 0.01f);
+    });
+    test("opaque clothes: stray low-alpha texels on the opaque shader family do not make the export transparent", [] {
+        using namespace assemble;
+        Scene s;
+        SceneTexture t; t.width = 4; t.height = 1;
+        // Texel 0 has alpha 0 (the stray low-alpha texels some garment textures carry); the rest is opaque.
+        t.rgba = {0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255};
+        s.textures.push_back(t);
+        SceneMaterial m; m.shader = "Koikano/main_clothes_opaque"; m.texture = 0; m.diffuse = {1, 1, 1, 1};
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        SceneVertex v; v.uv = {0.1f, 0.5f};
+        mesh.vertices.assign(3, v);
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
+        CHECK(look.diffuse.w == 1.0f);   // the game draws the opaque family with the texture's alpha ignored; the exporter must not mark it transparent
+        // A genuinely translucent shader family stays transparent — the game blends it, so MMD must too.
+        s.materials[0].shader = "Koikano/main_clothes_alpha";
+        s.materials[0].alpha = true;
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);
+        // And a non-opaque shader whose triangles sample the stray texel keeps the pre-existing behaviour:
+        // the cutout detection still fires (that is the main_item path the exporter handles with the solid rewrite).
+        s.materials[0].alpha = false;
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);   // alphaCutout (texture-based) still marks it
+    });
+    test("a shader bake that comes back solid black keeps the authored texture instead of a black plate", [] {
+        using namespace assemble;
+        // A third-party toon shader can read a colour constant the material never declares (or an ambient
+        // light the bake leaves at zero) and multiply the whole source by zero: the bake covers its texels
+        // with opaque but black pixels. The empty-bake guard only checks alpha, so it passes. Baking this
+        // would replace the card's texture with solid black - a red hair accessory turns into a black band.
+        SceneTexture src; src.width = 4; src.height = 4;
+        src.rgba.assign(static_cast<size_t>(src.width) * src.height * 4, 0);
+        for (size_t i = 0; i < src.rgba.size(); i += 4) { src.rgba[i] = 190; src.rgba[i + 1] = 90; src.rgba[i + 2] = 90; src.rgba[i + 3] = 255; }
+        std::vector<float> black(static_cast<size_t>(src.width) * src.height * 4, 0.0f);
+        std::vector<uint8_t> cov(static_cast<size_t>(src.width) * src.height, 1);
+        for (size_t i = 3; i < black.size(); i += 4) black[i] = 1.0f;   // opaque alpha, black RGB
+        CHECK(BakeLostColour(black, cov, src));
+        // A legitimate bake of the same colourful source carries the colour through: never skip it.
+        std::vector<float> lit = black;
+        for (size_t i = 0; i < lit.size(); i += 4) { lit[i] = 0.75f; lit[i + 1] = 0.35f; lit[i + 2] = 0.35f; }
+        CHECK(!BakeLostColour(lit, cov, src));
+        // A genuinely black source (a black accessory) baked black is fine too: nothing was lost.
+        SceneTexture blackSrc = src;
+        for (size_t i = 0; i < blackSrc.rgba.size(); i += 4) { blackSrc.rgba[i] = blackSrc.rgba[i + 1] = blackSrc.rgba[i + 2] = 0; }
+        CHECK(!BakeLostColour(black, cov, blackSrc));
+        // Too few covered texels to judge - leave the bake alone (a tiny detail can legitimately be black).
+        std::vector<uint8_t> tiny(cov.size(), 0);
+        for (size_t i = 0; i < 8; ++i) tiny[i] = 1;
+        CHECK(!BakeLostColour(black, tiny, src));
+    });
+    test("main_alpha cutout over a fully opaque atlas stays opaque in the PMX (no baked alpha holes)", [] {
+        using namespace assemble;
+        Scene s;
+        SceneTexture t; t.width = 4; t.height = 1;
+        t.rgba = {210, 60, 60, 255, 210, 60, 60, 255, 210, 60, 60, 255, 210, 60, 60, 255};
+        s.textures.push_back(t);
+        SceneMaterial m; m.shader = "Shader Forge/main_alpha"; m.texture = 0; m.alpha = true; m.diffuse = {1, 1, 1, 1};
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        SceneVertex v; v.uv = {0.5f, 0.5f};
+        mesh.vertices.assign(3, v);
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
+        mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        CHECK(assemble::TextureIsFullyOpaque(s.textures[0]));
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w == 1.0f);   // cutout, not a blend: the game writes depth
+        s.textures[0].rgba[3] = 0;   // an authored alpha hole must stay translucent
+        CHECK(!assemble::TextureIsFullyOpaque(s.textures[0]));
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);
+    });
     // A doubled surface (opaque base + translucent twin) — the co-located lining pattern (A) seen from both sides:
     // indices/winding/order identical except the translucent twin can be wound differently and (optionally) have an
     // island triangulated elsewhere entirely (partial overlap). mode: 0 same winding, 1 reversed (the author reversed

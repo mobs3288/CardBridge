@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.20] - 2026-11-21
+
+### Fixed
+
+- **Opaque KK/KKS garments rendered translucent or see-through in MMD view mode**: two pipeline defects turned intact clothes into look-throughs. (1) Garments whose game shader is the opaque family (`main_clothes_opaque`, `main_opaque`) were marked transparent when their textures carried stray low-alpha texels; the exporter now leaves these cutouts opaque and both viewers no longer discard their fragments. (2) A mod's `Shader Forge/main_alpha` outfit over a fully opaque atlas (e.g. the 时崎狂三 school uniform) was run through the UV-flat shader bake, which wrote alpha holes where the game's screen-space alpha test discards; MMD blended those holes over the interior lining and produced dark patches. The bake now keeps the authored opaque texture for such cutouts and the export writes them opaque. The GPU viewer's plain (MMD) mode now buckets materials by the exported material alpha, matching the PMX instead of the scene's alpha flag, so the interior lining can no longer sort through the garment. Verified on KK and KKS cards with the uniform mod: `cloth`, `skirt`, `sleeve` and `shoes_outer` PMX alpha 0.990 → 1.000 with raw opaque atlases, and the GPU-rendered as-exported preview is solid. Intentionally translucent materials (authored alpha holes, face overlays, sheer hair) keep their appearance. Added regression tests for both defects.
+
 ## [0.4.15] - 2026-11-21
 
 ### Fixed

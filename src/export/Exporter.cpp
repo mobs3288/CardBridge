@@ -202,7 +202,7 @@ bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& 
     return total > 0 && reversed * 5 > total;   // over a fifth wound against the normals: a co-located inner layer
 }
 
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment, char innerLayer_) {
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment, char innerLayer_, bool accessory) {
     MmdLook look;
     look.diffuse = mat.diffuse;
     if (mat.hidden) {   // the shader leaves nothing behind in the game: MikuMikuDance draws nothing either
@@ -225,7 +225,14 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // No specular: the bake leaves the game's highlight out, and MMD's broad sheen (power 5) whitened the face, the hair and the shoes.
     look.specular = {0.0f, 0.0f, 0.0f};
     if (mat.bakedLit) {   // the texture holds the game's lighting already: show it as it is, no second shading
-        look.diffuse = {0.0f, 0.0f, 0.0f, look.diffuse.w};
+        if (accessory) {
+            // The accessory mats are hair mats too, so the bake marks them bakedLit and zeroes the diffuse. Their
+            // baked textures hold the accessory's red gradient, though: MMD multiplies the texture by the material
+            // diffuse, so writing the mat's own diffuse shows the accessory instead of a solid black plate.
+            look.diffuse = mat.diffuse;
+        } else {
+            look.diffuse = {0.0f, 0.0f, 0.0f, look.diffuse.w};
+        }
         look.ambient = {1.0f, 1.0f, 1.0f};
     } else if (!mat.toon.empty()) {
         look.ambient = {1.0f, 1.0f, 1.0f};   // MMD multiplies the lit colour by the ramp; the shade tint lives in the ramp now
@@ -241,8 +248,18 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // garment then reads as one solid dark shape (the underpants / swimsuit / lace looked like a shadow). So receive stays off.
     // A material whose texture's alpha actually cuts texels (the stocking's lace) is transparent too: MMD does not test alpha for an
     // opaque material, so the cut texels would draw black; in the transparent pass its binary alpha works as the cutout it is.
-    const bool alphaCutout = HasAlphaCutout(scene, mat);
-    const bool transparent = mat.alpha || mat.translucent || alphaCutout;
+    // The opaque shader family is the exception on both counts: the game draws it opaque, and its garments' textures often carry
+    // stray low-alpha texels (the baker skips the KKS Koikano clothes, so nothing normalises them) — the shader discards nothing.
+    // Marking it transparent is what turned shirts, skirts and dresses into see-throughs in MMD mode; only real cutouts, authored
+    // alpha textures and translucent-shader materials stay transparent.
+    const bool alphaCutout = !assemble::IsOpaqueShaded(mat) && HasAlphaCutout(scene, mat);
+    // An alpha shader over a fully opaque source texture (e.g. a mod's main_alpha outfit) is an
+    // alpha cutout: the game discards below _Cutoff but writes depth for what remains, so the
+    // garment is solid. MMD has no alpha test in its opaque pass, so an alpha-blended material
+    // would let the interior lining and body show through — export it opaque instead.
+    const bool opaqueTexture = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
+                               assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
+    const bool transparent = (mat.alpha && !opaqueTexture) || mat.translucent || alphaCutout;
     if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout): MMD's shadow map and edge use the whole mesh, so they would draw the cut-away part
@@ -754,6 +771,16 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     int meshOrdinal = 0;
     const std::vector<char> garmentMaterials = MmdGarmentMaterials(scene);
     const std::vector<char> linings = ColocatedLinings(scene);
+    // Accessory mats (hair accessories): during the shader bake they are marked bakedLit like the character's hair,
+    // and the bake writes the accessory texture (the DXBC produced it). MMD multiplies the texture by the material
+    // diffuse, so the accessory must carry a non-zero diffuse to show; the fix writes the mat's own diffuse for them
+    // instead of the (0,0,0) written for the character's baked hair.
+    std::set<int> accessoryMats;
+    for (const auto& part : scene.parts)
+        if (part.id.rfind("outfit0.acc", 0) == 0)
+            for (int mi : part.meshes)
+                for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes)
+                    if (sm.material >= 0) accessoryMats.insert(sm.material);
     for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
         checkCancel();
         const auto& part = scene.parts[pi];
@@ -792,7 +819,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                 const char liningCode = static_cast<size_t>(sm.material) < linings.size() ? linings[static_cast<size_t>(sm.material)] : kLiningNone;
                 if (LintLining() && (mesh.name.find("botacc") != std::string::npos || mesh.name.find("bota") != std::string::npos || mesh.name.find("o_bra_a") != std::string::npos))
                     std::fprintf(stderr, "emit mesh='%s' sub=%d sm.material=%d liningCode=%d\n", mesh.name.c_str(), sub - 1, sm.material, static_cast<int>(liningCode));
-                const MmdLook look = MmdMaterialLook(scene, mat, garment, liningCode);
+                const MmdLook look = MmdMaterialLook(scene, mat, garment, liningCode, accessoryMats.count(sm.material) != 0);
                 pm.diffuse = look.diffuse;
                 pm.ambient = look.ambient;
                 pm.specular = look.specular;

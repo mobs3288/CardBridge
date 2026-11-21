@@ -4441,15 +4441,26 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             }
         }
     }
-    if (std::getenv("CARDBRIDGE_DEBUG_MAT"))
-        for (const auto& m : scene.materials) {
-            std::fprintf(stderr, "mat %s shader=%s idx=%d cull=%d two-sided=%d tex:", m.name.c_str(), m.shader.c_str(), m.shaderIndex,
-                         m.shaderIndex >= 0 ? scene.shaders[static_cast<size_t>(m.shaderIndex)].cull : -1, m.doubleSided ? 1 : 0);
+    if (std::getenv("CARDBRIDGE_DEBUG_MAT")) {
+        std::map<int, std::string> matParts;
+        for (const auto& p : scene.parts)
+            for (int mi : p.meshes)
+                for (const auto& sm : scene.meshes[static_cast<size_t>(mi)].submeshes)
+                    if (sm.material >= 0) matParts[sm.material] = p.id;
+        for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+            const auto& m = scene.materials[mi];
+            auto partIt = matParts.find(static_cast<int>(mi));
+            std::fprintf(stderr, "mat %-24s shader=%-28s idx=%-3d cull=%d two=%d diffuse=(%.2f %.2f %.2f %.2f) alpha=%d trans=%d hid=%d bakedLit=%d reads=%d part=%s tex:",
+                         m.name.c_str(), m.shader.c_str(), m.shaderIndex,
+                         m.shaderIndex >= 0 ? scene.shaders[static_cast<size_t>(m.shaderIndex)].cull : -1, m.doubleSided ? 1 : 0,
+                         m.diffuse.x, m.diffuse.y, m.diffuse.z, m.diffuse.w, m.alpha ? 1 : 0, m.translucent ? 1 : 0, m.hidden ? 1 : 0,
+                         m.bakedLit ? 1 : 0, m.readsColor, partIt == matParts.end() ? "?" : partIt->second.c_str());
             for (const auto& t : m.texProps) std::fprintf(stderr, " %s=%d(clamp=%d,name=%s)", t.name.c_str(), t.texture, t.texture >= 0 ? (int)scene.textures[static_cast<size_t>(t.texture)].clamp : -1, t.texture >= 0 ? scene.textures[static_cast<size_t>(t.texture)].name.c_str() : "none");
             std::fprintf(stderr, " | props:");
             for (const auto& pr : m.props) if (pr.first.rfind("_Color", 0) == 0 || pr.first.rfind("_overcolor", 0) == 0 || pr.first == "_nipsize" || pr.first.rfind("_paint", 0) == 0) std::fprintf(stderr, " %s=(%.2f %.2f %.2f %.2f)", pr.first.c_str(), pr.second.x, pr.second.y, pr.second.z, pr.second.w);
             std::fprintf(stderr, "\n");
         }
+    }
     if (opt.settleHeels) settleHeels(scene);
     {   // proportion diagnostics: informational findings about this card's sliders and ABMX table ([proportions] in the issues panel)
         for (const auto& f : AnalyzeCard(card))

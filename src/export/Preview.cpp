@@ -70,6 +70,9 @@ float CutoffOf(const assemble::SceneMaterial& mat) {
 
 // Discard threshold a fragment must pass: the cutout materials discard at their _Cutoff, the true overlays blend at any alpha.
 float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
+    // The opaque shader family is drawn by the game with the texture's alpha ignored (IsOpaqueShaded): fragments with stray
+    // low-alpha texels draw, not discard — discarding them here is the viewer-side twin of the exporter's HasAlphaCutout fix.
+    if (!blend && assemble::IsOpaqueShaded(mat)) return 0.0f;
     float cut = CutoffOf(mat);
     return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
@@ -480,6 +483,10 @@ void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMateri
             // neutral hemisphere is synthesised - without it the IBL shaders see a black environment and render black.
             // unity_SHBr/g/b stay 0 (no directional asymmetry); unity_SHC stays 0 (no opposite-lobe).
             if (pm.name == "unity_SHAr" || pm.name == "unity_SHAg" || pm.name == "unity_SHAb") { f[0] = f[1] = f[2] = f[3] = 0.45f; continue; }
+            // unity_AmbientSky / Equator / Ground are the built-in ambient lights of the "skybox" family (the
+            // UnityChan toon shaders read AmbientSky for their base). Left at zero those shaders multiply their
+            // whole surface by nothing and bake / draw it black; a neutral sky matches the hemisphere above.
+            if (pm.name == "unity_AmbientSky" || pm.name == "unity_AmbientEquator" || pm.name == "unity_AmbientGround") { f[0] = f[1] = f[2] = f[3] = 0.45f; continue; }
             if (pm.name == "unity_SHC" || pm.name == "unity_SHBr" || pm.name == "unity_SHBg" || pm.name == "unity_SHBb") { f[0] = f[1] = f[2] = f[3] = 0.0f; continue; }
             if (pm.name == "unity_OcclusionMaskSelector") { f[0] = 1.0f; f[1] = 1.0f; f[2] = 0.0f; f[3] = 1.0f; continue; }   // Unity's built-in: RGB occlusion, full pass
             // Unity's unity_SpecCube*_HDR carries the decode scale/bias of the reflection probes; zero kills the IBL
@@ -1376,7 +1383,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     }
     float L[3] = {flatL[0], flatL[1], flatL[2]}, camPos[3] = {flatCamPos[0], flatCamPos[1], flatCamPos[2]};
     const unsigned hw = std::getenv("CARDBRIDGE_BAKE_THREADS") ? static_cast<unsigned>(std::atoi(std::getenv("CARDBRIDGE_BAKE_THREADS"))) : std::max(1u, std::thread::hardware_concurrency());
-    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0, skipKksShader = 0;
+    int baked = 0, skipTranslucent = 0, skipEmptyBake = 0, skipNoShader = 0, skipKksShader = 0, skipBlackBake = 0;
     const size_t originalTextures = scene.textures.size();
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
@@ -1388,6 +1395,17 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // KK (Shader Forge) shaders still go through the original bake.
         if (mat.shader.rfind("Koikano/", 0) == 0) {
             ++skipKksShader;
+            continue;
+        }
+        // An alpha shader over a fully opaque source texture is an alpha CUTOUT, not a blend: the
+        // game discards fragments below _Cutoff and draws the rest with depth writes, so the garment
+        // is solid. The UV-flat bake cannot reproduce that screen-space alpha and writes holes where
+        // it discards; MMD then blends those over the interior lining — see-through outfits. Keep the
+        // authored opaque texture (the exporter still grades it) — the pre-bake behaviour that looked
+        // right, and the exact case a mod like 时崎狂三 (Shader Forge/main_alpha, opaque atlases) hits.
+        if (mat.alpha && mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
+            assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)])) {
+            ++skipTranslucent;
             continue;
         }
         const bool thisLit = lit || assemble::IsHairShaderFamily(mat.shader);
@@ -1579,6 +1597,19 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                 continue;
             }
         }
+        // A shader whose lighting model the SM4 emulator cannot reproduce can finish with every covered fragment black
+        // while its alpha is intact - the empty-bake check above only looks at alpha, so it passes. The usual cause is a
+        // colour constant the material does not declare by the name the shader reads (a third-party toon shader reading
+        // unity_AmbientSky or a base colour the material leaves unset), so the shader multiplies its source by zero.
+        // Baking that would replace the card's authored texture with a solid black plate - a hair accessory that the
+        // game paints red turns into a black plate. BakeLostColour detects that degenerate result; keep the authored
+        // texture (and the material's own diffuse) in that case, like an empty or KKS-skip bake.
+        if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
+            assemble::BakeLostColour(img, cov, scene.textures[static_cast<size_t>(mat.texture)])) {
+            scene.warn("", "material '" + mat.name + "' baked black despite an authored texture; keeping the original texture");
+            ++skipBlackBake;
+            continue;
+        }
 
         if (thisToon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
@@ -1673,8 +1704,8 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         scene.warn("materials", std::to_string(skipKksShader) +
                                 " Koikano (KKS) materials kept their baked create-job textures; the UV-flat material bake is not used for them");
     if (report) *report = std::string(lit ? "baked (shaded, front light" : "baked (colour only") + (grade ? ", colour graded" : "") + (toon ? ", toon ramps) " : ") ") + std::to_string(baked) + " material texture(s) through the game's shaders" +
-                          ((skipTranslucent || skipEmptyBake || skipNoShader || skipKksShader)
-                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader, " + std::to_string(skipKksShader) + " KKS shader)"
+                          ((skipTranslucent || skipEmptyBake || skipNoShader || skipKksShader || skipBlackBake)
+                               ? " (skipped: " + std::to_string(skipTranslucent) + " translucent, " + std::to_string(skipEmptyBake) + " empty bake, " + std::to_string(skipNoShader) + " no shader, " + std::to_string(skipKksShader) + " KKS shader, " + std::to_string(skipBlackBake) + " black bake)"
                                : "");
 }
 

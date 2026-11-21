@@ -1289,6 +1289,12 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
         const auto& vp = g.progs[g.vi];
         const auto& pp = g.progs[g.pi];
         if (vp.dxbc.empty() || pp.dxbc.empty()) continue;
+        // A shader whose binding table could not be parsed has no constant buffers: every cb operand
+        // reads as zero on D3D11, so the game shader would multiply its surface by nothing and draw it
+        // black (a third-party toon accessory becomes a black plate). The simple shader uses the
+        // authored texture and material colour instead, which is what the game shows. Leave g.ok false
+        // so this material takes the fallback path; shaders with parsed constants are unaffected.
+        if (pp.cbuffers.empty()) continue;
         if (FAILED(I.dev->CreateVertexShader(vp.dxbc.data(), vp.dxbc.size(), nullptr, &g.vs))) continue;
         if (FAILED(I.dev->CreatePixelShader(pp.dxbc.data(), pp.dxbc.size(), nullptr, &g.ps))) { Rel(g.vs); continue; }
         std::vector<D3D11_INPUT_ELEMENT_DESC> el;
@@ -1700,10 +1706,14 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
                     if (mat.hidden) continue;
-                    // The plain (as exported / MMD) view blends every alpha-flagged material, like MikuMikuDance's transparent pass:
-                    // the stockings/tights diffuse alpha is 0.99, and blindly alpha-testing them (bucket 2) drew them as solid
-                    // black shapes. MikuMikuDance blends them instead, so we do too.
-                    const int bucket = I.plain ? (mat.alpha ? 1 : 0)
+                    // The plain (as exported / MMD) view must agree with the PMX writer: decide the bucket from the material's
+                    // EXPORTED alpha (MmdLook.diffuse.w), not the scene's alpha flag. A main_alpha cutout over an opaque atlas
+                    // exports opaque (the game writes depth for it): leaving it in the blended, depth-less pass let the co-located
+                    // interior lining sort through the garment — the see-through skirt in MMD view mode. Truly translucent
+                    // materials keep their 0.99 alpha and still blend, so the stockings/tights do not draw as solid black.
+                    const MmdLook* look = I.plain && gs.material >= 0 && static_cast<size_t>(gs.material) < I.looks.size() ? &I.looks[static_cast<size_t>(gs.material)] : nullptr;
+                    const bool plainTransparent = look ? look->diffuse.w < 0.999f : (mat.alpha || mat.translucent);
+                    const int bucket = I.plain ? (plainTransparent ? 1 : 0)
                                        : (mat.translucent || (mat.alpha && detail::RenderQueueOf(scene, mat) >= 2500)) ? 1
                                        : (mat.alpha ? 2 : (detail::IsOverlayMaterial(scene, mat) ? 1 : 0));
                     if (bucket != pass) continue;
@@ -1775,10 +1785,12 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         if (!I.fbVs || !I.fbPs || !I.fbIl || !I.fbCb) { if (!matSkipped[static_cast<size_t>(gs.material)]) { matSkipped[static_cast<size_t>(gs.material)] = 1; ++I.skipped; } continue; }
                         float cbv[(7 + 32 + 5 + 1) * 4] = {};
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
-                        cbv[44] = bucket == 0 ? 1.0f : 0.0f;   // alphaGate.x: the fallback shader discards c.a < 0.5 on the opaque path
+                        // The fallback shader discards c.a < 0.5 on the opaque path, except for the opaque shader family
+                        // (main_clothes_opaque & friends): the game draws those fragments regardless of the texture's alpha,
+                        // so the GPU viewer must not clip them either.
+                        cbv[44] = (bucket == 0 && !assemble::IsOpaqueShaded(mat)) ? 1.0f : 0.0f;   // alphaGate.x
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };
-                        const MmdLook* look = I.plain && gs.material >= 0 && static_cast<size_t>(gs.material) < I.looks.size() ? &I.looks[static_cast<size_t>(gs.material)] : nullptr;
                         if (look) {   // MMD's lit colour: diffuse times its light (154/255) plus ambient, at most 1; no two-step shade without a ramp
                             const auto amb = [](float d, float a) { return std::min(1.0f, d * 154.0f / 255.0f + a); };
                             const float dif4[4] = {lin(amb(look->diffuse.x, look->ambient.x)), lin(amb(look->diffuse.y, look->ambient.y)), lin(amb(look->diffuse.z, look->ambient.z)), look->diffuse.w};

@@ -111,7 +111,7 @@ struct MmdLook {
 // map, but takes no self-shadow (inverted cloth bands where it clips) and gets no edge (back faces pushed through it).
 // `innerLayer` is a lining verdict from ColocatedLinings (kLiningNone..kLiningAmbiguous): kLiningOutward/kLiningInward are
 // written single-sided; an ambiguous verdict keeps the authored draw flags untouched.
-MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, char innerLayer = kLiningNone);
+MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, char innerLayer = kLiningNone, bool accessory = false);
 // One flag per scene material: it belongs to an outfit garment (ScenePart::garment, or group Outfit in a hand-built scene). The exporter
 // and the viewer's as-exported pass both use this, so the written PMX flags and the preview cannot drift apart.
 std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
