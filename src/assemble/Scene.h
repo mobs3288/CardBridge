@@ -404,6 +404,30 @@ struct Scene {
     void note(const std::string& part, const std::string& msg) { issues.push_back({"info", part, msg}); }
 };
 
+// True when the game draws this material with texture alpha ignored, including the character's own skin.
+//
+// Besides the "opaque" shader family above, KK and KKS build the body and face skin at run time (a create-job whose
+// alpha channel is a coverage mask for the clothes, not transparency) and draw it opaque: KK's face uses the
+// main_skin shader family, the body's create-job shader is often absent from the library altogether, and KKS uses
+// the same arrangement. Treating those alpha holes as a cutout sends the skin to MMD's blended pass, where it loses
+// depth writes and the back of the head shows through the face. Identify skin structurally - shader family, or a
+// shader-less create-job material used by the character's body/head part - never by card, texture or material index.
+inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
+    if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
+    if (!mat.shader.empty() || mat.shaderIndex >= 0 || scene.materials.empty()) return false;
+    if (&mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
+    const int mi = static_cast<int>(&mat - &scene.materials.front());
+    for (const auto& part : scene.parts) {
+        if (part.id != "body" && part.id != "head" && part.group != "Body" && part.group != "Head") continue;
+        for (int meshIdx : part.meshes) {
+            if (meshIdx < 0 || static_cast<size_t>(meshIdx) >= scene.meshes.size()) continue;
+            for (const auto& sm : scene.meshes[static_cast<size_t>(meshIdx)].submeshes)
+                if (sm.material == mi) return true;
+        }
+    }
+    return false;
+}
+
 // A chain is hair when its part is the character's hair slot, or its item hangs on one of the head's attach sockets (the list row's
 // attach node: a_n_head, a_n_headside, a_n_headtop, a_n_hair*, ...): imported custom-skeleton hair (the card's back / front / ponytail
 // accessories) and the base game's own hair items. Garments, skirts and the body's own jiggle are not hair - they want the garment

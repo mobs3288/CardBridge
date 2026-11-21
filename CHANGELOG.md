@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.5.2] - 2026-11-22
+
+### Fixed
+
+- **Translucent face / back of the head visible through the face in MMD mode (KK/KKS)**: the game builds the character's skin at run time and ignores the alpha channel of that texture — it is a coverage mask, not transparency. `MmdMaterialLook` classified any material whose covered texels included low alpha as a cutout (unless its shader name contained "opaque"), so the baked face was exported with alpha 0.99 and drawn in MMD's blended pass: no depth writes, geometry behind the face showing through, and dark triangular fragments around the mouth. A new structural `IgnoresTextureAlpha` helper recognises skin by shader family (KK/KKS `main_skin`) or as a shader-less create-job material on the character's body/head part, and keeps it opaque in the PMX and the plain viewer; genuinely translucent materials, hair cards, under-pieces and face FX are unaffected. The standard viewer's alpha test is unchanged. Face and body now export with alpha 1.0. Added classification and WARP-render regression tests; 19,006 unit checks pass. See `docs/MMD_FACE_OPACITY_FIX.md`.
+
 ## [0.5.1] - 2026-11-21
 
 ### Fixed

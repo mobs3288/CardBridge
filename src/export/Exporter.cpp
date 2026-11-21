@@ -252,14 +252,18 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // stray low-alpha texels (the baker skips the KKS Koikano clothes, so nothing normalises them) — the shader discards nothing.
     // Marking it transparent is what turned shirts, skirts and dresses into see-throughs in MMD mode; only real cutouts, authored
     // alpha textures and translucent-shader materials stay transparent.
-    const bool alphaCutout = !assemble::IsOpaqueShaded(mat) && HasAlphaCutout(scene, mat);
+    // The game ignores texture alpha for the opaque shader family and for the character's own skin (KK/KKS).
+    // Its runtime-built skin texture carries a coverage mask, not transparency: the face must stay in MMD's opaque
+    // pass or it loses depth writes and the back of the head shows through it.
+    const bool ignoresAlpha = assemble::IgnoresTextureAlpha(scene, mat);
+    const bool alphaCutout = !ignoresAlpha && HasAlphaCutout(scene, mat);
     // An alpha shader over a fully opaque source texture (e.g. a mod's main_alpha outfit) is an
     // alpha cutout: the game discards below _Cutoff but writes depth for what remains, so the
     // garment is solid. MMD has no alpha test in its opaque pass, so an alpha-blended material
     // would let the interior lining and body show through — export it opaque instead.
     const bool opaqueTexture = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
                                assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
-    const bool transparent = (mat.alpha && !opaqueTexture) || mat.translucent || alphaCutout;
+    const bool transparent = !ignoresAlpha && ((mat.alpha && !opaqueTexture) || mat.translucent || alphaCutout);
     if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout): MMD's shadow map and edge use the whole mesh, so they would draw the cut-away part

@@ -1573,6 +1573,93 @@ void unitTests() {
         CHECK((exporter::MmdMaterialLook(hair, hair.materials[0]).drawFlags & 0x10) == 0);   // no edge on the double layer (hair: it would clip)
         CHECK((exporter::MmdMaterialLook(sgl, sgl.materials[0]).drawFlags & 0x10) != 0);   // the single surface keeps its edge
     });
+    test("skin ignores texture alpha (KK/KKS): face and body stay opaque in MMD, real cutouts still blend", [] {
+        using namespace assemble;
+        // A texture whose covered triangle lands on a transparent texel: a coverage mask, which the game's skin
+        // shader ignores but a genuine cutout shader honours.
+        auto sceneFor = [](const char* shader, const char* partId, bool alphaFlag, int shaderIndex) {
+            Scene s;
+            SceneTexture tex;
+            tex.name = "coverage-mask"; tex.width = 4; tex.height = 4;
+            tex.rgba.assign(4 * 4 * 4, 0);
+            for (size_t i = 0; i < tex.rgba.size(); i += 4) { tex.rgba[i] = 255; tex.rgba[i + 1] = 160; tex.rgba[i + 2] = 140; }
+            s.textures.push_back(tex);
+            SceneMaterial m;
+            m.name = "skin-or-cutout"; m.shader = shader; m.shaderIndex = shaderIndex;
+            m.alpha = alphaFlag; m.texture = 0;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0, 1.5f, 0}}) {
+                SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {p.x + 0.5f, p.y - 1.0f}; mesh.vertices.push_back(v);
+            }
+            SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
+            mesh.submeshes.push_back(sub);
+            s.meshes.push_back(mesh);
+            ScenePart part; part.id = partId; part.group = std::string(partId) == "body" ? "Body" : "Outfit"; part.meshes = {0};
+            s.parts.push_back(part);
+            return s;
+        };
+        struct Case { const char* name; const char* shader; const char* part; bool alphaFlag; int shaderIndex; bool opaque; };
+        const Case cases[] = {
+            {"KK face",        "Shader Forge/main_skin", "head", false, 1, true},
+            {"KKS face",       "Koikano/main_skin",      "head", false, 1, true},
+            {"KK body create", "",                       "body", true,  -1, true},
+            {"KKS body create","",                       "body", true,  -1, true},
+            {"opaque garment", "Shader Forge/main_opaque","outfit0.top", false, 2, true},
+            {"hair cutout",    "Shader Forge/main_hair",  "outfit0.acc00", false, 3, false},
+            {"alpha shader",   "Shader Forge/main_alpha", "outfit0.top", true,  4, false},
+        };
+        for (const auto& c : cases) {
+            Scene s = sceneFor(c.shader, c.part, c.alphaFlag, c.shaderIndex);
+            CHECK(assemble::IgnoresTextureAlpha(s, s.materials[0]) == c.opaque);
+            const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
+            CHECK((look.diffuse.w > 0.999f) == c.opaque);   // PMX alpha 1 = MMD's opaque, depth-writing pass
+        }
+    });
+    test("MMD/plain view: opaque skin occludes the geometry behind the face", [] {
+        using namespace assemble;
+        exporter::GpuOptions go;
+        go.preference = "warp"; go.skin = "cpu";
+        exporter::GpuView gpu;
+        std::string why;
+        if (!gpu.Init(go, &why) || !gpu.ready()) return;
+        Scene s;
+        SceneTexture backTex;
+        backTex.name = "back"; backTex.width = 1; backTex.height = 1;
+        backTex.rgba = {20, 20, 200, 255};
+        s.textures.push_back(backTex);
+        SceneTexture skinTex;
+        skinTex.name = "skin"; skinTex.width = 1; skinTex.height = 1;
+        skinTex.rgba = {255, 40, 40, 255};
+        s.textures.push_back(skinTex);
+        SceneMaterial back; back.name = "back-of-head"; back.shader = "Shader Forge/main_opaque"; back.texture = 0;
+        s.materials.push_back(back);
+        SceneMaterial face; face.name = "cf_m_face_00"; face.shader = "Shader Forge/main_skin"; face.texture = 1;
+        s.materials.push_back(face);
+        auto quad = [](float z, int material) {
+            SceneMesh m;
+            for (Vec3 p : {Vec3{-0.5f, 1.0f, z}, Vec3{0.5f, 1.0f, z}, Vec3{0.5f, 1.6f, z}, Vec3{-0.5f, 1.6f, z}}) {
+                SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {p.x + 0.5f, p.y - 1.0f}; m.vertices.push_back(v);
+            }
+            SceneSubmesh sub; sub.material = material; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub);
+            return m;
+        };
+        s.meshes.push_back(quad(-0.1f, 0));
+        s.meshes.push_back(quad(0.0f, 1));
+        ScenePart head; head.id = "head"; head.group = "Head"; head.meshes = {0, 1};
+        s.parts.push_back(head);
+        CHECK(exporter::MmdMaterialLook(s, s.materials[1]).diffuse.w > 0.999f);   // the face is opaque
+        if (!gpu.Load(s, &why)) return;
+        gpu.SetPlain(true);
+        std::vector<uint32_t> px;
+        if (!gpu.Render(exporter::ViewCamera{}, 128, 128, nullptr, px) || px.empty()) return;
+        size_t red = 0, other = 0;
+        for (uint32_t p : px) {
+            const unsigned r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+            if (r > 150 && r > g * 3 && r > b * 3) ++red; else ++other;
+        }
+        CHECK(red > 1000);   // front red skin, not the back face bleeding through
+    });
     test("MMD/plain view: the edge is a rim behind the surface, not a tint over a blended skin material", [] {
         // A skin material exports with alpha 0.99 (MMD's blended pass: no depth write) and keeps its PMX edge.
         // Drawing that edge after the surface passes the depth test everywhere and paints the whole face with the
@@ -1589,7 +1676,7 @@ void unitTests() {
         tex.rgba = {255, 0, 0, 255};
         s.textures.push_back(tex);
         SceneMaterial m;
-        m.name = "skin"; m.shader = "Shader Forge/main_skin";
+        m.name = "blended overlay"; m.shader = "Shader Forge/main_item";
         m.diffuse = {1, 1, 1, 1};
         m.outlineColor = {0.1f, 0.1f, 0.1f};   // a dark PMX edge, distinct from the red surface
         m.translucent = true;                   // exports alpha 0.99: MMD blends it and writes no depth
