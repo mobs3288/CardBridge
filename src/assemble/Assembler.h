@@ -24,6 +24,14 @@ inline bool HasUsableSkin(const unity::RendererInfo& r, const unity::MeshData& m
     return r.skinned && !r.boneXforms.empty() && !mesh.skin.empty() && !mesh.bindPoses.empty();
 }
 
+// An outer top sub-part's OverInnerMask applies to the inner garment of the same top: the sibling sub-part created
+// from the card's own subPartsId with a lower list category (e.g. the shirt under a jacket), never an unrelated
+// garment and never the cover itself. Exposed for tests so the rule can be checked without a real card/library.
+inline bool IsInnerGarmentOf(const ScenePart& cover, const ScenePart& candidate) {
+    return !cover.subGroup.empty() && candidate.group == "Outfit" && !candidate.underPiece &&
+           candidate.subGroup == cover.subGroup && candidate.category < cover.category && candidate.id != cover.id;
+}
+
 // One layer to build on top of the outfit: a garment source (outfit file, or a Coordinate PNG) the assembly
 // grafts onto the scene after the outfit itself is built. The source is assembled against a disposable copy of
 // the card (ONLY the chosen clothes slots, the rest is discarded), and the parts land in the scene with

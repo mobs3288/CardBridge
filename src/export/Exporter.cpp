@@ -814,34 +814,24 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                     if (pmxTex < 0) {
                         // Encoded straight from the scene texture: copying a 2048 texture (16 MB) only to hand it to the
                         // PNG encoder was a needless transient at export time. A rewritten copy is made only when the pixels
-                        // differ (the alpha-thresholded main_item cutout, or an unbaked colour texture the game's colour grade
-                        // has not touched yet).
+                        // differ: the alpha-thresholded main_item cutout, and/or a colour texture the LUT has not graded yet.
+                        const assemble::SceneTexture* tp = &scene.textures[ti];
+                        const bool needGrade = ColourGradeEnabled() && tp->srgb && !tp->colourGraded;
                         assemble::SceneTexture rewritten;
                         bool rewrote = false;
-                        const assemble::SceneTexture* tp = &scene.textures[ti];
-                        if (solid) {
-                            rewritten = scene.textures[ti];
-                            for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = rewritten.rgba[px] < kItemCutout ? 0 : 255;
+                        if (solid || needGrade) {
+                            rewritten = *tp;
+                            if (solid)
+                                for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = rewritten.rgba[px] < kItemCutout ? 0 : 255;
+                            // MMD has no post-process, so the game's frame grade has to live in the PNG. GradeTexture consults
+                            // SceneTexture::colourGraded, the same flag the as-exported bake writes: a texture already graded
+                            // there is never graded twice, and one the bake could not run (KKS Koikano shaders, create-job
+                            // results, no shader in the bundle) is graded here. Doing it on the cutout copy too closes the old
+                            // gap where a main_item cutout escaped grading entirely.
+                            if (needGrade) GradeTexture(rewritten);
                             rewrote = true;
-                        } else if (ColourGradeEnabled() && tp->srgb && !tp->bakedInShaderBake) {
-                            // The game grades its whole frame, translucent layers included. A colour texture the shader bake did
-                            // not write (no shader in the bundle, or the LOD's reused main export) carries raw bytes; the same
-                            // look-up the preview applies to its frame runs here so the PMX matches, alpha untouched.
-                            rewritten = scene.textures[ti];
-                            const size_t n = rewritten.rgba.size() / 4;
-                            std::vector<uint32_t> px(n);
-                            for (size_t i = 0; i < n; ++i)
-                                px[i] = (uint32_t(rewritten.rgba[i * 4 + 3]) << 24) | (uint32_t(rewritten.rgba[i * 4]) << 16) |
-                                        (uint32_t(rewritten.rgba[i * 4 + 1]) << 8) | rewritten.rgba[i * 4 + 2];
-                            ApplyColourGrade(px, 0u);
-                            for (size_t i = 0; i < n; ++i) {
-                                rewritten.rgba[i * 4] = (px[i] >> 16) & 255;
-                                rewritten.rgba[i * 4 + 1] = (px[i] >> 8) & 255;
-                                rewritten.rgba[i * 4 + 2] = px[i] & 255;
-                            }
-                            rewrote = true;
+                            tp = &rewritten;
                         }
-                        if (rewrote) tp = &rewritten;
                         std::string file = "textures/" + safeFileName(tp->name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         log("texture " + tp->name + " (" + std::to_string(tp->width) + "x" + std::to_string(tp->height) + ")");
                         PendingEncode pe;

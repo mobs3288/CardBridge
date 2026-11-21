@@ -43,7 +43,11 @@ struct SceneTexture {
     bool clamp = false;          // the texture's wrap mode is clamp (ramps), not repeat
     bool srgb = true;            // the texture is flagged sRGB (colour data); false for masks and other linear data
     uint64_t pixelHash = 0;      // FNV-1a 64 of rgba
-    bool bakedInShaderBake = false;   // true when the shader bake wrote this texture (do not colour-grade it again at export)
+    bool bakedInShaderBake = false;   // true when the shader bake wrote this texture (provenance)
+    // The game's LUT grade has been applied to this texture's RGB. Single source of truth for "graded": both the viewer's
+    // as-exported copy and the PMX writer consult it, so a colour texture is graded exactly once whichever path reaches it
+    // (a shader bake, a create job, a KKS shader the bake cannot run, or a card texture shipped straight from the bundle).
+    bool colourGraded = false;
 };
 
 struct SceneTexBinding {
@@ -273,6 +277,9 @@ struct ScenePart {
     std::string property;
     int category = 0;
     int64_t sourceItemId = 0;
+    // Top sub-parts (created from the card's subPartsId) share a group id. An outer sub-part's OverInnerMask hides the
+    // regions of the inner sub-part(s) of that same group; the relation comes from the card, never from slot numbers.
+    std::string subGroup;
     std::string status;       // resolved-mod, resolved-base, missing-mod, ... (see resolve::StatusName)
     std::string detail;
     std::string modGuid, modName, modVersion, modAuthor, modPath;

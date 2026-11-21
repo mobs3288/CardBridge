@@ -36,6 +36,7 @@
 #include "export/BoneLabels.h"
 #include "export/FaceMorphs.h"
 #include "export/Exporter.h"         
+#include "export/ColourGrade.h"
 #include "export/MorphCatalog.h"
 #include "export/MmdNames.h"
 #include "export/PmxIk.h"
@@ -7460,6 +7461,71 @@ void unitTests() {
         bool sawMaterial = false;
         for (const auto& m : back.materials) if (m.name.find("outfit0.top") != std::string::npos) sawMaterial = true;
         CHECK(sawMaterial && back.materials.size() > 0);
+    });
+
+    test("colour grade: every colour texture is graded exactly once, data textures never", [] {
+        // A synthetic LUT whose output red is half the input red axis (green/blue pass through) makes a double
+        // application observable: one grade halves red, two would quarter it.
+        std::vector<uint8_t> lut(static_cast<size_t>(1024) * 32 * 3);
+        for (int b = 0; b < 32; ++b)
+            for (int g = 0; g < 32; ++g)
+                for (int r = 0; r < 32; ++r) {
+                    uint8_t* p = &lut[((31 - g) * 1024 + b * 32 + r) * 3];
+                    p[0] = static_cast<uint8_t>((r * 255 / 31) / 2);
+                    p[1] = static_cast<uint8_t>(g * 255 / 31);
+                    p[2] = static_cast<uint8_t>(b * 255 / 31);
+                }
+        const bool wasEnabled = exporter::ColourGradeEnabled();
+        CHECK(exporter::LoadColourGradePixels(lut.data(), 1024, 32));
+        exporter::SetColourGradeEnabled(true);
+        {
+            assemble::Scene s;
+            s.textures.resize(3);
+            auto& colour = s.textures[0];
+            colour.name = "colour"; colour.width = colour.height = 1; colour.rgba = {200, 100, 50, 255}; colour.srgb = true;
+            auto& data = s.textures[1];
+            data.name = "mask"; data.width = data.height = 1; data.rgba = {200, 100, 50, 255}; data.srgb = false;
+            auto& pre = s.textures[2];
+            pre.name = "already-graded"; pre.width = pre.height = 1; pre.rgba = {123, 45, 67, 255};
+            pre.srgb = true; pre.bakedInShaderBake = true; pre.colourGraded = true;
+            const size_t n = exporter::ApplyOutstandingColourGrade(s);
+            CHECK(n == 1);
+            CHECK(std::abs(static_cast<int>(colour.rgba[0]) - 100) <= 2);
+            CHECK(std::abs(static_cast<int>(colour.rgba[1]) - 100) <= 2);
+            CHECK(std::abs(static_cast<int>(colour.rgba[2]) - 50) <= 2);
+            CHECK(colour.rgba[3] == 255 && colour.colourGraded);
+            CHECK(data.rgba[0] == 200 && !data.colourGraded);                 // masks stay linear
+            CHECK(pre.rgba[0] == 123 && pre.rgba[1] == 45 && pre.rgba[2] == 67);
+            // A second pass - the viewer's bake followed by the PMX writer - must not grade it again.
+            CHECK(!exporter::GradeTexture(colour));
+            CHECK(exporter::ApplyOutstandingColourGrade(s) == 0);
+            CHECK(std::abs(static_cast<int>(colour.rgba[0]) - 100) <= 2);
+        }
+        exporter::SetColourGradeEnabled(wasEnabled);
+        exporter::LoadColourGrade("");   // drop the synthetic table again: no test may leak global grade state
+    });
+
+    test("inner garment masks: the covered garment comes from the card's own sub-part group", [] {
+        using namespace assemble;
+        auto part = [](const char* id, int category, const char* group = "outfit3.top") {
+            ScenePart p; p.id = id; p.group = "Outfit"; p.subGroup = group; p.category = category; return p;
+        };
+        const ScenePart jacket = part("outfit3.top.sub_b", 211);   // the outer garment, whose list row carries OverInnerMask
+        const ScenePart shirt  = part("outfit3.top.sub_a", 210);   // the inner garment of the same top
+        const ScenePart deco   = part("outfit3.top.sub_c", 212);   // a decoration in the same top: not inner
+        const ScenePart other  = part("outfit3.bottom", 210, "");  // an unrelated slot, even with a lower category
+        ScenePart under = shirt; under.id = "outfit3.top.sub_a.under.top.sub_b"; under.underPiece = true;
+        CHECK(IsInnerGarmentOf(jacket, shirt));
+        CHECK(!IsInnerGarmentOf(jacket, jacket));      // a cover never masks itself
+        CHECK(!IsInnerGarmentOf(jacket, deco));        // only the garment beneath it
+        CHECK(!IsInnerGarmentOf(jacket, other));      // never another slot
+        CHECK(!IsInnerGarmentOf(jacket, under));       // never an already hidden piece
+        ScenePart noGroup = jacket; noGroup.subGroup.clear();
+        CHECK(!IsInnerGarmentOf(noGroup, shirt));      // a standalone garment has no inner sibling
+        // The rule is purely structural: the same pairing works for a sailor top (200/201) as for a jacket (210/211).
+        const ScenePart sailorOuter = part("outfit1.top.sub_b", 201);
+        const ScenePart sailorInner = part("outfit1.top.sub_a", 200);
+        CHECK(IsInnerGarmentOf(sailorOuter, sailorInner));
     });
 
     test("viewport: diagnostic modes render deterministically on a synthetic scene", [] {

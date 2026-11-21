@@ -2928,7 +2928,8 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     bool bottomHidesShorts = false;   // KKS list field HideShorts on a bottom
     std::vector<std::string> kokanHiders;   // outfit part ids whose list row has KokanHide=1 (they hide the crotch, as the game does)
     struct MaskSource { std::shared_ptr<unity::TextureData> tex; std::string owner; };   // a garment's mask and the garment's part id
-    std::vector<MaskSource> bodyMasks, braMasks;
+    // The game has three mask columns per garment: what it hides on the body, on the bra, and on the inner garment beneath it.
+    std::vector<MaskSource> bodyMasks, braMasks, innerMasks;
     for (size_t wi = 0; wi < work.size(); ++wi) {
         cbtime::Scope itemTimer("item " + work[wi].partId);
         checkCancel();
@@ -2969,9 +2970,12 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         part.group = ref.group;
         part.garment = ref.group == "Outfit";
         part.fromClothing = card.clothingPartIds.count(ref.partId) != 0;
-        if (!part.fromClothing && ref.subKind >= 0) {   // top sub-parts inherit the top's provenance
+        if (ref.subKind >= 0) {   // top sub-parts inherit the top's provenance and share the group the card's subPartsId defined
             const size_t at = ref.partId.find(".sub_");
-            if (at != std::string::npos) part.fromClothing = card.clothingPartIds.count(ref.partId.substr(0, at)) != 0;
+            if (at != std::string::npos) {
+                part.subGroup = ref.partId.substr(0, at);
+                if (!part.fromClothing) part.fromClothing = card.clothingPartIds.count(part.subGroup) != 0;
+            }
         }
         part.property = ref.property;
         part.category = ref.category;
@@ -3541,17 +3545,21 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 auto mb = resolver.openItemBundle(item, mab, &w);
                 if (!mb) {
                     if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) into.push_back({loose, ref.partId});
-                    else scene.warn(ref.partId, std::string("body mask '") + mname + "' not found in " + mab);
+                    else scene.warn(ref.partId, std::string("mask '") + mname + "' not found in " + mab);
                     return;
                 }
                 UnityMaskLookup ml; ml.uf = mb.get();
                 std::string why;
                 if (auto mt = ResolveBodyMask(ml, mname, [&](const unity::PPtr& p) { return b.decode(*mb, p, ref.partId); }, &why)) into.push_back({mt, ref.partId});
                 else if (auto loose = resolver.openLooseTexture(item, mab, mname, nullptr)) into.push_back({loose, ref.partId});
-                else scene.warn(ref.partId, why.empty() ? ("body mask '" + mname + "' not found in " + mab) : why);
+                else scene.warn(ref.partId, why.empty() ? ("mask '" + mname + "' not found in " + mab) : why);
             };
             resolveMask("OverBodyMaskAB", "OverBodyMask", bodyMasks);
             resolveMask("OverBraMaskAB", "OverBraMask", braMasks);
+            // The same kind of column, in both KK and KKS list tables, that an outer top sub-part uses to cut away the
+            // inner garment it covers (sleeves, torso). It is resolved exactly like the body/bra masks and applied in
+            // the inner garment's own UV space below — never as a whole-part hide.
+            resolveMask("OverInnerMaskAB", "OverInnerMask", innerMasks);
         }
 
         // The game always plays the face's blend shapes (FaceBlendShape on the head prefab): eyes open, mouth closed, the
@@ -4251,6 +4259,19 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     applyMasks("body", [](const ScenePart& p) { return p.id == "body"; }, bodyMasks);
     applyMasks("bra", [](const ScenePart& p) { return p.group == "Outfit" && !p.underPiece && p.id.size() >= 4 && p.id.compare(p.id.size() - 4, 4, ".bra") == 0; }, braMasks,
                [](const SceneMesh& m) { return m.name.rfind("o_bra", 0) == 0; });   // only the bra itself; a body suit in the bra slot has other UVs
+    // An outer top sub-part's OverInnerMask cuts away the part of the inner garment it covers (the sleeves of a shirt under a
+    // jacket, for instance). The two are paired by the card's own subPartsId group, and the inner one is the sibling with a
+    // lower category — no slot numbers, item ids or outfit combinations are encoded here. The mask is sampled in the inner
+    // garment's UV space and only its covered triangles move to a hidden under piece, so the collar and hem stay and the
+    // triangles come back with the nude switch. This is the same regional mechanism as the body and bra masks.
+    for (const auto& mk : innerMasks) {
+        const ScenePart* cover = nullptr;
+        for (const auto& p : scene.parts) if (p.id == mk.owner) { cover = &p; break; }
+        if (!cover || cover->subGroup.empty()) continue;   // only sub-parts of a top define an inner garment
+        const ScenePart coverCopy = *cover;                // copy: applyMasks appends parts to scene.parts
+        applyMasks("inner garment",
+                   [&coverCopy](const ScenePart& p) { return IsInnerGarmentOf(coverCopy, p); }, std::vector<MaskSource>{mk});
+    }
     // Body suppression fallback: when NO body mask could be resolved for this outfit (missing texture, its mask asset is a prefab shadowing the name,
     // or no mask declared), conceal the body triangles that opaque clothing covers anyway (ray-occluded — never the open slits).
     // A resolved mask still drives everything above; this runs only for outfits whose mask is unavailable or invalid.

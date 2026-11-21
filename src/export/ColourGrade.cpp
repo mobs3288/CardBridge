@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "core/FileIo.h"
+#include "assemble/Scene.h"
 
 namespace cardbridge::exporter {
 
@@ -30,6 +31,13 @@ bool LoadColourGrade(const std::string& libraryDir) {
     stbi_uc* px = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &n, 3);
     if (!px) return false;
     if (w != kSize * kSize || h != kSize) { stbi_image_free(px); return false; }
+    const bool ok = LoadColourGradePixels(px, w, h);
+    stbi_image_free(px);
+    return ok;
+}
+
+bool LoadColourGradePixels(const uint8_t* px, int w, int h) {
+    if (!px || w != kSize * kSize || h != kSize) return false;
     g_lut.resize(static_cast<size_t>(kSize) * kSize * kSize * 3);
     // The strip holds one square per blue slice, left to right; inside a square red runs along x and green up (row 0 is the top).
     for (int b = 0; b < kSize; ++b)
@@ -37,7 +45,6 @@ bool LoadColourGrade(const std::string& libraryDir) {
             for (int r = 0; r < kSize; ++r)
                 for (int c = 0; c < 3; ++c)
                     g_lut[((static_cast<size_t>(b) * kSize + g) * kSize + r) * 3 + c] = px[(static_cast<size_t>(kSize - 1 - g) * w + b * kSize + r) * 3 + c];
-    stbi_image_free(px);
     return true;
 }
 
@@ -73,6 +80,32 @@ void ApplyColourGrade(std::vector<uint32_t>& bgra, uint32_t skip) {
     const size_t chunk = (bgra.size() + hw - 1) / hw;
     for (unsigned t = 0; t < hw; ++t) pool.emplace_back(work, t * chunk, std::min(bgra.size(), (t + 1) * chunk));
     for (auto& t : pool) t.join();
+}
+
+bool GradeTexture(assemble::SceneTexture& tex) {
+    if (!ColourGradeEnabled() || !tex.srgb || tex.colourGraded) return false;
+    const size_t n = tex.rgba.size() / 4;
+    if (!n) { tex.colourGraded = true; return false; }
+    std::vector<uint32_t> px(n);
+    for (size_t i = 0; i < n; ++i)
+        px[i] = (uint32_t(tex.rgba[i * 4 + 3]) << 24) | (uint32_t(tex.rgba[i * 4]) << 16) |
+                (uint32_t(tex.rgba[i * 4 + 1]) << 8) | tex.rgba[i * 4 + 2];
+    ApplyColourGrade(px, 0u);
+    for (size_t i = 0; i < n; ++i) {
+        tex.rgba[i * 4] = (px[i] >> 16) & 255;
+        tex.rgba[i * 4 + 1] = (px[i] >> 8) & 255;
+        tex.rgba[i * 4 + 2] = px[i] & 255;
+    }
+    tex.colourGraded = true;   // authoritative: a later consumer must never apply the LUT to these bytes again
+    return true;
+}
+
+size_t ApplyOutstandingColourGrade(assemble::Scene& scene) {
+    if (!ColourGradeEnabled()) return 0;
+    size_t graded = 0;
+    for (auto& t : scene.textures)
+        if (GradeTexture(t)) ++graded;
+    return graded;
 }
 
 } // namespace cardbridge::exporter

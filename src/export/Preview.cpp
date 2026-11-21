@@ -1649,14 +1649,9 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // create-job body overlay), washing saturated back hair out to pale lavender in MMD.
         for (size_t i = 0; i < bt.rgba.size(); ++i)
             bt.rgba[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, img[i] * 255.0f + 0.5f)));
-        if (grade) {   // the same look-up the preview applies to its frame; alpha stays
-            std::vector<uint32_t> px(static_cast<size_t>(W) * H);
-            for (size_t i = 0; i < px.size(); ++i)
-                px[i] = (uint32_t(bt.rgba[i * 4 + 3]) << 24) | (uint32_t(bt.rgba[i * 4]) << 16) | (uint32_t(bt.rgba[i * 4 + 1]) << 8) | bt.rgba[i * 4 + 2];
-            ApplyColourGrade(px, 0u);
-            for (size_t i = 0; i < px.size(); ++i) { bt.rgba[i * 4] = (px[i] >> 16) & 255; bt.rgba[i * 4 + 1] = (px[i] >> 8) & 255; bt.rgba[i * 4 + 2] = px[i] & 255; }
-        }
-        bt.bakedInShaderBake = true;   // the bake's own grade choice is authoritative: never re-grade at export
+        // Grading happens once, below, through the same GradeTexture the PMX writer uses — never inline here. That keeps a
+        // single "already graded" fact (SceneTexture::colourGraded) for baked and unbaked textures alike.
+        bt.bakedInShaderBake = true;   // provenance: this texture was written by the shader bake
         scene.textures.push_back(std::move(bt));
         st.mips.push_back(Mips{});
         st.built.push_back(false);
@@ -1669,6 +1664,11 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (progress) progress("baked texture " + std::to_string(mi + 1) + "/" + std::to_string(scene.materials.size()) + ": " +
                                mat.name + " (" + std::to_string(W) + "x" + std::to_string(H) + ")");
     }
+    // The game grades its whole frame. A PMX has no post-process, so the grade has to live in the colour textures themselves.
+    // Grading every still-ungraded sRGB texture here (not just the ones this bake ran) is what makes the as-exported view and
+    // the written PMX agree for KKS Koikano materials, create-job results and materials with no shader alike. The per-texture
+    // flag makes the call idempotent: a texture the bake already graded is never graded a second time.
+    if (grade) ApplyOutstandingColourGrade(scene);
     if (skipKksShader)
         scene.warn("materials", std::to_string(skipKksShader) +
                                 " Koikano (KKS) materials kept their baked create-job textures; the UV-flat material bake is not used for them");

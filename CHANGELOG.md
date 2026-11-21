@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.4.14] - 2026-11-21
+
+### Fixed
+
+- **MMD material colours differed from the game view (KK and KKS)**: the game's AmplifyColor LUT is a *frame* post-process, so a PMX has to carry it in its colour textures. Commit `87e18b9` established that rule, but the fallback that grades an unbaked texture ran only in the PMX writer — the viewer's "as exported" (MMD) path grades the frame only in Lit mode and sampled those same unbaked textures raw. KKS `Koikano/` materials (which deliberately skip the UV-flat shader bake) and create-job textures therefore appeared ungraded in MMD mode while the exported PMX was graded, and a `main_item` cutout escaped grading entirely. A single `SceneTexture::colourGraded` flag and one `GradeTexture` helper now govern both paths: the export bake grades every still-ungraded sRGB texture in the scene copy, and the PMX writer grades only what is still ungraded. Masks, normal maps and toon/sphere maps (`srgb == false`) are never graded, alpha is preserved, and the grade is applied exactly once. Non-MMD rendering and the existing KK bake are unchanged.
+- **Inner garments not hidden by the outer garment (KK and KKS)**: list rows carry three visibility masks — `OverBodyMask`, `OverBraMask` and `OverInnerMask`. CardBridge resolved and applied only the first two, so an outer top sub-part (a jacket) never cut away the inner shirt beneath it and the shirt's full sleeves were exported. The inner mask is now resolved like the others from the same list column, and applied to the inner garment of the same card-defined `subPartsId` group in that garment's own UV space. Only the covered triangles move into a hidden under piece (restored by the nude switch); the visible collar, hem and sleeves stay, and no slot numbers, item ids or outfit combinations are hardcoded.
+
 ## [0.4.12] - 2026-11-21
 
 ### Fixed
