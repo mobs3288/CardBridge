@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.5] - 2026-11-22
+
+### Fixed
+
+- **Nose-ridge slider never freezes the viewer**: dragging now only rewrites one small texture for live feedback. The full skin re-bake is deferred until you release the slider and confirm it in a Yes/No popup; declining restores the previously applied value and live texture. Build and 19,056 unit checks pass.
+
 ## [0.6.4] - 2026-11-22
 
 ### Added / Fixed

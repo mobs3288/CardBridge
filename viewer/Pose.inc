@@ -491,7 +491,26 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (id == kTransSize) { InvalidatePanel(); return; }   // the radius applies to the next stroke; nothing to rebuild
-    if (id == kNoseRidge) { if (released) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); } ApplySkinLook(false); return; }
+    if (id == kNoseRidge) {
+        // Dragging only rewrites one small texture, so the view follows without freezing. The expensive full re-bake
+        // runs only after the user explicitly confirms it in a popup when the slider is released.
+        if (!released) { ApplyNoseRidgeLive(); return; }
+        const int answer = MessageBoxW(g.hwnd,
+            L"Apply this nose ridge shading?\n\nThe character's skin textures will be re-baked once. Cancel keeps the previous value.",
+            L"CardBridge - nose ridge", MB_YESNO | MB_ICONQUESTION);
+        if (answer == IDYES) {
+            g.tw.noseRidgeApplied = g.tw.noseRidge;
+            g.settings.noseRidge = g.tw.noseRidge;
+            SaveSettings(g.settings);
+            ApplySkinLook(false);
+            Log("nose ridge shading applied");
+        } else {
+            g.tw.noseRidge = g.tw.noseRidgeApplied;   // keep the UI in step with the scene we put back
+            ApplyNoseRidgeLive();
+        }
+        InvalidatePanel();
+        return;
+    }
     if (id == kNoseRidgeOpacity) { if (released) { g.settings.noseRidgeOpacity = g.tw.noseRidgeOpacity; SaveSettings(g.settings); } return; }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
@@ -762,7 +781,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     g.tw.skinShadeTop = g.settings.skinShadeTop;
                     g.tw.skinShadeWidth = g.settings.skinShadeWidth;
                     g.tw.skinAo = g.settings.skinAo;
-                    g.tw.noseRidge = g.settings.noseRidge;   // persisted default for new cards; 1 = the card's authored ridge
+                    g.tw.noseRidge = g.tw.noseRidgeApplied = g.settings.noseRidge;   // persisted default for new cards
                     g.tw.noseRidgeOpacity = g.settings.noseRidgeOpacity;
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");

@@ -105,6 +105,7 @@ struct Tweaks {
     float skinShadeWidth = 0.6f;                          // how wide the cleavage line runs (0.1 = hairline, 1 = default, 2 = broad); saved in the viewer's settings
     float skinAo = 0.85f;                                // Koikatsu's own look baked in (base body normal lighting + the card's detail line mask); 0 = off; saved in the viewer's settings
     float noseRidge = 1.0f;                              // head-mod centre nose shading: 1 = as authored, 0 = off, 2 = stronger (per card)
+    float noseRidgeApplied = 1.0f;                       // the last value the user confirmed (the popup can revert to this)
     float noseRidgeOpacity = 1.0f;                       // independent opacity layer: 0 = invisible, 1 = fully visible
     float transSizeCm = 4.0f;                             // translucency brush radius, centimetres
     float transStrength = 0.65f;                          // how see-through a fully painted texel becomes (0..1, like the morph weights)
