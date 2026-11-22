@@ -69,6 +69,8 @@
 #include "SpringRef.h"
 
 #include <nlohmann/json.hpp>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #include <algorithm>
 #include <chrono>
@@ -1517,7 +1519,7 @@ void unitTests() {
         SceneMaterial m; m.shader = "Shader Forge/main_alpha"; m.texture = 0; m.alpha = true; m.diffuse = {1, 1, 1, 1};
         s.materials.push_back(m);
         SceneMesh mesh;
-        SceneVertex v; v.uv = {0.5f, 0.5f};
+        SceneVertex v; v.uv = {0.1f, 0.5f};   // samples the first texel (x = 0): the cutout test below is mesh-sampled, as HasAlphaCutout requires
         mesh.vertices.assign(3, v);
         SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
         mesh.submeshes.push_back(sub);
@@ -1760,6 +1762,84 @@ void unitTests() {
             const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
             CHECK((look.diffuse.w > 0.999f) == c.opaque);   // PMX alpha 1 = MMD's opaque, depth-writing pass
         }
+    });
+    test("export: skin/opaque coverage-mask alpha is solidified, genuine fabric alpha is kept (pantyhose backdrop)", [] {
+        using namespace assemble;
+        Scene s;
+        s.name = "alpha-solidify";
+        SceneBone root; root.name = "root"; root.parent = -1; root.pos = {0, 0, 0}; root.source = "rig"; root.world = Mat4{};
+        s.bones.push_back(root);
+        // The body bake's alpha is a clothes COVERAGE MASK: 0 where a garment hides the skin, never opacity.
+        SceneTexture skin; skin.name = "skin-coverage"; skin.width = 4; skin.height = 4; skin.rgba.resize(4 * 4 * 4);
+        for (size_t i = 0; i < skin.rgba.size(); i += 4) {
+            skin.rgba[i] = 255; skin.rgba[i + 1] = 170; skin.rgba[i + 2] = 150;
+            skin.rgba[i + 3] = ((i / 4) % 2) ? 0 : 255;   // half the texels are "under clothing"
+        }
+        s.textures.push_back(skin);
+        // A genuine sheer fabric: every texel is authored translucent (this is what MMD must keep blending).
+        SceneTexture sheer; sheer.name = "sheer-socks"; sheer.width = 4; sheer.height = 4; sheer.rgba.resize(4 * 4 * 4);
+        for (size_t i = 0; i < sheer.rgba.size(); i += 4) {
+            sheer.rgba[i] = 255; sheer.rgba[i + 1] = 200; sheer.rgba[i + 2] = 210; sheer.rgba[i + 3] = 190;   // a sub-255 tint, no holes
+        }
+        s.textures.push_back(sheer);
+        SceneTexture lace; lace.name = "lace-socks"; lace.width = 4; lace.height = 4; lace.rgba.resize(4 * 4 * 4);
+        for (size_t i = 0; i < lace.rgba.size(); i += 4) {
+            const size_t x = (i / 4) % 4;
+            lace.rgba[i] = 255; lace.rgba[i + 1] = 120; lace.rgba[i + 2] = 130;
+            lace.rgba[i + 3] = x < 2 ? 0 : 190;   // half a hole, half the game's sub-255 tint: a real cutout with a mid-alpha tint
+        }
+        s.textures.push_back(lace);
+        SceneMaterial body; body.name = "cf_m_body"; body.shader = "Shader Forge/main_skin"; body.texture = 0;
+        SceneMaterial socks; socks.name = "o_socks_knee01"; socks.shader = "Shader Forge/main_alpha"; socks.alpha = true; socks.texture = 1;
+        SceneMaterial laceMat; laceMat.name = "o_socks_lace"; laceMat.shader = "Shader Forge/main_alpha"; laceMat.alpha = true; laceMat.texture = 2;
+        s.materials.push_back(body); s.materials.push_back(socks); s.materials.push_back(laceMat);
+        auto addPart = [&](const char* id, const char* group, int mat) {
+            const int pi = static_cast<int>(s.parts.size());
+            ScenePart p; p.id = id; p.label = id; p.group = group; p.includeInExport = true; s.parts.push_back(p);
+            SceneMesh m; m.name = std::string(id) + "_mesh"; m.part = pi; m.reshapable = false;
+            for (Vec3 v : {Vec3{-0.5f, 0, 0}, Vec3{0.5f, 0, 0}, Vec3{0.5f, 1, 0}, Vec3{-0.5f, 1, 0}}) {
+                SceneVertex sv; sv.pos = v; sv.normal = {0, 0, 1}; sv.uv = {v.x + 0.5f, v.y}; sv.bone[0] = 0; sv.weight[0] = 1; m.vertices.push_back(sv);
+            }
+            SceneSubmesh sub; sub.material = mat; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub);
+            s.meshes.push_back(m); s.parts[static_cast<size_t>(pi)].meshes.push_back(static_cast<int>(s.meshes.size()) - 1);
+        };
+        addPart("body", "Body", 0);
+        addPart("outfit0.socks", "Outfit", 1);
+        addPart("outfit0.socks2", "Outfit", 2);
+        card::Card c; c.path = "alpha_solidify.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("alpha_solidify") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s, c, eo);
+        const pmx::Model m = pmx::ReadPmx(fileio::ReadFile(r.pmxPath));
+        CHECK(m.materials.size() == 3);
+        CHECK(m.materials[0].diffuse.w > 0.999f);   // skin exports opaque
+        CHECK(m.materials[1].diffuse.w > 0.999f);   // a tint-only alpha shader: the game draws it solid, MMD must not blend it
+        CHECK(m.materials[2].diffuse.w < 0.999f);   // a real cutout keeps MMD's transparent pass
+        auto exportedAlpha = [&](int mi) {
+            CHECK(m.materials[static_cast<size_t>(mi)].texture >= 0);
+            const std::string path = fileio::Join(r.folder, m.textures[static_cast<size_t>(m.materials[static_cast<size_t>(mi)].texture)]);
+            int w = 0, h = 0, ch = 0;
+            stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, 4);
+            CHECK(px != nullptr);
+            if (!px) return std::vector<int>{};
+            std::vector<int> a(static_cast<size_t>(w) * h);
+            for (size_t i = 0; i < a.size(); ++i) a[i] = px[i * 4 + 3];
+            stbi_image_free(px);
+            return a;
+        };
+        const auto skinAlpha = exportedAlpha(0);
+        const auto sockAlpha = exportedAlpha(1);
+        const auto laceAlpha = exportedAlpha(2);
+        CHECK(!skinAlpha.empty() && !sockAlpha.empty() && !laceAlpha.empty());
+        int skinLow = 0, sockLow = 0, laceLow = 0, laceHigh = 0, laceMid = 0;
+        for (int a : skinAlpha) if (a < 255) ++skinLow;
+        for (int a : sockAlpha) if (a < 255) ++sockLow;
+        for (int a : laceAlpha) { if (a == 0) ++laceLow; else if (a == 255) ++laceHigh; else ++laceMid; }
+        CHECK(skinLow == 0);                       // the coverage mask cannot make the under-piece skin vanish in MMD
+        CHECK(sockLow == 0);                       // the pantyhose tint is baked as a solid texture, so the stage cannot show through
+        CHECK(laceLow > 0 && laceHigh > 0);        // the cutout keeps its holes AND draws the kept texels fully opaque in MMD
+        CHECK(laceMid == 0);                       // no 190/255 tint may survive: MMD would read it as translucency
     });
     test("MMD/plain view: opaque skin occludes the geometry behind the face", [] {
         using namespace assemble;

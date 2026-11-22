@@ -263,7 +263,10 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     // would let the interior lining and body show through — export it opaque instead.
     const bool opaqueTexture = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
                                assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
-    const bool transparent = !ignoresAlpha && ((mat.alpha && !opaqueTexture) || mat.translucent || alphaCutout);
+    // An alpha-test material whose mesh never samples a discarded texel is solid: its sub-255 alpha is a tint the
+    // game's test passes, not translucency. MMD blended it (0.99) and let the stage show through the tights.
+    const bool alphaTestSolid = !ignoresAlpha && mat.alpha && !mat.translucent && !alphaCutout;
+    const bool transparent = !ignoresAlpha && (mat.translucent || alphaCutout || (mat.alpha && !opaqueTexture && !alphaTestSolid));
     if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera
     // A mesh cut to a shape by its texture (HasCutout): MMD's shadow map and edge use the whole mesh, so they would draw the cut-away part
@@ -696,7 +699,7 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
 // the scene texture -> PMX texture indices (direct and alpha-solidified), the toon / sphere dedupe maps and
 // the file list as written. LODs re-encode nothing and re-reference exactly these files.
 struct ExportTextureReuse {
-    std::vector<int> texMap, solidTexMap;
+    std::vector<int> texMap, solidTexMap, opaqueTexMap, cutoutTexMap;
     std::map<std::string, int> toonFiles, sphereFiles;
     std::vector<std::string> textureFiles;
     std::vector<std::string> pmxTextures;   // model.textures as written by the main run
@@ -729,8 +732,10 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
 
     // --- textures: only those a written material uses ---------------------
     std::vector<int> texMap(scene.textures.size(), -1);   // scene texture -> pmx texture
-    std::vector<int> solidTexMap(scene.textures.size(), -1);   // the same, written with alpha 255 (for the item shader)
-    if (reuse) { texMap = reuse->texMap; solidTexMap = reuse->solidTexMap; }
+    std::vector<int> solidTexMap(scene.textures.size(), -1);   // the same, alpha thresholded (for the item shader's cutout)
+    std::vector<int> opaqueTexMap(scene.textures.size(), -1);  // the same, alpha solidified (for the game's opaque / skin shaders)
+    std::vector<int> cutoutTexMap(scene.textures.size(), -1);  // the same, alpha thresholded to 0/255 (for the game's alpha-test shaders)
+    if (reuse) { texMap = reuse->texMap; solidTexMap = reuse->solidTexMap; opaqueTexMap = reuse->opaqueTexMap; cutoutTexMap = reuse->cutoutTexMap; }
     pmx::Model model;
     model.name = scene.name;
     if (reuse) model.textures = reuse->pmxTextures;   // the LOD shares the main export's texture list and indices
@@ -846,22 +851,43 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                     // The game's item shader (main_item) is opaque but discards where the texture's alpha is below 0.25 (a card's
                     // MaterialEditor image cut to a shape): this material gets the image with exactly that, alpha 0 or 255, so MMD neither
                     // blends the rest see-through nor shows the cut texels (which were black).
-                    const bool solid = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
-                    int& pmxTex = solid ? solidTexMap[ti] : texMap[ti];
+                    const bool itemCutout = !mat.alpha && mat.shader.find("main_item") != std::string::npos;
+                    const bool ignoreAlpha = assemble::IgnoresTextureAlpha(scene, mat);
+                    // A genuine alpha-blend material (the card's "translucent" shaders) must keep its authored alpha; so
+                    // must a material with no cutout at all. For an alpha-TEST material the game's shader discards texels
+                    // below _Cutoff and draws everything above it SOLID. MMD has no alpha test: it uses the PNG's alpha as
+                    // opacity, so a baked 190 (0.75) becomes a 0.74 blend and the stage shows through the pantyhose.
+                    // Write those cutout textures with binary alpha (0 below the cutoff, 255 above). MMD then draws every
+                    // texel the game kept at full opacity, and discards only the texels the game really cut.
+                    float cutoff = 0.5f;
+                    for (const auto& pr : mat.props) if (pr.first == "_Cutoff") cutoff = pr.second.x;
+                    const uint8_t cutLevel = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, cutoff * 255.0f)));
+                    const bool alphaTestCutout = mat.alpha && !mat.translucent && !ignoreAlpha && HasAlphaCutout(scene, mat);
+                    // Anything the PMX keeps in MMD's opaque pass (diffuse alpha 1) has no texture-alpha role either, so it is
+                    // solidified: the opaque shader family, the character's skin (its alpha is a coverage mask), and alpha
+                    // shaders over a fully opaque atlas. Genuine blends and cutouts keep their 0.99 and their authored alpha.
+                    const bool solidOpaque = look.diffuse.w > 0.999f;
+                    const bool solid = itemCutout || ignoreAlpha || solidOpaque || alphaTestCutout;
+                    int& pmxTex = itemCutout ? solidTexMap[ti] : alphaTestCutout ? cutoutTexMap[ti] : (ignoreAlpha || solidOpaque) ? opaqueTexMap[ti] : texMap[ti];
                     if (reuse && pmxTex < 0)
                         throw FormatError("the LOD export expected texture " + std::to_string(ti) + " (\"" + scene.textures[ti].name + "\") to have been written by the main export");
                     if (pmxTex < 0) {
                         // Encoded straight from the scene texture: copying a 2048 texture (16 MB) only to hand it to the
                         // PNG encoder was a needless transient at export time. A rewritten copy is made only when the pixels
-                        // differ: the alpha-thresholded main_item cutout, and/or a colour texture the LUT has not graded yet.
+                        // differ: the alpha-thresholded cutouts, the solidified opaque / skin alpha, and/or a colour texture
+                        // the LUT has not graded yet.
                         const assemble::SceneTexture* tp = &scene.textures[ti];
                         const bool needGrade = ColourGradeEnabled() && tp->srgb && !tp->colourGraded;
                         assemble::SceneTexture rewritten;
                         bool rewrote = false;
                         if (solid || needGrade) {
                             rewritten = *tp;
-                            if (solid)
+                            if (itemCutout)
                                 for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = rewritten.rgba[px] < kItemCutout ? 0 : 255;
+                            else if (alphaTestCutout)
+                                for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = rewritten.rgba[px] < cutLevel ? 0 : 255;
+                            else if (ignoreAlpha || solidOpaque)
+                                for (size_t px = 3; px < rewritten.rgba.size(); px += 4) rewritten.rgba[px] = 255;
                             // MMD has no post-process, so the game's frame grade has to live in the PNG. GradeTexture consults
                             // SceneTexture::colourGraded, the same flag the as-exported bake writes: a texture already graded
                             // there is never graded twice, and one the bake could not run (KKS Koikano shaders, create-job
@@ -909,6 +935,8 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     if (captureOut) {   // hand the main export's texture bookkeeping to the LOD passes
         captureOut->texMap = texMap;
         captureOut->solidTexMap = solidTexMap;
+        captureOut->opaqueTexMap = opaqueTexMap;
+        captureOut->cutoutTexMap = cutoutTexMap;
         captureOut->toonFiles = toonFiles;
         captureOut->sphereFiles = sphereFiles;
         captureOut->textureFiles = textureFiles;

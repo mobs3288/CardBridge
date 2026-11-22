@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.7] - 2026-11-22
+
+### Fixed
+
+- **Pantyhose / stockings translucent in exported PMX: MMD's stage grid visible through the tights (KK/KKS)**: KK's `main_alpha` and KKS's `main_clothes_alpha` are alpha-TEST shaders — they discard texels under `_Cutoff` and draw everything above it solid. Their baked textures carry the shader's output alpha (about 190/255 on the pantyhose), which MMD reads as *opacity*: with the material's 0.99 blended pass the tights rendered at roughly 0.74 and showed the stage through them. The exporter now writes the PMX texture alpha as a binary 0/255 cutout at the shader's `_Cutoff` for those materials (keeping MMD's 0.99 pass so real holes vanish), and exports alpha-test materials that never sample a discarded texel as fully opaque with solid alpha. Genuine translucency (`translucent` materials), face overlays, hair cards, opaque shaders and the skin's coverage mask keep their existing handling. Alpha-test cutout detection remains mesh-sampled, so stray low-alpha atlas texels do not turn a garment see-through. Verified on `KK_237456.png` (the supplied Yoko Littner card, with the RX21 mods): the socks texture went from 190 mid-alpha texels to a clean 0/255 mask with no intermediate values; all 19,061 unit checks pass, including new KK/KKS-aware export tests for the cutout, solid-tint and preserve-transparency paths.
+
 ## [0.6.5] - 2026-11-22
 
 ### Fixed
