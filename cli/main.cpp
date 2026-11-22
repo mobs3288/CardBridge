@@ -195,7 +195,7 @@ void usage() {
         "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
         "                                             in the preview or the PMX at all, bones included; --nude ticks the\n"
         "                                             Nude body box (skin under the clothes shows)\n"
-        "             [--nose-ridge F]                head-mod centre nose shading ridge: 1 = as authored (default), 0 = off, 0..1 subtler, 1..2 stronger. Cards with no ridge are untouched; never adds a nose line\n"
+        "             [--nose-ridge F]                head-mod centre nose ridge opacity: 1 = as authored (default), 0 = invisible, 2 = stronger. Cards with no ridge are untouched; never adds a nose line\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"

@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.3] - 2026-11-22
+
+### Fixed
+
+- **Nose-ridge slider: live, stays in the current view, and reads as opacity**: the slider now writes through its own value setter, so the ridge updates on each drag step without a re-bake (no loading bar needed). The change is applied to both the live scene and the baked "as exported" scene, so dragging it no longer kicks you out of MMD mode. The control is labelled **Nose ridge opacity**: `0` invisible, `1` as authored, `2` stronger. The spreading falloff of the ridge is preserved. Build and 19,046 unit checks pass.
+
 ## [0.6.2] - 2026-11-22
 
 ### Fixed

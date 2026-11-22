@@ -402,7 +402,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({1, kSkinShadeTop, "Cleavage length", "Skin shading"});
         rows.push_back({1, kSkinShadeWidth, "Shading width", "Skin shading"});
         rows.push_back({1, kSkinAo, "Koikatsu AO (base body normal + detail lines)", "Skin shading"});
-        rows.push_back({1, kNoseRidge, "Nose ridge shading: 1 = as in the card, 0 = off, 0..1 subtler, 1..2 stronger", "Skin shading"});
+        rows.push_back({1, kNoseRidge, "Nose ridge opacity: 1 = as in the card, 0 = invisible, 2 = stronger", "Skin shading"});
         rows.push_back({0, -1, "Translucent clothes: paint the see-through area on the garment", "Translucent clothes"});
         rows.push_back({2, kTransBrush, "Translucency brush: left-drag on a garment paints (right-drag erases)", "Translucent clothes"});
         rows.push_back({2, kTransErase, "Erase the paint instead of laying it down", "Translucent clothes"});

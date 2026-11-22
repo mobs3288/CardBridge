@@ -305,25 +305,25 @@ Vec4 NippleTintOption() {
     return Vec4{g.tw.nippleColour.x, g.tw.nippleColour.y, g.tw.nippleColour.z, 1.0f};
 }
 
-// Nose-ridge drag: change only the head mod's detail-map texture and re-upload that one small image. No create-job,
-// skin-shade or AO re-bake, so the slider follows the mouse in real time. The exported ("as exported") copy is
-// invalidated only once, on release, by TweakEdited below.
-void ApplyNoseRidgeLive(bool released) {
+// Nose-ridge drag: change only the head mod's detail-map texture and re-upload that one small image in whichever
+// view is showing. No create-job, skin-shade or AO re-bake, so the slider follows the mouse in real time. Both the
+// live scene and the baked "as exported" scene are updated, so the mode you are in never changes underneath you.
+void ApplyNoseRidgeLive() {
     std::shared_ptr<Loaded> L = Current();
-    if (!L || L->scene.noseRidge.texture < 0) return;
-    assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge);
-    const int ti = L->scene.noseRidge.texture;
-    if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
-    if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+    if (!L) return;
+    if (L->scene.noseRidge.texture >= 0) {
+        assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge);
+        const int ti = L->scene.noseRidge.texture;
+        if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+        if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+    }
+    if (g.expOk && g.expScene && g.expScene->noseRidge.texture >= 0) {
+        assemble::SetNoseRidgeStrength(*g.expScene, g.tw.noseRidge);
+        const int ti = g.expScene->noseRidge.texture;
+        if (g.gpuExp.ready()) g.gpuExp.UpdateTextures(std::vector<int>{ti});
+    }
     g.dirty = true;
     InvalidateView();
-    if (released && g.expOk) {   // the baked copy holds the old texture; drop it once the drag ends
-        g.expOk = false;
-        g.showExp = false;
-        g.expFor.reset();
-        g.expScene.reset();
-        g.gpuExp.Unload();
-    }
 }
 
 // Re-applies the live skin look (automatic body shading and the nipple tint). `rebuild` recomputes the occlusion map
@@ -479,7 +479,7 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (id == kTransSize) { InvalidatePanel(); return; }   // the radius applies to the next stroke; nothing to rebuild
-    if (id == kNoseRidge) { ApplyNoseRidgeLive(released); if (released) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); } return; }
+    if (id == kNoseRidge) { if (released) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); } return; }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
         id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
