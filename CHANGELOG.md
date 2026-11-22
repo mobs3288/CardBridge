@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.1] - 2026-11-22
+
+### Fixed
+
+- **Nostril shadow discarded by the face-paint cutout (KK/KKS)**: a nose texture's alpha is authored as one continuous ramp - the dark nostril cores plus a soft shadow spanning both of them (alpha 4..28 in the supplied card). The `toon_nose` cutout kept only the cores, so the shadow never reached the viewer or the PMX. The sub-cutout fringe is now lifted from the source texture onto the face skin's create-job result at the shared UV layout, underneath any KoiSkinOverlayX face paint. Only pixels the card already authored are used; no new detail is drawn and the opaque cores stay on the decal mesh, so nothing is double-drawn. Added extraction/compositing tests; 19,046 unit checks pass. Verified on `KK_235599.png` in the GPU view.
+
 ## [0.6.0] - 2026-11-22
 
 ### Added

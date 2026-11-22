@@ -3453,7 +3453,21 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                 int job = createJobFor(which, "cf_m_face_create", texs, props, 1024);
                 if (job >= 0) {
                     card::MaterialEdits::Image fov;
-                    if (b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayFace, fov)) {
+                    const bool haveFov = b.edits && b.edits->decodeSkinOverlay(card::MaterialEdits::OverlayFace, fov);
+                    // Restore the soft shadow that the nose texture authors below the face-paint cutout. It is a few
+                    // low-alpha pixels of the very same texture (a broad patch over both nostrils), not a new detail.
+                    // The face skin and nose atlas share their UV layout, so laying it on the create job's result is
+                    // faithful. The card's own KSOX face paint, when present, goes underneath it.
+                    auto nose = rowTexture(414, faceV.at("noseId").asInt(), "ChaFileFace.noseId", "NoseTex", "nose shadow");
+                    NoseFringe fringe = nose ? ExtractNoseFringe(nose->rgba, nose->width, nose->height, 1024, 1024) : NoseFringe{};
+                    if (fringe.present) {
+                        std::vector<uint8_t> over(static_cast<size_t>(1024) * 1024 * 4, 0);
+                        if (haveFov) CompositeRgba(over, 1024, 1024, fov.rgba, fov.width, fov.height);
+                        CompositeRgba(over, 1024, 1024, fringe.rgba, fringe.width, fringe.height);
+                        scene.createJobs.back().overlay = std::move(over);
+                        scene.createJobs.back().overlayWidth = 1024;
+                        scene.createJobs.back().overlayHeight = 1024;
+                    } else if (haveFov) {
                         scene.createJobs.back().overlay = fov.rgba;
                         scene.createJobs.back().overlayWidth = fov.width;
                         scene.createJobs.back().overlayHeight = fov.height;

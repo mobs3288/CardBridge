@@ -53,6 +53,21 @@ float DetectNoseRidge(const std::vector<uint8_t>& rgba, int w, int h, std::vecto
 // DetectNoseRidge. Pure: repeated calls with different strengths never accumulate.
 void ApplyNoseRidge(std::vector<uint8_t>& rgba, int w, int h, const std::vector<float>& weight, float strength);
 
+// A nose texture's alpha is one authored ramp: the opaque-ish cores (drawn by the decal mesh) and the soft shadow
+// spanning both nostrils below the material's alpha cutout. The cutout throws the shadow away, so lift just that
+// sub-cutout fringe into an RGBA overlay at the face-skin resolution, where no cutout applies. Only source pixels
+// are used - nothing is generated, tinted or repositioned.
+struct NoseFringe {
+    std::vector<uint8_t> rgba;
+    int width = 0, height = 0;
+    bool present = false;
+};
+NoseFringe ExtractNoseFringe(const std::vector<uint8_t>& noseRgba, int noseW, int noseH, int targetW, int targetH);
+
+// Source-over composite `src` (sw x sh) onto `dst` (w x h), both top-first RGBA. Used to combine the card's own
+// KoiSkinOverlayX face paint with the nose fringe before applying both to the create job's result.
+void CompositeRgba(std::vector<uint8_t>& dst, int w, int h, const std::vector<uint8_t>& src, int sw, int sh);
+
 struct Scene;   // Scene.h includes this header; a forward declaration keeps the dependency one-way
 
 // Applies the setting to a scene's stored face texture, restoring the untouched pixels each time so slider changes

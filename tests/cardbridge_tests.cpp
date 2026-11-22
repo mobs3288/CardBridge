@@ -990,6 +990,37 @@ void unitTests() {
         CHECK(DetectNoseRidge(tiny, 0, 0, none) == 0.0f);
         ApplyNoseRidge(tiny, 0, 0, none, 0.0f);
     });
+    test("nose shadow: only the source texture's sub-cutout fringe is lifted onto the face skin", [] {
+        using namespace assemble;
+        const int NW = 64, NH = 64, TW = 128, TH = 128;
+        std::vector<uint8_t> nose(static_cast<size_t>(NW) * NH * 4, 0);
+        // A soft shadow patch (alpha 4..40) above two dark cores (alpha 200).
+        for (int y = 20; y < 30; ++y)
+            for (int x = 20; x < 44; ++x) nose[(static_cast<size_t>(y) * NW + x) * 4 + 3] = 24;
+        for (int y = 40; y < 44; ++y)
+            for (int x : {22, 40}) nose[(static_cast<size_t>(y) * NW + x) * 4 + 3] = 200;
+        auto fringe = ExtractNoseFringe(nose, NW, NH, TW, TH);
+        CHECK(fringe.present && fringe.width == TW && fringe.height == TH);
+        int soft = 0, cores = 0, outside = 0;
+        for (size_t i = 3; i < fringe.rgba.size(); i += 4) {
+            if (fringe.rgba[i] > 0 && fringe.rgba[i] < 128) ++soft;
+            if (fringe.rgba[i] >= 128) ++cores;
+            if (fringe.rgba[i] == 0) ++outside;
+        }
+        CHECK(soft > 100);                 // the authored soft shadow survives
+        CHECK(cores == 0);                 // the opaque cores stay on the decal mesh, never double-drawn
+        CHECK(outside > fringe.rgba.size() / 4 / 2);   // transparent everywhere else
+        // Compositing the fringe over a skin-coloured face darkens only the shadow area.
+        std::vector<uint8_t> face(static_cast<size_t>(TW) * TH * 4, 255);
+        for (size_t i = 3; i < face.size(); i += 4) face[i] = 255;
+        const size_t at = (static_cast<size_t>(50) * TW + TW / 2) * 4;   // pixel -> byte, inside the shadow band
+        const uint8_t before = face[at];
+        CompositeRgba(face, TW, TH, fringe.rgba, fringe.width, fringe.height);
+        CHECK(face[at] < before);
+        std::vector<uint8_t> tiny;
+        CHECK(!ExtractNoseFringe(tiny, 0, 0, 1, 1).present);
+        CompositeRgba(tiny, 0, 0, face, TW, TH);   // degenerate sizes are a no-op
+    });
     test("item prefab roots keep their own transform under the node the game parents them to", [] {
         // SetParent(parent, worldPositionStays: false): a hair or accessory root with an offset and scale keeps both.
         const Mat4 parent = Mat4::TRS({1, 2, 3}, Quat{}, {1, 1, 1});

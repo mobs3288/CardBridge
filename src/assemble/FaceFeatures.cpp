@@ -218,6 +218,40 @@ void ApplyNoseRidge(std::vector<uint8_t>& rgba, int w, int h, const std::vector<
         }
 }
 
+NoseFringe ExtractNoseFringe(const std::vector<uint8_t>& noseRgba, int noseW, int noseH, int targetW, int targetH) {
+    NoseFringe out;
+    if (noseW <= 0 || noseH <= 0 || targetW <= 0 || targetH <= 0 ||
+        noseRgba.size() < static_cast<size_t>(noseW) * noseH * 4) return out;
+    out.width = targetW; out.height = targetH;
+    out.rgba.assign(static_cast<size_t>(targetW) * targetH * 4, 0);
+    for (int y = 0; y < targetH; ++y)
+        for (int x = 0; x < targetW; ++x) {
+            const int sx = std::min(noseW - 1, x * noseW / targetW), sy = std::min(noseH - 1, y * noseH / targetH);
+            const uint8_t* s = &noseRgba[(static_cast<size_t>(sy) * noseW + sx) * 4];
+            if (s[3] == 0 || s[3] >= 128) continue;   // only what the cutout would discard
+            uint8_t* d = &out.rgba[(static_cast<size_t>(y) * targetW + x) * 4];
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+            out.present = true;
+        }
+    return out;
+}
+
+void CompositeRgba(std::vector<uint8_t>& dst, int w, int h, const std::vector<uint8_t>& src, int sw, int sh) {
+    if (sw <= 0 || sh <= 0 || src.size() < static_cast<size_t>(sw) * sh * 4) return;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int sx = std::min(sw - 1, x * sw / w), sy = std::min(sh - 1, y * sh / h);
+            const uint8_t* s = &src[(static_cast<size_t>(sy) * sw + sx) * 4];
+            const float a = s[3] / 255.0f;
+            if (a <= 0.0f) continue;
+            uint8_t* d = &dst[(static_cast<size_t>(y) * w + x) * 4];
+            const float da = d[3] / 255.0f, oa = a + da * (1.0f - a);
+            for (int c = 0; c < 3; ++c)
+                d[c] = static_cast<uint8_t>((s[c] * a + d[c] * da * (1.0f - a)) / std::max(oa, 1e-6f) + 0.5f);
+            d[3] = static_cast<uint8_t>(oa * 255.0f + 0.5f);
+        }
+}
+
 void SetNoseRidgeStrength(Scene& scene, float strength) {
     NoseRidge& nr = scene.noseRidge;
     nr.strength = std::min(2.0f, std::max(0.0f, strength));
