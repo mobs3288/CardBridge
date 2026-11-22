@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.4] - 2026-11-22
+
+### Fixed
+
+- **Black bands on alpha-test garments in exported PMX (KK/KKS)**: a shader whose name contains `opaque` can still be an alpha test (`_Cutoff`, queue 2450) and discard texels of a modded garment's texture (a card-supplied MainTex or a game texture). The name-based rule solidified those discarded texels' black RGB, painting a band above the shorts on `KK_237456.png` (Yoko Littner) and along dress openings on `KK_388778.png`, neither of which the game or viewer shows. The shader bake now proves the clip from its own output — for any material the name rule would otherwise solidify — when at least 25% of the covered texels are discarded, so stray low-alpha atlas texels still leave intact clothes solid. The PMX keeps a binary cutout mask and MMD's 0.99 pass, and the software/GPU viewers discard the same texels. Verified on `KK_237456.png`, `KK_388778.png` and `KK_235599.png`; 19,181 checks pass. See `docs/BLACK_OUTFIT_CUTOUT_FIX.md`.
+- **Holes under clipped garments in the exported body**: the assembly's `always` / `kokan` under-pieces carry body triangles moved out of the body mesh, so hiding them while covered opened holes wherever a garment clipped alpha. They now stay drawn; only under-pieces covered by a named garment are hidden.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added

@@ -161,6 +161,11 @@ public:
     // The scene's vertices changed in place (a re-shape): uploads the new positions and normals, keeping the current skin. Tangents (the normal
     // map frame) are recomputed only when asked; leave them while a slider is being dragged and ask once it is released.
     void Refresh(bool tangents);
+    // Live morph weights changed: rewrites only the meshes whose delta actually changed (meshes that lost their last morph are restored to
+    // their immutable base geometry), and re-skins only when a pose is active. Much cheaper than Refresh(false) on a continuous slider drag,
+    // which would rewrite every vertex of every mesh and re-skin the whole character on every intermediate value. Call after SetMorphDelta.
+    // Returns false when no mesh needed an update (e.g. the same weights were set twice).
+    bool RefreshMorph();
 
     // Where a model-space point lands in the picture of the last Render (pixels from the top left) and its depth (smaller = nearer the camera).
     // False before the first Render.

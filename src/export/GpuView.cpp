@@ -143,6 +143,7 @@ struct GpuView::Impl {
     const assemble::Scene* scene = nullptr;
     std::vector<GpuMesh> meshes;
     std::vector<std::vector<Vec3>> morphDelta;   // per scene mesh, the accumulated live-morph offsets (empty = no morphs; see SetMorphDelta)
+    std::vector<char> morphedMeshes;             // per mesh, 1 while the CPU mirror carries morph offsets (so RefreshMorph can also undo them)
     std::vector<GpuShader> shaders;
     std::vector<GpuTex> textures;                // by scene texture
     GpuTex defaults[4];                          // white, black, gray, bump
@@ -627,6 +628,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Rel(benchTsStart); Rel(benchTsEnd); Rel(benchTsDisjoint); Rel(benchEvent);
         benchQueries = false; benchPending = false; benchLastMs = -1.0;
         Clear();
+        morphDelta.clear();
+        morphedMeshes.clear();
         Rel(samplerWrap); Rel(samplerClamp);
         Rel(raster); Rel(rasterCull); Rel(rasterCullFront);
         Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite); Rel(depthNoTest);
@@ -969,9 +972,15 @@ void GpuView::SetMorphDelta(const std::vector<std::vector<Vec3>>* delta) {
     // but a new scene clears them in Load as well.
     I.morphDelta = delta ? *delta : std::vector<std::vector<Vec3>>{};
 }
+// True when mesh mi has a usable (fully sized) morph delta in the stored copy.
+static bool HasMorphDelta(const std::vector<std::vector<Vec3>>& delta, size_t mi, size_t verts) {
+    return mi < delta.size() && !delta[mi].empty() && delta[mi].size() == verts;
+}
+
 void GpuView::Refresh(bool tangents) {
     Impl& I = *impl_;
     if (!I.dev || !I.scene) return;
+    I.morphedMeshes.assign(I.meshes.size(), 0);
     for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
         GpuMesh& g = I.meshes[mi];
         const auto& m = I.scene->meshes[mi];
@@ -984,11 +993,57 @@ void GpuView::Refresh(bool tangents) {
             g.rest[v].nrm[0] = sv.normal.x; g.rest[v].nrm[1] = sv.normal.y; g.rest[v].nrm[2] = sv.normal.z;
             if (tangents) { g.rest[v].tan[0] = tan[v].x; g.rest[v].tan[1] = tan[v].y; g.rest[v].tan[2] = tan[v].z; }
         }
-        FoldMorphDelta(I.morphDelta, mi, g.rest);   // re-add the live morphs' offsets on top of the fresh rest
+        if (HasMorphDelta(I.morphDelta, mi, m.vertices.size())) {
+            FoldMorphDelta(I.morphDelta, mi, g.rest);   // re-add the live morphs' offsets on top of the fresh rest
+            I.morphedMeshes[mi] = 1;
+        }
         if (g.restBuf) I.ctx->UpdateSubresource(g.restBuf, 0, nullptr, g.rest.data(), 0, 0);
         if (g.skinInBuf) I.ctx->UpdateSubresource(g.skinInBuf, 0, nullptr, g.rest.data(), 0, 0);
     }
     SetSkin(I.skinCopy.empty() ? nullptr : &I.skinCopy);
+}
+
+bool GpuView::RefreshMorph() {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return false;
+    // A morph change touches only the meshes whose offsets changed, plus the ones that just lost their last morph (which must go back to
+    // the immutable base vertices). Everything else keeps the buffer it already has: no full-scene vertex rewrite per slider tick.
+    std::vector<char> now(I.meshes.size(), 0);
+    std::vector<size_t> touched;
+    for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
+        const auto& m = I.scene->meshes[mi];
+        if (!HasMorphDelta(I.morphDelta, mi, m.vertices.size())) continue;
+        now[mi] = 1;
+        touched.push_back(mi);
+    }
+    for (size_t mi = 0; mi < I.meshes.size(); ++mi)
+        if (I.morphedMeshes.size() > mi && I.morphedMeshes[mi] && !now[mi]) touched.push_back(mi);
+    if (touched.empty()) return false;
+
+    const bool posed = !I.skinCopy.empty();
+    for (size_t mi : touched) {
+        if (mi >= I.scene->meshes.size()) continue;
+        GpuMesh& g = I.meshes[mi];
+        const auto& m = I.scene->meshes[mi];
+        if ((!g.vb && !g.restBuf) || g.rest.size() != m.vertices.size()) continue;
+        // Always rebuild from the scene's immutable rest vertices: never fold an offset into an already morphed copy (that compounds).
+        for (size_t v = 0; v < g.rest.size(); ++v) {
+            const auto& sv = m.vertices[v];
+            g.rest[v].pos[0] = sv.pos.x; g.rest[v].pos[1] = sv.pos.y; g.rest[v].pos[2] = sv.pos.z;
+            g.rest[v].nrm[0] = sv.normal.x; g.rest[v].nrm[1] = sv.normal.y; g.rest[v].nrm[2] = sv.normal.z;
+        }
+        FoldMorphDelta(I.morphDelta, mi, g.rest);
+        if (g.restBuf) I.ctx->UpdateSubresource(g.restBuf, 0, nullptr, g.rest.data(), 0, 0);
+        if (g.skinInBuf) I.ctx->UpdateSubresource(g.skinInBuf, 0, nullptr, g.rest.data(), 0, 0);
+        if (!posed) {   // no pose: the drawn buffer is just the (morphed) rest copy; no compute dispatch needed
+            if (g.posedBuf) { I.ctx->UpdateSubresource(g.posedBuf, 0, nullptr, g.rest.data(), 0, 0); g.vb = g.posedBuf; }
+            else if (g.restBuf) g.vb = g.restBuf;
+            else if (g.vb) I.ctx->UpdateSubresource(g.vb, 0, nullptr, g.rest.data(), 0, 0);   // single-buffer CPU-skin layout
+        }
+    }
+    I.morphedMeshes = std::move(now);
+    if (posed) SetSkin(&I.skinCopy);   // a pose rides along: re-skin the touched vertices with the current bones
+    return true;
 }
 
 bool GpuView::Project(Vec3 world, float& sx, float& sy, float& depth) const {
@@ -1237,6 +1292,8 @@ void GpuView::Unload() {
     Impl& I = *impl_;
     I.Clear();
     I.scene = nullptr;
+    I.morphDelta.clear();
+    I.morphedMeshes.clear();
     I.skinCopy.clear();
     I.lastM[0] = 0;
     I.lastW = I.lastH = 0;
@@ -1286,6 +1343,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
     if (isCancelled()) { I.Clear(); I.scene = nullptr; return fail("cancelled by user"); }
     I.Clear();
     I.morphDelta.clear();   // a new scene: whatever deltas the previous one carried mean nothing now (the viewer re-applies its weights on load)
+    I.morphedMeshes.clear();
     I.scene = &scene;
     GPUDBG("load begin: shaders=%zu materials=%zu textures=%zu meshes=%zu parts=%zu globals=%zu\n",
            scene.shaders.size(), scene.materials.size(), scene.textures.size(), scene.meshes.size(),
@@ -1812,9 +1870,9 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         // The fallback shader discards c.a < 0.5 on the opaque path, except for the opaque shader family
                         // (main_clothes_opaque & friends): the game draws those fragments regardless of the texture's alpha,
                         // so the GPU viewer must not clip them either.
-                        // Plain mode keeps skin opaque (its texture alpha is a coverage mask); the standard fallback
-                        // path keeps its existing alpha test unchanged.
-                        const bool ignoresAlpha = look ? assemble::IgnoresTextureAlpha(*I.scene, mat) : assemble::IsOpaqueShaded(mat);
+                        // Both modes use the same rule, including a shader whose bake proved it clips alpha despite its
+                        // "opaque" name: the standard fallback must not paint those cut-out texels black either.
+                        const bool ignoresAlpha = assemble::IgnoresTextureAlpha(*I.scene, mat);
                         cbv[44] = (bucket == 0 && !ignoresAlpha) ? 1.0f : 0.0f;   // alphaGate.x
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };

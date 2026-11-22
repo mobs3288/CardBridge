@@ -311,7 +311,14 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
     const bool skin = mat.shader.find("skin") != std::string::npos;
     const float gloss = 0.3f * mat.specular.x + 0.59f * mat.specular.y + 0.11f * mat.specular.z;
     if (tooth) look.sphere = 1;
-    else if (!mat.bakedLit && !overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
+    // Hair is always marked bakedLit by BakeShaderTextures (thisLit = lit || IsHairShaderFamily). The old
+    // !mat.bakedLit guard therefore made this branch unreachable for every successfully baked hair material:
+    // the PMX got no sphere map at all and MMD showed the flat baked colour with no ring highlight. A hair
+    // bake only contains the shader's view-independent colour - the anisotropic strand highlight is a
+    // normal/view-dependent term that cannot be captured in UV space - so the ring has to come from the
+    // sphere map regardless of bakedLit. Keep the guard for the generic gloss sphere: that one would add
+    // a second, broad sheen on top of a lit bake (skin, face, lit garments).
+    else if (!overlay && !lens && hair) { look.sphere = 3; look.sphereStrength = 0.15f; }
     else if (!mat.bakedLit && !overlay && !lens && !skin && gloss * 0.25f >= 0.02f) { look.sphere = 2; look.sphereStrength = std::min(0.25f, gloss * 0.25f); }
     // A co-located lining layer faces into its garment (the outward-facing twin is reversed at export; an inward-facing one already
     // does). Both are written single-sided so they are culled from outside and never cover the outer layer. An ambiguous twin

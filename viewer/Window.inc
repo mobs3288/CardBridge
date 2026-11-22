@@ -484,7 +484,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
         if (sc && (g.gpuExp.ready() || g.gpuExp.Init(go, &why))) {
             g.gpuExp.SetPlain(true);
-            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); const size_t fb = g.gpuExp.fallbackMaterials(); Log(std::string("as exported: on (X switches back)") + (fb ? "; " + std::to_string(fb) + " material(s) shade via their normal map - the game's shader did not upload" : ""), LogKind::Good); }
+            if (g.gpuExp.Load(*sc, &why, [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) { g.expScene = sc; g.expOk = true; g.showExp = g.expFor == Current(); ApplyPoseLive(); MorphsOnExportViewLoaded(); const size_t fb = g.gpuExp.fallbackMaterials(); Log(std::string("as exported: on (X switches back)") + (fb ? "; " + std::to_string(fb) + " material(s) shade via their normal map - the game's shader did not upload" : ""), LogKind::Good); }
             else Log("export preview upload failed: " + why, LogKind::Warn);
         } else if (sc) Log("export preview: no Direct3D 11 device (" + why + ")", LogKind::Warn);
         ProgEnd();
@@ -581,7 +581,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.opt.stale = true;
         }
         if (L) LoadMorphCatalog();
-        else { g.morphCatalog = {}; g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); }
+        else { g.morphCatalog = {}; g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); g.gpuExp.SetMorphDelta(nullptr); }
         if (!g.expBusy.load()) ProgEnd();   // only close the bar here when no exported-preview bake is in flight (WM_EXP_READY closes it)
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);

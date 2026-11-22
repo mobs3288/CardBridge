@@ -82,7 +82,12 @@ PmxLoadResult BuildScene(const Model& doc, const std::string& pmxDir) {
         sm.name = mat.name + (mat.nameEn.empty() || mat.nameEn == mat.name ? "" : " / " + mat.nameEn);
         sm.shader = "MMD";
         sm.diffuse = mat.diffuse;
-        sm.shadow = {1, 1, 1};                 // ambient = diffuse in the MMD look
+        // MMD shades as diffuse*light + ambient, and MmdMaterialLook derives
+        // ambient from the scene's shadow multiplier. PMX stores ambient
+        // separately (0.5 on most models), so map it here: leaving the
+        // multiplier at 1 double-lights every surface and washes the face out.
+        auto shade = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+        sm.shadow = {shade(mat.ambient.x), shade(mat.ambient.y), shade(mat.ambient.z)};
         sm.specular = mat.specular;
         sm.specularPower = mat.specularPower;
         sm.outlineColor = {mat.edgeColor.x, mat.edgeColor.y, mat.edgeColor.z};
@@ -119,10 +124,12 @@ PmxLoadResult BuildScene(const Model& doc, const std::string& pmxDir) {
         assemble::SceneVertex sv;
         sv.pos = v.position;
         sv.normal = v.normal;
-        sv.uv = v.uv;
-        sv.uv1 = {v.additionalUv[0].x, v.additionalUv[0].y};
-        sv.uv2 = {v.additionalUv[1].x, v.additionalUv[1].y};
-        sv.uv3 = {v.additionalUv[2].x, v.additionalUv[2].y};
+        // PMX puts v=0 at the top; Scene/renderer use Unity's v-up convention
+        // (textures are uploaded bottom-row-first). The exporter flips it back.
+        sv.uv = {v.uv.x, 1.0f - v.uv.y};
+        sv.uv1 = {v.additionalUv[0].x, 1.0f - v.additionalUv[0].y};
+        sv.uv2 = {v.additionalUv[1].x, 1.0f - v.additionalUv[1].y};
+        sv.uv3 = {v.additionalUv[2].x, 1.0f - v.additionalUv[2].y};
         for (int k = 0; k < 4; ++k) { sv.bone[k] = v.bone[k]; sv.weight[k] = v.weight[k]; }
         if (v.deformType == 1 || v.deformType == 3) sv.weight[1] = 1.0f - v.weight[0];
         if (v.deformType == 3) warn("SDEF vertices are skinned as BDEF2 in the preview; the document keeps SDEF");

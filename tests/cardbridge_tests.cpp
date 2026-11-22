@@ -1458,6 +1458,15 @@ void unitTests() {
         // A character hair mat keeps the designed (0,0,0,w): its shade lives in the baked texture, which MMD shows as-is.
         const auto hairLook = exporter::MmdMaterialLook(s, s.materials[1]);
         CHECK(hairLook.diffuse.x < 0.01f && hairLook.diffuse.y < 0.01f && hairLook.diffuse.z < 0.01f);
+        // A baked hair bake cannot hold the shader's normal/view-dependent strand highlight, so the PMX must
+        // still give baked-lit hair its ring sphere. The old !mat.bakedLit guard made this branch unreachable.
+        CHECK(accLook.sphere == 3 && accLook.sphereStrength > 0.0f);
+        CHECK(hairLook.sphere == 3 && hairLook.sphereStrength > 0.0f);
+        SceneMaterial litSkin; litSkin.shader = "Shader Forge/main_skin"; litSkin.bakedLit = true;
+        litSkin.specular = {1, 1, 1};
+        s.materials.push_back(litSkin);
+        // The generic gloss sphere is still suppressed on a lit bake (it would double the sheen).
+        CHECK(exporter::MmdMaterialLook(s, s.materials[2]).sphere == 0);
     });
     test("opaque clothes: stray low-alpha texels on the opaque shader family do not make the export transparent", [] {
         using namespace assemble;
@@ -1763,6 +1772,62 @@ void unitTests() {
             const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
             CHECK((look.diffuse.w > 0.999f) == c.opaque);   // PMX alpha 1 = MMD's opaque, depth-writing pass
         }
+    });
+    test("an opaque-named shader that clips alpha keeps its cutout instead of drawing black texels", [] {
+        using namespace assemble;
+        // The bake's own output is the evidence: a material the name-based rule calls opaque may still clip a
+        // substantial part of its UVs (a modded garment's alpha-masked MaterialEditor texture). The detection is
+        // structural - never a card, texture or shader name - so garments with a few stray alpha texels stay opaque.
+        {
+            std::vector<float> img(64 * 4, 1.0f);
+            std::vector<uint8_t> cov(64, 1);
+            CHECK(!BakeHasAlphaCutout(img, cov));                          // fully solid: no cutout
+            std::fill(img.begin(), img.end(), 0.0f);
+            CHECK(BakeHasAlphaCutout(img, cov));                           // every covered texel clipped
+            for (size_t i = 0; i < cov.size(); ++i) cov[i] = i < 60 ? 1 : 0;
+            for (size_t i = 0; i < 40; ++i) for (int c = 0; c < 4; ++c) img[i * 4 + c] = 1.0f;
+            CHECK(BakeHasAlphaCutout(img, cov));                           // 24 clipped of 60 covered (40%)
+            for (size_t i = 40; i < 56; ++i) for (int c = 0; c < 4; ++c) img[i * 4 + c] = 1.0f;
+            CHECK(!BakeHasAlphaCutout(img, cov));                          // 4 clipped of 60 is stray atlas alpha, not a cutout
+            cov.assign(64, 0);
+            img.assign(64 * 4, 0.0f);
+            cov[0] = 1;                                                    // one stray texel is not a cutout
+            CHECK(!BakeHasAlphaCutout(img, cov));
+        }
+        Scene s;
+        SceneTexture tex;
+        tex.name = "alpha-cutout-cloth"; tex.width = 4; tex.height = 4;
+        tex.rgba.assign(4 * 4 * 4, 0);
+        for (size_t i = 0; i < tex.rgba.size(); i += 4) { tex.rgba[i] = 110; tex.rgba[i + 1] = 120; tex.rgba[i + 2] = 115; tex.rgba[i + 3] = ((i / 4) / 4) % 2 ? 0 : 255; }
+        s.textures.push_back(tex);
+        SceneMaterial m;
+        m.name = "cf_m_top_tennis_d"; m.shader = "Shader Forge/main_opaque"; m.texture = 0;
+        m.alpha = true; m.cardMainTex = true; m.shaderClipsAlpha = true;
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0, 1.5f, 0}}) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {p.x + 0.5f, p.y - 1.0f}; mesh.vertices.push_back(v);
+        }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2}; mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        ScenePart part; part.id = "outfit0.top"; part.group = "Outfit"; part.meshes = {0}; part.visibleInPreview = true;
+        s.parts.push_back(part);
+        CHECK(!IgnoresTextureAlpha(s, s.materials[0]));
+        const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
+        CHECK(look.diffuse.w < 0.999f);   // MMD keeps the holes instead of painting them black
+        s.materials[0].shaderClipsAlpha = false;
+        CHECK(IgnoresTextureAlpha(s, s.materials[0]));
+        // At assembly time a game texture is not made a cutout from its pixels alone — that decision is card-only, so a
+        // texture with stray low-alpha atlas texels stays solid. The bake can still prove a real clip on a game texture
+        // (Yoko Littner's bloomers, _Cutoff 0.5 / queue 2450), and the export must honour that proof: a name-based rule
+        // that solidifies those discarded texels paints a black band in MMD.
+        s.materials[0].cardMainTex = false;
+        s.materials[0].alpha = false;
+        CHECK(IgnoresTextureAlpha(s, s.materials[0]));
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w > 0.999f);
+        s.materials[0].shaderClipsAlpha = true;   // proven by the bake, whatever the texture's owner
+        CHECK(!IgnoresTextureAlpha(s, s.materials[0]));
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 0.999f);
     });
     test("export: skin/opaque coverage-mask alpha is solidified, genuine fabric alpha is kept (pantyhose backdrop)", [] {
         using namespace assemble;
@@ -3048,6 +3113,96 @@ void unitTests() {
         size_t diffSame = 0;
         for (size_t i = 0; i < rest.size(); ++i) if (rest[i] != same[i]) ++diffSame;
         CHECK(diffSame == 0);
+    });
+
+    test("morphs: every recomputation starts from the immutable base geometry (no accumulation)", [] {
+        using namespace exporter;
+        auto near = [](Vec3 a, Vec3 b, float eps = 1e-4f) { return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps; };
+        assemble::Scene s;
+        assemble::SceneMesh m;
+        m.name = "cf_O_kuti";
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
+            assemble::SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; m.vertices.push_back(v);
+        }
+        assemble::SceneBlendShape sh; sh.name = "up";
+        sh.offsets.emplace_back(0, Vec3{0, 0.5f, 0}); sh.offsets.emplace_back(1, Vec3{0, 0.5f, 0});
+        m.shapes.push_back(sh);
+        { assemble::SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub); }
+        s.meshes.push_back(m);
+        s.materials.push_back(assemble::SceneMaterial{});
+        const LiveMorphCatalog cat = BuildLiveMorphs(s);
+        const LiveMorph* open = nullptr;
+        for (const auto& lm : cat.morphs) if (lm.name == "cf_O_kuti.up") open = &lm;
+        CHECK(open != nullptr);
+        if (!open) return;
+        // Rebuild the delta the way a slider does on every tick: from scratch, never on top of the previous result.
+        auto deltaAt = [&](float w) {
+            std::vector<std::vector<Vec3>> dst(s.meshes.size());
+            AccumulateLiveMorph(s, cat, *open, w, dst);
+            return dst;
+        };
+        std::vector<std::vector<Vec3>> first = deltaAt(1.0f);
+        CHECK(first.size() == 1 && first[0].size() == 4);
+        CHECK(near(first[0][0], Vec3{0, 0.5f, 0}, 1e-6f) && near(first[0][2], Vec3{}, 1e-6f));
+        // Recompute the same weight 40 times: every result must equal the first, i.e. offsets never stack on a previous result.
+        for (int i = 0; i < 40; ++i) {
+            std::vector<std::vector<Vec3>> fresh = deltaAt(0.3f);
+            std::vector<std::vector<Vec3>> again = deltaAt(0.3f);
+            CHECK(near(fresh[0][0], again[0][0], 1e-6f) && near(fresh[0][1], again[0][1], 1e-6f) && near(fresh[0][2], again[0][2], 1e-6f));
+        }
+        // The scene's rest vertices are never touched by morphing.
+        CHECK(near(s.meshes[0].vertices[0].pos, Vec3{-0.5f, 1.0f, 0}, 1e-6f));
+    });
+
+    test("morphs: the incremental GPU update restores base geometry when weights go back to zero", [] {
+        using namespace assemble;
+        exporter::GpuOptions go;
+        go.preference = "warp"; go.skin = "cpu";
+        exporter::GpuView gpu;
+        std::string why;
+        if (!gpu.Init(go, &why) || !gpu.ready()) return;   // no D3D11 (WARP) here: nothing to assert
+        Scene s;
+        SceneMesh m;
+        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0.5f, 1.6f, 0}, Vec3{-0.5f, 1.6f, 0}}) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; m.vertices.push_back(v);
+        }
+        { SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sub); }
+        s.meshes.push_back(m);
+        s.materials.push_back(SceneMaterial{});
+        ScenePart part; part.id = "p"; part.group = "Body"; part.meshes = {0}; s.parts.push_back(part);
+        if (!gpu.Load(s, &why)) return;
+
+        std::vector<std::array<float, 3>> pos;
+        CHECK(gpu.ReadbackPosed(pos));
+        if (pos.size() != 4) return;
+        const std::vector<std::array<float, 3>> base = pos;   // immutable rest positions, per vertex
+        std::vector<std::vector<Vec3>> delta(1, std::vector<Vec3>(4, Vec3{}));
+        delta[0][0] = delta[0][1] = Vec3{0, 0.5f, 0};
+
+        gpu.SetMorphDelta(&delta);
+        CHECK(gpu.RefreshMorph());
+        CHECK(gpu.ReadbackPosed(pos) && pos.size() == 4);
+        CHECK(std::fabs(pos[0][1] - (base[0][1] + 0.5f)) < 1e-5f);   // morphed vertices move
+        CHECK(std::fabs(pos[1][1] - (base[1][1] + 0.5f)) < 1e-5f);
+        CHECK(std::fabs(pos[2][1] - base[2][1]) < 1e-5f);            // untouched vertices stay put
+        CHECK(std::fabs(pos[3][1] - base[3][1]) < 1e-5f);
+
+        delta[0][0] = delta[0][1] = Vec3{0, 0.25f, 0};      // a new weight: recomputed from base, not stacked
+        gpu.SetMorphDelta(&delta);
+        CHECK(gpu.RefreshMorph());
+        CHECK(gpu.ReadbackPosed(pos) && pos.size() == 4);
+        CHECK(std::fabs(pos[0][1] - (base[0][1] + 0.25f)) < 1e-5f);
+        CHECK(std::fabs(pos[1][1] - (base[1][1] + 0.25f)) < 1e-5f);
+
+        gpu.SetMorphDelta(nullptr);                          // clearing the delta undoes the morph exactly
+        CHECK(gpu.RefreshMorph());
+        CHECK(gpu.ReadbackPosed(pos) && pos.size() == 4);
+        for (size_t v = 0; v < pos.size(); ++v) {
+            CHECK(std::fabs(pos[v][0] - base[v][0]) < 1e-5f);
+            CHECK(std::fabs(pos[v][1] - base[v][1]) < 1e-5f);
+            CHECK(std::fabs(pos[v][2] - base[v][2]) < 1e-5f);
+        }
+        CHECK(!gpu.RefreshMorph());                          // nothing left to update
     });
 
     test("pmx rotation: +Y turned onto an axis, in the yaw-pitch-roll order of rigid bodies", [] {
@@ -11080,10 +11235,16 @@ void pmxImportTests() {
         CHECK(mesh.vertices[3].weight[0] == doc.vertices[3].weight[0]);
         CHECK(std::fabs(mesh.vertices[3].weight[1] - 0.4f) < 1e-6f);   // SDEF's second weight made explicit
         CHECK(std::fabs(mesh.vertices[1].uv2.x - 0.1f) < 1e-6f);        // additional UV channel 2 -> uv2
+        CHECK(std::fabs(mesh.vertices[0].uv.y - (1.0f - doc.vertices[0].uv.y)) < 1e-6f);  // PMX v-down -> Scene v-up
         CHECK(mesh.shapes.size() == 1);                                 // the one vertex morph
         CHECK(r.scene.expressions.size() == 1);                        // the one group morph
         CHECK(r.scene.materials[0].outlineColor.x == doc.materials[0].edgeColor.x);
         CHECK(!r.warnings.empty());   // missing textures and unsupported morphs are reported, never dropped
+        // The MMD look must use the PMX ambient (0.5 on this fixture), not a
+        // full-bright multiplier: that washed the face out to white.
+        const auto look = exporter::MmdMaterialLook(r.scene, r.scene.materials[0]);
+        CHECK(std::fabs(look.ambient.x - doc.materials[0].diffuse.x * doc.materials[0].ambient.x) < 1e-6f);
+        CHECK(look.ambient.x < doc.materials[0].diffuse.x * 0.6f);   // not a full-bright multiplier
     });
 
     test("pmx material edits apply to the document without losing source-only data", [] {

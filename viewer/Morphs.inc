@@ -51,7 +51,19 @@ void RebuildMorphDelta() {
         if (w == 0.0f) continue;
         exporter::AccumulateLiveMorph(L->scene, g.morphCatalog, g.morphCatalog.morphs[i], w, g.morphDelta);
     }
-    if (g.gpuOk && g.gpuScene == L) g.gpu.SetMorphDelta(&g.morphDelta);   // store; the caller refreshes the skin
+    // Store on both GPU views. The "as exported" view is the default after load, so a morph slider must be able to play there too -
+    // otherwise the tab would have to switch to the software renderer, which cannot follow a continuous drag.
+    if (g.gpuOk && g.gpuScene == L) g.gpu.SetMorphDelta(&g.morphDelta);
+    if (g.expOk && g.expFor == L) g.gpuExp.SetMorphDelta(&g.morphDelta);
+}
+
+// The exported preview was (re)baked and uploaded: fold the weights that are already set into its fresh GPU copy, so switching to the
+// MMD look never drops a morph that is playing in the Lit view (and a re-bake mid-drag does not blank the face).
+void MorphsOnExportViewLoaded() {
+    const std::shared_ptr<Loaded> L = Current();
+    if (!L || !g.expOk || g.expFor != L) return;
+    g.gpuExp.SetMorphDelta(&g.morphDelta);
+    g.gpuExp.RefreshMorph();
 }
 
 // Builds the catalog from the current scene. `keepWeights` (a re-shape: the scene is the same, the order is the same) carries the current
@@ -72,14 +84,21 @@ void SetMorphCatalog(bool keepWeights) {
 void LoadMorphCatalog() { SetMorphCatalog(false); }
 
 // A morph slider (or the tab's reset) changed: accumulate and show at once. No re-assembly - the live shapes follow the slider for free.
+// Both GPU views can carry the delta: the exported (MMD-look) view is the default and the fast one, the Lit view is used once uploaded.
+// Staying in whichever GPU view is on screen is essential - dropping to the software renderer made a drag block the UI thread for seconds.
 void MorphSlideEdited() {
     RebuildMorphDelta();
-    if (g.showExp) {   // the X / "as exported" copy is a separate baked scene: it cannot show live morphs
+    const std::shared_ptr<Loaded> L = Current();
+    const bool canExp = g.expOk && g.expFor == L && g.gpuExp.ready();
+    const bool canLit = g.gpuOk && g.gpuScene == L;
+    if (canExp) g.gpuExp.RefreshMorph();   // only the touched vertices, no full re-skin unless a pose is active
+    if (canLit) g.gpu.RefreshMorph();
+    if (g.showExp && !canExp && canLit) {
+        // The exported copy cannot show this morph (no GPU copy, or a simplified preview with a different mesh layout): only then fall
+        // back to the Lit view. With no GPU view at all the software renderer already reads g.morphDelta, so there is nothing to switch.
         g.showExp = false;
         Log("as exported: off (morphs play in the live view)");
     }
-    std::shared_ptr<Loaded> L = Current();
-    if (g.gpuOk && g.gpuScene == L) g.gpu.Refresh(false);   // rebuild the rest with the deltas folded in and re-skin (the pose rides along)
     g.dirty = true;   // the picture must be re-rendered (else the change is invisible until something else repaints)
     InvalidateView();
     InvalidatePanel();

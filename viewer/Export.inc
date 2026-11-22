@@ -298,7 +298,7 @@ void ToggleAsExported() {
         g.showExp = false; g.dirty = true; Log("as exported: off"); return; 
     }
     if (!g.gpu.ready()) { Log("as exported needs the Direct3D 11 view", LogKind::Warn); return; }
-    if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; g.dirty = true; Log("as exported: on"); return; }
+    if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; MorphsOnExportViewLoaded(); g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
     const bool applyOpt = g.opt.applied.set && g.opt.applied.reduction > 0.0f;
