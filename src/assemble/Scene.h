@@ -125,27 +125,7 @@ struct SceneMaterial {
     bool cardSkin = false;                   // the body's skin material (cf_m_body): _overcolor1 tints the nipple / areola overlay
     Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)
     bool hairTinted = false;                 // _Color holds the card's measured hair tint (sRGB): the standard views linearise it like any colour, the bake feeds it raw like every other colour (see BakeShaderTextures)
-    // A shader whose name belongs to the "opaque" family can still clip low-alpha texels when its material is an alpha
-    // test (queue 2450, _Cutoff): a modded garment whose texture is alpha-masked uses the game's clip to cut the fabric
-    // into panels, and the game shows the body or the layer underneath there. BakeShaderTextures sets this from the
-    // shader's own output, never from a card, texture or material name, for a card or a game texture alike. Viewers and
-    // the PMX writer then honour the cutout instead of painting those texels black.
-    bool shaderClipsAlpha = false;
-    bool cardMainTex = false;   // _MainTex was replaced by an image embedded in the card (MaterialEditor), not a game texture
 };
-
-// True when a shader bake produced a real alpha cutout over the texels the material's mesh covers. A shader that ignores
-// alpha leaves every covered texel solid; only a shader that actually clips (or passes a low alpha through) produces a
-// substantial low-alpha area. Stray single texels from atlas padding must not count, hence the fraction and minimum.
-inline bool BakeHasAlphaCutout(const std::vector<float>& img, const std::vector<uint8_t>& cov) {
-    size_t covered = 0, clipped = 0;
-    for (size_t i = 0; i < cov.size(); ++i)
-        if (cov[i]) {
-            ++covered;
-            if (img.size() > i * 4 + 3 && img[i * 4 + 3] < 0.5f) ++clipped;
-        }
-    return covered >= 32 && clipped * 4 >= covered;   // at least 25% of the covered texels are clipped
-}
 
 // True when the game draws this material with the texture's alpha ignored: the
 // "opaque" shader family — Shader Forge/main_opaque, Koikano/main_clothes_opaque,
@@ -445,7 +425,6 @@ struct Scene {
 // depth writes and the back of the head shows through the face. Identify skin structurally - shader family, or a
 // shader-less create-job material used by the character's body/head part - never by card, texture or material index.
 inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
-    if (mat.shaderClipsAlpha) return false;   // proven by the shader bake: this material cuts texels even though its name says "opaque"
     if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
     if (!mat.shader.empty() || mat.shaderIndex >= 0 || scene.materials.empty()) return false;
     if (&mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;

@@ -1773,62 +1773,6 @@ void unitTests() {
             CHECK((look.diffuse.w > 0.999f) == c.opaque);   // PMX alpha 1 = MMD's opaque, depth-writing pass
         }
     });
-    test("an opaque-named shader that clips alpha keeps its cutout instead of drawing black texels", [] {
-        using namespace assemble;
-        // The bake's own output is the evidence: a material the name-based rule calls opaque may still clip a
-        // substantial part of its UVs (a modded garment's alpha-masked MaterialEditor texture). The detection is
-        // structural - never a card, texture or shader name - so garments with a few stray alpha texels stay opaque.
-        {
-            std::vector<float> img(64 * 4, 1.0f);
-            std::vector<uint8_t> cov(64, 1);
-            CHECK(!BakeHasAlphaCutout(img, cov));                          // fully solid: no cutout
-            std::fill(img.begin(), img.end(), 0.0f);
-            CHECK(BakeHasAlphaCutout(img, cov));                           // every covered texel clipped
-            for (size_t i = 0; i < cov.size(); ++i) cov[i] = i < 60 ? 1 : 0;
-            for (size_t i = 0; i < 40; ++i) for (int c = 0; c < 4; ++c) img[i * 4 + c] = 1.0f;
-            CHECK(BakeHasAlphaCutout(img, cov));                           // 24 clipped of 60 covered (40%)
-            for (size_t i = 40; i < 56; ++i) for (int c = 0; c < 4; ++c) img[i * 4 + c] = 1.0f;
-            CHECK(!BakeHasAlphaCutout(img, cov));                          // 4 clipped of 60 is stray atlas alpha, not a cutout
-            cov.assign(64, 0);
-            img.assign(64 * 4, 0.0f);
-            cov[0] = 1;                                                    // one stray texel is not a cutout
-            CHECK(!BakeHasAlphaCutout(img, cov));
-        }
-        Scene s;
-        SceneTexture tex;
-        tex.name = "alpha-cutout-cloth"; tex.width = 4; tex.height = 4;
-        tex.rgba.assign(4 * 4 * 4, 0);
-        for (size_t i = 0; i < tex.rgba.size(); i += 4) { tex.rgba[i] = 110; tex.rgba[i + 1] = 120; tex.rgba[i + 2] = 115; tex.rgba[i + 3] = ((i / 4) / 4) % 2 ? 0 : 255; }
-        s.textures.push_back(tex);
-        SceneMaterial m;
-        m.name = "cf_m_top_tennis_d"; m.shader = "Shader Forge/main_opaque"; m.texture = 0;
-        m.alpha = true; m.cardMainTex = true; m.shaderClipsAlpha = true;
-        s.materials.push_back(m);
-        SceneMesh mesh;
-        for (Vec3 p : {Vec3{-0.5f, 1.0f, 0}, Vec3{0.5f, 1.0f, 0}, Vec3{0, 1.5f, 0}}) {
-            SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {p.x + 0.5f, p.y - 1.0f}; mesh.vertices.push_back(v);
-        }
-        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2}; mesh.submeshes.push_back(sub);
-        s.meshes.push_back(mesh);
-        ScenePart part; part.id = "outfit0.top"; part.group = "Outfit"; part.meshes = {0}; part.visibleInPreview = true;
-        s.parts.push_back(part);
-        CHECK(!IgnoresTextureAlpha(s, s.materials[0]));
-        const auto look = exporter::MmdMaterialLook(s, s.materials[0]);
-        CHECK(look.diffuse.w < 0.999f);   // MMD keeps the holes instead of painting them black
-        s.materials[0].shaderClipsAlpha = false;
-        CHECK(IgnoresTextureAlpha(s, s.materials[0]));
-        // At assembly time a game texture is not made a cutout from its pixels alone — that decision is card-only, so a
-        // texture with stray low-alpha atlas texels stays solid. The bake can still prove a real clip on a game texture
-        // (Yoko Littner's bloomers, _Cutoff 0.5 / queue 2450), and the export must honour that proof: a name-based rule
-        // that solidifies those discarded texels paints a black band in MMD.
-        s.materials[0].cardMainTex = false;
-        s.materials[0].alpha = false;
-        CHECK(IgnoresTextureAlpha(s, s.materials[0]));
-        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w > 0.999f);
-        s.materials[0].shaderClipsAlpha = true;   // proven by the bake, whatever the texture's owner
-        CHECK(!IgnoresTextureAlpha(s, s.materials[0]));
-        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 0.999f);
-    });
     test("export: skin/opaque coverage-mask alpha is solidified, genuine fabric alpha is kept (pantyhose backdrop)", [] {
         using namespace assemble;
         Scene s;

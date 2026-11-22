@@ -1183,7 +1183,6 @@ struct Builder {
                 int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main, forceSrgb) : -1;
                 if (main && t >= 0) {
                     sm.texture = t;
-                    sm.cardMainTex = true;
                     sm.diffuse = {1, 1, 1, 1};
                     // The embedded image is the complete authored look; where the outfit colours are already composed
                     // into the texture the same ones must not be applied again (same rule as the outfit create path).
@@ -1222,10 +1221,6 @@ struct Builder {
                 for (const auto& d : scene.shaders[static_cast<size_t>(sm.shaderIndex)].texDefaults)
                     if (d.first == "_MainTex" && d.second == "black") sm.hidden = true;
         }
-        // A card image with real alpha holes used as the material's MainTex is a cutout, even when the game shader's
-        // family name says "opaque": the game clips those texels and shows the body or the garment underneath. Decide
-        // this from the card's own pixels, so the interactive (unbaked) view agrees with the baked/exported one. Game
-        // textures are deliberately excluded — their stray low-alpha atlas texels are not cutouts (see IsOpaqueShaded).
         scene.materials.push_back(std::move(sm));
         return static_cast<int>(scene.materials.size()) - 1;
     }
