@@ -3459,7 +3459,13 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     // The face skin and nose atlas share their UV layout, so laying it on the create job's result is
                     // faithful. The card's own KSOX face paint, when present, goes underneath it.
                     auto nose = rowTexture(414, faceV.at("noseId").asInt(), "ChaFileFace.noseId", "NoseTex", "nose shadow");
-                    NoseFringe fringe = nose ? ExtractNoseFringe(nose->rgba, nose->width, nose->height, 1024, 1024) : NoseFringe{};
+                    // Only lift the fringe of a nostril-ONLY nose texture. A card that also authors a nose line has
+                    // low-alpha fringes along that whole stroke; baking those into the face atlas paints a stray dark
+                    // smear near the mouth. Nostril-only cards (the ones that lose their shadow to the cutout) are the
+                    // ones this restore is for.
+                    const bool nostrilOnly = nose && DetectNoseFeatures(nose->rgba, nose->width, nose->height).nostrils &&
+                                             !DetectNoseFeatures(nose->rgba, nose->width, nose->height).line;
+                    NoseFringe fringe = nostrilOnly ? ExtractNoseFringe(nose->rgba, nose->width, nose->height, 1024, 1024) : NoseFringe{};
                     if (fringe.present) {
                         std::vector<uint8_t> over(static_cast<size_t>(1024) * 1024 * 4, 0);
                         if (haveFov) CompositeRgba(over, 1024, 1024, fov.rgba, fov.width, fov.height);

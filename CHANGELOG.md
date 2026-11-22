@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.4] - 2026-11-22
+
+### Added / Fixed
+
+- **Two independent nose-ridge controls**: the original **Nose ridge shading** slider is back on its full re-apply path (1 = as authored, 0 = off, 2 = stronger), and a separate **Nose ridge opacity** layer was added beside it (0 = invisible, 1 = fully visible) that applies live to a single small texture. `--nose-ridge-opacity F` is the matching CLI flag and both values are recorded in the manifest. The two controls multiply, so opacity 0 hides the ridge regardless of the shading setting. Viewer settings persist both.
+- **Stray dark smear under the mouth on cards that have a nose line (KK/KKS)**: the 0.6.1 shadow restore lifted every sub-cutout pixel of the nose texture onto the face skin. On cards whose nose texture also authors a nose line, the line's low-alpha fringes were baked into the face atlas near the mouth as a dark vertical smudge. The fringe restore is now limited to nostril-only nose textures - the cards that actually lose their authored shadow to the cutout. Verified on `KK_236802 (1).png`: smudge gone, authored nose line unchanged. Build and 19,046 unit checks pass.
+
 ## [0.6.3] - 2026-11-22
 
 ### Fixed

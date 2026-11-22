@@ -37,7 +37,8 @@ LipLineFeatures DetectLipLineFeatures(const std::vector<uint8_t>& rgba, int w, i
 // ridge, 0 removes it, values between/above make it subtler or stronger. Detection is per card, so a card whose face
 // has no ridge defaults to 0 and nothing is ever added to it.
 struct NoseRidge {
-    float strength = 1.0f;        // 1 = authored, 0 = off
+    float strength = 1.0f;        // 1 = authored, 0 = off (the original "Nose ridge shading" slider)
+    float opacity = 1.0f;         // independent opacity layer: 0 = invisible, 1 = fully visible
     float detected = 0.0f;        // how pronounced the authored ridge is (0 = none)
     int texture = -1;             // the face create-result texture this applies to
     int width = 0, height = 0;
@@ -72,6 +73,6 @@ struct Scene;   // Scene.h includes this header; a forward declaration keeps the
 
 // Applies the setting to a scene's stored face texture, restoring the untouched pixels each time so slider changes
 // never accumulate. Safe on cards with no detected ridge (no-op).
-void SetNoseRidgeStrength(Scene& scene, float strength);
+void SetNoseRidgeStrength(Scene& scene, float strength, float opacity = 1.0f);
 
 } // namespace cardbridge::assemble

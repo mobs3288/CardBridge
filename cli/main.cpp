@@ -195,7 +195,8 @@ void usage() {
         "             [--hide a,b] [--nude]          untick parts (outfit0.top,...) like the viewer's list: they are not\n"
         "                                             in the preview or the PMX at all, bones included; --nude ticks the\n"
         "                                             Nude body box (skin under the clothes shows)\n"
-        "             [--nose-ridge F]                head-mod centre nose ridge opacity: 1 = as authored (default), 0 = invisible, 2 = stronger. Cards with no ridge are untouched; never adds a nose line\n"
+        "             [--nose-ridge F]                head-mod centre nose ridge shading: 1 = as authored (default), 0 = off, 2 = stronger\n"
+        "             [--nose-ridge-opacity F]        independent opacity layer for that ridge: 0 = invisible, 1 = fully visible (default)\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
@@ -1039,8 +1040,10 @@ int cmdConvert(const Args& a) {
     // Per-card presentation: the head mod's centre nose shading ridge can read like a nose line. 1 keeps the
     // authored amount, 0 removes it, values between/above make it subtler or stronger. Cards with no detected
     // ridge are untouched, so this never paints a feature the source does not have.
-    if (a.opt.count("nose-ridge"))
-        assemble::SetNoseRidgeStrength(scene, static_cast<float>(std::atof(a.get("nose-ridge").c_str())));
+    if (a.opt.count("nose-ridge") || a.opt.count("nose-ridge-opacity"))
+        assemble::SetNoseRidgeStrength(scene,
+                                       a.opt.count("nose-ridge") ? static_cast<float>(std::atof(a.get("nose-ridge").c_str())) : scene.noseRidge.strength,
+                                       a.opt.count("nose-ridge-opacity") ? static_cast<float>(std::atof(a.get("nose-ridge-opacity").c_str())) : scene.noseRidge.opacity);
     // Default: colour only (the viewer or engine lights it, over a white material) with the preview's grading baked in.
     // --bake-lit puts the toon shading in the texture too (the material is then unlit: black in an engine that lights it itself).
     if (!a.has("no-bake")) {   // the game's shaders run over every material's UV layout, so the PMX textures carry their colour

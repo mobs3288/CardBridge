@@ -655,7 +655,8 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     j["facial_features"] = {{"nose_line", ff.noseLine}, {"nostrils", ff.nostrils},
                             {"upper_lip_line", ff.upperLipLine}, {"lower_lip_line", ff.lowerLipLine},
                             {"nose_ridge_detected", scene.noseRidge.detected},
-                            {"nose_ridge_strength", scene.noseRidge.strength}};
+                            {"nose_ridge_strength", scene.noseRidge.strength},
+                            {"nose_ridge_opacity", scene.noseRidge.opacity}};
 
     json tex = json::array();
     for (size_t i = 0; i < scene.textures.size(); ++i) {

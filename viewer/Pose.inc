@@ -312,19 +312,20 @@ void ApplyNoseRidgeLive() {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
     if (L->scene.noseRidge.texture >= 0) {
-        assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge);
+        assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge, g.tw.noseRidgeOpacity);
         const int ti = L->scene.noseRidge.texture;
         if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
         if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
     }
     if (g.expOk && g.expScene && g.expScene->noseRidge.texture >= 0) {
-        assemble::SetNoseRidgeStrength(*g.expScene, g.tw.noseRidge);
+        assemble::SetNoseRidgeStrength(*g.expScene, g.tw.noseRidge, g.tw.noseRidgeOpacity);
         const int ti = g.expScene->noseRidge.texture;
         if (g.gpuExp.ready()) g.gpuExp.UpdateTextures(std::vector<int>{ti});
     }
     g.dirty = true;
     InvalidateView();
 }
+
 
 // Re-applies the live skin look (automatic body shading and the nipple tint). `rebuild` recomputes the occlusion map
 // from the current body mesh; a plain re-apply only changes the strength. The create texture is pushed to the GPU and
@@ -333,6 +334,17 @@ void ApplySkinLook(bool rebuildMap) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
     exporter::ApplyNippleTint(L->scene, NippleTintOption());
+    if (L->scene.noseRidge.texture >= 0) {
+        assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge, g.tw.noseRidgeOpacity);
+        const int ti = L->scene.noseRidge.texture;
+        if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+        if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+        g.expOk = false;   // the baked "as exported" copy holds the old texture
+        g.showExp = false;
+        g.expFor.reset();
+        g.expScene.reset();
+        g.gpuExp.Unload();
+    }
     auto& ss = L->scene.skinShade;
     if (ss.ready()) {
         const bool rebuild = rebuildMap;
@@ -479,7 +491,8 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (id == kTransSize) { InvalidatePanel(); return; }   // the radius applies to the next stroke; nothing to rebuild
-    if (id == kNoseRidge) { if (released) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); } return; }
+    if (id == kNoseRidge) { if (released) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); } ApplySkinLook(false); return; }
+    if (id == kNoseRidgeOpacity) { if (released) { g.settings.noseRidgeOpacity = g.tw.noseRidgeOpacity; SaveSettings(g.settings); } return; }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
         id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
@@ -750,6 +763,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     g.tw.skinShadeWidth = g.settings.skinShadeWidth;
                     g.tw.skinAo = g.settings.skinAo;
                     g.tw.noseRidge = g.settings.noseRidge;   // persisted default for new cards; 1 = the card's authored ridge
+                    g.tw.noseRidgeOpacity = g.settings.noseRidgeOpacity;
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));

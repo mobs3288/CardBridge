@@ -93,6 +93,7 @@ struct Settings {
     float skinShadeWidth = 0.6f;     // cleavage width: 0.1 = hairline, 1 = the default, 2 = a broad gradient
     float skinAo = 0.85f;              // Koikatsu's own look baked into the skin (base body normal lighting + the detailId line mask); 0 = off
     float noseRidge = 1.0f;            // head-mod centre nose ridge presentation (1 = authored, 0 = off, 2 = stronger)
+    float noseRidgeOpacity = 1.0f;     // independent opacity layer (0 = invisible, 1 = fully visible)
     // The physical breast / hip jiggle settings, persisted here for new cards and the export (the Look tab edits the live set).
     assemble::JiggleSettings jiggle;   // defaults: the Natural preset
     // Display names for morphs in the Morphs tab (display only: the PMX still carries the original names, MMD motions key morphs by name).
@@ -140,6 +141,7 @@ Settings LoadSettings() {
         s.skinShadeWidth = static_cast<float>(j.value("skinShadeWidth", 0.6));
         s.skinAo = static_cast<float>(j.value("skinAo", 0.85));
         s.noseRidge = static_cast<float>(j.value("noseRidge", 1.0));
+        s.noseRidgeOpacity = static_cast<float>(j.value("noseRidgeOpacity", 1.0));
         if (j.value("jiggle", nlohmann::json::object()).is_object()) {
             const auto& jj = j["jiggle"];
             auto num = [&jj](const char* key, float def) {
@@ -192,6 +194,7 @@ void SaveSettings(const Settings& s) {
         j["skinShadeWidth"] = s.skinShadeWidth;
         j["skinAo"] = s.skinAo;
         j["noseRidge"] = s.noseRidge;
+        j["noseRidgeOpacity"] = s.noseRidgeOpacity;
         j["jiggle"] = {{"mass", s.jiggle.mass}, {"stiffness", s.jiggle.stiffness}, {"damping", s.jiggle.damping}, {"gravity", s.jiggle.gravity},
                        {"amplitude_vertical", s.jiggle.amplitudeVertical}, {"amplitude_horizontal", s.jiggle.amplitudeHorizontal},
                        {"amplitude_depth", s.jiggle.amplitudeDepth}, {"rotation_strength", s.jiggle.rotationStrength},

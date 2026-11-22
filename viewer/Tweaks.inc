@@ -199,12 +199,11 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kSkinShadeTop) { r.v = &g.tw.skinShadeTop; r.def = 1.2f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinShadeWidth) { r.v = &g.tw.skinShadeWidth; r.def = 0.6f; r.lo = 0.1f; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinAo) { r.v = &g.tw.skinAo; r.def = 0.85f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
-    if (id == kNoseRidge) {
-        // Apply on the value change itself, not via TweakEdited: the slider writes the value on every mouse move and
-        // this guarantees the small detail-map update happens with it, so the ridge tracks the drag in real time.
-        r.get = [] { return g.tw.noseRidge; };
-        r.set = [](float v) { g.tw.noseRidge = v; ApplyNoseRidgeLive(); };
-        r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true;
+    if (id == kNoseRidge) { r.v = &g.tw.noseRidge; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
+    if (id == kNoseRidgeOpacity) {
+        r.get = [] { return g.tw.noseRidgeOpacity; };
+        r.set = [](float v) { g.tw.noseRidgeOpacity = v; ApplyNoseRidgeLive(); };   // lightweight live layer
+        r.def = 1.0f; r.lo = 0; r.hi = 1; r.step = 0.01f; r.percent = true; return true;
     }
     if (id == kTransStrength) { r.v = &g.tw.transStrength; r.def = 0.65f; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }   // shown as 0..100
     if (id == kTransSize) { r.v = &g.tw.transSizeCm; r.def = 4.0f; r.lo = 0.5f; r.hi = 15.0f; r.step = 0.25f; r.percent = false; r.fmt = "%.2f cm"; return true; }

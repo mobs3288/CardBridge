@@ -252,14 +252,17 @@ void CompositeRgba(std::vector<uint8_t>& dst, int w, int h, const std::vector<ui
         }
 }
 
-void SetNoseRidgeStrength(Scene& scene, float strength) {
+void SetNoseRidgeStrength(Scene& scene, float strength, float opacity) {
     NoseRidge& nr = scene.noseRidge;
     nr.strength = std::min(2.0f, std::max(0.0f, strength));
+    nr.opacity = std::min(1.0f, std::max(0.0f, opacity));
     if (nr.texture < 0 || static_cast<size_t>(nr.texture) >= scene.textures.size()) return;
     auto& tex = scene.textures[static_cast<size_t>(nr.texture)];
     if (nr.original.empty()) return;
     tex.rgba = nr.original;
-    ApplyNoseRidge(tex.rgba, nr.width, nr.height, nr.mask, nr.strength);
+    // Opacity is an independent layer: 0 flattens the ridge away entirely regardless of the shading setting, 1 leaves
+    // the shading setting in full control. Both sliders therefore do something different and neither silently wins.
+    ApplyNoseRidge(tex.rgba, nr.width, nr.height, nr.mask, nr.strength * nr.opacity);
     tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
 }
 
