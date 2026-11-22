@@ -1,8 +1,10 @@
 #include "core/FileIo.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -59,10 +61,23 @@ int64_t LastWriteTicks(const std::string& path) {
 }
 
 void WriteFile(const std::string& path, const uint8_t* data, size_t size) {
-    std::ofstream f(ToPath(path), std::ios::binary | std::ios::trunc);
-    if (!f) throw FormatError("cannot create " + path);
-    if (size) f.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-    if (!f) throw FormatError("cannot write " + path);
+    // Windows can briefly hold a file that was just created or deleted (antivirus, the search
+    // indexer, another process), so opening it with trunc may fail with a sharing violation even
+    // though the path is valid. Exports write dozens of PNGs back to back and a re-export deletes
+    // and rewrites the same names; retry for a fraction of a second before declaring failure.
+    // Both the open and the write are retried: a stream that opened but failed part-way is simply
+    // truncated and written again on the next attempt.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        std::ofstream f(ToPath(path), std::ios::binary | std::ios::trunc);
+        if (!f) {
+            if (attempt == 7) throw FormatError("cannot create " + path);
+        } else {
+            if (size) f.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+            if (f) return;   // closes (and flushes) on destruction
+            if (attempt == 7) throw FormatError("cannot write " + path);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5 * (attempt + 1)));
+    }
 }
 
 void WriteTextFile(const std::string& path, const std::string& text) {

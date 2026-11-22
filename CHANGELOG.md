@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.8] - 2026-11-22
+
+### Fixed
+
+- **Transient `cannot create ...textures/*.png` failures during export**: on Windows an antivirus or the search indexer can hold a just-created or just-deleted PNG briefly, so the `ofstream` open in `fileio::WriteFile` failed with a sharing violation. A re-export deletes and rewrites the same texture names, which made this intermittently fail unit tests (and could fail a real conversion). `WriteFile` now retries the open/write for up to ~140 ms before giving up; a successful write is unchanged.
+
 ## [0.7.7] - 2026-11-22
 
 ### Fixed
