@@ -137,6 +137,7 @@ inline bool IsOpaqueShaded(const SceneMaterial& mat) {
     return mat.shader.find("opaque") != std::string::npos;
 }
 
+
 // A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and
 // white, face and body skin: Graphics.Blit into a render texture). `material` carries the shader, colours and input textures;
 // the result is written into Scene::textures[texture] (a placeholder until then) by export::RunCreateJobs.
@@ -416,6 +417,17 @@ struct Scene {
     void note(const std::string& part, const std::string& msg) { issues.push_back({"info", part, msg}); }
 };
 
+// The effective Unity render queue: the material's own override, else its shader's, else Geometry (2000).
+// Transparent and alpha-test queues start at 2450; below that the game draws the surface in its opaque
+// pass. Shared by the material-semantics helpers here and by classification in the exporter, so the
+// same material is read the same way on every path. Defined after Scene (it needs scene.shaders).
+inline int EffectiveRenderQueue(const Scene& scene, const SceneMaterial& mat) {
+    if (mat.renderQueue >= 0) return mat.renderQueue;
+    if (mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size())
+        return scene.shaders[static_cast<size_t>(mat.shaderIndex)].queue;
+    return 2000;
+}
+
 // True when the game draws this material with texture alpha ignored, including the character's own skin.
 //
 // Besides the "opaque" shader family above, KK and KKS build the body and face skin at run time (a create-job whose
@@ -426,6 +438,14 @@ struct Scene {
 // shader-less create-job material used by the character's body/head part - never by card, texture or material index.
 inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
     if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
+    // A material with no authored alpha flag, no translucency and an opaque render queue is drawn by
+    // the game without reading texture alpha at all — whatever the UV-flat bake left in the atlas. Hair
+    // is the common case: a baked strand sheet contains alpha-0 padding between its islands and jagged
+    // strand tips, neither of which the game treats as a hole in the surface. Using that padding as
+    // proof of an alpha cutout sent the whole rear hair to the blended (no-depth-write) pass. This rule
+    // is structural (the material's own metadata), not a name or card exception: a material that wants
+    // alpha testing declares it with mat.alpha and/or a transparent/alpha-test queue.
+    if (!mat.alpha && !mat.translucent && EffectiveRenderQueue(scene, mat) < 2450) return true;
     if (!mat.shader.empty() || mat.shaderIndex >= 0 || scene.materials.empty()) return false;
     if (&mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
     const int mi = static_cast<int>(&mat - &scene.materials.front());

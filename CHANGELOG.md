@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.7] - 2026-11-22
+
+### Fixed
+
+- **Pantyhose / stockings dithered in the interactive viewer while the PMX exported correctly (KK/KKS)**: `MmdMaterialLook` classifies an alpha-test material whose mesh samples no discarded texel as solid, and the PMX writer solidifies its texture alpha — but the viewer bound the baked texture directly, reading its 217–245 alpha as translucency and showing the body through the tights as a crosshatch. The material decision now lives in one shared helper (`IsAlphaTestSolid`) used by both paths, and `SolidifyAlphaTestSolidTextures` gives the viewer's scene the same opaque texture the PMX gets. The baked RGB (the subtle sheen) and all UVs are preserved byte for byte; genuine cutouts and authored translucent materials are untouched.
+- **Rear hair see-through from a false alpha-cutout classification (KK/KKS)**: `HasAlphaCutout` declared a material a cutout on the first low-alpha texel a triangle centroid landed on. A baked hair atlas has alpha-0 padding between strand islands and jagged strand tips, so the main rear-hair submesh was exported with diffuse alpha 0.99, lost depth writes and showed the background through it. A structural rule now treats materials with no alpha flag, no translucency and an opaque render queue as opaque (the game ignores their texture alpha), and cutout detection needs at least 5% of the mesh's own samples to be discarded. The whole rear hair now exports opaque with solidified textures, while genuine alpha-test hair and lace still keep their masks. Verified on `KK_176361.png`, `KK_235599.png` and `KK_101895.png`; 19,183 unit checks pass. See `docs/REGRESSION_INVESTIGATION_2026-11-22.md`.
+
 ## [0.7.4] - 2026-11-22
 
 ### Fixed

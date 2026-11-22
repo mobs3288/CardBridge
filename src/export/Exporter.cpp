@@ -147,32 +147,41 @@ bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat)
     return TextureHasCutTexels(scene, mat);
 }
 
-// A material is an alpha-cutout only when its triangles actually sample texels that discard: the lace of a stocking
-// (the mesh spans the holes, so the fragments both exist and must show through). A mesh whose island sits entirely
-// inside the opaque part renders fully either way, so it is opaque: as it is the mesh that determines what MMD draws,
-// the scan walks it, not the atlas. An opaque answer also keeps the skin shader from the transparent pass,
-// which restores self-shadowing and depth writes for it (its mask is the game's coverage mask: the hidden body
-// triangles are not in the PMX at all, so the atlas being empty outside the islands is expected, not breakage).
+// A material is an alpha-cutout only when a meaningful share of the texels its own triangles cover is
+// actually discarded — the lace of a stocking, where the mesh spans the holes and the fragments must show
+// through. One low-alpha texel is not enough: a UV-flat baked atlas has alpha-0 padding between islands
+// and jagged strand tips, and a single centroid landing there used to declare an entire opaque material
+// a cutout (the rear hair then lost depth writes and showed the background). Each triangle contributes
+// four barycentric samples so a small UV island cannot be decided by one unlucky sample; at least 5% of
+// the mesh's samples must be discarded. A mesh that only covers opaque texels stays opaque.
 bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    if (assemble::IgnoresTextureAlpha(scene, mat)) return false;   // the game never reads this material's texture alpha
     if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
     const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
     if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
     if (scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
     const int mi = static_cast<int>(&mat - &scene.materials.front());
     const int W = t.width, H = t.height;
+    static const float kBary[4][3] = {{1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                                      {0.6f, 0.2f, 0.2f}, {0.2f, 0.6f, 0.2f}, {0.2f, 0.2f, 0.6f}};
+    size_t sampled = 0, discarded = 0;
     for (const auto& mesh : scene.meshes) {
         for (const auto& sm : mesh.submeshes) {
             if (sm.material != mi) continue;
             for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
                 const auto& a = mesh.vertices[sm.indices[i]].uv, & b = mesh.vertices[sm.indices[i + 1]].uv, & c = mesh.vertices[sm.indices[i + 2]].uv;
-                float u = (a.x + b.x + c.x) / 3.0f, v = (a.y + b.y + c.y) / 3.0f;
-                u -= std::floor(u); v -= std::floor(v);
-                const int x = std::min(W - 1, static_cast<int>(u * W)), y = std::min(H - 1, static_cast<int>((1.0f - v) * H));
-                if (t.rgba[(static_cast<size_t>(y) * W + x) * 4 + 3] < kItemCutout) return true;
+                for (const auto& w : kBary) {
+                    float u = a.x * w[0] + b.x * w[1] + c.x * w[2];
+                    float v = a.y * w[0] + b.y * w[1] + c.y * w[2];
+                    u -= std::floor(u); v -= std::floor(v);
+                    const int x = std::min(W - 1, static_cast<int>(u * W)), y = std::min(H - 1, static_cast<int>((1.0f - v) * H));
+                    ++sampled;
+                    if (t.rgba[(static_cast<size_t>(y) * W + x) * 4 + 3] < kItemCutout) ++discarded;
+                }
             }
         }
     }
-    return false;
+    return sampled >= 4 && discarded * 20 >= sampled;   // at least 5% of the covered texels are cut
 }
 
 // The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid, the game's
@@ -200,6 +209,32 @@ bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& 
             }
         }
     return total > 0 && reversed * 5 > total;   // over a fifth wound against the normals: a co-located inner layer
+}
+
+bool IsAlphaTestSolid(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
+    // An alpha-shader material whose mesh never samples a discarded texel is drawn SOLID by the game:
+    // its sub-255 alpha is a tint that passes _Cutoff, not a translucency request. Genuine cutouts,
+    // translucent shaders and materials whose alpha the game ignores keep their own handling.
+    if (assemble::IgnoresTextureAlpha(scene, mat) || !mat.alpha || mat.translucent) return false;
+    if (HasAlphaCutout(scene, mat)) return false;
+    if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+    return !assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
+}
+
+void SolidifyAlphaTestSolidTextures(assemble::Scene& scene) {
+    for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+        assemble::SceneMaterial& mat = scene.materials[mi];
+        if (!IsAlphaTestSolid(scene, mat)) continue;
+        const int ti = mat.texture;
+        if (ti < 0 || static_cast<size_t>(ti) >= scene.textures.size()) continue;
+        // Copy before appending: push_back can reallocate scene.textures. Only alpha changes — the
+        // authored RGB (the sheen and the strand/fabric detail) and the UVs are preserved byte for byte.
+        assemble::SceneTexture solid = scene.textures[static_cast<size_t>(ti)];
+        solid.name += "_opaque";
+        for (size_t p = 3; p < solid.rgba.size(); p += 4) solid.rgba[p] = 255;
+        scene.textures.push_back(std::move(solid));
+        mat.texture = static_cast<int>(scene.textures.size()) - 1;
+    }
 }
 
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment, char innerLayer_, bool accessory) {
@@ -265,7 +300,8 @@ MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMater
                                assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
     // An alpha-test material whose mesh never samples a discarded texel is solid: its sub-255 alpha is a tint the
     // game's test passes, not translucency. MMD blended it (0.99) and let the stage show through the tights.
-    const bool alphaTestSolid = !ignoresAlpha && mat.alpha && !mat.translucent && !alphaCutout;
+    // Shared with the viewer's texture preparation so both paths agree on this material.
+    const bool alphaTestSolid = IsAlphaTestSolid(scene, mat);
     const bool transparent = !ignoresAlpha && (mat.translucent || alphaCutout || (mat.alpha && !opaqueTexture && !alphaTestSolid));
     if (transparent) look.diffuse.w = 0.99f;  // an authored alpha texture or an alpha cutout needs the material below 1 so MikuMikuDance keeps it in its transparent pass
     look.drawFlags = mat.doubleSided || tooth ? 0x01 : 0x00;   // teeth: seen from inside a mouth, a single-sided mesh can face away from the camera

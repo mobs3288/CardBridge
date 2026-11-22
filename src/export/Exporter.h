@@ -112,6 +112,15 @@ struct MmdLook {
 // `innerLayer` is a lining verdict from ColocatedLinings (kLiningNone..kLiningAmbiguous): kLiningOutward/kLiningInward are
 // written single-sided; an ambiguous verdict keeps the authored draw flags untouched.
 MmdLook MmdMaterialLook(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool outfitGarment = false, char innerLayer = kLiningNone, bool accessory = false);
+// A material the game draws SOLID even though its shader is an alpha-test family: its texture alpha is a
+// baked tint (no texel the mesh covers is discarded), not translucency. Shared by the PMX writer and the
+// viewer so both read the same material semantics instead of re-deriving them from the texture.
+bool IsAlphaTestSolid(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+// Make the scene's own texture agree with that decision: copy the affected texture with alpha solidified
+// (the authored RGB, sheen and UVs are untouched) and repoint the material's main texture at it. The PMX
+// writer already does this at export time, so the interactive viewer then sees the same pixels it exports.
+// Idempotent: a texture that is already opaque is left alone.
+void SolidifyAlphaTestSolidTextures(assemble::Scene& scene);
 // One flag per scene material: it belongs to an outfit garment (ScenePart::garment, or group Outfit in a hand-built scene). The exporter
 // and the viewer's as-exported pass both use this, so the written PMX flags and the preview cannot drift apart.
 std::vector<char> MmdGarmentMaterials(const assemble::Scene& scene);
@@ -125,6 +134,10 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene);
 // The material is cut to a shape by its texture the way the game's item shader cuts it (main_item discards where the main texture's
 // alpha is below 0.25), sampled where its own triangles lie. `mat` must be one of `scene.materials`.
 bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+// True when a meaningful share of the texels the material's own triangles cover are alpha-discarded.
+// Empty baked-atlas padding or one stray texel is not enough to classify an otherwise opaque material
+// as a cutout. `mat` must be one of `scene.materials`.
+bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
 // The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid), the triangle winding
 // of a large share of them running opposite to their vertex normals. `mat` must be one of `scene.materials`.
 bool HasInnerLayer(const assemble::Scene& scene, const assemble::SceneMaterial& mat);

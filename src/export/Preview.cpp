@@ -1721,6 +1721,11 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     // the written PMX agree for KKS Koikano materials, create-job results and materials with no shader alike. The per-texture
     // flag makes the call idempotent: a texture the bake already graded is never graded a second time.
     if (grade) ApplyOutstandingColourGrade(scene);
+    // Make the scene agree with the PMX writer: an alpha-test material with no real cutout is drawn solid
+    // in the game, and the exporter solidifies its texture alpha. Without this the interactive viewer
+    // sampled the baked 217-245 alpha as translucency and showed the body through the tights as a dither.
+    // Runs on the final, graded pixels, keeps all RGB (the sheen) and is idempotent.
+    SolidifyAlphaTestSolidTextures(scene);
     if (skipKksShader)
         scene.warn("materials", std::to_string(skipKksShader) +
                                 " Koikano (KKS) materials kept their baked create-job textures; the UV-flat material bake is not used for them");

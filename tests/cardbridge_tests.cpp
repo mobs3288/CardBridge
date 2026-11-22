@@ -1492,6 +1492,7 @@ void unitTests() {
         // And a non-opaque shader whose triangles sample the stray texel keeps the pre-existing behaviour:
         // the cutout detection still fires (that is the main_item path the exporter handles with the solid rewrite).
         s.materials[0].alpha = false;
+        s.materials[0].renderQueue = 3040;   // main_clothes_alpha is a transparent-queue shader in the game
         CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);   // alphaCutout (texture-based) still marks it
     });
     test("a shader bake that comes back solid black keeps the authored texture instead of a black plate", [] {
@@ -1539,6 +1540,88 @@ void unitTests() {
         s.textures[0].rgba[3] = 0;   // an authored alpha hole must stay translucent
         CHECK(!assemble::TextureIsFullyOpaque(s.textures[0]));
         CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);
+    });
+    test("alpha-test tint is solidified for the viewer like the PMX, with its sheen preserved", [] {
+        using namespace assemble;
+        auto makeSock = [](bool withHoles) {
+            Scene s;
+            SceneTexture t; t.name = "sheer-tint"; t.width = 8; t.height = 8; t.rgba.resize(8 * 8 * 4);
+            for (size_t i = 0; i < t.rgba.size(); i += 4) {
+                t.rgba[i] = 90; t.rgba[i + 1] = 80; t.rgba[i + 2] = 70;   // the baked sheen/detail
+                const int x = static_cast<int>((i / 4) % 8);
+                t.rgba[i + 3] = (withHoles && x < 2) ? 0 : 190;            // tint, or a real lace cutout
+            }
+            s.textures.push_back(t);
+            SceneMaterial m; m.name = "sock"; m.shader = "Shader Forge/main_alpha"; m.alpha = true; m.texture = 0;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+                SceneVertex v; v.pos = {static_cast<float>(x), static_cast<float>(y), 0};
+                v.normal = {0, 0, 1}; v.uv = {(x + 0.5f) / 8, (y + 0.5f) / 8};
+                mesh.vertices.push_back(v);
+            }
+            for (int y = 0; y < 7; ++y) for (int x = 0; x < 7; ++x) {
+                const int a = y * 8 + x, b = a + 1, c = a + 8, d = c + 1;
+                SceneSubmesh sub; sub.material = 0; sub.indices = {a, b, c, b, d, c};
+                mesh.submeshes.push_back(sub);
+            }
+            s.meshes.push_back(mesh);
+            return s;
+        };
+        Scene tint = makeSock(false);
+        CHECK(exporter::IsAlphaTestSolid(tint, tint.materials[0]));
+        CHECK(exporter::MmdMaterialLook(tint, tint.materials[0]).diffuse.w > 0.999f);
+        const auto before = tint.textures[0].rgba;
+        exporter::SolidifyAlphaTestSolidTextures(tint);
+        CHECK(tint.materials[0].texture == 1);
+        const auto& solid = tint.textures[1];
+        bool opaque = true, rgbKept = true;
+        for (size_t i = 0; i < solid.rgba.size(); i += 4) {
+            if (solid.rgba[i + 3] != 255) opaque = false;
+            for (int c = 0; c < 3; ++c) if (solid.rgba[i + c] != before[i + c]) rgbKept = false;
+        }
+        CHECK(opaque);      // the viewer now sees the same solid texture the PMX writer writes
+        CHECK(rgbKept);     // the baked sheen is untouched
+        exporter::SolidifyAlphaTestSolidTextures(tint);   // idempotent
+        CHECK(tint.materials[0].texture == 1);
+        Scene cut = makeSock(true);
+        CHECK(!exporter::IsAlphaTestSolid(cut, cut.materials[0]));
+        exporter::SolidifyAlphaTestSolidTextures(cut);
+        CHECK(cut.materials[0].texture == 0);   // a real cutout keeps its alpha mask
+    });
+    test("alpha cutout needs real coverage: atlas padding must not make hair transparent", [] {
+        using namespace assemble;
+        auto make = [](int transparentTexels, bool opaqueHair) {
+            Scene s;
+            SceneTexture t; t.name = "hair-atlas"; t.width = 8; t.height = 8; t.rgba.resize(8 * 8 * 4);
+            for (size_t i = 0; i < t.rgba.size(); i += 4) {
+                t.rgba[i] = 110; t.rgba[i + 1] = 95; t.rgba[i + 2] = 80;
+                t.rgba[i + 3] = static_cast<uint8_t>(i / 4) < static_cast<size_t>(transparentTexels) ? 0 : 255;
+            }
+            s.textures.push_back(t);
+            SceneMaterial m; m.name = "hair"; m.shader = opaqueHair ? "Shader Forge/main_hair" : "Shader Forge/main_alpha";
+            m.alpha = !opaqueHair; m.renderQueue = opaqueHair ? 2000 : 3040; m.texture = 0;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+                SceneVertex v; v.pos = {static_cast<float>(x), static_cast<float>(y), 0};
+                v.normal = {0, 0, 1}; v.uv = {(x + 0.5f) / 8, (y + 0.5f) / 8};
+                mesh.vertices.push_back(v);
+            }
+            for (int y = 0; y < 7; ++y) for (int x = 0; x < 7; ++x) {
+                const int a = y * 8 + x;
+                SceneSubmesh sub; sub.material = 0; sub.indices = {a, a + 1, a + 8, a + 1, a + 9, a + 8};
+                mesh.submeshes.push_back(sub);
+            }
+            s.meshes.push_back(mesh);
+            return s;
+        };
+        Scene one = make(1, true);     // one padding texel in an otherwise solid opaque-queue hair atlas
+        CHECK(!exporter::HasAlphaCutout(one, one.materials[0]));
+        CHECK(exporter::MmdMaterialLook(one, one.materials[0]).diffuse.w > 0.999f);
+        Scene realCut = make(24, false);   // a genuine alpha-test cutout (37.5% discarded)
+        CHECK(exporter::HasAlphaCutout(realCut, realCut.materials[0]));
+        CHECK(exporter::MmdMaterialLook(realCut, realCut.materials[0]).diffuse.w < 0.999f);
     });
     // A doubled surface (opaque base + translucent twin) — the co-located lining pattern (A) seen from both sides:
     // indices/winding/order identical except the translucent twin can be wound differently and (optionally) have an
@@ -1763,7 +1846,10 @@ void unitTests() {
             {"KK body create", "",                       "body", true,  -1, true},
             {"KKS body create","",                       "body", true,  -1, true},
             {"opaque garment", "Shader Forge/main_opaque","outfit0.top", false, 2, true},
-            {"hair cutout",    "Shader Forge/main_hair",  "outfit0.acc00", false, 3, false},
+            // A *genuine* hair cutout declares alpha testing; an opaque-queue hair material with
+            // alpha=0 (the rear hair) is opaque even when its baked atlas has alpha-0 padding.
+            {"hair cutout",    "Shader Forge/main_hair",  "outfit0.acc00", true,  3, false},
+            {"rear hair",      "Shader Forge/main_hair",  "hair.back",    false, 3, true},
             {"alpha shader",   "Shader Forge/main_alpha", "outfit0.top", true,  4, false},
         };
         for (const auto& c : cases) {
