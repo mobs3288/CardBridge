@@ -44,9 +44,22 @@ float ToLinear(float c);
 assemble::SceneMaterial LinearColours(const assemble::SceneMaterial& mat);
 int RenderQueueOf(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
 bool IsOverlayMaterial(const assemble::Scene& scene, const assemble::SceneMaterial& mat);
+bool IsNoseDecal(const assemble::SceneMaterial& mat);   // Preview.cpp: face-paint decals draw over the skin
 }
 using detail::LinearLight;
 using detail::ToLinear;
+
+// A face-paint decal is a few thin strokes on a large texture. Mip averaging shrinks their alpha until the material's
+// cutout discards them, which is how the nostrils disappeared in the live viewer even after their texture was fixed.
+// Restrict such textures to level 0 so a sample with any implicit LOD still sees the authored stroke.
+static bool IsDecalTexture(const assemble::Scene& scene, int ti) {
+    for (const auto& m : scene.materials) {
+        if (!detail::IsNoseDecal(m)) continue;
+        if (m.texture == ti) return true;
+        for (const auto& tb : m.texProps) if (tb.texture == ti) return true;
+    }
+    return false;
+}
 
 namespace {
 
@@ -141,6 +154,7 @@ struct GpuView::Impl {
     ID3D11DepthStencilState* depth = nullptr;
     ID3D11DepthStencilState* depthOverlay = nullptr;          // depth test without write, for the highlight tint
     ID3D11DepthStencilState* depthOverlayWrite = nullptr;     // depth test+write with the overlay's LEqual, for the game's ZWrite-on transparent materials
+    ID3D11DepthStencilState* depthNoTest = nullptr;           // face-paint decals (toon_nose) are drawn over the skin, not depth-tested behind a head mod's 3D nose
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendOverlay = nullptr;          // ordinary src-alpha blending, for the highlight
     // Per-frame constant buffers, by (material, stage, slot).
@@ -615,7 +629,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Clear();
         Rel(samplerWrap); Rel(samplerClamp);
         Rel(raster); Rel(rasterCull); Rel(rasterCullFront);
-        Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite);
+        Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite); Rel(depthNoTest);
         Rel(blend); Rel(blendOverlay);
         for (auto& d : defaults) { Rel(d.srv); Rel(d.tex); }
         ReleaseTargets();
@@ -660,7 +674,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     }
 
     // srgb: the texels are sRGB-encoded colour data, so the sampler hands the shader linear values (and mips average in linear light).
-    bool MakeTexture(int w, int h, const uint8_t* rgbaTopFirst, GpuTex& out, bool flip, bool srgb = false) {
+    bool MakeTexture(int w, int h, const uint8_t* rgbaTopFirst, GpuTex& out, bool flip, bool srgb = false, bool noMips = false) {
         D3D11_TEXTURE2D_DESC d{};
         d.Width = static_cast<UINT>(w); d.Height = static_cast<UINT>(h); d.MipLevels = 0; d.ArraySize = 1;
         d.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
@@ -668,7 +682,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         if (FAILED(dev->CreateTexture2D(&d, nullptr, &out.tex))) return false;
         D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MostDetailedMip = 0; sv.Texture2D.MipLevels = static_cast<UINT>(-1);
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MostDetailedMip = 0; sv.Texture2D.MipLevels = noMips ? 1 : static_cast<UINT>(-1);
         if (FAILED(dev->CreateShaderResourceView(out.tex, &sv, &out.srv))) return false;
         if (flip) {   // Unity's v runs up: the shaders expect the bottom row first
             std::vector<uint8_t> rows(static_cast<size_t>(w) * h * 4);
@@ -1195,6 +1209,9 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     D3D11_DEPTH_STENCIL_DESC wd = dd;
     wd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; wd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     I.dev->CreateDepthStencilState(&wd, &I.depthOverlayWrite);
+    D3D11_DEPTH_STENCIL_DESC nd = dd;
+    nd.DepthEnable = FALSE; nd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    I.dev->CreateDepthStencilState(&nd, &I.depthNoTest);
     D3D11_BLEND_DESC bd{};
     bd.AlphaToCoverageEnable = TRUE;   // the shaders' alpha cut-out (eyelines, lashes, hair tips) without sorting
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
@@ -1237,7 +1254,7 @@ bool GpuView::UpdateTextures(const std::vector<int>& textureIndices) {
         Rel(g.tex);
         const auto& t = I.scene->textures[static_cast<size_t>(ti)];
         if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * static_cast<size_t>(t.height) * 4) {
-            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), g, true, LinearLight() && t.srgb)) {
+            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), g, true, LinearLight() && t.srgb, IsDecalTexture(*I.scene, ti))) {
                 Rel(g.srv);
                 Rel(g.tex);
                 ok = false;
@@ -1339,7 +1356,7 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
         if (ti < 0 || static_cast<size_t>(ti) >= scene.textures.size() || I.textures[static_cast<size_t>(ti)].srv) return;
         const auto& t = scene.textures[static_cast<size_t>(ti)];
         if (t.width > 0 && t.height > 0 && t.rgba.size() >= static_cast<size_t>(t.width) * t.height * 4) {
-            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true, LinearLight() && t.srgb))
+            if (!I.MakeTexture(t.width, t.height, t.rgba.data(), I.textures[static_cast<size_t>(ti)], true, LinearLight() && t.srgb, IsDecalTexture(*I.scene, ti)))
                 texFailed = true;
         }
     };
@@ -1725,7 +1742,13 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     // The plain (as exported / MMD) view keeps the no-write tint: MikuMikuDance does not write depth for blended materials.
                     const bool zWrite = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size()) ? scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite : (!I.plain);
                     if (bucket == 1) {   // the game's transparent compositing: depth per the shader's ZWrite, alpha-blended
-                        ctx->OMSetDepthStencilState(zWrite ? I.depthOverlayWrite : I.depthOverlay, 0);
+                        // Nose paint is a decal, not a solid part of the face: a head mod can build the nose into the face
+                        // mesh a fraction of a millimetre in front of the separate cf_O_noseline mesh, so a normal depth
+                        // test loses the authored nostrils even though the texture still carries them. Draw this shader
+                        // family like the game's face paints - over the skin, without depth testing. Both view modes use
+                        // this path, so standard and MMD ("as exported") views agree.
+                        const bool faceDecal = detail::IsNoseDecal(mat);
+                        ctx->OMSetDepthStencilState(faceDecal ? I.depthNoTest : (zWrite ? I.depthOverlayWrite : I.depthOverlay), 0);
                         ctx->OMSetBlendState(I.blendOverlay, bf, 0xFFFFFFFFu);
                     } else {
                         ctx->OMSetDepthStencilState(I.depth, 0);

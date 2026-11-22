@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.5.5] - 2026-11-22
+
+### Fixed
+
+- **Nostrils still missing in the live viewer (standard and MMD modes)**: the 0.5.3 fix corrected the texture and the software preview, but the viewer renders through Direct3D 11 (`GpuView::Render`), which had its own depth state. The separate `cf_O_noseline` decal mesh sits a fraction of a millimetre behind head mods' 3D nose surface, so the depth test discarded it even though the texture carried the nostrils. Face-paint decals (`toon_nose` shader family) now draw without depth testing in both the standard and MMD ("as exported") buckets, and their textures expose only mip level 0 so thin authored strokes are not averaged below the material's alpha cutoff. Verified with `cardbridge convert --gpu-view` on `KK_235599.png` in both the baked export view and the unbaked live-scene view: nostrils visible, no nose line introduced. 19,034 unit checks pass.
+
 ## [0.5.3] - 2026-11-22
 
 ### Fixed
