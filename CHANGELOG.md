@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.2] - 2026-11-22
+
+### Fixed
+
+- **Nose-ridge slider now responds live while dragging**: it had been routed through the full skin-look re-apply, so every drag event re-ran the automatic body shading and AO bakes and the slider felt stuck. The drag now changes only the head mod's detail-map texture and re-uploads that single image; the exported copy is invalidated once on release. Build and 19,046 unit checks pass.
+
 ## [0.6.1] - 2026-11-22
 
 ### Fixed
