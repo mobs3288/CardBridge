@@ -16,6 +16,36 @@ void StartExport() {
     std::string stem = SafeStem(L->title.empty() ? std::string("character") : L->title);
     std::string outDir = parent + "/" + stem;
     for (int n = 2; Exists(outDir) && n < 1000; ++n) outDir = parent + "/" + stem + " (" + std::to_string(n) + ")";
+    // A native PMX is exported from its own document, not rebuilt from the
+    // card pipeline: every source-only field survives the round trip.
+    if (L->NativePmx() && L->pmxDoc) {
+        ProgBegin("Exporting PMX: " + stem);
+        Log("export started: " + outDir + " (native PMX)", LogKind::Info);
+        auto doc = std::make_shared<pmx::Model>(*L->pmxDoc);
+        const std::string pmxDir = L->pmxDir;
+        assemble::Scene sceneCopy = L->scene;
+        material::WorkbenchState matCopy = g.mat;
+        std::thread([doc, pmxDir, outDir, stem, sceneCopy = std::move(sceneCopy), matCopy]() mutable {
+            bool cancelled = false;
+            try {
+                ProgSet(0.2, "applying material edits");
+                material::ApplyOverrides(sceneCopy, matCopy);
+                pmx::ApplySceneMaterials(sceneCopy, *doc);
+                if (ProgCancelled()) throw Cancelled{};
+                ProgSet(0.6, "writing PMX and textures");
+                const std::string path = pmx::ExportDocument(*doc, pmxDir, outDir, stem);
+                Log("export done: " + path, LogKind::Good);
+            } catch (const Cancelled&) {
+                cancelled = true;
+                Log("export cancelled", LogKind::Warn);
+            } catch (const std::exception& e) {
+                Log(std::string("export failed: ") + e.what(), LogKind::Error);
+            }
+            g.exporting = false;
+            PostMessageW(g.hwnd, WM_EXPORT_DONE, cancelled ? 1 : 0, 0);
+        }).detach();
+        return;
+    }
     const std::string library = g.settings.library, mods = g.settings.mods;
     const std::vector<char> hiddenNow = g.hidden;
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;

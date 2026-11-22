@@ -1,6 +1,6 @@
 # Native PMX Import & Unified Editor — implementation roadmap
 
-**Status: Phase 1 in progress** (2026-11-21). This document tracks the architectural expansion described in the project brief. Each stage ends with: architecture findings, implementation summary, files changed, decisions, test results, known limitations, remaining tasks. No stage is marked complete on the basis of code existing — behaviour is checked.
+**Status: Phases 1–2 complete** (Phase 2 on 2026-11-22). This document tracks the architectural expansion described in the project brief. Each stage ends with: architecture findings, implementation summary, files changed, decisions, test results, known limitations, remaining tasks. No stage is marked complete on the basis of code existing — behaviour is checked.
 
 **Hard rules:** CardBridge stays one application; Koikatsu is an asset *source*, never a runtime dependency of PMX editing; imported data that CardBridge cannot interpret is preserved, never silently dropped; never assume two models share a skeleton; never route an imported PMX through the Koikatsu assembly pipeline for round-trip export.
 
@@ -50,8 +50,8 @@
 
 | Phase | Goal | Status |
 |---|---|---|
-| **1 — Native PMX foundation** | Lossless document model, native importer, preservation layer, round-trip export, regression tests, `pmx info`/`pmx roundtrip` CLI | **in progress** |
-| 2 — Unified editing foundation | PMX→Scene bridge, load `.pmx` in viewer, Model Explorer, materials/textures, existing bone/pose editor, validation | pending |
+| **1 — Native PMX foundation** | Lossless document model, native importer, preservation layer, round-trip export, regression tests, `pmx info`/`pmx roundtrip` CLI | **complete** |
+| **2 — Unified editing foundation** | PMX→Scene bridge, load `.pmx` in viewer, Model Explorer, materials/textures, existing bone/pose editor, validation | **complete** |
 | 3 — Asset library | Enumerable KK/KKS catalog, category taxonomy, thumbnails, dependency index, asset browser window, dedup/caching | pending |
 | 4 — Cross-model transfer | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | pending |
 | 5 — Advanced editing | Morph, physics, mesh, advanced material/texture editors | pending |
@@ -95,8 +95,33 @@
 - Round-trip is structural and, for the tested sample, byte-identical; text stored internally as UTF-8 may re-encode differently for malformed UTF-16 (unpaired surrogates). Valid PMX text is unaffected.
 - PMX 2.1 soft bodies and globals beyond the first eight are preserved byte-for-byte but not interpreted or editable yet.
 - Reserved/unknown *structural* tokens (future deform/morph/joint types) are rejected with a precise error rather than guessed — correct but not forward-compatible beyond those types.
-- Nothing in the viewer can open a `.pmx` yet; Phase 2 adds the PMX→Scene bridge and editor integration.
+- (Phase 1 limitation, resolved in Phase 2) Nothing in the viewer could open a `.pmx`.
+
+---
+
+## Phase 2 — Unified editing foundation (2026-11-22)
+
+### Implementation summary
+- New `src/pmx/PmxToScene.{h,cpp}`: `BuildScene` maps the imported document into `assemble::Scene` (textures decoded from the PMX folder, materials, bones, vertices with deform weights, meshes/submeshes, vertex morphs as blend shapes, group morphs as expressions, one part), reporting every source-only feature as a warning. `ApplySceneMaterials` copies workbench edits back into the document; `ExportDocument` writes a self-contained folder (`<name>.pmx` + `textures/`) with relative texture paths.
+- Viewer: `.pmx` accepted by Open / drag-drop / command line (`StartLoadPmx`, no resolver or card); native models keep their document in `Loaded`; the Parts tab is labelled **Model** and renders a Model Explorer (collapse-able sections for meshes, materials, bone hierarchy, morphs, physics, textures and display frames; clicking a bone opens Bones, a material opens the Workbench, a morph opens Morphs). Card-only proportion state is cleared for native models.
+- Export from a native PMX writes from the document with edited materials applied — never through the Koikatsu assembly pipeline.
+
+### Files changed
+- New: `src/pmx/PmxToScene.{h,cpp}`, `viewer/Explorer.inc`.
+- Modified: `CMakeLists.txt`, `viewer/main.cpp`, `viewer/State.inc`, `viewer/Pose.inc`, `viewer/Util.inc`, `viewer/Window.inc`, `viewer/Panel.inc`, `viewer/Export.inc`, `tests/cardbridge_tests.cpp`, `docs/ARCHITECTURE_DECISIONS.md` (ADR-013), `CHANGELOG.md`, `README.md`, this roadmap.
+
+### Results
+- Build clean (w64devkit/Ninja, `-j4`), no new warnings.
+- `cardbridge_tests.exe`: **19,110 checks, 0 failed** (1 integration suite skipped). Four new Phase 2 tests pass, plus the real Rin model now goes through `BuildScene` in the round-trip test: 31,942 vertices, 453 bones, 24 materials, 80 vertex-morph shapes.
+- Source-only data still survives an edited export (`trailing`, local axes, external parent keys, all morph types, frames, physics, textures).
+
+### Known limitations
+- Posing is preview-only in this phase: bone edits are not baked into the exported document's rest pose (Phase 5).
+- Physics, display frames and non-vertex morphs are visible in the Model Explorer as read-only summaries; editing them is Phase 5.
+- The GUI was not driven automatically for this phase (no headless PMX smoke script); verification is via the unit tests and the bridge's real-model check.
 
 ### Remaining implementation tasks
-- **Phase 2:** `pmx::Model` → `assemble::Scene` bridge; `.pmx` as a first-class input in `Open`/drag-drop/`StartLoad`; Model Explorer; guard card-only panels; validate native-model editing and re-export.
-- **Phase 3–6:** asset catalog and browser, cross-model attachment/fitting, advanced morph/physics/mesh editors, unified project/import/export workflow and full regression.
+- **Phase 3:** enumerable KK/KKS asset catalog, taxonomy, thumbnails, dependency index, asset browser, dedup/caching.
+- **Phase 4:** accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting.
+- **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
+- **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.

@@ -55,6 +55,7 @@
 #include "mesh/Simplify.h"
 #include "pmx/PmxWriter.h"
 #include "pmx/PmxReader.h"
+#include "pmx/PmxToScene.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
 #include "shader/UnityShader.h"
@@ -11064,6 +11065,67 @@ void pmxImportTests() {
     checkFixture(true, "pmx roundtrip: 2.1/UTF-8, add UVs, SDEF/QDEF, all morphs, flags and trailing bytes");
     checkFixture(false, "pmx roundtrip: 2.0/UTF-16 with 4-byte indices and the same feature set");
 
+    test("pmx scene bridge: the document maps into the shared editor scene", [] {
+        const pmx::Model doc = makeRoundTripFixture(false);
+        const pmx::PmxLoadResult r = pmx::BuildScene(doc, "");
+        CHECK(r.scene.name == doc.nameEn);
+        CHECK(r.scene.bones.size() == doc.bones.size());
+        CHECK(r.scene.materials.size() == doc.materials.size());
+        CHECK(r.scene.parts.size() == 1);
+        CHECK(!r.scene.meshes.empty());
+        const auto& mesh = r.scene.meshes[0];
+        CHECK(mesh.vertices.size() == doc.vertices.size());
+        CHECK(mesh.submeshes.size() == doc.materials.size());
+        CHECK(mesh.vertices[0].bone[0] == doc.vertices[0].bone[0]);
+        CHECK(mesh.vertices[3].weight[0] == doc.vertices[3].weight[0]);
+        CHECK(std::fabs(mesh.vertices[3].weight[1] - 0.4f) < 1e-6f);   // SDEF's second weight made explicit
+        CHECK(std::fabs(mesh.vertices[1].uv2.x - 0.1f) < 1e-6f);        // additional UV channel 2 -> uv2
+        CHECK(mesh.shapes.size() == 1);                                 // the one vertex morph
+        CHECK(r.scene.expressions.size() == 1);                        // the one group morph
+        CHECK(r.scene.materials[0].outlineColor.x == doc.materials[0].edgeColor.x);
+        CHECK(!r.warnings.empty());   // missing textures and unsupported morphs are reported, never dropped
+    });
+
+    test("pmx material edits apply to the document without losing source-only data", [] {
+        pmx::Model doc = makeRoundTripFixture(true);
+        const Bytes before = pmx::WritePmx(doc);
+        pmx::PmxLoadResult r = pmx::BuildScene(doc, "");
+        r.scene.materials[0].diffuse = {0.25f, 0.5f, 0.75f, 1.0f};
+        r.scene.materials[0].outlineWidth = 4.0f;
+        pmx::ApplySceneMaterials(r.scene, doc);
+        const Bytes after = pmx::WritePmx(doc);
+        CHECK(after != before);
+        const pmx::Model again = pmx::ReadPmx(after);
+        CHECK(std::fabs(again.materials[0].diffuse.x - 0.25f) < 1e-6f);
+        CHECK(std::fabs(again.materials[0].edgeSize - 4.0f) < 1e-6f);
+        CHECK(again.format.trailing == doc.format.trailing);
+        CHECK(again.bones[1].localAxisZ.z == doc.bones[1].localAxisZ.z);
+        CHECK(again.bones[1].externalParentKey == 1234);
+        CHECK(again.morphs.size() == doc.morphs.size());
+        CHECK(again.frames[0].items == doc.frames[0].items);
+        CHECK(again.textures == doc.textures);
+        CHECK(again.rigidBodies.size() == doc.rigidBodies.size());
+        CHECK(again.joints.size() == doc.joints.size());
+    });
+
+    test("pmx export copies textures into a self-contained folder", [] {
+        const std::string src = tempPath("pmx_src");
+        const std::string dst = tempPath("pmx_out");
+        fileio::CreateDirectories(src);
+        const Bytes png = tinyPng();
+        fileio::WriteFile(src + "/tex.png", png.data(), png.size());
+        pmx::Model doc = makeRoundTripFixture(false);
+        doc.textures[0] = "tex.png";
+        const std::string path = pmx::ExportDocument(doc, src, dst, "model");
+        CHECK(path == dst + "/model.pmx");
+        CHECK(fileio::Exists(dst + "/textures/tex.png"));
+        CHECK(fileio::Exists(path));
+        const pmx::Model written = pmx::ReadPmxFile(path);
+        CHECK(written.textures[0] == "textures/tex.png");
+        CHECK(written.vertices.size() == doc.vertices.size());
+        CHECK(written.format.trailing == doc.format.trailing);
+    });
+
     test("pmx import: the independent test reader agrees with the native importer", [] {
         pmx::Model src = makeRoundTripFixture(false);
         src.format.trailing.clear();   // the old reader only tolerates trailing bytes in 2.1
@@ -11102,6 +11164,15 @@ void pmxImportTests() {
         for (const auto& f : again.frames) frameItems2 += f.items.size();
         CHECK(frameItems2 == frameItems);
         CHECK(pmx::WritePmx(again) == written);
+        const pmx::PmxLoadResult built = pmx::BuildScene(m, "");
+        CHECK(built.scene.parts.size() == 1);
+        CHECK(!built.scene.meshes.empty());
+        CHECK(built.scene.meshes[0].vertices.size() == m.vertices.size());
+        CHECK(built.scene.bones.size() == m.bones.size());
+        CHECK(built.scene.materials.size() == m.materials.size());
+        size_t shapes = 0;
+        for (const auto& mesh : built.scene.meshes) shapes += mesh.shapes.size();
+        CHECK(shapes == 80);   // the supplied model has 80 vertex morphs
         if (original != written)
             std::printf("  note: %s re-encoded (%zu -> %zu bytes) but structure was preserved\n",
                         path.c_str(), original.size(), written.size());

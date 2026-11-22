@@ -37,7 +37,8 @@ void InvalidateSliderRow(int id) {
 int ListRowCount() {
     if (g.tab == TabParts) {
         std::shared_ptr<Loaded> L = Current();
-        return L ? static_cast<int>(BuildRows(*L).size()) : 0;
+        if (!L) return 0;
+        return L->NativePmx() ? static_cast<int>(BuildExplorerRows(*L).size()) : static_cast<int>(BuildRows(*L).size());
     }
     return static_cast<int>(BuildTweakRows(g.tab).size());
 }
@@ -48,6 +49,7 @@ void PanelListClick(int x, int y, const PanelLayout& l) {
     std::shared_ptr<Loaded> L = Current();
     if (g.tab == TabParts) {
         if (!L || g.showIssues) return;
+        if (L->NativePmx()) { ExplorerListClick(x, y, l, *L); return; }
         const std::vector<PartRow> rows = BuildRows(*L);
         const int idx = RowAt(rows, l, x, y);
         if (idx < 0) return;
@@ -244,7 +246,7 @@ void DumpTestLayout() {
     }
     // The accessory rows (and their gizmo chips) and the gizmos themselves, so a scripted run can select one and drag an axis or a ring.
     j["accessories"] = nlohmann::json::array();
-    if (L && g.tab == TabParts) {
+    if (L && g.tab == TabParts && !L->NativePmx()) {
         const std::vector<PartRow> prows = BuildRows(*L);
         const int scroll = static_cast<int>(std::lround(g.partPos * kRowH));
         for (size_t i = 0; i < prows.size(); ++i) {
@@ -518,7 +520,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (L->scene.parts[i].nudeSwitch && !(g.applyKeep && g.keepHidden.count(L->scene.parts[i].id))) g.hidden[i] = 1;   // starts unticked
         g.keepHidden.clear();
         // Proportion correction state: a different card starts faithful with fresh diagnostics; a same-card reload (an outfit switch or a re-apply) keeps the user's corrections.
-        if (L && L->card.path != g.propCardKey) {
+        // A native PMX has no card and no game shape sliders, so that panel stays empty for it.
+        if (L && L->NativePmx()) { g.propCardKey.clear(); g.propSugs.clear(); g.propFindings.clear(); }
+        else if (L && L->card.path != g.propCardKey) {
             g.propCardKey = L->card.path;
             g.propSugs.clear();
             g.propFindings = assemble::AnalyzeCard(L->card);
@@ -635,6 +639,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t buf[1024];
         if (DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, buf, 1024)) {
             const std::string dropped = Slashes(WideToUtf8(buf));
+            if (IsPmxPath(dropped)) {
+                g.cam = {};
+                {
+                    std::lock_guard<std::recursive_mutex> lk(g.mu);
+                    g.clothingPins.clear();
+                }
+                StartLoadPmx(dropped);
+                DragFinish(reinterpret_cast<HDROP>(wp));
+                return 0;
+            }
             const card::ImageSourceKind sourceKind = card::DetectImageSource(dropped);
             if (sourceKind == card::ImageSourceKind::RegularClothing) {
                 // A Koikatsu Coordinate (outfit) file: always ask how it goes onto the outfit on screen.
@@ -797,7 +811,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (L && !g.showIssues && g.tab == TabMaterials) { MaterialsTabClick(x, y, l, true); return 0; }
             if (L && !g.showIssues && g.tab == TabOptimize) { OptTabClick(x, y, true); return 0; }
             if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts) { TweakClick(x, y, l, true); return 0; }
-            if (L && !g.showIssues) {
+            if (L && !g.showIssues && !L->NativePmx()) {
                 std::vector<PartRow> rows = BuildRows(*L);
                 int idx = RowAt(rows, l, x, y);
                 if (idx >= 0 && rows[static_cast<size_t>(idx)].part >= 0) {
@@ -967,7 +981,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             const int oldChip = g.hoverAccChip, oldRotChip = g.hoverRotChip;
             if (x < kPanel && g.tab == TabParts && !g.showIssues)
-                if (std::shared_ptr<Loaded> LL = Current()) {
+                if (std::shared_ptr<Loaded> LL = Current(); LL && !LL->NativePmx()) {
                     std::vector<PartRow> rows = BuildRows(*LL);
                     int idx = RowAt(rows, l, x, y);
                     if (idx >= 0) {
@@ -1031,6 +1045,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 OptTabHover(x, y);
             } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts && g.tab != TabOptimize) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
+            } else if (L && !g.showIssues && L->NativePmx()) {
+                g.hoverRow = RowIndexAt(BuildExplorerRows(*L).size(), l, x, y);
             } else if (L && !g.showIssues) {
                 std::vector<PartRow> rows = BuildRows(*L);
                 int idx = RowAt(rows, l, x, y);
@@ -1228,6 +1244,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 } else if (g.tab != TabParts && g.tab != TabOptimize && g.tab != TabBones && g.tab != TabMaterials) {
                     int maxScroll = std::max(0, static_cast<int>(BuildTweakRows(g.tab).size()) - VisibleRows(l));
                     g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
+                } else if (L->NativePmx()) {
+                    int maxScroll = std::max(0, static_cast<int>(BuildExplorerRows(*L).size()) - VisibleRows(l));
+                    g.partScroll = std::max(0, std::min(maxScroll, g.partScroll - (d > 0 ? 3 : -3)));
                 } else {
                     std::vector<PartRow> rows = BuildRows(*L);
                     int maxScroll = std::max(0, static_cast<int>(rows.size()) - VisibleRows(l));
@@ -1270,6 +1289,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     hand = g.opt.hover != -1;
                 } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts && g.tab != TabOptimize) {
                     hand = RowIndexAt(BuildTweakRows(g.tab).size(), l, p.x, p.y) >= 0;
+                } else if (L && !g.showIssues && L->NativePmx()) {
+                    hand = RowIndexAt(BuildExplorerRows(*L).size(), l, p.x, p.y) >= 0;
                 } else if (L && !g.showIssues) {
                     std::vector<PartRow> rows = BuildRows(*L);
                     hand = RowAt(rows, l, p.x, p.y) >= 0;

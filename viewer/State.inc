@@ -32,6 +32,12 @@ bool SamePoseState(const PoseState& a, const PoseState& b) {
 struct Loaded {
     assemble::Scene scene;
     card::Card card;
+    // Non-null when opened from a native .pmx. The document is authoritative
+    // for everything the scene cannot express; edits are copied back into a
+    // copy of it at export time, never rebuilt through the card pipeline.
+    std::shared_ptr<pmx::Model> pmxDoc;
+    std::string pmxDir;
+    bool NativePmx() const { return pmxDoc != nullptr; }
     std::string title;
     int outfit = 0, outfits = 0;
     std::vector<size_t> partTriangles;
@@ -380,6 +386,7 @@ struct App {
     float listPressPos = 0.0f;     // partPos at the press: the list offset the drag maps from
     std::set<std::string> collapsedGroups;
     std::set<std::string> collapsedMorphs;   // morph groups folded in the Morphs tab (Brows / Eyes / Mouth / Other)
+    std::set<std::string> explorerCollapsed; // Model Explorer sections folded (native PMX models)
     Tweaks tw;
     // Proportion correction (optional; faithful when empty). The card is never modified: corrections live in a
     // separate layer applied in the assemble/reshape pipeline. Per-card state; suggestions are recomputed on demand.

@@ -108,7 +108,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             const bool usable = L != nullptr || i == TabSettings;
             s.FillRound(t, ui::kRad, act ? ui::kSelect : hot ? ui::kCardHi : ui::kCard);
             if (act) s.StrokeRound(t, ui::kRad, ui::kAccent);
-            s.TextCentered(g.fontSemi, !usable ? ui::kFaint : act ? ui::kAccentHi : hot ? ui::kText : ui::kSub, t, kTabNames[i]);
+            const char* label = (L && L->NativePmx() && i == TabParts) ? "Model" : kTabNames[i];
+            s.TextCentered(g.fontSemi, !usable ? ui::kFaint : act ? ui::kAccentHi : hot ? ui::kText : ui::kSub, t, label);
         }
     }
 
@@ -177,6 +178,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             DrawMaterialsTab(s, clip, l, *L);
         } else if (g.tab == TabOptimize) {
             DrawOptimizeTab(s, clip, l, *L);
+        } else if (g.tab == TabParts && L->NativePmx()) {
+            DrawExplorerRows(s, clip, l, *L);
         } else if (g.tab != TabParts) {
             const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
             const int visible = VisibleRows(l);

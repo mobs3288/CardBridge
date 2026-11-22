@@ -88,6 +88,7 @@ add_library(cardbridge_core STATIC
     src/assemble/BodySuppression.cpp
     src/pmx/PmxWriter.cpp
     src/pmx/PmxReader.cpp
+    src/pmx/PmxToScene.cpp
     src/export/Exporter.cpp
     src/export/SkinBench.cpp
     src/assemble/Pose.cpp

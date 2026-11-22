@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.0] - 2026-11-22
+
+### Added
+
+- **Phase 2 — native PMX models open directly in the CardBridge viewer.** `Open` (and drag-and-drop, and the command-line path) now accepts `.pmx` alongside Koikatsu cards. A native `.pmx` goes through a new `pmx::BuildScene` bridge into the same `assemble::Scene` the rest of the editor uses, so the Bones tab and posing, Morphs, Material Workbench, viewport renderer and gizmos work on it unchanged. The Parts tab becomes a **Model Explorer** for these models (meshes, materials, bone hierarchy, morphs, physics, textures, display frames), with card-only panels clearly marked as unavailable. Export writes from the original PMX document with the viewer's material edits applied — it is never rebuilt through the card pipeline — and copies textures into a self-contained `textures/` folder. Everything source-specific (additional UVs, SDEF/QDEF, local axes, morph kinds, IK, rigid bodies, joints, display frames, soft-body bytes, format/encoding) is still preserved. Five new tests cover the bridge, material-edit round-trip and self-contained export; the supplied real PMX is checked end to end (`CARDBRIDGE_TEST_PMX`). See `docs/PMX_IMPORT_ROADMAP.md`.
+
 ## [0.6.7] - 2026-11-22
 
 ### Fixed

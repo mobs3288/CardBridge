@@ -350,3 +350,18 @@ clickable at a time.
 **Alternatives rejected.** Skipping unknown sections (data loss); treating unknown types as BDEF4/material morphs (stream drift and corruption); warning but continuing (an exported file would silently differ).
 
 **Consequences.** CardBridge can open any valid PMX 2.0/2.1 file it understands, and a file it does not understand fails loudly with an actionable message instead of exporting damage. A future soft-body editor can decode `format.trailing` without re-importing the source file.
+
+---
+
+## ADR-013 — Imported PMX documents stay authoritative; the scene is an editing view
+
+**Date:** Phase 2, unified editing foundation (2026-11-22).
+**Status:** accepted — implemented and tested.
+
+**Context.** The viewer's renderers, posing, morph sliders and material workbench all consume `assemble::Scene`. Reusing them for an imported PMX requires a PMX→Scene bridge, but a plain `Scene → pmx::Model → WritePmx` export would discard everything the scene cannot express (ADR-011). The brief forbids reconstructing an imported model through the Koikatsu assembly pipeline.
+
+**Decision.** `Loaded` keeps both: the imported `pmx::Model` document and a `Scene` built from it for viewing/editing. `BuildScene` maps vertices (with BDEF2/SDEF second weights made explicit), materials, bones, meshes/submeshes, vertex morphs (blend shapes) and group morphs (expressions) into `Scene`, and reports every source-only feature as a warning instead of dropping it silently. Export copies the document, applies the workbench's effective material fields with `ApplySceneMaterials`, writes with the preservation-aware `WritePmx`, and copies referenced textures into the output folder with relative paths. The Parts tab is dynamically labelled "Model" and renders a Model Explorer for native PMX; card-only tabs stay visible but empty.
+
+**Alternatives rejected.** A separate editor/UI for PMX (duplicates the whole tool); a lossy Scene→writer export (silently loses source data); making the card pipeline accept PMX (couples the editor to Koikatsu).
+
+**Consequences.** All existing editors work on native PMX without modification. Editing anything outside the mapped subset (bones in the document, physics, frames, non-vertex morphs) is deferred to later phases; the document remains unchanged until a corresponding editor writes it. Posing is currently a preview-only change (the document's rest pose is not baked on export) — stated in the known limitations.

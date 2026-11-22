@@ -604,7 +604,71 @@ bool EnsureResolver(std::string& err) {
     return true;
 }
 
+bool IsPmxPath(const std::string& path) {
+    const size_t dot = path.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string ext = path.substr(dot + 1);
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == "pmx";
+}
+
+// Native PMX entry point. Deliberately does not touch the resolver or the
+// card: a PMX is a first-class input, not a conversion result.
+void StartLoadPmx(const std::string& path) {
+    if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
+    const std::string prevCardPath = g.cardPath;
+    g.cardPath = path;
+    g.loadingOutfit = -1;
+    g.applyKeep = false;
+    g.tweakPending = false;
+    KillTimer(g.hwnd, kTimerApplyTweaks);
+    g.status = "loading " + fileio::FileName(path) + " ...";
+    ProgBegin("Loading " + fileio::FileName(path));
+    Log("open PMX " + path);
+    InvalidatePanel();
+    std::thread([path, prevCardPath]() {
+        auto t0 = std::chrono::steady_clock::now();
+        auto out = std::make_shared<Loaded>();
+        bool failed = false;
+        try {
+            ProgSet(0.05, "reading the PMX");
+            out->pmxDoc = std::make_shared<pmx::Model>(pmx::ReadPmxFile(path));
+            const size_t slash = path.rfind('/');
+            out->pmxDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
+            ProgSet(0.45, "building the scene");
+            const pmx::PmxLoadResult built = pmx::BuildScene(*out->pmxDoc, out->pmxDir);
+            out->scene = built.scene;
+            out->notes = built.warnings;
+            out->title = out->pmxDoc->nameEn.empty() ? out->pmxDoc->name : out->pmxDoc->nameEn;
+            if (out->title.empty()) out->title = fileio::FileName(path);
+            out->partTriangles.assign(out->scene.parts.size(), 0);
+            for (size_t pi = 0; pi < out->scene.parts.size(); ++pi)
+                for (int mi : out->scene.parts[pi].meshes)
+                    for (const auto& sub : out->scene.meshes[static_cast<size_t>(mi)].submeshes)
+                        out->partTriangles[pi] += sub.indices.size() / 3;
+            char msg[256];
+            std::snprintf(msg, sizeof msg, "ready in %.1fs: %s vertices, %s morphs, %s bones",
+                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                          Count(out->scene.meshes.empty() ? 0 : out->scene.meshes[0].vertices.size()).c_str(),
+                          Count(out->pmxDoc->morphs.size()).c_str(), Count(out->scene.bones.size()).c_str());
+            Log(msg, LogKind::Good);
+            for (const std::string& w : built.warnings) Log("  " + w, LogKind::Warn);
+        } catch (const std::exception& e) {
+            failed = true;
+            Log(std::string("PMX load failed: ") + e.what(), LogKind::Error);
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            if (!failed) g.loaded = out;
+            else g.cardPath = prevCardPath;
+        }
+        g.busy = false;
+        PostMessageW(g.hwnd, WM_LOADED, failed ? 1 : 0, 0);
+    }).detach();
+}
+
 void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
+    if (IsPmxPath(path)) { StartLoadPmx(path); return; }
     if (g.busy.exchange(true)) { Log("still loading; wait for it to finish", LogKind::Warn); return; }
     const std::string prevCardPath = g.cardPath;
     g.cardPath = path;

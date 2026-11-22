@@ -236,10 +236,10 @@ std::string PickCard(HWND owner) {
     OPENFILENAMEW of{};
     of.lStructSize = sizeof of;
     of.hwndOwner = owner;
-    of.lpstrFilter = L"Koikatsu cards (*.png)\0*.png\0All files\0*.*\0";
+    of.lpstrFilter = L"Koikatsu cards and PMX models (*.png;*.pmx)\0*.png;*.pmx\0Koikatsu cards (*.png)\0*.png\0PMX models (*.pmx)\0*.pmx\0All files\0*.*\0";
     of.lpstrFile = file;
     of.nMaxFile = 1024;
-    of.lpstrTitle = L"Open a Koikatsu character card";
+    of.lpstrTitle = L"Open a Koikatsu card or a PMX model";
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     return GetOpenFileNameW(&of) ? Slashes(WideToUtf8(file)) : std::string();
 }
