@@ -653,7 +653,9 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
     // reports exactly that, and neither feature is ever inferred from the other's presence.
     const auto& ff = scene.facialFeatures;
     j["facial_features"] = {{"nose_line", ff.noseLine}, {"nostrils", ff.nostrils},
-                            {"upper_lip_line", ff.upperLipLine}, {"lower_lip_line", ff.lowerLipLine}};
+                            {"upper_lip_line", ff.upperLipLine}, {"lower_lip_line", ff.lowerLipLine},
+                            {"nose_ridge_detected", scene.noseRidge.detected},
+                            {"nose_ridge_strength", scene.noseRidge.strength}};
 
     json tex = json::array();
     for (size_t i = 0; i < scene.textures.size(); ++i) {

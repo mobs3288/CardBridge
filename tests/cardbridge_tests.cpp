@@ -958,6 +958,38 @@ void unitTests() {
         auto none = DetectLipLineFeatures(empty, W, H);
         CHECK(!none.upper && !none.lower);
     });
+    test("nose ridge setting: detected per card, removable and repeatable without touching a card that has none", [] {
+        using namespace assemble;
+        const int W = 256, H = 256;
+        std::vector<uint8_t> tex(static_cast<size_t>(W) * H * 4, 0);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const size_t i = (static_cast<size_t>(y) * W + x) * 4;
+                const bool stripe = x >= W / 2 - 2 && x <= W / 2 + 2;
+                const uint8_t v = stripe ? 20 : 90;   // a dark vertical ridge down the centre
+                tex[i] = v; tex[i + 1] = v; tex[i + 2] = v; tex[i + 3] = 255;
+            }
+        std::vector<float> mask;
+        const float detected = DetectNoseRidge(tex, W, H, mask);
+        CHECK(detected > 0.0f);
+        const uint8_t centre = tex[(static_cast<size_t>(H / 2) * W + W / 2) * 4];
+        ApplyNoseRidge(tex, W, H, mask, 0.0f);
+        CHECK(tex[(static_cast<size_t>(H / 2) * W + W / 2) * 4] > centre + 20);   // ridge removed: centre ≈ neighbours
+        const auto removed = tex;
+        ApplyNoseRidge(tex, W, H, mask, 1.0f);
+        CHECK(tex == removed);   // re-applying the same strength is a no-op (always rebuilt from the original)
+        // A card with no ridge is left byte-for-byte as authored.
+        std::vector<uint8_t> flat(static_cast<size_t>(W) * H * 4, 90);
+        for (size_t i = 3; i < flat.size(); i += 4) flat[i] = 255;
+        std::vector<float> none;
+        CHECK(DetectNoseRidge(flat, W, H, none) == 0.0f);
+        const auto before = flat;
+        ApplyNoseRidge(flat, W, H, none, 0.0f);
+        CHECK(flat == before);
+        std::vector<uint8_t> tiny;
+        CHECK(DetectNoseRidge(tiny, 0, 0, none) == 0.0f);
+        ApplyNoseRidge(tiny, 0, 0, none, 0.0f);
+    });
     test("item prefab roots keep their own transform under the node the game parents them to", [] {
         // SetParent(parent, worldPositionStays: false): a hair or accessory root with an offset and scale keeps both.
         const Mat4 parent = Mat4::TRS({1, 2, 3}, Quat{}, {1, 1, 1});

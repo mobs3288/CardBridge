@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Math.h"
+#include "assemble/FaceFeatures.h"
 
 #include <array>
 #include <cstdint>
@@ -400,6 +401,7 @@ struct Scene {
     std::vector<SceneCollider> colliders;
     std::vector<ScenePoseEntry> pose;   // the bone edits baked into this scene (see BakePose), empty for the rest pose
     FacialFeatureDetection facialFeatures;
+    NoseRidge noseRidge;   // per-card presentation setting for the head mod's centre nose shading
     bool aposeApplied = false;          // BakePose included the automatic A-pose
     bool chainsSettled = false;         // an item's DynamicBone chains were run to rest (CARDBRIDGE_DYNBONE): they depend on the body's shape, so Reshape cannot redo them
     std::vector<SceneIssue> issues;

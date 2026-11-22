@@ -312,6 +312,17 @@ void ApplySkinLook(bool rebuildMap) {
     std::shared_ptr<Loaded> L = Current();
     if (!L) return;
     exporter::ApplyNippleTint(L->scene, NippleTintOption());
+    if (L->scene.noseRidge.texture >= 0) {
+        assemble::SetNoseRidgeStrength(L->scene, g.tw.noseRidge);
+        const int ti = L->scene.noseRidge.texture;
+        if (g.state) exporter::InvalidateViewTexture(*g.state, ti);
+        if (g.gpuOk && g.gpuScene == L) g.gpu.UpdateTextures(std::vector<int>{ti});
+        g.expOk = false;   // the baked "as exported" copy holds the old face texture
+        g.showExp = false;
+        g.expFor.reset();
+        g.expScene.reset();
+        g.gpuExp.Unload();
+    }
     auto& ss = L->scene.skinShade;
     if (ss.ready()) {
         const bool rebuild = rebuildMap;
@@ -458,6 +469,7 @@ void TweakEdited(int id, bool released) {
         return;
     }
     if (id == kTransSize) { InvalidatePanel(); return; }   // the radius applies to the next stroke; nothing to rebuild
+    if (id == kNoseRidge) { g.settings.noseRidge = g.tw.noseRidge; SaveSettings(g.settings); ApplySkinLook(false); return; }
     if (IsLiveId(id)) { ApplyPoseLive(); return; }
     if (id == kSkinShade || id == kSkinShadeUnder || id == kSkinShadeTop || id == kSkinShadeWidth || id == kSkinAo ||
         id == kNipplePink || id == kNippleR || id == kNippleG || id == kNippleB) {
@@ -727,6 +739,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                     g.tw.skinShadeTop = g.settings.skinShadeTop;
                     g.tw.skinShadeWidth = g.settings.skinShadeWidth;
                     g.tw.skinAo = g.settings.skinAo;
+                    g.tw.noseRidge = g.settings.noseRidge;   // persisted default for new cards; 1 = the card's authored ridge
                     const Value& bv = c.body.at("shapeValueBody");
                     const Value& fv = c.face.at("shapeValueFace");
                     for (size_t i = 0; i < bv.size(); ++i) g.tw.bodyCard.push_back(static_cast<float>(bv.at(i).asFloat()));

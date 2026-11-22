@@ -1,5 +1,7 @@
 #include "assemble/FaceFeatures.h"
 #include "assemble/Assembler.h"   // SoftenNoseLineAlpha (the existing line feather, reused verbatim)
+#include "assemble/Scene.h"
+#include "core/Bytes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -146,6 +148,85 @@ LipLineFeatures DetectLipLineFeatures(const std::vector<uint8_t>& rgba, int w, i
     }
     if (comps.size() == 1 && !f.upper && !f.lower) f.upper = true;
     return f;
+}
+
+float DetectNoseRidge(const std::vector<uint8_t>& rgba, int w, int h, std::vector<float>& weight) {
+    weight.assign(static_cast<size_t>(w) * h, 0.0f);
+    if (w < 32 || h < 32 || rgba.size() < static_cast<size_t>(w) * h * 4) return 0.0f;
+    const int radius = std::max(3, w / 90);
+    float peak = 0.0f;
+    // The face is laid out symmetrically in its atlas. A ridge is a narrow vertical band near the centre column whose
+    // pixels differ from the average of their horizontal neighbours. Work per row so the broad face shading cancels.
+    for (int y = h / 8; y < h * 7 / 8; ++y) {
+        for (int x = w / 2 - w / 14; x <= w / 2 + w / 14; ++x) {
+            if (x - radius < 0 || x + radius >= w) continue;
+            const size_t c = static_cast<size_t>(y) * w + x;
+            double avg[3] = {0, 0, 0};
+            for (int k = -radius; k <= radius; ++k) {
+                if (k == 0) continue;
+                const size_t n = static_cast<size_t>(y) * w + (x + k);
+                for (int ch = 0; ch < 3; ++ch) avg[ch] += rgba[n * 4 + ch];
+            }
+            const double div = 2 * radius;
+            float diff = 0.0f;
+            for (int ch = 0; ch < 3; ++ch) {
+                const double d = std::fabs(rgba[c * 4 + ch] - avg[ch] / div);
+                diff = std::max(diff, static_cast<float>(d));
+            }
+            // Only a consistent darkening (a shading ridge), not a bright seam or a coloured painted line.
+            bool darker = true;
+            for (int ch = 0; ch < 3; ++ch)
+                if (rgba[c * 4 + ch] > avg[ch] / div + 2.0) darker = false;
+            const float v = darker ? std::min(1.0f, diff / 18.0f) : 0.0f;
+            weight[c] = v;
+            peak = std::max(peak, v);
+        }
+    }
+    // A single speck is not a ridge: keep only bands that continue over many rows.
+    int strongCols = 0;
+    for (int x = w / 2 - w / 14; x <= w / 2 + w / 14; ++x) {
+        int rows = 0;
+        for (int y = h / 8; y < h * 7 / 8; ++y) if (weight[static_cast<size_t>(y) * w + x] > 0.35f) ++rows;
+        if (rows > (h * 3 / 4) / 8) ++strongCols;
+    }
+    if (strongCols < 2) { weight.assign(static_cast<size_t>(w) * h, 0.0f); return 0.0f; }
+    return peak;
+}
+
+void ApplyNoseRidge(std::vector<uint8_t>& rgba, int w, int h, const std::vector<float>& /*weight*/, float strength) {
+    if (w < 32 || h < 32 || rgba.size() < static_cast<size_t>(w) * h * 4) return;
+    // Amplifying a normal/detail map far past its authored values clips into white highlights, so the "more visible"
+    // end is deliberately gentle; 2 is the strongest useful setting, not a doubled texture.
+    const float k = std::min(1.0f, std::max(-0.25f, 1.0f - strength));   // 0 = authored, 1 = removed
+    if (std::fabs(k) < 1e-4f) return;
+    const int radius = std::max(3, w / 90);
+    std::vector<uint8_t> src = rgba;   // sample the untouched image, so repeated applies cannot drift
+    for (int y = h / 8; y < h * 7 / 8; ++y)
+        for (int x = w / 2 - w / 14; x <= w / 2 + w / 14; ++x) {
+            if (x - radius < 0 || x + radius >= w) continue;
+            const size_t c = static_cast<size_t>(y) * w + x;
+            for (int ch = 0; ch < 3; ++ch) {
+                double avg = 0.0;
+                for (int j = -radius; j <= radius; ++j) {
+                    if (j == 0) continue;
+                    avg += src[(static_cast<size_t>(y) * w + x + j) * 4 + ch];
+                }
+                avg /= 2 * radius;
+                const double v = src[c * 4 + ch] * (1.0 - k) + avg * k;
+                rgba[c * 4 + ch] = static_cast<uint8_t>(std::min(255.0, std::max(0.0, v)) + 0.5);
+            }
+        }
+}
+
+void SetNoseRidgeStrength(Scene& scene, float strength) {
+    NoseRidge& nr = scene.noseRidge;
+    nr.strength = std::min(2.0f, std::max(0.0f, strength));
+    if (nr.texture < 0 || static_cast<size_t>(nr.texture) >= scene.textures.size()) return;
+    auto& tex = scene.textures[static_cast<size_t>(nr.texture)];
+    if (nr.original.empty()) return;
+    tex.rgba = nr.original;
+    ApplyNoseRidge(tex.rgba, nr.width, nr.height, nr.mask, nr.strength);
+    tex.pixelHash = Fnv1a64(tex.rgba.data(), tex.rgba.size());
 }
 
 } // namespace cardbridge::assemble

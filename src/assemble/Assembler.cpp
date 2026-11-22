@@ -4425,6 +4425,22 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         exporter::RunCreateJobs(scene);
     }
     log("create materials done");
+    // Per-card presentation setting: the centre nose ridge is authored in the head mod's face detail mask, not in
+    // the nose texture. Detect it there, keep the untouched pixels, and let the viewer slider / CLI flag dial it
+    // without ever painting a feature the card does not have. Cards without a ridge detect 0 and stay as authored.
+    for (const auto& mat : scene.materials) {
+        if (mat.name != "cf_m_face_00") continue;
+        for (const auto& tb : mat.texProps) {
+            if (tb.texture < 0 || static_cast<size_t>(tb.texture) >= scene.textures.size()) continue;
+            if (tb.name != "_DetailMask" && tb.name != "_NormalMapDetail") continue;
+            auto& tex = scene.textures[static_cast<size_t>(tb.texture)];
+            NoseRidge& nr = scene.noseRidge;
+            nr.detected = DetectNoseRidge(tex.rgba, tex.width, tex.height, nr.mask);
+            if (nr.detected > 0.0f) { nr.texture = tb.texture; nr.width = tex.width; nr.height = tex.height; nr.original = tex.rgba; }
+            break;
+        }
+        break;
+    }
     {
         cbtime::Scope _("nipple tint + skin shade + ao");
         exporter::ApplyNippleTint(scene, opt.nippleColour);

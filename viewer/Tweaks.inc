@@ -198,6 +198,7 @@ bool SliderFor(int id, SliderRef& r) {
     if (id == kSkinShadeTop) { r.v = &g.tw.skinShadeTop; r.def = 1.2f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinShadeWidth) { r.v = &g.tw.skinShadeWidth; r.def = 0.6f; r.lo = 0.1f; r.hi = 2; r.step = 0.05f; return true; }
     if (id == kSkinAo) { r.v = &g.tw.skinAo; r.def = 0.85f; r.lo = 0; r.hi = 2; r.step = 0.05f; return true; }
+    if (id == kNoseRidge) { r.v = &g.tw.noseRidge; r.def = 1.0f; r.lo = 0; r.hi = 2; r.step = 0.05f; r.percent = false; r.fmt = "%.2f"; return true; }
     if (id == kTransStrength) { r.v = &g.tw.transStrength; r.def = 0.65f; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }   // shown as 0..100
     if (id == kTransSize) { r.v = &g.tw.transSizeCm; r.def = 4.0f; r.lo = 0.5f; r.hi = 15.0f; r.step = 0.25f; r.percent = false; r.fmt = "%.2f cm"; return true; }
     if (id == kNippleR) { r.v = &g.tw.nippleColour.x; r.def = assemble::kDefaultNippleColour.x; r.lo = 0; r.hi = 1; r.step = 0.01f; return true; }

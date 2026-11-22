@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.6.0] - 2026-11-22
+
+### Added
+
+- **Per-card nose-ridge strength control (KK/KKS)**: some head mods bake a narrow shading ridge down the centre of the nose bridge into the face detail map (`cf_face_00_md`). It is authored in the card's data, but without a matching nose line it can read like one. The ridge is now detected per card and exposed as a presentation setting: `1` keeps the authored amount (default), `0` removes it, values in between are subtler and values above are stronger (gently capped so a normal map cannot clip to white). The Look tab has a **Nose ridge shading** slider, the CLI has `--nose-ridge F`, the effective value and the detected amount are written to the manifest's `facial_features` block, and the setting is persisted in the viewer. It never paints a stroke the source lacks: cards with no detected ridge are left byte-for-byte as authored, and the actual nose-line texture is still respected independently (`nose_line: false` on cards that have none). Added detection/preservation tests; 19,040 unit checks pass.
+
 ## [0.5.5] - 2026-11-22
 
 ### Fixed

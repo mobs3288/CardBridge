@@ -104,6 +104,7 @@ struct Tweaks {
     float skinShadeTop = 1.2f;                             // the top extent of the cleavage: 0 = none, 1 = the full breast line, 2 = toward the base of the neck; saved in the viewer's settings
     float skinShadeWidth = 0.6f;                          // how wide the cleavage line runs (0.1 = hairline, 1 = default, 2 = broad); saved in the viewer's settings
     float skinAo = 0.85f;                                // Koikatsu's own look baked in (base body normal lighting + the card's detail line mask); 0 = off; saved in the viewer's settings
+    float noseRidge = 1.0f;                              // head-mod centre nose shading: 1 = as authored, 0 = off, 2 = stronger (per card)
     float transSizeCm = 4.0f;                             // translucency brush radius, centimetres
     float transStrength = 0.65f;                          // how see-through a fully painted texel becomes (0..1, like the morph weights)
     bool pinkNipples = true;                              // automatic pink nipple / areola tint (off: the card's own colour)
@@ -239,7 +240,7 @@ bool MorphEditChar(wchar_t ch);        // typed characters; called from WM_CHAR
 constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, kHeightCm = 203, kSag = 204,
               kSkinShade = 205, kNipplePink = 206, kNippleR = 207, kNippleG = 208, kNippleB = 209,
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
-               kTransStrength = 214, kTransSize = 215,
+               kTransStrength = 214, kTransSize = 215, kNoseRidge = 216,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kAutoCloth = 306,
               kOriginalGarment = 309,
               kJiggleMass = 320, kJiggleStiffness = 321, kJiggleDamping = 322, kJiggleGravity = 323,
