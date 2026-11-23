@@ -38,6 +38,7 @@
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
 #include "export/BakeQuality.h"
+#include "export/TextureUpscaler.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
 #include "mesh/Simplify.h"
@@ -232,6 +233,9 @@ void usage() {
          "             [--upscale N]                 upscale exported colour textures N times (2..8) with waifu2x-ncnn-vulkan (MIT).\n"
          "                                             Open source, GPU (Vulkan), optional: without the tool the export is unchanged.\n"
          "             [--upscaler <exe>]               path to waifu2x-ncnn-vulkan.exe (else CARDBRIDGE_UPSCALER,\n"
+         "             [--upscale-model waifu2x|realesrgan]\n"
+         "                                             which open-source model to use (default: waifu2x). realesrgan uses the\n"
+         "                                             x4plus-anime model, usually sharper on line art but slower.\n"
          "                                             tools/upscaler/, or PATH). Toon and sphere maps are never upscaled.\n"
          "                                             Takes precedence over --bake-quality resolution; the other quality settings stay.\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
@@ -1194,6 +1198,8 @@ int cmdConvert(const Args& a) {
         eo.upscaleScale = n;
     }
     eo.upscalerExe = a.get("upscaler");
+    eo.upscalerModel = a.opt.count("upscale-model") ? a.get("upscale-model") : "waifu2x";
+    if (!exporter::IsKnownUpscaler(eo.upscalerModel)) { std::fprintf(stderr, "--upscale-model must be waifu2x or realesrgan\n"); return 1; }
     if (!materialWorkbenchJson.is_null()) eo.materialWorkbench = materialWorkbenchJson;
     if (a.opt.count("simplify")) {
         const double pct = std::atof(a.get("simplify").c_str());

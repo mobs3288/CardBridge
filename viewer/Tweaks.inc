@@ -285,10 +285,11 @@ const char* const kNippleSizeLabels[4] = {"S", "M", "L", "XL"};
 // The five presets; the first is the tightest (a sports top), the last is the most lively.
 const char* const kJigglePresetLabels[5] = {"Subtle", "Very Subtle", "V.V. Subtle", "Natural", "Dynamic"};
 const char* const kBakeQualityLabels[3] = {"Standard", "High", "Ultra"};
+const char* const kUpscalerLabels[2] = {"Waifu2x", "Real-ESRGAN"};
 
-int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 5 : rowId == kBakeQuality ? 3 : 0; }
-int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 70 : rowId == kBakeQuality ? 62 : 32; }
-int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset || rowId == kBakeQuality ? 6 : 2; }
+int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 5 : rowId == kBakeQuality ? 3 : rowId == kBakeUpscalerModel ? 2 : 0; }
+int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 70 : rowId == kBakeQuality ? 62 : rowId == kBakeUpscalerModel ? 100 : 32; }
+int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset || rowId == kBakeQuality || rowId == kBakeUpscalerModel ? 6 : 2; }
 RECT PresetChipRect(int rowId, int i, int y) {
     const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
     const int x = 52 + i * (w + gap);
@@ -328,6 +329,7 @@ int ActivePresetChip(int rowId) {
         return best;
     }
     if (rowId == kBakeQuality) return std::clamp(g.bakeQuality, 0, 2);
+    if (rowId == kBakeUpscalerModel) return g.upscaleUseEsrgan ? 1 : 0;
     if (rowId == kJigglePreset) {
         switch (assemble::MatchJigglePreset(g.jiggle)) {
         case assemble::JigglePreset::Subtle: return 0;
@@ -346,9 +348,16 @@ const char* PresetChipText(int rowId, int i) {
     if (rowId == kNippleSize && i >= 0 && i < 4) return kNippleSizeLabels[i];
     if (rowId == kJigglePreset && i >= 0 && i < 5) return kJigglePresetLabels[i];
     if (rowId == kBakeQuality && i >= 0 && i < 3) return kBakeQualityLabels[i];
+    if (rowId == kBakeUpscalerModel && i >= 0 && i < 2) return kUpscalerLabels[i];
     return "";
 }
 void ApplyPresetChip(int rowId, int chip) {
+    if (rowId == kBakeUpscalerModel) {
+        g.upscaleUseEsrgan = chip != 0;
+        Log(std::string("upscaler: ") + kUpscalerLabels[g.upscaleUseEsrgan ? 1 : 0]);
+        InvalidatePanel();
+        return;
+    }
     if (rowId == kBakeQuality) {
         chip = std::clamp(chip, 0, 2);
         if (chip == g.bakeQuality) return;

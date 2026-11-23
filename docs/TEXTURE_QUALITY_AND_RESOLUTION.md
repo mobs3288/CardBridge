@@ -137,6 +137,16 @@ maps are left at their authored size. Output is lossless PNG. A single material'
 texels — a thin antialiased edge band — while the interior stayed fully opaque. Measured on that
 card: 17 colour textures upscaled, export size 2.3 MB → 7.6 MB.
 
+### Real-ESRGAN anime model (0.7.15)
+
+`--upscale-model realesrgan` (viewer: **Model: Real-ESRGAN**) uses the x4plus-anime ncnn model with
+`realesrgan-ncnn-vulkan.exe` and `models-realesrgan-anime/` beside it (model files from
+`github.com/Nenotriple/gimp_upscale`, original model by xinntao, BSD-3-Clause). It is generally
+sharper on line art than waifu2x. A cutout atlas stores black in fully transparent texels; before
+the colour model runs those texels have their RGB filled from the nearest covered neighbour
+(`TextureUpscaler.cpp::FillTransparentRgb`), otherwise the black bleeds into the visible edge. Both
+models interpolate alpha, producing a thin antialiased edge band (~0.5% of texels).
+
 Honest limits: this is interpolation, not recovered source detail. It makes edges and small features
 look cleaner at zoom, but cannot add information the bake never captured. Higher factors cost disk
 space and GPU time. The MMD A/B in section 4 is still the acceptance test — CardBridge's preview does

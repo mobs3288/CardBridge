@@ -250,7 +250,7 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
                kSkinShadeUnder = 210, kSkinShadeTop = 211, kSkinShadeWidth = 212, kSkinAo = 213,
                kTransStrength = 214, kTransSize = 215, kNoseRidge = 216, kNoseRidgeOpacity = 217,
               kNippleIn = 300, kAPose = 301, kPhysics = 302, kJiggleBust = 303, kJiggleButt = 304, kAutoCloth = 306,
-              kOriginalGarment = 309, kBakeQuality = 310, kBakeUpscale = 311,   // Look tab: bake quality chips + upscale switch
+              kOriginalGarment = 309, kBakeQuality = 310, kBakeUpscale = 311, kBakeUpscalerModel = 312,   // Look tab: bake quality / upscale settings
               kJiggleMass = 320, kJiggleStiffness = 321, kJiggleDamping = 322, kJiggleGravity = 323,
               kJiggleAmpVertical = 324, kJiggleAmpHorizontal = 325, kJiggleAmpDepth = 326,
               kJiggleRotation = 327, kJiggleStrength = 328, kJiggleSimHz = 329, kJigglePreset = 330,
@@ -532,7 +532,8 @@ struct App {
     bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
     bool originalGarment = true;                  // Look tab: keep the card's own garment vertices, the drape exactly as the viewer shows it (no vertex fix); off = run the clipping correction in the preview and the export
     int bakeQuality = 0;                          // Look tab: shader bake quality, 0 = standard (1024), 1 = high (2048), 2 = ultra (4096); same presets as the CLI
-    bool upscaleTextures = false;                 // Look tab: upscale the PMX's colour textures 2x with waifu2x (open source, optional)
+    bool upscaleTextures = false;                 // Look tab: upscale the PMX's colour textures 2x (open source, optional)
+    bool upscaleUseEsrgan = false;                // Look tab: Real-ESRGAN anime model instead of waifu2x
     float heightCm = 160.0f, baseHeightCm = 160.0f;   // target height (cm) the whole model scales to; base = its measured rest height
     float sag = 1.0f;                                 // static hang scale (1 = the card's own, 0 = none, 2 = double)
     float sagDefault = 1.0f;                          // per-card reset for the sag slider, from the card's own chains/size

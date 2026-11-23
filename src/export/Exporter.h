@@ -34,7 +34,8 @@ struct ExportOptions {
     // Off by default; an unresolvable tool keeps the normal export unchanged.
     bool upscaleTextures = false;
     int upscaleScale = 2;
-    std::string upscalerExe, upscalerModel;
+    std::string upscalerExe;                       // explicit exe path; auto-detected when empty
+    std::string upscalerModel = "waifu2x";         // "waifu2x" or "realesrgan" (x4plus-anime)
     bool physics = true;           // rigid bodies and joints for hair, skirts and ribbons; false = a rigid PMX with no physics at all
     bool jiggleBust = true;        // breast jiggle physics (the body's own jiggle chains); default on
     bool jiggleButt = false;       // hip / butt jiggle physics; default off - the card's butt sway reads as the back of the skirt vibrating. [--jiggle-butt] enables it

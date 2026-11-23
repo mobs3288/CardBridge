@@ -1014,7 +1014,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         std::string exe = opt.upscalerExe, model = opt.upscalerModel, err;
         if (exe.empty() || model.empty() || !fileio::Exists(model)) {
             std::string why;
-            if (!ResolveUpscaler(exe, model, &why)) {
+            if (!ResolveUpscaler(opt.upscalerModel, exe, model, &why)) {
                 if (opt.log) opt.log("texture upscaling skipped: " + why);
                 exe.clear();
             }
@@ -1024,10 +1024,10 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
             for (const auto& pe : pendingEncodes) {
                 if (!IsUpscalableTexture(pe.file)) continue;
                 const std::string full = fileio::Join(opt.outDir, pe.file);
-                if (UpscalePngInPlace(exe, model, full, opt.upscaleScale, &err)) ++done;
+                if (UpscalePngInPlace(opt.upscalerModel, exe, model, full, opt.upscaleScale, &err)) ++done;
                 else if (opt.log) opt.log("upscale failed for " + pe.file + ": " + err);
             }
-            if (opt.log) opt.log("upscaled " + std::to_string(done) + " colour texture(s) " + std::to_string(opt.upscaleScale) + "x with waifu2x");
+            if (opt.log) opt.log("upscaled " + std::to_string(done) + " colour texture(s) " + std::to_string(opt.upscaleScale) + "x with " + opt.upscalerModel);
         }
     }
     report(0.52, "morphs and physics");

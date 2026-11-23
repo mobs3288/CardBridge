@@ -79,6 +79,7 @@ void StartExport() {
     const bool originalGarment = (fixEnv && *fixEnv) ? std::string(fixEnv) == "0" : g.originalGarment;
     const exporter::BakeQuality bakeQuality = ViewerBakeQuality();   // snapshot: the worker runs on a copy of the scene
     const bool upscaleTextures = g.upscaleTextures;
+    const char* const upscaleModel = g.upscaleUseEsrgan ? "realesrgan" : "waifu2x";
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
     const assemble::ProportionLayer correctionLayer = ProportionLayerNow();   // the layer the scene on screen was re-shaped with
     if (!correctionLayer.empty() && correctionLayer.enabled)
@@ -88,7 +89,7 @@ void StartExport() {
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, bakeQuality, upscaleTextures, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -138,7 +139,8 @@ void StartExport() {
             eo.jiggle = jiggle;
             eo.assetLibrary = library;
             eo.modsFolder = mods;
-            eo.upscaleTextures = upscaleTextures;   // optional waifu2x pass on the written PNGs (viewer switch)
+            eo.upscaleTextures = upscaleTextures;   // optional learned upscaling of the written PNGs (viewer switches)
+            eo.upscalerModel = upscaleModel;
             if (matCopy.IsDirty()) {
                 material::MaterialFile mf = material::MakeMaterialFile(scene, matCopy, matSha);
                 eo.materialFile = "viewer";

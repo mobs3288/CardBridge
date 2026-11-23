@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.15] - 2026-11-23
+
+### Added
+
+- **Selectable upscaler model**: `--upscale-model waifu2x|realesrgan` and the viewer's Look tab "Model: Waifu2x / Real-ESRGAN" chips. Real-ESRGAN uses the x4plus-anime ncnn model and is usually sharper on line art. Before the model runs, fully transparent texels have their RGB filled from the nearest covered texel (the cutout atlas stores black there), preventing black bleed at edges. 19,274 unit checks pass; verified on the Yoko outfit-7 bra atlas in MMD-bound exports.
+
 ## [0.7.14] - 2026-11-23
 
 ### Added

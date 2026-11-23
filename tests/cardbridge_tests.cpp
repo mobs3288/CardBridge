@@ -8294,6 +8294,9 @@ void unitTests() {
         CHECK(!exporter::IsUpscalableTexture("toon01.png"));
         CHECK(!exporter::IsUpscalableTexture("textures/sphere_hair_15.png"));
         CHECK(!exporter::IsUpscalableTexture("notes.txt"));
+        CHECK(exporter::IsKnownUpscaler("waifu2x"));
+        CHECK(exporter::IsKnownUpscaler("realesrgan"));
+        CHECK(!exporter::IsKnownUpscaler("magic"));
     });
 
     test("shader map cap: default 1024, preset setter restores cleanly", [] {

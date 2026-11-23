@@ -5,18 +5,23 @@
 namespace cardbridge {
 namespace exporter {
 
-// Optional post-export texture upscaling through waifu2x-ncnn-vulkan (MIT, github.com/nihui/waifu2x-ncnn-vulkan).
-// It is a plain external program invoked on the PNGs after they are written; the PMX needs no change because
-// PMX texture references carry no dimensions. Nothing here is used unless the caller opts in.
+// Optional post-export texture upscaling through open-source Vulkan upscalers. It is a plain
+// external program invoked on the PNGs after they are written; PMX stores no texture dimensions,
+// so no PMX change is needed. Nothing here is used unless the caller opts in.
 
-// Finds waifu2x-ncnn-vulkan.exe and its models directory. `exe` may be an explicit path; otherwise the
-// CARDBRIDGE_UPSCALER env var, tools/upscaler/, and PATH are tried. Returns false with a reason in err.
-bool ResolveUpscaler(std::string& exe, std::string& modelDir, std::string* err);
+// "waifu2x" (github.com/nihui/waifu2x-ncnn-vulkan, MIT) or "realesrgan" (github.com/xinntao/
+// Real-ESRGAN-ncnn-vulkan, MIT, x4plus-anime model). Case-insensitive; empty means waifu2x.
+bool IsKnownUpscaler(const std::string& model);
 
-// Upscales one PNG in place (writes a temporary file, then replaces the original). The anime-style
-// model interpolates alpha too, which antialiases cutout edges; interior alpha stays at 255.
-bool UpscalePngInPlace(const std::string& exe, const std::string& modelDir, const std::string& pngPath,
-                       int scale, std::string* err);
+// Finds the executable and its models directory. `exe` may be an explicit path; otherwise
+// CARDBRIDGE_UPSCALER, tools/upscaler/ and PATH are tried. Returns false with a reason in err.
+bool ResolveUpscaler(const std::string& model, std::string& exe, std::string& modelDir, std::string* err);
+
+// Upscales one PNG in place (temporary file, then replace). Both models interpolate alpha,
+// which antialiases cutout edges. The realesrgan path first dilates RGB into fully transparent
+// texels so the model cannot bleed their stored black into the visible edge.
+bool UpscalePngInPlace(const std::string& model, const std::string& exe, const std::string& modelDir,
+                       const std::string& pngPath, int scale, std::string* err);
 
 // Toon/sphere maps are data, not colour: upscaling them would change MMD's lighting response.
 bool IsUpscalableTexture(const std::string& fileName);
