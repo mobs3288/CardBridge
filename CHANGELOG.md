@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.22] - 2026-11-24
+
+### Fixed
+
+- **The MMD / "as exported" view no longer draws an extra, differently-shaded white bang.** KK/KKS hair draws its strand pattern through `_ColorMask` and leaves `_MainTex` unset, but `BakeShaderTextures` skipped every `Koikano/*` shader, so hair reached the plain GPU renderer with no texture at all and came out as a flat white cap over the head. Hair shader families are now baked like the rest, giving both the view and the PMX the card's lavender strand colour and detail. Verified on card KK_351156; 19,282 checks pass.
+- **Opaque-shader-family garments keep their depth writes in the MMD view.** The exported-alpha bucket now keeps `main_opaque` materials in the opaque pass instead of blending them over the body, so skirts no longer show the underwear through them.
+
 ## [0.7.17] - 2026-11-23
 
 ### Fixed
