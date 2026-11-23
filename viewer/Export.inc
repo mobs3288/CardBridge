@@ -1,5 +1,29 @@
 // viewer fragment: export, as-exported (included in order by main.cpp)
 
+// The Look tab's bake-quality preset, resolved through the same rules the CLI uses.
+namespace {
+exporter::BakeQuality ViewerBakeQuality() {
+    exporter::BakeQuality q;
+    const char* name = g.bakeQuality == 1 ? "high" : g.bakeQuality == 2 ? "ultra" : "standard";
+    if (!exporter::ResolveBakePreset(name, q)) q = exporter::BakeQuality{};
+    return q;
+}
+}
+
+void BakeQualityChanged() {
+    const exporter::BakeQuality q = ViewerBakeQuality();
+    // Shader maps are decoded during assembly, so the cap has to be set before the card is reloaded.
+    assemble::SetShaderTextureMaxSize(q.areaShaderMaps ? std::max(1024, q.maxSize) : 1024);
+    {   // the as-exported preview was baked with the old setting; drop it so X re-bakes
+        std::lock_guard<std::recursive_mutex> lock(g.mu);
+        g.expOk = false; g.showExp = false; g.expFor.reset(); g.expScene.reset(); g.gpuExp.Unload();
+    }
+    g.dirty = true;
+    Log("texture quality: " + std::string(g.bakeQuality == 1 ? "high" : g.bakeQuality == 2 ? "ultra" : "standard") +
+        " (bake cap " + std::to_string(q.maxSize) + ")");
+    ScheduleApplyTweaks();
+}
+
 // ---- export ------------------------------------------------------------------------------------------------------------
 std::string PickExportParent(HWND owner) {
     if (std::getenv("CARDBRIDGE_TEST_HOOKS") && std::getenv("CARDBRIDGE_EXPORT_PARENT")) return Slashes(std::getenv("CARDBRIDGE_EXPORT_PARENT"));   // scripted runs: no dialog
@@ -53,6 +77,7 @@ void StartExport() {
     const float sag = g.sag;
     const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");   // 0 forces the fix off (the function also honours it); anything else turns it on
     const bool originalGarment = (fixEnv && *fixEnv) ? std::string(fixEnv) == "0" : g.originalGarment;
+    const exporter::BakeQuality bakeQuality = ViewerBakeQuality();   // snapshot: the worker runs on a copy of the scene
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
     const assemble::ProportionLayer correctionLayer = ProportionLayerNow();   // the layer the scene on screen was re-shaped with
     if (!correctionLayer.empty() && correctionLayer.enabled)
@@ -62,7 +87,7 @@ void StartExport() {
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, bakeQuality, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -83,12 +108,13 @@ void StartExport() {
             // Colour only, graded like the preview (G): the PMX viewer or engine does the lighting over a white material.
             {   // the skip reasons land in the log: a skipped material stays a white sheet in the PMX, silently no more
                 std::string bakeNote;
-                exporter::BakeShaderTextures(scene, 1024, false, &bakeNote,
+                exporter::BakeShaderTextures(scene, bakeQuality.maxSize, false, &bakeNote,
                     [](const std::string& m) {
                         Log("  " + m);
                         const double f = ParseBakeFrac(m);
                         ProgSet(f >= 0.0 ? 0.06 + f * 0.44 : -1.0, m);
-                    }, true, true, [] { return ProgCancelled(); });
+                    }, true, true, [] { return ProgCancelled(); },
+                    bakeQuality.supersample, bakeQuality.islandPadding);
                 if (!bakeNote.empty()) Log("  " + bakeNote);
             }
             if (ProgCancelled()) throw Cancelled{};
@@ -301,12 +327,13 @@ void ToggleAsExported() {
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; MorphsOnExportViewLoaded(); g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
     const bool grade = exporter::ColourGradeEnabled();
+    const exporter::BakeQuality bakeQuality = ViewerBakeQuality();
     const bool applyOpt = g.opt.applied.set && g.opt.applied.reduction > 0.0f;
     const float optReduction = g.opt.applied.reduction;
     ProgBegin("Rendering as-exported preview (MMD look)");
     Log(std::string("baking the export preview (colour only, toon ramps, ") + (grade ? "graded" : "not graded") + ")");
     auto copy = std::make_shared<assemble::Scene>(L->scene);
-    std::thread([L, grade, copy, applyOpt, optReduction]() {
+    std::thread([L, grade, copy, applyOpt, optReduction, bakeQuality]() {
         std::shared_ptr<assemble::Scene> sc;
         bool cancelled = false;
         try {
@@ -324,11 +351,12 @@ void ToggleAsExported() {
             }
             ProgSet(0.05, "baking shader textures");
             std::string expNote;
-            exporter::BakeShaderTextures(*sc, 1024, false, &expNote,
+            exporter::BakeShaderTextures(*sc, bakeQuality.maxSize, false, &expNote,
                 [](const std::string& m) {
                     const double f = ParseBakeFrac(m);
                     ProgSet(f >= 0.0 ? 0.05 + f * 0.80 : -1.0, m);
-                }, grade, true, [] { return ProgCancelled(); });
+                }, grade, true, [] { return ProgCancelled(); },
+                bakeQuality.supersample, bakeQuality.islandPadding);
             if (!expNote.empty()) Log("  " + expNote);
             if (ProgCancelled()) throw Cancelled{};
         } catch (const Cancelled&) {

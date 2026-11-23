@@ -255,6 +255,20 @@ try {
         $s = Shot $t[0]
         $sliders = @($lay.rows | Where-Object { $_.kind -eq 1 -and $_.y -ge 0 }).Count
         Check "$($t[0]): sliders are listed" ($sliders -gt 0) "$sliders visible"
+        if ($t[0] -eq 'look') {
+            $chips = @($lay.rows | Where-Object { $_.id -eq 310 -and $_.kind -eq 6 -and $_.y -ge 0 })
+            Check 'look: bake-quality chips are listed' ($chips.Count -eq 1)
+            if ($chips.Count -eq 1) {
+                # Chip centres: x = 52 + i*(62+6); the dumped y is the row centre.
+                Click 151 ([int]$chips[0].y) 250
+                $after = WaitFor { param($l) $l.state.loaded -and -not $l.state.busy -and $l.bakeQuality -eq 1 } 40
+                Check 'look: High chip sets the bake preset' ($null -ne $after) "bakeQuality=$($after.bakeQuality)"
+                if ($after) {
+                    Click 83 ([int]$chips[0].y) 250
+                    [void](WaitFor { param($l) $l.state.loaded -and -not $l.state.busy -and $l.bakeQuality -eq 0 } 40)
+                }
+            }
+        }
     }
     if (Want 'proportions') {
         Write-Host 'proportions tab'

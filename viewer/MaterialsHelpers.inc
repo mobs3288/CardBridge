@@ -1,5 +1,7 @@
 // viewer fragment: materials helpers, picker, save/load (included in order by main.cpp)
 
+void BakeQualityChanged();   // defined in Export.inc: applies the preset cap and rebuilds the scene
+
 // ---- materials (Stage 2) ----------------------------------------------------------------------------------------------
 // The workbench state lives in App; these helpers keep slider buffers in sync
 // with the effective material and apply buffer changes to the override.
@@ -396,6 +398,10 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
     else if (tab == TabLook) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
         rows.push_back({1, kHeightCm, "Height (cm)", "Height"});
+        rows.push_back({0, -1, "Texture quality (shader bake)", "Bake quality"});
+        rows.push_back({6, kBakeQuality, "Preset:", "Bake quality"});
+        rows.push_back({4, 0, "standard 1024 / high 2048 / ultra 4096; no upscaling", "Bake quality"});
+        rows.push_back({4, 0, "applies to PMX + as-exported view; reloads the card", "Bake quality"});
         rows.push_back({0, -1, "Skin shading: automatic creases (cleavage, under the breasts, navel)", "Skin shading"});
         rows.push_back({1, kSkinShade, "Cleavage shading", "Skin shading"});
         rows.push_back({1, kSkinShadeUnder, "Fold under the breasts", "Skin shading"});
@@ -564,6 +570,7 @@ bool TweakChanged(int id) {
     if (id == kJiggleButt) return g.jiggleButt;
     if (id == kAutoCloth) return g.autoCloth;
     if (id == kOriginalGarment) return g.originalGarment;   // the switch shows ON by default (like the A-pose switch)
+    if (id == kBakeQuality) return g.bakeQuality != 0;
     if (id == kTransBrush) return g.transBrush;
     if (id == kTransErase) return g.transErase;
     if (id == kNipplePink) return !g.tw.pinkNipples;
@@ -617,6 +624,7 @@ void ResetTweak(int id) {
     else if (id == kJiggleButt) g.jiggleButt = false;   // reset to the new default (butt jiggle off)
     else if (id == kAutoCloth) g.autoCloth = false;
     else if (id == kOriginalGarment) g.originalGarment = true;
+    else if (id == kBakeQuality) { g.bakeQuality = 0; BakeQualityChanged(); }
     else if (id == kTransBrush || id == kTransErase) {
         if (id == kTransBrush) g.transBrush = false; else g.transErase = false;
         TransSwitchChanged(id);   // the toggle reverts the bake at once (the paint is kept)

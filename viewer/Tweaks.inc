@@ -266,6 +266,7 @@ bool SliderFor(int id, SliderRef& r) {
 // Pose controls change the picture at once, no re-assembly. Morphs too: a weight is a live edit, like a pose bone.
 bool IsLiveId(int id) { return id == kAPose || id == kAPoseDeg || id == kHeightCm || id == kSag || (id >= kBoneEdit && id < kBoneEdit + kBoneEditCount) || (id >= kMatBase && id < kMatBase + kMatCount) || (id >= kMorphBase && id < kMorphBase + static_cast<int>(g.morphWeights.size())); }
 void TransSwitchChanged(int id);   // defined in Paint.inc (the translucency switch: apply or revert the bake at once)
+void BakeQualityChanged();         // defined in Export.inc (reload the card so shader maps use the preset cap)
 void TransApplyNow();              // defined in Paint.inc (re-applies the baked alpha from the stored masks)
 void TransClearPaint();            // defined in Paint.inc (the "clear the brush" button)
 
@@ -283,10 +284,11 @@ constexpr float kNippleSizeMm[4] = {-4.0f, 0.0f, 4.0f, 8.0f};   // out/in offset
 const char* const kNippleSizeLabels[4] = {"S", "M", "L", "XL"};
 // The five presets; the first is the tightest (a sports top), the last is the most lively.
 const char* const kJigglePresetLabels[5] = {"Subtle", "Very Subtle", "V.V. Subtle", "Natural", "Dynamic"};
+const char* const kBakeQualityLabels[3] = {"Standard", "High", "Ultra"};
 
-int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 5 : 0; }
-int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 70 : 32; }
-int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset ? 6 : 2; }
+int PresetChipCount(int rowId) { return rowId == kNippleSize ? 4 : rowId == kBustCup ? kBustCupCount : rowId == kBustBand ? kBustBandCount : rowId == kJigglePreset ? 5 : rowId == kBakeQuality ? 3 : 0; }
+int PresetChipW(int rowId) { return rowId == kNippleSize ? 52 : rowId == kBustCup ? 37 : rowId == kJigglePreset ? 70 : rowId == kBakeQuality ? 62 : 32; }
+int PresetChipGap(int rowId) { return rowId == kNippleSize ? 6 : rowId == kJigglePreset || rowId == kBakeQuality ? 6 : 2; }
 RECT PresetChipRect(int rowId, int i, int y) {
     const int w = PresetChipW(rowId), gap = PresetChipGap(rowId);
     const int x = 52 + i * (w + gap);
@@ -325,6 +327,7 @@ int ActivePresetChip(int rowId) {
         for (int i = 0; i < 4; ++i) { const float d = std::fabs(r.Value() - kNippleSizeMm[i]); if (d < bestD) { bestD = d; best = i; } }
         return best;
     }
+    if (rowId == kBakeQuality) return std::clamp(g.bakeQuality, 0, 2);
     if (rowId == kJigglePreset) {
         switch (assemble::MatchJigglePreset(g.jiggle)) {
         case assemble::JigglePreset::Subtle: return 0;
@@ -342,9 +345,17 @@ const char* PresetChipText(int rowId, int i) {
     if (rowId == kBustCup && i >= 0 && i < kBustCupCount) return kBustCupLabels[i];
     if (rowId == kNippleSize && i >= 0 && i < 4) return kNippleSizeLabels[i];
     if (rowId == kJigglePreset && i >= 0 && i < 5) return kJigglePresetLabels[i];
+    if (rowId == kBakeQuality && i >= 0 && i < 3) return kBakeQualityLabels[i];
     return "";
 }
 void ApplyPresetChip(int rowId, int chip) {
+    if (rowId == kBakeQuality) {
+        chip = std::clamp(chip, 0, 2);
+        if (chip == g.bakeQuality) return;
+        g.bakeQuality = chip;
+        BakeQualityChanged();
+        return;
+    }
     if (rowId == kBustBand || rowId == kBustCup) {
         SliderRef r;
         if (!SliderFor(kBodyBust, r) || !r.Valid()) return;

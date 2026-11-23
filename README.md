@@ -176,6 +176,8 @@ Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memor
 | `high` | 2048 | 2 | 2048 |
 | `ultra` | 4096 | 2 | 4096 |
 
+The same three presets are in the viewer's **Look** tab, at the top: **Texture quality → Preset: Standard / High / Ultra**. Changing it reloads the card (shader maps are decoded during assembly) and re-bakes the "as exported" view, so the viewer and the PMX export use the same setting. It applies to the current session only; for repeated exports use the CLI flag.
+
 `standard` is byte-identical to older exports. Higher presets never upscale a small source texture — they help only where the card or a mod supplies larger source images. Internal rendering is capped at 4096 per side so `ultra` stays practical; expect roughly 4x the bake time of `standard` for textures that are upscaled internally. Judge the result in MMD, not in CardBridge's preview.
 
 ### Comparing the viewer view with the MMD output

@@ -217,6 +217,7 @@ void DumpTestLayout() {
     j["track"] = {kTrackL, kTrackR};
     j["rowH"] = kRowH;
     j["tab"] = g.tab;
+    j["bakeQuality"] = g.bakeQuality;   // Look tab preset: so a scripted click can verify the chip set it
     j["tabs"] = nlohmann::json::array();
     for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, true});
     j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};

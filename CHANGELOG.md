@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.13] - 2026-11-23
+
+### Added
+
+- **Viewer bake-quality control**: the Look tab now has a "Texture quality" preset row (Standard / High / Ultra) at the top, driving both the PMX export and the "as exported" preview through the same settings as `--bake-quality`. Switching presets reloads the card so shader maps use the new cap and discards the cached export preview. `tools/viewer_smoke.ps1` now clicks High and verifies the state; a private off-screen click test confirmed `0 → 1`. See `docs/TEXTURE_QUALITY_AND_RESOLUTION.md`.
+
 ## [0.7.12] - 2026-11-23
 
 ### Added

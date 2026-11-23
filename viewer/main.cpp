@@ -42,6 +42,7 @@
 #include "export/MorphCatalog.h"
 #include "export/SkeletonOverlay.h"
 #include "export/ColourGrade.h"
+#include "export/BakeQuality.h"
 #include "export/Exporter.h"
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"

@@ -29,6 +29,11 @@ are untouched.
 - **`--bake-quality standard|high|ultra`** (default `standard`) and **`--bake-size N`**
   (64..8192, overrides only the resolution) are resolved before assembly. Unknown presets
   are rejected with a clear usage error; existing flags and defaults are unchanged.
+- The viewer exposes the same three presets in the **Look** tab ("Texture quality"). A chip
+  click applies the cap, drops the cached "as exported" bake and reloads the card so shader
+  maps are decoded at the new cap. The setting is per-session (the CLI flag is the durable
+  one for scripted exports). Verified with `tools/viewer_smoke.ps1 -Only look`, which now
+  clicks High and checks the state dump, plus a private off-screen click test.
 - `BakeShaderTextures` gained two trailing defaulted parameters (`supersample`,
   `islandPadding`), so the viewer and the diagnostic tools keep calling it exactly as before.
 - **Supersampling** renders at up to 2x per output texel and reduces **once** with an
