@@ -341,18 +341,6 @@ cardbridge/
   VERSION             the one place the version number is written
 ```
 
-## Milestones
-
-- [x] **0.** Offline feasibility study (verdict: go)
-- [x] **1.** Headless proof of concept: one real card to PMX, no game process (verified on two cards; open items in the feasibility doc, 12.4)
-- [ ] **2.** Live preview and part tree on the engine renderer
-- [ ] **3.** PMX part organisation, toggle testing, validation
-- [ ] **4.** Standalone UI, project save/load
-- [ ] **5.** Slot replacement and mod robustness
-- [x] **6.** Packaging (installer + portable ZIP, reproducible build)
-
-Milestone 1 acceptance tests (A1 to A10) are listed in the feasibility document.
-
 ---
 
 <p align="center">
