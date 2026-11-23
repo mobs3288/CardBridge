@@ -114,7 +114,35 @@ Method:
 
 No MMD process was running when this work was done, so no visual sign-off is claimed here.
 
-## 5. Remaining limitations
+## 5. Optional learned upscaling (0.7.14)
+
+The resolution presets could not fix the stair-stepped edges on a cutout garment (e.g. Yoko Littner,
+`KK_237456.png`, outfit 7). Those come from **binary alpha**: the bra atlas has only alpha 0 and 255,
+so its silhouette is a hard one-texel staircase. No amount of shader baking at the same source
+resolution changes that. An external open-source upscaler does help, because it interpolates across
+the edge.
+
+**Tool:** [waifu2x-ncnn-vulkan](https://github.com/nihui/waifu2x-ncnn-vulkan) (MIT), Windows release
+`20250915`, `models-upconv_7_anime_style_art_rgb`. It is optional and never required:
+
+- CLI: `--upscale 2` (2..8), optionally `--upscaler <exe>`.
+- Viewer: Look tab → "Upscale PMX textures 2x (waifu2x, open source)".
+- Auto-detection: explicit path → `CARDBRIDGE_UPSCALER` → `tools/upscaler/waifu2x-ncnn-vulkan.exe` → `PATH`.
+- If the tool or its models are missing, the export continues with the original PNGs and logs why.
+
+`src/export/TextureUpscaler.cpp` runs the tool after the PNGs are written (PMX has no texture
+dimensions, so no PMX change is needed). Only colour PNGs are processed; `toon*` and `sphere*` data
+maps are left at their authored size. Output is lossless PNG. A single material's cutout atlas
+(`baked_cf_m_bot_pants01_cutout_92_opaque.png`, 1024²) became 2048² with **0.52%** fractional-alpha
+texels — a thin antialiased edge band — while the interior stayed fully opaque. Measured on that
+card: 17 colour textures upscaled, export size 2.3 MB → 7.6 MB.
+
+Honest limits: this is interpolation, not recovered source detail. It makes edges and small features
+look cleaner at zoom, but cannot add information the bake never captured. Higher factors cost disk
+space and GPU time. The MMD A/B in section 4 is still the acceptance test — CardBridge's preview does
+not apply upscaling, only the written PMX does.
+
+## 6. Remaining limitations
 
 - Higher presets cannot recover detail that was never in the source. Upscaling small textures
   would only interpolate; it is deliberately not done.

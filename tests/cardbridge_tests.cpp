@@ -46,6 +46,7 @@
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
 #include "export/BakeQuality.h"
+#include "export/TextureUpscaler.h"
 #include "export/RotateGizmo.h"
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
@@ -8285,6 +8286,14 @@ void unitTests() {
         BakedTextureSize(256, 512, 4096, w, h); CHECK(w == 256 && h == 512);
         // Historical floor for tiny sources.
         BakedTextureSize(32, 32, 1024, w, h); CHECK(w == 64 && h == 64);
+    });
+
+    test("texture upscaling: colour PNGs only, toon and sphere maps are data", [] {
+        CHECK(exporter::IsUpscalableTexture("baked_cf_m_bra_00.png"));
+        CHECK(exporter::IsUpscalableTexture("textures/baked_cf_m_body_00_opaque.png"));
+        CHECK(!exporter::IsUpscalableTexture("toon01.png"));
+        CHECK(!exporter::IsUpscalableTexture("textures/sphere_hair_15.png"));
+        CHECK(!exporter::IsUpscalableTexture("notes.txt"));
     });
 
     test("shader map cap: default 1024, preset setter restores cleanly", [] {

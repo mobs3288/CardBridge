@@ -106,6 +106,7 @@ add_library(cardbridge_core STATIC
     src/export/OutfitIcon.cpp
     src/export/OutfitTemplate.cpp
     src/export/Preview.cpp
+    src/export/TextureUpscaler.cpp
     src/export/SkinShade.cpp
     src/export/Translucency.cpp
     src/export/SkinAoBake.cpp

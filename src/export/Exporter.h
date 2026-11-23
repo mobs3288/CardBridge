@@ -30,6 +30,11 @@ struct ExportOptions {
     std::string baseName;          // file stem; defaults to the character name
     float scale = 12.5f;           // model units per metre (MMD convention)
     bool overwrite = false;
+    // Optional post-export upscaling of colour textures through waifu2x-ncnn-vulkan (open source, Windows).
+    // Off by default; an unresolvable tool keeps the normal export unchanged.
+    bool upscaleTextures = false;
+    int upscaleScale = 2;
+    std::string upscalerExe, upscalerModel;
     bool physics = true;           // rigid bodies and joints for hair, skirts and ribbons; false = a rigid PMX with no physics at all
     bool jiggleBust = true;        // breast jiggle physics (the body's own jiggle chains); default on
     bool jiggleButt = false;       // hip / butt jiggle physics; default off - the card's butt sway reads as the back of the skirt vibrating. [--jiggle-butt] enables it

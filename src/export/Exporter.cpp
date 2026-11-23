@@ -1,4 +1,5 @@
 #include "export/Exporter.h"
+#include "export/TextureUpscaler.h"
 #include "core/Timing.h"
 #include "mesh/Simplify.h"
 #include "mesh/Occlusion.h"
@@ -1006,6 +1007,28 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
         worker();
         for (auto& th : pool) th.join();
         for (size_t i = 0; i < n; ++i) fileio::WriteFile(fileio::Join(opt.outDir, pendingEncodes[i].file), pngs[i].data(), pngs[i].size());
+    }
+    // Optional open-source upscaling. PMX stores no texture dimensions, so replacing the PNGs is enough;
+    // toon and sphere maps are data textures and are deliberately left at their authored size.
+    if (opt.upscaleTextures && !pendingEncodes.empty()) {
+        std::string exe = opt.upscalerExe, model = opt.upscalerModel, err;
+        if (exe.empty() || model.empty() || !fileio::Exists(model)) {
+            std::string why;
+            if (!ResolveUpscaler(exe, model, &why)) {
+                if (opt.log) opt.log("texture upscaling skipped: " + why);
+                exe.clear();
+            }
+        }
+        if (!exe.empty()) {
+            size_t done = 0;
+            for (const auto& pe : pendingEncodes) {
+                if (!IsUpscalableTexture(pe.file)) continue;
+                const std::string full = fileio::Join(opt.outDir, pe.file);
+                if (UpscalePngInPlace(exe, model, full, opt.upscaleScale, &err)) ++done;
+                else if (opt.log) opt.log("upscale failed for " + pe.file + ": " + err);
+            }
+            if (opt.log) opt.log("upscaled " + std::to_string(done) + " colour texture(s) " + std::to_string(opt.upscaleScale) + "x with waifu2x");
+        }
     }
     report(0.52, "morphs and physics");
     cbtime::Scope morphsTimer("morphs + physics");

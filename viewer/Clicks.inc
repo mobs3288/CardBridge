@@ -95,6 +95,11 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         ScheduleApplyTweaks();
         return;
     }
+    if (row.kind == 2 && row.id == kBakeUpscale) {
+        if (right) ResetTweak(row.id); else g.upscaleTextures = !g.upscaleTextures;
+        Log(row.label + ": " + (g.upscaleTextures ? "on" : "off") + " (PMX export only)");
+        return;
+    }
     if (row.kind == 2 && row.id == kNipplePink) {
         if (right) ResetTweak(row.id); else g.tw.pinkNipples = !g.tw.pinkNipples;
         Log(row.label + ": " + (g.tw.pinkNipples ? "on" : "off"));

@@ -180,6 +180,8 @@ The same three presets are in the viewer's **Look** tab, at the top: **Texture q
 
 `standard` is byte-identical to older exports. Higher presets never upscale a small source texture — they help only where the card or a mod supplies larger source images. Internal rendering is capped at 4096 per side so `ultra` stays practical; expect roughly 4x the bake time of `standard` for textures that are upscaled internally. Judge the result in MMD, not in CardBridge's preview.
 
+**Optional learned upscaling:** `--upscale 2` (or 4) post-processes the exported colour PNGs with [waifu2x-ncnn-vulkan](https://github.com/nihui/waifu2x-ncnn-vulkan) (MIT, open source, GPU/Vulkan). The viewer's Look tab has the same switch ("Upscale PMX textures 2x"). It needs the tool locally: put `waifu2x-ncnn-vulkan.exe` and its `models-*` folders in `tools/upscaler/`, set `CARDBRIDGE_UPSCALER`, pass `--upscaler <exe>`, or have it on `PATH`. Without it the export is unchanged. Toon and sphere maps are never upscaled. See [`docs/TEXTURE_QUALITY_AND_RESOLUTION.md`](docs/TEXTURE_QUALITY_AND_RESOLUTION.md) for the honest limits — upscaling cannot restore detail that was never in the source, but it does interpolate cutout alpha edges (which smooths stair-stepped clothing edges).
+
 ### Comparing the viewer view with the MMD output
 
 `X` (or the **MMD** button next to *All*) switches to "as exported": the exact materials, toon ramps, edges, self-shadow and ground shadow the PMX has — what MikuMikuDance will actually show.

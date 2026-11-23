@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.14] - 2026-11-23
+
+### Added
+
+- **Optional open-source texture upscaling**: `--upscale N` (2..8) and the viewer's Look-tab "Upscale PMX textures 2x" switch post-process exported colour PNGs with waifu2x-ncnn-vulkan (MIT). Auto-detects the tool via `--upscaler`, `CARDBRIDGE_UPSCALER`, `tools/upscaler/` or PATH; without it the export is unchanged. Toon and sphere maps are excluded. The anime model interpolates alpha, which antialiases hard cutout edges (0.52% edge texels on the Yoko outfit-7 bra atlas; 17 textures, 2.3 → 7.6 MB). Upscaling cannot restore source detail; see `docs/TEXTURE_QUALITY_AND_RESOLUTION.md`. 19,271 unit checks and the viewer smoke test pass.
+
 ## [0.7.13] - 2026-11-23
 
 ### Added

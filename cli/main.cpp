@@ -229,6 +229,10 @@ void usage() {
          "                                             Higher presets never upscale small source textures. Bake time and memory grow with\n"
          "                                             the preset; only high-res source detail can benefit.\n"
          "             [--bake-size N]                override just the baked texture resolution (64..8192), e.g. --bake-size 2048.\n"
+         "             [--upscale N]                 upscale exported colour textures N times (2..8) with waifu2x-ncnn-vulkan (MIT).\n"
+         "                                             Open source, GPU (Vulkan), optional: without the tool the export is unchanged.\n"
+         "             [--upscaler <exe>]               path to waifu2x-ncnn-vulkan.exe (else CARDBRIDGE_UPSCALER,\n"
+         "                                             tools/upscaler/, or PATH). Toon and sphere maps are never upscaled.\n"
          "                                             Takes precedence over --bake-quality resolution; the other quality settings stay.\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
         "  cardbridge simplify-bench [--subdiv N]   time the triangle reduction on a synthetic closed mesh (subdiv 6 = 81920 faces; the same path LODs use)\n"
@@ -1183,6 +1187,13 @@ int cmdConvert(const Args& a) {
     eo.assetLibrary = a.get("library");
     eo.modsFolder = a.get("mods");
     eo.materialFile = a.get("materials");
+    if (a.opt.count("upscale")) {
+        const int n = std::atoi(a.get("upscale").c_str());
+        if (n < 2 || n > 8) { std::fprintf(stderr, "--upscale needs an integer factor 2..8\n"); return 1; }
+        eo.upscaleTextures = true;
+        eo.upscaleScale = n;
+    }
+    eo.upscalerExe = a.get("upscaler");
     if (!materialWorkbenchJson.is_null()) eo.materialWorkbench = materialWorkbenchJson;
     if (a.opt.count("simplify")) {
         const double pct = std::atof(a.get("simplify").c_str());
