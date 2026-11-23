@@ -1869,10 +1869,12 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) cbv[r * 4 + col] = M[r][col];
                         // The fallback shader discards c.a < 0.5 on the opaque path, except for the opaque shader family
                         // (main_clothes_opaque & friends): the game draws those fragments regardless of the texture's alpha,
-                        // so the GPU viewer must not clip them either.
-                        // Plain mode keeps skin opaque (its texture alpha is a coverage mask); the standard fallback
-                        // path keeps its existing alpha test unchanged.
-                        const bool ignoresAlpha = look ? assemble::IgnoresTextureAlpha(*I.scene, mat) : assemble::IsOpaqueShaded(mat);
+                        // so the GPU viewer must not clip them either. Plain mode keeps skin opaque (its texture alpha is a
+                        // coverage mask); the standard fallback path keeps its existing alpha test unchanged. The one
+                        // exception is a card MainTex whose bake proved a real clip: its discarded texels must not be
+                        // painted black over the garment (see CardMainTexClipsAlpha).
+                        const bool ignoresAlpha = mat.shaderClipsAlpha ? false
+                            : (look ? assemble::IgnoresTextureAlpha(*I.scene, mat) : assemble::IsOpaqueShaded(mat));
                         cbv[44] = (bucket == 0 && !ignoresAlpha) ? 1.0f : 0.0f;   // alphaGate.x
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };

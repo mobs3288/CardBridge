@@ -1183,6 +1183,7 @@ struct Builder {
                 int t = e->texId >= 0 ? embeddedTexture(e->texId, partId, main, forceSrgb) : -1;
                 if (main && t >= 0) {
                     sm.texture = t;
+                    sm.cardMainTex = true;   // structural fact: the card replaced this material's MainTex (see CardMainTexClipsAlpha)
                     sm.diffuse = {1, 1, 1, 1};
                     // The embedded image is the complete authored look; where the outfit colours are already composed
                     // into the texture the same ones must not be applied again (same rule as the outfit create path).

@@ -72,7 +72,9 @@ float CutoffOf(const assemble::SceneMaterial& mat) {
 float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
     // The opaque shader family is drawn by the game with the texture's alpha ignored (IsOpaqueShaded): fragments with stray
     // low-alpha texels draw, not discard — discarding them here is the viewer-side twin of the exporter's HasAlphaCutout fix.
-    if (!blend && assemble::IsOpaqueShaded(mat)) return 0.0f;
+    // The one exception is a card MainTex whose bake proved a real clip: its discarded texels must not be painted black
+    // over the garment (see CardMainTexClipsAlpha). Every other material keeps the existing rule unchanged.
+    if (!blend && !mat.shaderClipsAlpha && assemble::IsOpaqueShaded(mat)) return 0.0f;
     float cut = CutoffOf(mat);
     return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
@@ -1631,6 +1633,17 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             scene.warn("", "material '" + mat.name + "' baked black despite an authored texture; keeping the original texture");
             ++skipBlackBake;
             continue;
+        }
+        // A shader whose name says "opaque" can still be an alpha test. When the card replaced MainTex with an alpha-masked
+        // image (a modded garment cut into panels), the bake's own output has substantial holes: the game clips those texels
+        // while the opaque-name rule would solidify them and paint their black RGB over the garment. Trust the pixels here,
+        // but ONLY for card textures — a game texture's stray low-alpha atlas texels are not a cutout, and treating them as
+        // one put skirt/cape panels into MMD's blended pass and punched holes in them (the reverted 0.7.4 rule).
+        if (!mat.shaderClipsAlpha && assemble::CardMainTexClipsAlpha(mat, img, cov)) {
+            mat.shaderClipsAlpha = true;
+            mat.alpha = true;         // the game's clip is real: honour the baked mask in both viewers and the PMX writer
+            mat.translucent = false;
+            scene.warn("", "material '" + mat.name + "' clips its card-supplied MainTex; keeping the alpha cutout instead of drawing discarded texels black");
         }
         if (thisToon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
