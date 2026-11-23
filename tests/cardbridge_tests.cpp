@@ -1961,6 +1961,53 @@ void unitTests() {
         CHECK(laceLow > 0 && laceHigh > 0);        // the cutout keeps its holes AND draws the kept texels fully opaque in MMD
         CHECK(laceMid == 0);                       // no 190/255 tint may survive: MMD would read it as translucency
     });
+    test("export: a transparent-queue fishnet keeps its fractional alpha (no flat black stockings)", [] {
+        using namespace assemble;
+        Scene s;
+        s.name = "fishnet-alpha";
+        SceneBone root; root.name = "root"; root.parent = -1; root.pos = {0, 0, 0}; root.source = "rig"; root.world = Mat4{};
+        s.bones.push_back(root);
+        SceneTexture net; net.name = "fishnet"; net.width = 4; net.height = 4; net.rgba.resize(4 * 4 * 4);
+        for (size_t i = 0; i < net.rgba.size(); i += 4) {
+            const size_t x = (i / 4) % 4;
+            net.rgba[i] = 60; net.rgba[i + 1] = 50; net.rgba[i + 2] = 45;
+            net.rgba[i + 3] = (x % 2) ? 0 : 200;   // mesh holes and a ~0.78 tint over skin
+        }
+        s.textures.push_back(net);
+        SceneMaterial mat; mat.name = "cf_m_panst_02"; mat.shader = "Shader Forge/main_alpha";
+        mat.alpha = true; mat.texture = 0; mat.renderQueue = 3040;   // Transparent queue: the game blends it
+        s.materials.push_back(mat);
+        ScenePart part; part.id = "outfit6.pantyhose"; part.group = "Outfit"; part.meshes = {0};
+        s.parts.push_back(part);
+        SceneMesh mesh;
+        for (Vec3 v : {Vec3{-0.5f, 0, 0}, Vec3{0.5f, 0, 0}, Vec3{0.5f, 1, 0}, Vec3{-0.5f, 1, 0}}) {
+            SceneVertex sv; sv.pos = v; sv.normal = {0, 0, 1}; sv.uv = {v.x + 0.5f, v.y}; sv.bone[0] = 0; sv.weight[0] = 1; mesh.vertices.push_back(sv);
+        }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        card::Card c; c.path = "fishnet-alpha.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("fishnet_alpha") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s, c, eo);
+        const pmx::Model m = pmx::ReadPmx(fileio::ReadFile(r.pmxPath));
+        CHECK(m.materials.size() == 1);
+        CHECK(m.materials[0].diffuse.w < 0.999f);   // MMD's blended pass
+        CHECK(m.materials[0].texture >= 0);
+        const std::string path = fileio::Join(r.folder, m.textures[static_cast<size_t>(m.materials[0].texture)]);
+        int w = 0, h = 0, ch = 0;
+        stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, 4);
+        CHECK(px != nullptr);
+        int low = 0, mid = 0, high = 0;
+        if (px) {
+            for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4) {
+                if (px[i] < 64) ++low; else if (px[i] < 250) ++mid; else ++high;
+            }
+            stbi_image_free(px);
+        }
+        CHECK(low > 0 && mid > 0);   // holes stay holes, the tint stays translucent - no flat black sheet
+        CHECK(high == 0);
+    });
     test("MMD/plain view: opaque skin occludes the geometry behind the face", [] {
         using namespace assemble;
         exporter::GpuOptions go;

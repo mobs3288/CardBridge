@@ -1,5 +1,11 @@
 # MMD pantyhose transparency — root cause and fix (0.6.7)
 
+> **Update (0.7.11):** binarising at `_Cutoff` is correct only for the alpha-TEST queue (2450). A material
+> in a transparent queue (Unity 3000+, e.g. the fishnet `cf_m_panst_02` at queue 3040) *blends* its
+> authored alpha over the skin — a ~200/255 dark tint draws a fishnet, not a solid sheet. Thresholding
+> that alpha made it fully opaque black in MMD. Transparent-queue materials now keep their fractional
+> alpha; alpha-test materials keep the binary cutout described below.
+
 ## Symptom
 
 Card `C:\Users\pepsi\Downloads\KK_237456.png` (Yoko Littner, KK + RX21 mods). The internal

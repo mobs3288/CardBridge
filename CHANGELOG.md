@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.11] - 2026-11-23
+
+### Fixed
+
+- **Fishnet stockings exported as flat black (Yoko Littner, `KK_237456.png`, outfit 7)**: `cf_m_panst_02` is a `main_alpha` material in Unity's **transparent queue (3040)** — it blends its dark ~200/255 alpha over the skin, which the viewer draws as fishnet. The exporter was binarising that alpha at `_Cutoff` for every `main_alpha` material, turning the mesh into an opaque black sheet in MMD. Binarisation (and alpha-solidification) now apply only to alpha-TEST queues (<3000); transparent-queue materials keep their authored fractional alpha and MMD's 0.99 blended pass. Verified on a fresh export of outfit 6 (viewer "outfit 7") and 19,219 unit checks, including a fishnet-alpha regression test. See `docs/MMD_PANTYHOSE_ALPHA_FIX.md`.
+
 ## [0.7.10] - 2026-11-23
 
 ### Fixed

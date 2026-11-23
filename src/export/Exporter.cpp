@@ -204,6 +204,9 @@ bool IsAlphaTestSolid(const assemble::Scene& scene, const assemble::SceneMateria
     // its sub-255 alpha is a tint that passes _Cutoff, not a translucency request. Genuine cutouts,
     // translucent shaders and materials whose alpha the game ignores keep their own handling.
     if (assemble::IgnoresTextureAlpha(scene, mat) || !mat.alpha || mat.translucent) return false;
+    // A transparent-queue material (>= 3000) blends its authored alpha over what is behind it (a fishnet over skin):
+    // binarising that alpha at _Cutoff makes the mesh solid black. Only alpha-test queues may be solidified.
+    if (assemble::EffectiveRenderQueue(scene, mat) >= 3000) return false;
     if (HasAlphaCutout(scene, mat)) return false;
     if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
     return !assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
@@ -893,7 +896,11 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                     float cutoff = 0.5f;
                     for (const auto& pr : mat.props) if (pr.first == "_Cutoff") cutoff = pr.second.x;
                     const uint8_t cutLevel = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, cutoff * 255.0f)));
-                    const bool alphaTestCutout = mat.alpha && !mat.translucent && !ignoreAlpha && HasAlphaCutout(scene, mat);
+                    // Only an alpha-TEST queue (< 3000) discards below _Cutoff and draws the rest SOLID. A
+                    // transparent-queue material (>= 3000) blends its authored alpha (a fishnet's ~200/255
+                    // tint over skin): thresholding that alpha turns the mesh into a flat black sheet.
+                    const bool alphaTestCutout = mat.alpha && !mat.translucent && !ignoreAlpha &&
+                                                 assemble::EffectiveRenderQueue(scene, mat) < 3000 && HasAlphaCutout(scene, mat);
                     // Anything the PMX keeps in MMD's opaque pass (diffuse alpha 1) has no texture-alpha role either, so it is
                     // solidified: the opaque shader family, the character's skin (its alpha is a coverage mask), and alpha
                     // shaders over a fully opaque atlas. Genuine blends and cutouts keep their 0.99 and their authored alpha.
