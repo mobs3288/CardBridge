@@ -149,6 +149,11 @@ struct GpuView::Impl {
     GpuTex defaults[4];                          // white, black, gray, bump
     ID3D11SamplerState* samplerWrap = nullptr;
     ID3D11SamplerState* samplerClamp = nullptr;
+    // LOD-0 (no mip) variants for binary-alpha cutout atlases: mip averaging blends the 0/255 mask with the
+    // black island padding into partial alpha, which reads as see-through panels in the blended MMD pass.
+    ID3D11SamplerState* samplerLod0Wrap = nullptr;
+    ID3D11SamplerState* samplerLod0Clamp = nullptr;
+    std::vector<char> binaryAlpha;   // per material: its main texture's alpha is only 0/255 (a cutout mask)
     ID3D11RasterizerState* raster = nullptr;
     ID3D11RasterizerState* rasterCull = nullptr;   // back faces culled: what the game and MikuMikuDance do for a single-sided material
     ID3D11RasterizerState* rasterCullFront = nullptr;   // front faces culled: a co-located lining faced into its garment (the PMX writes it inside-out)
@@ -630,7 +635,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         Clear();
         morphDelta.clear();
         morphedMeshes.clear();
-        Rel(samplerWrap); Rel(samplerClamp);
+        Rel(samplerWrap); Rel(samplerClamp); Rel(samplerLod0Wrap); Rel(samplerLod0Clamp);
         Rel(raster); Rel(rasterCull); Rel(rasterCullFront);
         Rel(depth); Rel(depthOverlay); Rel(depthOverlayWrite); Rel(depthNoTest);
         Rel(blend); Rel(blendOverlay);
@@ -1248,6 +1253,11 @@ bool GpuView::Init(const GpuOptions& opt, std::string* why) {
     I.dev->CreateSamplerState(&sd, &I.samplerWrap);
     sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     I.dev->CreateSamplerState(&sd, &I.samplerClamp);
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.MaxLOD = 0.0f;   // cutout masks: keep alpha binary, no mip averaging
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    I.dev->CreateSamplerState(&sd, &I.samplerLod0Wrap);
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    I.dev->CreateSamplerState(&sd, &I.samplerLod0Clamp);
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE; rd.MultisampleEnable = TRUE;
     I.dev->CreateRasterizerState(&rd, &I.raster);
@@ -1435,6 +1445,21 @@ bool GpuView::Load(const assemble::Scene& scene, std::string* why,
 
     I.cutout.assign(scene.materials.size(), 0);
     for (size_t m = 0; m < scene.materials.size(); ++m) I.cutout[m] = HasCutout(scene, scene.materials[m]) ? 1 : 0;
+    // A binary-alpha (0/255) main texture is a cutout mask: sample it at LOD 0 so mip/bilinear averaging over the
+    // black island padding cannot turn it into partial alpha (see-through panels in the blended MMD pass).
+    I.binaryAlpha.assign(scene.materials.size(), 0);
+    for (size_t m = 0; m < scene.materials.size(); ++m) {
+        const int ti = scene.materials[m].texture;
+        if (ti < 0 || static_cast<size_t>(ti) >= scene.textures.size()) continue;
+        const auto& t = scene.textures[static_cast<size_t>(ti)];
+        bool has0 = false, has255 = false, binary = !t.rgba.empty();
+        for (size_t p = 3; p < t.rgba.size(); p += 4) {
+            const uint8_t a = t.rgba[p];
+            if (a == 0) has0 = true; else if (a == 255) has255 = true; else { binary = false; break; }
+        }
+        // Only a true cutout mask (both holes and solid) needs LOD 0; a fully-opaque texture keeps mip mapping.
+        I.binaryAlpha[m] = (binary && has0 && has255) ? 1 : 0;
+    }
 
     // The simple shader's normal map per material: the material's own binding whose name says normal / bump.
     // A binding that says mask is not a tangent-space normal map (_NormalMask is a mask, not a normal);
@@ -1910,7 +1935,8 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                         ctx->PSSetShaderResources(0, 1, &ft->srv);
                         const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
-                        ID3D11SamplerState* fs = ftClamp ? I.samplerClamp : I.samplerWrap;
+                        const bool ftLod0 = gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)];
+                        ID3D11SamplerState* fs = ftLod0 ? (ftClamp ? I.samplerLod0Clamp : I.samplerLod0Wrap) : (ftClamp ? I.samplerClamp : I.samplerWrap);
                         ctx->PSSetSamplers(0, 1, &fs);
                         const int nm = gs.material >= 0 && static_cast<size_t>(gs.material) < I.fbNormals.size() ? gs.material : -1;
                         const GpuTex* nt = nm >= 0 && I.fbNormals[static_cast<size_t>(nm)] ? I.fbNormals[static_cast<size_t>(nm)] : &I.defaults[3];
@@ -1985,7 +2011,8 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                             GPUDBG("  skipping invalid s register %u\n", tb.sampler);
                             continue;
                         }
-                        ID3D11SamplerState* ss = clamp ? I.samplerClamp : I.samplerWrap;
+                        const bool lod0 = gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)];
+                        ID3D11SamplerState* ss = lod0 ? (clamp ? I.samplerLod0Clamp : I.samplerLod0Wrap) : (clamp ? I.samplerClamp : I.samplerWrap);
                         ctx->PSSetSamplers(tb.sampler, 1, &ss);
                     }
                     ctx->IASetVertexBuffers(0, 1, &gm.vb, &stride, &offset);

@@ -8,6 +8,7 @@ All notable changes to CardBridge are documented here, following [Keep a Changel
 
 - **Viewer keeps the card's authored outfit fit (long skirts no longer render knee-length).** A normal card load no longer clears the outfit's coordinate-specific ABMX bone mods; the authored skirt/fit scale (e.g. `cf_d_sk_top` Y=2.0) is preserved so the viewer matches the original card and the CLI export. Clothing/coordinate imports still clear or merge the target slot through the existing ABMX merge path.
 - **Opaque outfits no longer read see-through in the baked / "as exported" view and PMX.** The body's nipple/areola overlay is now masked when the shown outfit wears a top (new structural `card::OutfitWearsTop`), reproducing the game's coverage behaviour; the pale discs that bled through opaque cloth are gone. Nude outfits keep the card's own nipple shape. Genuine cutouts and transparent-queue (fishnet) materials keep their holes / fractional alpha.
+- **Cutout garments no longer read as see-through panels in the MMD / "as exported" view.** Binary-alpha (0/255) cutout atlases are now sampled at LOD 0 (no mip averaging) in both the fallback/MMD and Lit GPU paths, so the black island padding is not blended into partial alpha. The long skirt renders solid like the card, keeping only its authored thin slits; fractional-alpha (fishnet) materials keep mip mapping.
 - Regression tests: `OutfitWearsTop` (worn top vs nude) and default-load preserving coordinate ABMX while imports still clear only the target slot. 19,282 unit checks pass.
 
 ## [0.7.16] - 2026-11-23
