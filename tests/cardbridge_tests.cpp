@@ -153,6 +153,10 @@ std::string envUtf8(const char* k) {
 
 Bytes B(std::initializer_list<int> l) { Bytes b; for (int x : l) b.push_back(static_cast<uint8_t>(x)); return b; }
 
+// u8 literals are decoded by the compiler, so UTF-8 test data does not depend
+// on the compiler's execution charset (MSVC without /utf-8, for example).
+std::string Utf8(const char8_t* s) { return std::string(reinterpret_cast<const char*>(s)); }
+
 // A minimal valid PNG (1x1) so card-loader tests need no files.
 Bytes tinyPng() {
     // 1x1 RGBA PNG generated with Python zlib, CRCs included
@@ -10117,6 +10121,63 @@ void meshTests() {
     });
 }
 
+void exportFileNameTests() {
+    test("export: character names keep Korean, Japanese, Chinese and spaces in the PMX file name", [] {
+        struct Case { std::string name, file; };
+        const Case cases[] = {
+            {Utf8(u8"프린츠 오이겐"),        Utf8(u8"프린츠 오이겐.pmx")},
+            {Utf8(u8"初音ミク"),            Utf8(u8"初音ミク.pmx")},
+            {Utf8(u8"初音未来"),            Utf8(u8"初音未来.pmx")},
+            {Utf8(u8"Hatsune Miku"),        Utf8(u8"Hatsune Miku.pmx")},
+            {Utf8(u8"프린츠 오이겐 Miku"),  Utf8(u8"프린츠 오이겐 Miku.pmx")},
+        };
+        for (const auto& c : cases) {
+            const std::string actual = fileio::SafeFileName(c.name) + ".pmx";
+            CHECK(actual == c.file);
+            CHECK(actual.find('_') == std::string::npos);   // no valid character was replaced
+        }
+    });
+
+    test("export: file names sanitize only genuinely invalid Windows characters", [] {
+        CHECK(fileio::SafeFileName("A-Z_a.b 1") == "A-Z_a.b 1");        // ASCII and spaces are untouched
+        CHECK(fileio::SafeFileName("a<b>c:d\"e|f?g*h") == "a_b_c_d_e_f_g_h");
+        CHECK(fileio::SafeFileName("a\\b") == "a_b");
+        CHECK(fileio::SafeFileName(std::string("a\nb\tc")) == "a_b_c");
+        CHECK(fileio::SafeFileName("") == "unnamed");
+        // A stray continuation byte cannot leak into a UTF-8 path: it becomes one '_'.
+        std::string broken = "a";
+        broken.push_back(static_cast<char>(0x80));
+        broken += 'b';
+        CHECK(fileio::SafeFileName(broken) == "a_b");
+        // The 80-character cap counts scalars, never bytes (no half-written UTF-8 at the end).
+        std::string korean;
+        for (int i = 0; i < 100; ++i) korean += Utf8(u8"가");
+        CHECK(fileio::SafeFileName(korean).size() == 80 * 3);
+        CHECK(fileio::SafeFileName(std::string(100, 'a')).size() == 80);
+    });
+
+    test("export: a Korean name writes a real PMX at the exact UTF-8 path on Windows", [] {
+        auto s = makeSkinnedScene();
+        s.name = Utf8(u8"프린츠 오이겐");
+        card::Card c;
+        c.path = "card.png";
+        exporter::ExportOptions eo;
+        // The folder is the caller's (correct) Unicode name; the file name used to turn into underscores.
+        eo.outDir = tempPath(Utf8(u8"프린츠 오이겐")) + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s, c, eo);
+        const std::string expected = Utf8(u8"프린츠 오이겐.pmx");
+        CHECK(fileio::FileName(r.pmxPath) == expected);
+        CHECK(r.pmxPath == fileio::Join(eo.outDir, expected));
+        CHECK(fileio::Exists(r.pmxPath));
+        CHECK(fileio::FileSize(r.pmxPath) > 0);
+        // Independent check: construct the native path from UTF-8 and ask the OS, not the FileIo helper.
+        const std::u8string native(r.pmxPath.begin(), r.pmxPath.end());
+        CHECK(std::filesystem::exists(std::filesystem::path(native)));
+        CHECK(std::filesystem::path(native).filename().u8string() == std::u8string(expected.begin(), expected.end()));
+    });
+}
+
 void lodPreserveTests() {
     using namespace mesh;
 
@@ -11376,6 +11437,7 @@ int main() {
     unitTests();
     pmxImportTests();
     meshTests();
+    exportFileNameTests();
     lodPreserveTests();
     customHairTests();
     integrationTests();

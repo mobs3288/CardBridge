@@ -19,7 +19,6 @@
 #include <stb_image_write.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -36,17 +35,6 @@
 namespace cardbridge::exporter {
 
 namespace {
-
-std::string safeFileName(const std::string& s) {
-    std::string out;
-    for (unsigned char c : s) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.') out.push_back(static_cast<char>(c));
-        else out.push_back('_');
-    }
-    if (out.empty()) out = "unnamed";
-    if (out.size() > 80) out.resize(80);
-    return out;
-}
 
 Bytes encodePng(const assemble::SceneTexture& t) {
     Bytes out;
@@ -758,7 +746,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
     auto report = [&](double frac, const std::string& stage) { if (opt.progress) opt.progress(frac, stage); };
     auto checkCancel = [&]() { if (opt.cancelled && opt.cancelled()) throw Cancelled{}; };
-    std::string stem = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
+    std::string stem = fileio::SafeFileName(opt.baseName.empty() ? scene.name : opt.baseName);
 
     if (!isLod && fileio::Exists(opt.outDir) && !opt.overwrite) {
         std::vector<std::string> existing = fileio::ListFiles(opt.outDir, {".pmx", ".png", ".json"});
@@ -940,7 +928,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                             rewrote = true;
                             tp = &rewritten;
                         }
-                        std::string file = "textures/" + safeFileName(tp->name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
+                        std::string file = "textures/" + fileio::SafeFileName(tp->name) + "_" + std::to_string(ti) + (solid ? "_opaque" : "") + ".png";
                         log("texture " + tp->name + " (" + std::to_string(tp->width) + "x" + std::to_string(tp->height) + ")");
                         PendingEncode pe;
                         if (rewritten.width > 0) pe.solidCopy = std::move(rewritten);
@@ -1318,7 +1306,7 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
 // and share its textures; the manifest lists them as "lods" together with the simplification that was applied.
 ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, const ExportOptions& opt) {
     auto log = [&](const std::string& s) { if (opt.log) opt.log(s); };
-    const std::string stem0 = opt.baseName.empty() ? safeFileName(scene.name) : safeFileName(opt.baseName);
+    const std::string stem0 = fileio::SafeFileName(opt.baseName.empty() ? scene.name : opt.baseName);
     const float requested = std::clamp(opt.simplifyPercent, 0.0f, 95.0f) / 100.0f;
     // The occlusion map is the same for the main reduction and every LOD pass of this export: compute it once.
     const bool anyReduce = (requested > 0.0f) || std::any_of(opt.lodTargets.begin(), opt.lodTargets.end(),

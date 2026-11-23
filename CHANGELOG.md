@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.9] - 2026-11-23
+
+### Fixed
+
+- **Non-ASCII character names became underscores in the exported PMX file name (KK/KKS)**: the exporter sanitized the file stem byte by byte and replaced every byte outside ASCII alphanumerics with `_`, so `프린츠 오이겐` exported as `___________________.pmx` while the output folder kept the correct Korean name. Naming now goes through `fileio::SafeFileName`, which decodes UTF-8 scalars and replaces only characters Windows forbids in a file name (`< > : " / \ | ? *` and control codes). Korean, Japanese, Simplified/Traditional Chinese, spaces and punctuation are kept byte for byte - no transliteration or normalization - and the 80-character cap now counts characters rather than bytes so it cannot cut a multibyte scalar in half. Verified with `KK_238563.png`: it now writes `프린츠 오이겐.pmx` inside `프린츠 오이겐`; 19,207 unit checks pass, including new regression tests for Korean, Japanese, Chinese, English and mixed names and a real Windows file-creation check.
+
 ## [0.7.8] - 2026-11-22
 
 ### Fixed

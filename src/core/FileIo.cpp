@@ -18,6 +18,41 @@ std::string ToUtf8(const fs::path& p) {
     auto u = p.generic_u8string();
     return std::string(u.begin(), u.end());
 }
+
+// Decodes one UTF-8 scalar. Malformed bytes (bad continuation, overlong form,
+// surrogate, value above U+10FFFF) are rejected so a broken name cannot emit a
+// broken path. `len` is the number of bytes consumed when the result is true.
+bool NextUtf8(const std::string& s, size_t i, uint32_t& cp, size_t& len) {
+    const auto at = [&](size_t k) { return static_cast<unsigned char>(s[k]); };
+    const auto cont = [&](size_t k) { return k < s.size() && (at(k) & 0xC0) == 0x80; };
+    const uint8_t b0 = at(i);
+    if (b0 < 0x80) { cp = b0; len = 1; return true; }
+    if (b0 >= 0xC2 && b0 <= 0xDF && cont(i + 1)) {
+        cp = (static_cast<uint32_t>(b0 & 0x1F) << 6) | (at(i + 1) & 0x3F);
+        len = 2; return true;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF && cont(i + 1) && cont(i + 2)) {
+        cp = (static_cast<uint32_t>(b0 & 0x0F) << 12) | (static_cast<uint32_t>(at(i + 1) & 0x3F) << 6) | (at(i + 2) & 0x3F);
+        if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        len = 3; return true;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+        cp = (static_cast<uint32_t>(b0 & 0x07) << 18) | (static_cast<uint32_t>(at(i + 1) & 0x3F) << 12) |
+             (static_cast<uint32_t>(at(i + 2) & 0x3F) << 6) | (at(i + 3) & 0x3F);
+        if (cp < 0x10000 || cp > 0x10FFFF) return false;
+        len = 4; return true;
+    }
+    return false;
+}
+
+// The characters Windows does not allow in a file name, plus the C0 controls
+// (and DEL). Everything else - including spaces and all non-ASCII scalars -
+// is a valid file name character.
+bool InvalidFileNameChar(uint32_t cp) {
+    return cp < 0x20 || cp == 0x7F ||
+           cp == '"' || cp == '<' || cp == '>' || cp == ':' || cp == '/' || cp == '\\' ||
+           cp == '|' || cp == '?' || cp == '*';
+}
 } // namespace
 
 Bytes ReadFile(const std::string& path) {
@@ -138,6 +173,29 @@ std::string Stem(const std::string& path) {
     std::string n = FileName(path);
     auto i = n.find_last_of('.');
     return i == std::string::npos ? n : n.substr(0, i);
+}
+
+std::string SafeFileName(const std::string& name) {
+    constexpr size_t kMaxChars = 80;
+    std::string out;
+    size_t chars = 0;
+    for (size_t i = 0; i < name.size() && chars < kMaxChars;) {
+        uint32_t cp = 0;
+        size_t len = 0;
+        if (!NextUtf8(name, i, cp, len)) {
+            // A bad byte is replaced on its own; the next byte may start a good scalar.
+            out.push_back('_');
+            ++chars;
+            ++i;
+            continue;
+        }
+        if (InvalidFileNameChar(cp)) out.push_back('_');
+        else out.append(name, i, len);   // keep the original bytes: no normalization, no transliteration
+        ++chars;
+        i += len;
+    }
+    if (out.empty()) out = "unnamed";
+    return out;
 }
 
 } // namespace cardbridge::fileio

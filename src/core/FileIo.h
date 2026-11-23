@@ -34,4 +34,12 @@ std::string Join(const std::string& a, const std::string& b);
 std::string FileName(const std::string& path);
 std::string Stem(const std::string& path);
 
+// Turns a character name (UTF-8) into a single safe file-name component: only
+// characters Windows forbids in a file name (< > : " / \ | ? *, control codes)
+// become '_'. Every other Unicode scalar - Korean, Japanese, Chinese, spaces,
+// punctuation - is kept byte-for-byte; nothing is transliterated or normalized.
+// Malformed UTF-8 bytes become '_' so the result is always valid UTF-8. The
+// result is capped at 80 characters (not bytes). Empty input becomes "unnamed".
+std::string SafeFileName(const std::string& name);
+
 } // namespace cardbridge::fileio
