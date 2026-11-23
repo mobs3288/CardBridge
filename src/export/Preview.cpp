@@ -69,10 +69,10 @@ float CutoffOf(const assemble::SceneMaterial& mat) {
 }
 
 // Discard threshold a fragment must pass: the cutout materials discard at their _Cutoff, the true overlays blend at any alpha.
-float DiscardBelow(const assemble::SceneMaterial& mat, bool blend) {
-    // The opaque shader family is drawn by the game with the texture's alpha ignored (IsOpaqueShaded): fragments with stray
-    // low-alpha texels draw, not discard — discarding them here is the viewer-side twin of the exporter's HasAlphaCutout fix.
-    if (!blend && assemble::IsOpaqueShaded(mat)) return 0.0f;
+float DiscardBelow(const assemble::Scene& scene, const assemble::SceneMaterial& mat, bool blend) {
+    // The opaque shader family normally draws stray low-alpha atlas texels, but a shader whose bake proved it clips
+    // (shaderClipsAlpha) really cuts those texels — drawing their black RGB paints a band over the body underneath.
+    if (!blend && assemble::IgnoresTextureAlpha(scene, mat)) return 0.0f;
     float cut = CutoffOf(mat);
     return cut > 0.0f ? cut : (blend ? 0.004f : 0.5f);
 }
@@ -363,7 +363,7 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                             SampleBilinear(*mp, lod, u, v, tc);
                             r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
                         }
-                        if (al < detail::DiscardBelow(mat, blend)) continue;
+                        if (al < detail::DiscardBelow(scene, mat, blend)) continue;
                         float nz = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
                         // Two-tone toon: lit side full colour, shade side tinted by the material's shadow colour.
                         float lit = std::min(1.0f, std::max(0.0f, (nz - 0.35f) / 0.2f));
@@ -1015,7 +1015,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             if (mt.trace) { std::fprintf(stderr, "  result %s %.3f %.3f %.3f %.3f %s\n", okRun ? "ok" : why.c_str(), io.output[0][0], io.output[0][1], io.output[0][2], io.output[0][3], io.discarded ? "DISCARDED" : ""); traced = true; mt.trace = false; }
                             if (!okRun || io.discarded) continue;
                             r = io.output[0][0]; g = io.output[0][1]; bl = io.output[0][2]; al = io.output[0][3];
-                            if (al < detail::DiscardBelow(mat, blend)) continue;
+                            if (al < detail::DiscardBelow(scene, mat, blend)) continue;
                             if (highlight) highlightTint(r, g, bl);
                             if (writeZ) zbuf[zi] = z;
                             auto q2f = [linear](float f) { f = std::min(1.0f, std::max(0.0f, f)); if (linear) f = detail::ToSrgb(f); return f; };
@@ -1047,7 +1047,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             SampleBilinear(*mp, lod, u, v, tc);
                             r *= tc[0]; g *= tc[1]; bl *= tc[2]; al = tc[3];
                         }
-                        if (al < detail::DiscardBelow(mat, blend)) continue;
+                        if (al < detail::DiscardBelow(scene, mat, blend)) continue;
                         // The lighting normal: the vertex one, perturbed by the material's tangent-space normal map when the
                         // game's shader did not run (the simple path) - the same DXT5nm decode the game shaders and the bake read.
                         float nlm = std::fabs(l0 * NZ[i0] + l1 * NZ[i1] + l2 * NZ[i2]);
@@ -1632,6 +1632,18 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             ++skipBlackBake;
             continue;
         }
+        // A shader named "opaque" can still be an alpha test (_Cutoff, queue 2450): the game cuts the fabric into
+        // panels and shows the body or the layer underneath. The bake is direct evidence — the shader left a
+        // substantial part of the covered UVs below alpha 0.5. Trust that over the name-based rule: otherwise the
+        // viewers draw the clipped texels with their black RGB and the PMX writer solidifies their alpha, turning
+        // every opening into a solid black band. This applies to a game texture as much as a card one.
+        const bool bakeClipsAlpha = assemble::IgnoresTextureAlpha(scene, mat) && assemble::BakeHasAlphaCutout(img, cov);
+        if (bakeClipsAlpha) {
+            mat.shaderClipsAlpha = true;
+            mat.alpha = true;
+            mat.translucent = false;
+            scene.warn("", "material '" + mat.name + "' clips alpha in the game; keeping the cutout instead of drawing its texels black");
+        }
         if (thisToon) {   // the shade ramp: the mean colour at each light angle over the sheet, relative to the baked front light
             auto meanColour = [&](const float* Lv, float out[3]) {
                 std::vector<float> ti;
@@ -1690,7 +1702,9 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             cov.swap(cov2);
         }
         assemble::SceneTexture bt;
-        bt.name = "baked_" + mat.name;
+        // Cutout textures get a distinct filename: an identically named PNG from an earlier (solid-alpha) export can
+        // otherwise be reused from MMD's texture cache, which would bring the black band straight back.
+        bt.name = "baked_" + mat.name + (bakeClipsAlpha ? "_cutout" : "");
         bt.source = "shader bake (" + mat.shader + ")";
         bt.width = W; bt.height = H;
         bt.clamp = clampMain;   // the viewer sampler must clamp the baked texture exactly as the game clamps its source

@@ -1872,7 +1872,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         // so the GPU viewer must not clip them either.
                         // Plain mode keeps skin opaque (its texture alpha is a coverage mask); the standard fallback
                         // path keeps its existing alpha test unchanged.
-                        const bool ignoresAlpha = look ? assemble::IgnoresTextureAlpha(*I.scene, mat) : assemble::IsOpaqueShaded(mat);
+                        const bool ignoresAlpha = assemble::IgnoresTextureAlpha(*I.scene, mat);
                         cbv[44] = (bucket == 0 && !ignoresAlpha) ? 1.0f : 0.0f;   // alphaGate.x
                         const float lit[4] = {L[0], L[1], L[2], 0.0f};
                         const auto lin = [](float c) { return LinearLight() ? ToLinear(c) : c; };

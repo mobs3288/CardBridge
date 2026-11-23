@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.10] - 2026-11-23
+
+### Fixed
+
+- **Black band above the shorts' waist in exported PMX (Yoko Littner, `KK_237456.png`)**: two `main_opaque` materials are really alpha tests (`_Cutoff` 0.5, queue 2450) — the bloomers (33.4% of covered UVs discarded) and the jacket (21.5%). A 25% detection threshold caught only the first, leaving the jacket's black texels to paint the band. The shader bake now proves the clip from its own output at 5% of the covered texels for any material, card or game texture, so both are cut out; the viewers and PMX writer respect the proof, and clipped texels no longer draw black over the body. Cutout bakes get a `_cutout` texture filename so a solid-alpha PNG cached by MMD from an earlier export cannot bring the band back. Verified with a software render of the PMX (skin down to the belt, no holes) and 19,213 unit checks. See `docs/BLACK_OUTFIT_CUTOUT_FIX.md`.
+
 ## [0.7.9] - 2026-11-23
 
 ### Fixed

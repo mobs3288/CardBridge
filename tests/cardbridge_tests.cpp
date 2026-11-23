@@ -1863,6 +1863,26 @@ void unitTests() {
             CHECK((look.diffuse.w > 0.999f) == c.opaque);   // PMX alpha 1 = MMD's opaque, depth-writing pass
         }
     });
+    test("bake-proven clip keeps an alpha-test garment's cutout instead of a black band", [] {
+        using namespace assemble;
+        {
+            std::vector<float> img(64 * 4, 1.0f);
+            std::vector<uint8_t> cov(64, 1);
+            CHECK(!BakeHasAlphaCutout(img, cov));                          // fully solid
+            std::fill(img.begin(), img.end(), 0.0f);
+            CHECK(BakeHasAlphaCutout(img, cov));                           // every covered texel clipped
+            for (size_t i = 0; i < 60; ++i) for (int c = 0; c < 4; ++c) img[i * 4 + c] = 1.0f;
+            CHECK(BakeHasAlphaCutout(img, cov));                           // 4 clipped of 60 covered (> 5%)
+        }
+        SceneMaterial m;
+        m.name = "o_top_jacket07_a"; m.shader = "Shader Forge/main_opaque";
+        CHECK(IgnoresTextureAlpha(Scene{}, m));                            // name rule: opaque
+        m.shaderClipsAlpha = true;                                         // bake proved the alpha test clips
+        m.alpha = true;                                                    // the bake sets this alongside the proof
+        CHECK(!IgnoresTextureAlpha(Scene{}, m));
+        Scene s; s.materials.push_back(m);
+        CHECK(exporter::MmdMaterialLook(s, m).diffuse.w < 0.999f);         // MMD keeps the holes, no black band
+    });
     test("export: skin/opaque coverage-mask alpha is solidified, genuine fabric alpha is kept (pantyhose backdrop)", [] {
         using namespace assemble;
         Scene s;
