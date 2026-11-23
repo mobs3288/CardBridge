@@ -810,8 +810,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 std::lock_guard<std::recursive_mutex> lk(g.mu);
                 for (ClothingPin& p : g.clothingPins) if (p.dstOutfit < 0) p.dstOutfit = shown;
             }
-            if (card::ClearOutfitCoordinateSlot(c, shown, static_cast<int>(c.outfits.size()), nullptr))
-                Log("ABMX: this outfit's coordinate-specific bone mods cleared (default outfit load; the export uses the same table)");
+            // The card's own coordinate-specific ABMX (skirt length, fit) is part of the authored look: keep it on a
+            // normal load so the viewer matches the card and the CLI export. Clothing/coordinate imports still clear or
+            // merge the target slot through mergeAbmxPayloads; only an actual import rewrites the table.
             Log("assembling outfit " + std::to_string(shown) + " (" + c.outfitName(shown) + ") ...");
             assemble::AssembleOptions ao;
             ao.outfit = shown;

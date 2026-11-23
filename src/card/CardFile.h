@@ -299,4 +299,9 @@ ApplyCoordinateReport ApplyCoordinate(Card& card, const Card& src, const ApplyCo
 // (pre-fix behaviour). The plain CLI export never calls this.
 bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::vector<std::string>* notes);
 
+// True when the outfit wears a top garment (clothes slot 0 has a non-zero id). Structural clothing-state read, used to
+// decide whether the body's nipple / areola overlay should be masked (the game hides it under clothing). A nude outfit
+// (no top) returns false so the card's own nipple shape is kept.
+bool OutfitWearsTop(const Card& card, int outfit);
+
 } // namespace cardbridge::card

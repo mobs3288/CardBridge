@@ -1132,6 +1132,16 @@ bool ClearOutfitCoordinateSlot(Card& card, int dstOutfit, int dstOutfits, std::v
     return true;
 }
 
+bool OutfitWearsTop(const Card& card, int outfit) {
+    int m = outfit;
+    if (m < 0) m = static_cast<int>(card.status.at("coordinateType").asInt());
+    if (m < 0 || static_cast<size_t>(m) >= card.outfits.size()) return false;
+    const Value& cl = card.outfits[static_cast<size_t>(m)].clothes;
+    if (!cl.isMap() || !cl.at("parts").isArray() || cl.at("parts").asArray().empty()) return false;
+    const Value& p0 = cl.at("parts").at(size_t(0));
+    return p0.isMap() && p0.at("id").asInt() != 0;
+}
+
 // `clothToMerged[i]` is the merged slot holding source accessory slot i
 // (-1 when the source slot was empty - for files, ApplyClothing computes this;
 // for a Coordinate import it is the identity with empties marked -1).

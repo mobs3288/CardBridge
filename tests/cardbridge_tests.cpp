@@ -6832,6 +6832,41 @@ void unitTests() {
         CHECK(cs1 != nullptr && cs1->scale.x == 2.5f);                 // outfit-1 entry for outfit 1
     });
 
+    test("coverage: a worn top masks the nipple overlay; a nude outfit keeps it (OutfitWearsTop)", [] {
+        card::Card c = testMoeCard();
+        CHECK(card::OutfitWearsTop(c, 0));                       // outfit 0 wears top id 56
+        CHECK(card::OutfitWearsTop(c, -1));                      // falls back to coordinateType (0)
+        c.outfits[0].clothes = testClothesMap({0, 0, 203, 0, 0, 0, 0, 6, 6});   // topless
+        CHECK(!card::OutfitWearsTop(c, 0));
+        CHECK(card::OutfitWearsTop(c, 1));                       // other outfits still wear their top
+        card::Card empty;
+        empty.status = testMoeStatus();
+        CHECK(!card::OutfitWearsTop(empty, 0));                  // no outfits: nude, keep nipples
+    });
+
+    test("default load keeps the card's coordinate ABMX (skirt length); only an import clears it", [] {
+        // The authored coordinate-specific skirt scale must survive a normal load: the viewer no longer clears it.
+        card::AbmxTable t;
+        card::AbmxMod longSkirt; longSkirt.scale = {1.0f, 2.0f, 1.15f};
+        t.bones["cf_d_sk_top"] = {longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, longSkirt};
+        card::Card c = testMoeCard();
+        c.extended = Value(Value::Map{
+            {Value(std::string("KKABMPlugin.ABMData")),
+             Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(t))}})})},
+        });
+        const card::AbmxMod* m = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
+        CHECK(m != nullptr && m->scale.y == 2.0f);               // authored long-skirt scale intact on load
+        // An import with an ABMX-less source still clears only the target slot (existing merge behaviour).
+        card::Card src = testMoeCard();                          // no ABMX payload
+        card::ApplyClothingOptions copt; copt.outfit = 0;
+        card::ClothingFile cl = card::ExtractClothingFromCard(src, 0);
+        card::ApplyClothing(c, cl, copt);
+        const card::AbmxMod* after = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
+        CHECK(after == nullptr || after->scale.y == 1.0f);       // import cleared the target slot
+        const card::AbmxMod* other = card::LoadAbmx(c.extended).find("cf_d_sk_top", 1);
+        CHECK(other != nullptr && other->scale.y == 2.0f);       // other coordinates untouched
+    });
+
     test("coordinate import: per-coordinate plugins rebase (DynamicBoneEditor, HairAccessoryCustomizer, Accessory_States, pushup)", [] {
         card::Card src = testToruCard();
         // patch the source outfit: pins in slots 0, 4, 6 (used for the slot-remap assertions below)

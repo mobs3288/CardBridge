@@ -286,11 +286,16 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     // Viewer sliders: a value the user set replaces the card's own, then the optional proportion-correction layer overrides that.
     for (size_t i = 0; i < v.size() && i < opt.bodyShape.size(); ++i) v[i] = opt.bodyShape[i];
     for (size_t i = 0; i < v.size(); ++i) v[i] = SliderValueCorrected(v[i], opt.proportionLayer, kBodySlider, static_cast<int>(i));
+    // The game masks the nipple / areola overlay wherever clothing covers the body; the baked (plain / PMX) view has no
+    // such coverage mask, so a stood-out areola dome protrudes through the garment and reads as a pale see-through disc.
+    // When the shown outfit wears a top, treat the nipples as inside (the existing nippleInside behaviour) so the outfit
+    // reads solid, exactly as the card does. Nude outfits (no top) keep the card's own nipple shape.
+    const bool nipInside = opt.nippleInside || card::OutfitWearsTop(card, opt.outfit);
     if (v.size() > 13) {
-        float nip = opt.nippleInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
+        float nip = nipInside ? 0.0f : static_cast<float>(card.status.at("nipStandRate").asFloat());
         v[13] = v[13] + (1.0f - v[13]) * std::min(1.0f, std::max(0.0f, nip));
-        if (opt.nippleInside) v[13] = std::min(v[13], 0.0f);
-        if (opt.nippleInside) v[11] = 0.0f;   // the areola dome flat too: it is what shows as a pale disc through thin clothes
+        if (nipInside) v[13] = std::min(v[13], 0.0f);
+        if (nipInside) v[11] = 0.0f;   // the areola dome flat too: it is what shows as a pale disc through thin clothes
     }
     for (size_t i = 0; i < v.size(); ++i) shape::ChangeValue(S, anm, cats, static_cast<int>(i), v[i]);
     if (std::getenv("CARDBRIDGE_DEBUG_SHAPE"))
@@ -302,7 +307,7 @@ Overrides bodyShapeOverrides(const card::Card& card, resolve::Resolver& resolver
     // Nipple placement along the chest normal (the nipple bones' local z): the sliders only reach the shape the maker allows, which still
     // stands out of the skin and shows through thin clothes; this moves the tip below or above it.
     {
-        const float off = opt.nippleInside ? std::min(opt.nippleOffset, opt.nippleInsideOffset) : opt.nippleOffset;
+        const float off = nipInside ? std::min(opt.nippleOffset, opt.nippleInsideOffset) : opt.nippleOffset;
         if (off != 0.0f)
             for (const char* nm : {"cf_s_bnip02_L", "cf_s_bnip02_R", "cf_s_bnipacc_L", "cf_s_bnipacc_R", "cf_s_bnip015_L", "cf_s_bnip015_R",
                               "cf_s_bnip025_L", "cf_s_bnip025_R", "cf_s_bnip01_L", "cf_s_bnip01_R"}) {
