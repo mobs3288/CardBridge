@@ -2,12 +2,6 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
-## [0.7.9] - 2026-11-23
-
-### Fixed
-
-- **Black "shadow" bands on a modded dress in the MMD ("as exported") view (KK/KKS, e.g. `KK_388778.png`)**: the China dress's `main_opaque` shader is an alpha test, and the card's MaterialEditor MainTex has real alpha holes; the game clips those texels, but CardBridge's name-based opaque rule solidified them and painted their black RGB over the forearms, bust and waist. The earlier 0.7.4 attempt was reverted because it declared every game texture with low-alpha atlas texels a cutout (holes in capes/skirts). The bake is still the evidence, but the cutout decision now also requires the structural fact that the card supplied `_MainTex` (plus ≥25% of the mesh's covered texels clipped, no translucency, opaque shader family), so game-texture garments keep the solid rule. The software viewer, GPU viewer and PMX writer share that one decision; the baked mask reaches MMD as a binary cutout instead of solid black. Added a regression test covering the card-texture case, the game-texture guard, translucent shaders and stray alpha. 19,196 unit checks pass. See `docs/BLACK_OUTFIT_CUTOUT_FIX.md`.
-
 ## [0.7.8] - 2026-11-22
 
 ### Fixed

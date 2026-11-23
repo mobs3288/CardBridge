@@ -125,30 +125,7 @@ struct SceneMaterial {
     bool cardSkin = false;                   // the body's skin material (cf_m_body): _overcolor1 tints the nipple / areola overlay
     Vec4 cardNippleColour;                   // the card's own _overcolor1 (restored when the automatic pink tint is off)
     bool hairTinted = false;                 // _Color holds the card's measured hair tint (sRGB): the standard views linearise it like any colour, the bake feeds it raw like every other colour (see BakeShaderTextures)
-    // A shader whose name belongs to the "opaque" family (main_opaque / main_clothes_opaque) can still be an alpha TEST
-    // (_Cutoff, queue 2450). When the card's MaterialEditor replaces _MainTex with an image that has real alpha holes,
-    // the game clips those texels and shows the body or the layer underneath; the name-based opaque rule instead
-    // solidifies them, painting the discarded texels' black RGB as bands over the garment. BakeShaderTextures proves the
-    // clip from the shader's OWN output and sets shaderClipsAlpha, which makes all three consumers (software viewer,
-    // GPU viewer, PMX writer) honour the cutout. cardMainTex is set at assembly time from the structural fact that the
-    // image came from the card - a game texture's stray low-alpha atlas texels must never trigger this rule (that is what
-    // punched holes in capes and stockings in the first attempt).
-    bool shaderClipsAlpha = false;
-    bool cardMainTex = false;   // _MainTex was replaced by an image embedded in the card (MaterialEditor), not a game texture
 };
-
-// True when a shader bake produced a real alpha cutout over the texels the material's mesh covers. A shader that ignores
-// alpha leaves every covered texel solid; only a shader that actually clips produces a substantial low-alpha area. Stray
-// single texels from atlas padding must not count, hence the fraction and minimum.
-inline bool BakeHasAlphaCutout(const std::vector<float>& img, const std::vector<uint8_t>& cov) {
-    size_t covered = 0, clipped = 0;
-    for (size_t i = 0; i < cov.size(); ++i)
-        if (cov[i]) {
-            ++covered;
-            if (img.size() > i * 4 + 3 && img[i * 4 + 3] < 0.5f) ++clipped;
-        }
-    return covered >= 32 && clipped * 4 >= covered;   // at least 25% of the covered texels are clipped
-}
 
 // True when the game draws this material with the texture's alpha ignored: the
 // "opaque" shader family — Shader Forge/main_opaque, Koikano/main_clothes_opaque,
@@ -160,12 +137,6 @@ inline bool IsOpaqueShaded(const SceneMaterial& mat) {
     return mat.shader.find("opaque") != std::string::npos;
 }
 
-// The narrow decision: an opaque-named material is a genuine cutout only when the CARD supplied its MainTex AND the
-// shader bake proves it clips a substantial part of the covered texels. Game textures keep the name-based opaque rule
-// no matter what their atlas alpha does. Kept here so the bake and the unit tests use exactly the same predicate.
-inline bool CardMainTexClipsAlpha(const SceneMaterial& mat, const std::vector<float>& img, const std::vector<uint8_t>& cov) {
-    return mat.cardMainTex && !mat.translucent && IsOpaqueShaded(mat) && BakeHasAlphaCutout(img, cov);
-}
 
 // A texture the game builds at run time by drawing one full-screen quad through a "create" material's shader (eye iris and
 // white, face and body skin: Graphics.Blit into a render texture). `material` carries the shader, colours and input textures;
@@ -466,7 +437,6 @@ inline int EffectiveRenderQueue(const Scene& scene, const SceneMaterial& mat) {
 // depth writes and the back of the head shows through the face. Identify skin structurally - shader family, or a
 // shader-less create-job material used by the character's body/head part - never by card, texture or material index.
 inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
-    if (mat.shaderClipsAlpha) return false;   // the bake proved this material cuts texels even though its name says "opaque"
     if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
     // A material with no authored alpha flag, no translucency and an opaque render queue is drawn by
     // the game without reading texture alpha at all — whatever the UV-flat bake left in the atlas. Hair
