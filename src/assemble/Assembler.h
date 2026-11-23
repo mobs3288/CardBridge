@@ -12,6 +12,12 @@
 
 namespace cardbridge::assemble {
 
+// Longest side of shader maps (masks, ramps, gloss) decoded into the scene. 1024 by
+// default, exactly as before; the high/ultra bake presets raise it so a mod's larger
+// mask is not boxed down before the bake ever sees it. Set before building a scene.
+void SetShaderTextureMaxSize(int side);
+int ShaderTextureMaxSize();
+
 // The automatic nipple / areola colour: the reference tone the user picked for the default (#fda797, an HSL(9, 96%, 79%)
 // warm pastel salmon-pink). An explicit colour overrides it (see AssembleOptions); w <= 0 keeps the card's own colour.
 inline constexpr Vec4 kDefaultNippleColour{0.992f, 0.655f, 0.592f, 1.0f};

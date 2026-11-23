@@ -9,6 +9,7 @@
 #include "unity/TextureDecode.h"
 
 #include "core/Bytes.h"
+#include "core/ImageResample.h"
 #include "shape/Shape.h"
 #include "card/Abmx.h"
 #include "card/MaterialEdits.h"
@@ -34,6 +35,13 @@
 #include <set>
 
 namespace cardbridge::assemble {
+
+namespace {
+int g_shaderTextureMaxSize = 1024;
+}
+
+void SetShaderTextureMaxSize(int side) { g_shaderTextureMaxSize = std::max(64, side); }
+int ShaderTextureMaxSize() { return g_shaderTextureMaxSize; }
 
 namespace {
 
@@ -818,19 +826,31 @@ struct Builder {
         int result = -1;
         auto t = decode(*src, lp, partId);
         if (t && t->width > 0 && t->height > 0) {
-            int sx = 1, sy = 1;
-            while (t->width / sx > 1024) sx *= 2;
-            while (t->height / sy > 1024) sy *= 2;
-            int w = t->width / sx, h = t->height / sy;
-            std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
-            for (int y = 0; y < h; ++y)
-                for (int x = 0; x < w; ++x)
-                    for (int c = 0; c < 4; ++c) {
-                        int sum = 0;
-                        for (int dy = 0; dy < sy; ++dy)
-                            for (int dx = 0; dx < sx; ++dx) sum += t->rgba[(static_cast<size_t>(y * sy + dy) * t->width + (x * sx + dx)) * 4 + c];
-                        px[(static_cast<size_t>(y) * w + x) * 4 + c] = static_cast<uint8_t>(sum / (sx * sy));
-                    }
+            int w = t->width, h = t->height;
+            std::vector<uint8_t> px;
+            if (g_shaderTextureMaxSize <= 1024) {
+                // Historical power-of-two box shrink, kept byte-for-byte for the standard path.
+                int sx = 1, sy = 1;
+                while (t->width / sx > 1024) sx *= 2;
+                while (t->height / sy > 1024) sy *= 2;
+                w = t->width / sx; h = t->height / sy;
+                px.resize(static_cast<size_t>(w) * h * 4);
+                for (int y = 0; y < h; ++y)
+                    for (int x = 0; x < w; ++x)
+                        for (int c = 0; c < 4; ++c) {
+                            int sum = 0;
+                            for (int dy = 0; dy < sy; ++dy)
+                                for (int dx = 0; dx < sx; ++dx) sum += t->rgba[(static_cast<size_t>(y * sy + dy) * t->width + (x * sx + dx)) * 4 + c];
+                            px[(static_cast<size_t>(y) * w + x) * 4 + c] = static_cast<uint8_t>(sum / (sx * sy));
+                        }
+            } else {
+                // High/ultra: one area-weighted reduction to the preset cap, no upscaling.
+                const float scale = std::min(1.0f, static_cast<float>(g_shaderTextureMaxSize) / static_cast<float>(std::max(t->width, t->height)));
+                w = std::max(1, static_cast<int>(static_cast<float>(t->width) * scale + 0.5f));
+                h = std::max(1, static_cast<int>(static_cast<float>(t->height) * scale + 0.5f));
+                px.resize(static_cast<size_t>(w) * h * 4);
+                image::areaResample<uint8_t>(t->rgba.data(), t->width, t->height, 4, px.data(), w, h);
+            }
             result = addSceneTexture(t->name, src->name(), w, h, std::move(px));
             scene.textures[static_cast<size_t>(result)].clamp = t->wrapMode == 1;
             scene.textures[static_cast<size_t>(result)].srgb = t->colorSpace == 1;

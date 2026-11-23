@@ -1,7 +1,9 @@
 ﻿#include "export/Preview.h"
 #include "export/Exporter.h"
+#include "export/BakeQuality.h"
 #include "material/MaterialWorkbench.h"
 #include "export/Translucency.h"
+#include "core/ImageResample.h"
 
 #include "assemble/Pose.h"
 #include "assemble/Assembler.h"
@@ -21,6 +23,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <set>
 
 #include "export/ColourGrade.h"
@@ -1355,9 +1358,74 @@ void ApplyPartStateForExport(assemble::Scene& scene, const std::vector<char>& hi
     PruneExportBones(scene);
 }
 
+namespace {
+void PadIslandsByOwner(std::vector<float>& img, std::vector<uint8_t>& cov,
+                       std::vector<int>& islands, int W, int H, int passes);
+
+// Dilation after the bake: the historical 6-pass nearest-neighbour copy unless island
+// ownership is supplied, in which case only same-island neighbours may contribute.
+void PadCoverage(std::vector<float>& img, std::vector<uint8_t>& cov, std::vector<int>* islands,
+                 int W, int H, int passes) {
+    if (islands && islands->size() == cov.size()) { PadIslandsByOwner(img, cov, *islands, W, H, passes); return; }
+    // Historical dilation, kept byte-for-byte for the standard path.
+    for (int pass = 0; pass < passes; ++pass) {
+        std::vector<uint8_t> cov2 = cov;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const size_t ti = static_cast<size_t>(y) * W + x;
+                if (cov[ti]) continue;
+                for (int d = 0; d < 4; ++d) {
+                    const int nx = x + (d == 0) - (d == 1), ny = y + (d == 2) - (d == 3);
+                    if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                    const size_t ni = static_cast<size_t>(ny) * W + nx;
+                    if (!cov[ni]) continue;
+                    for (int c = 0; c < 4; ++c) img[ti * 4 + static_cast<size_t>(c)] = img[ni * 4 + static_cast<size_t>(c)];
+                    cov2[ti] = 1;
+                    break;
+                }
+            }
+        cov.swap(cov2);
+    }
+}
+
+// `islands` holds a connected-component id per texel (-1 outside coverage); a texel only
+// inherits from a neighbour in its own island, so touching islands cannot bleed. Deterministic:
+// ties are broken by lowest island id, then by neighbour order.
+void PadIslandsByOwner(std::vector<float>& img, std::vector<uint8_t>& cov,
+                       std::vector<int>& islands, int W, int H, int passes) {
+    if (islands.size() != cov.size()) return;
+    for (int pass = 0; pass < passes; ++pass) {
+        std::vector<uint8_t> cov2 = cov;
+        std::vector<int> isl2 = islands;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const size_t ti = static_cast<size_t>(y) * W + x;
+                if (cov[ti]) continue;
+                int owner = -1;
+                size_t from = static_cast<size_t>(-1);
+                for (int d = 0; d < 4; ++d) {
+                    const int nx = x + (d == 0) - (d == 1), ny = y + (d == 2) - (d == 3);
+                    if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                    const size_t ni = static_cast<size_t>(ny) * W + nx;
+                    if (!cov[ni]) continue;
+                    const int isl = islands[ni];
+                    if (isl < 0) continue;
+                    if (owner < 0 || isl < owner) { owner = isl; from = ni; }
+                }
+                if (from == static_cast<size_t>(-1)) continue;
+                for (int c = 0; c < 4; ++c) img[ti * 4 + static_cast<size_t>(c)] = img[from * 4 + static_cast<size_t>(c)];
+                cov2[ti] = 1;
+                isl2[ti] = owner;
+            }
+        cov.swap(cov2);
+        islands.swap(isl2);
+    }
+}
+} // namespace
+
 void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::string* report,
                         const std::function<void(const std::string&)>& progress, bool grade, bool toon,
-                        const std::function<bool()>& cancelled) {
+                        const std::function<bool()>& cancelled, int supersample, bool islandPadding) {
     grade = grade && ColourGradeEnabled();
     toon = toon && !lit;
     const bool dbg = std::getenv("CARDBRIDGE_BAKE_TIME") != nullptr;
@@ -1458,8 +1526,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         if (uses.empty()) continue;
         int W = 512, H = 512;
         if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures) { W = scene.textures[static_cast<size_t>(mat.texture)].width; H = scene.textures[static_cast<size_t>(mat.texture)].height; }
-        while (std::max(W, H) > maxSize) { W = std::max(1, W / 2); H = std::max(1, H / 2); }
-        W = std::max(W, 64); H = std::max(H, 64);
+        BakedTextureSize(W, H, maxSize, W, H);
         // Tangents depend only on the flat's positions and UVs: compute once, reuse across the front-light render, the toon-ramp renders and the reference render.
         std::vector<std::vector<Vec3>> flatTangents;
         flatTangents.reserve(flats.size());
@@ -1476,7 +1543,8 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // encoded, crushed saturated hair colours (a bright purple tint's R/G fell to near black in the PMX texture
         // while the linear-light viewer, which encodes its frame, stayed bright). Feeding _Color raw makes the baked
         // product match the viewer's encoded colour, for hair on the hair slots and for hair worn as accessories alike.
-        auto render = [&](int W, int H, const float* Lv, std::vector<float>& img, std::vector<uint8_t>& cov) -> bool {
+        auto render = [&](int W, int H, const float* Lv, std::vector<float>& img, std::vector<uint8_t>& cov,
+                          std::vector<int>* islands = nullptr) -> bool {
         CbSet psCb;
         FillConstants(sr->programs[sr->pi], mat, Lv, camPos, psCb, &scene.globalProps);
         std::vector<std::vector<PsIn>> vsOut(flats.size());
@@ -1509,6 +1577,36 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
                 float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
                 tris.push_back({use.flat, i0, i1, i2, ax, ay, bx, by, cx, cy, den, std::fabs(den) < 1e-8f});
             }
+        }
+        // Connected components by shared vertex inside one flattened mesh: an island id lets the
+        // dilation copy only within the same island, so neighbours that merely touch in UV space
+        // cannot contaminate each other. Built only when the caller asked for island-aware padding.
+        std::vector<int> islandOfTri;
+        if (islands) {
+            islandOfTri.resize(tris.size());
+            std::iota(islandOfTri.begin(), islandOfTri.end(), 0);
+            auto root = [&](int a) {
+                while (islandOfTri[static_cast<size_t>(a)] != a) {
+                    islandOfTri[static_cast<size_t>(a)] = islandOfTri[static_cast<size_t>(islandOfTri[static_cast<size_t>(a)])];
+                    a = islandOfTri[static_cast<size_t>(a)];
+                }
+                return a;
+            };
+            std::map<std::pair<size_t, uint32_t>, int> seenVertex;
+            for (size_t t = 0; t < tris.size(); ++t) {
+                const Tri& tr = tris[t];
+                const uint32_t v[3] = {tr.i0, tr.i1, tr.i2};
+                for (uint32_t vi : v) {
+                    const auto key = std::make_pair(tr.flat, vi);
+                    auto it = seenVertex.find(key);
+                    if (it == seenVertex.end()) seenVertex.emplace(key, static_cast<int>(t));
+                    else {
+                        const int a = root(it->second), b = root(static_cast<int>(t));
+                        if (a != b) islandOfTri[static_cast<size_t>(b)] = a;
+                    }
+                }
+            }
+            for (int& id : islandOfTri) id = root(id);
         }
         std::vector<std::atomic<int>> best(static_cast<size_t>(W) * H);
         for (auto& b : best) b.store(-1);
@@ -1545,6 +1643,13 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             for (unsigned w = 1; w < hw; ++w) pool.emplace_back(coverWorker, w);
             coverWorker(0);
             for (auto& th : pool) th.join();
+        }
+        if (islands) {
+            islands->assign(static_cast<size_t>(W) * H, -1);
+            for (size_t ti = 0; ti < best.size(); ++ti) {
+                const int t = best[ti].load(std::memory_order_relaxed);
+                if (t >= 0) (*islands)[ti] = islandOfTri[static_cast<size_t>(t)];
+            }
         }
         auto worker = [&](unsigned wi) {
             MatTextures mt;
@@ -1595,7 +1700,28 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         };
         std::vector<float> img;
         std::vector<uint8_t> cov;
-        if (!render(W, H, L, img, cov)) continue;
+        std::vector<int> islands;
+        // Supersampling renders at up to kMaxSupersampleSide internally, then reduces once with
+        // the area filter. Every sample is shaded with the same shader and light, so this only
+        // improves coverage of thin UV islands and edge colour - it cannot invent source detail.
+        const float ssScale = SupersampleScale(W, H, supersample);
+        if (ssScale <= 1.0f) {
+            if (!render(W, H, L, img, cov, islandPadding ? &islands : nullptr)) continue;
+            PadCoverage(img, cov, islandPadding ? &islands : nullptr, W, H, 6);
+        } else {
+            const int RW = SupersampleSide(W, ssScale), RH = SupersampleSide(H, ssScale);
+            std::vector<float> hi;
+            std::vector<uint8_t> hic;
+            std::vector<int> hisl;
+            if (!render(RW, RH, L, hi, hic, islandPadding ? &hisl : nullptr)) continue;
+            // Pad at the internal resolution: the fringe stays ~6 output texels wide, and the
+            // reduction only ever sees colour owned by the island it came from.
+            PadCoverage(hi, hic, islandPadding ? &hisl : nullptr, RW, RH,
+                        std::max(6, static_cast<int>(6.0f * ssScale + 0.5f)));
+            img.assign(static_cast<size_t>(W) * H * 4, 0.0f);
+            cov.assign(static_cast<size_t>(W) * H, 0);
+            image::areaResample<float>(hi.data(), RW, RH, 4, img.data(), W, H, hic.data(), cov.data());
+        }
         // A shader that discarded every covered fragment would bake a transparent sheet -
         // in MikuMikuDance the garment simply vanishes. Never bake that: keep the card's
         // own texture and record the skip, loudly.
@@ -1682,25 +1808,8 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
             for (size_t i = 0; i < cov.size(); ++i) if (cov[i]) { ++covered; if (img[i * 4 + 3] >= 0.5f) ++solid; }
             std::fprintf(stderr, "bake %s (%s): %dx%d, %zu texels covered, %zu with alpha >= 0.5, alpha flag %d\n", mat.name.c_str(), mat.shader.c_str(), W, H, covered, solid, mat.alpha ? 1 : 0);
         }
-        // Pad the islands so bilinear filtering and mips do not pull in empty texels at the seams.
-        for (int pass = 0; pass < 6; ++pass) {
-            std::vector<uint8_t> cov2 = cov;
-            for (int y = 0; y < H; ++y)
-                for (int x = 0; x < W; ++x) {
-                    size_t ti = static_cast<size_t>(y) * W + x;
-                    if (cov[ti]) continue;
-                    for (int d = 0; d < 4; ++d) {
-                        int nx = x + (d == 0) - (d == 1), ny = y + (d == 2) - (d == 3);
-                        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-                        size_t ni = static_cast<size_t>(ny) * W + nx;
-                        if (!cov[ni]) continue;
-                        for (int c = 0; c < 4; ++c) img[ti * 4 + static_cast<size_t>(c)] = img[ni * 4 + static_cast<size_t>(c)];
-                        cov2[ti] = 1;
-                        break;
-                    }
-                }
-            cov.swap(cov2);
-        }
+        // Padding already happened above (at output resolution, or at the internal resolution
+        // before the area reduction), so bilinear filtering and mips never read empty texels.
         assemble::SceneTexture bt;
         // Cutout textures get a distinct filename: an identically named PNG from an earlier (solid-alpha) export can
         // otherwise be reused from MMD's texture cache, which would bring the black band straight back.

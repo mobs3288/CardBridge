@@ -166,6 +166,18 @@ cardbridge pmx roundtrip "<model.pmx>" "<copy.pmx>"
 
 Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memory), `--outfit N`, `--apose-degrees N` / `--tpose`, `--simplify 40`, `--lods`, `--skin-shade F`, `--skin-ao F`, `--pose <file>`, `--print-diagnostics`, `--normalize-*` for the opt-in proportion fixes. `cardbridge clothes` writes an outfit file back out from a card. Exit codes: `0` ok, `1` usage, `2` unsupported/rejected card, `3` conversion failed.
 
+### Bake texture quality
+
+`--bake-quality standard|high|ultra` (default `standard`) controls the shader-bake textures written to the PMX; `--bake-size N` (64..8192) overrides just the resolution. See [`docs/TEXTURE_QUALITY_AND_RESOLUTION.md`](docs/TEXTURE_QUALITY_AND_RESOLUTION.md) for what each preset does and what it cannot do.
+
+| Preset | Bake cap | Internal samples | Shader-map cap |
+|---|---:|---:|---:|
+| `standard` | 1024 | 1 | 1024 |
+| `high` | 2048 | 2 | 2048 |
+| `ultra` | 4096 | 2 | 4096 |
+
+`standard` is byte-identical to older exports. Higher presets never upscale a small source texture — they help only where the card or a mod supplies larger source images. Internal rendering is capped at 4096 per side so `ultra` stays practical; expect roughly 4x the bake time of `standard` for textures that are upscaled internally. Judge the result in MMD, not in CardBridge's preview.
+
 ### Comparing the viewer view with the MMD output
 
 `X` (or the **MMD** button next to *All*) switches to "as exported": the exact materials, toon ramps, edges, self-shadow and ground shadow the PMX has — what MikuMikuDance will actually show.

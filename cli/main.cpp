@@ -37,6 +37,7 @@
 #include "export/OutfitIcon.h"
 #include "export/SkeletonOverlay.h"
 #include "export/Preview.h"
+#include "export/BakeQuality.h"
 #include "export/SkinShade.h"
 #include "export/SkinAoBake.h"
 #include "mesh/Simplify.h"
@@ -94,6 +95,27 @@ Args parseArgs(int argc, char** argv, const std::vector<std::string>& boolFlags)
         }
     }
     return a;
+}
+
+// Preset first, then an explicit --bake-size overrides just the resolution. Keeping the two
+// separate means --bake-quality stays a one-knob choice while --bake-size remains an escape hatch.
+bool BakeQualityFromArgs(const Args& a, exporter::BakeQuality& out, std::string& error) {
+    const std::string preset = a.get("bake-quality", "standard");
+    if (!exporter::ResolveBakePreset(preset, out)) {
+        error = "unknown --bake-quality '" + preset + "' (expected standard, high or ultra)";
+        return false;
+    }
+    if (a.opt.count("bake-size")) {
+        const std::string s = a.get("bake-size");
+        char* end = nullptr;
+        const long n = std::strtol(s.c_str(), &end, 10);
+        if (end == s.c_str() || *end != '\0' || n <= 0) {
+            error = "--bake-size must be a positive integer (64..8192)";
+            return false;
+        }
+        out.maxSize = exporter::ClampBakeSize(static_cast<int>(n));
+    }
+    return true;
 }
 
 #ifdef _WIN32
@@ -199,6 +221,15 @@ void usage() {
         "             [--nose-ridge-opacity F]        independent opacity layer for that ridge: 0 = invisible, 1 = fully visible (default)\n"
         "             [--gpu auto|hardware|warp|software] [--gpu-skin gpu|cpu|auto]  which device the --gpu-view picture and the skinning use (auto prefers the best-suited hardware adapter; warp and software are the CPU fallbacks; skin auto uses the CPU below --skin-threshold verts)\n"
         "             [--skin-threshold N]           'auto' skin threshold in vertices (default 20000, or CARDBRIDGE_SKIN_THRESHOLD)\n"
+         "             [--bake-quality standard|high|ultra]\n"
+         "                                             shader-bake texture quality (default: standard). standard = 1024, one sample per\n"
+         "                                             texel, byte-identical to older exports. high = 2048 with 2x internal supersampling,\n"
+         "                                             island-safe padding and area-resampled shader maps. ultra = 4096 with the same\n"
+         "                                             treatment; very large sources are capped internally so conversion stays practical.\n"
+         "                                             Higher presets never upscale small source textures. Bake time and memory grow with\n"
+         "                                             the preset; only high-res source detail can benefit.\n"
+         "             [--bake-size N]                override just the baked texture resolution (64..8192), e.g. --bake-size 2048.\n"
+         "                                             Takes precedence over --bake-quality resolution; the other quality settings stay.\n"
         "  cardbridge skin-bench [--repeats N] [--gpu auto|hardware|warp]   CPU vs GPU skinning on synthetic workloads (10k/50k/150k/500k verts)\n"
         "  cardbridge simplify-bench [--subdiv N]   time the triangle reduction on a synthetic closed mesh (subdiv 6 = 81920 faces; the same path LODs use)\n"
         "  cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>]\n"
@@ -754,6 +785,14 @@ int cmdConvert(const Args& a) {
     if (a.positional.size() < 2) { usage(); return 1; }
     std::string out = normalizeSlashes(a.get("out"));
     if (out.empty() || a.get("library").empty()) { std::fprintf(stderr, "--library and --out are required\n"); return 1; }
+    exporter::BakeQuality bakeQuality;
+    {
+        std::string err;
+        if (!BakeQualityFromArgs(a, bakeQuality, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    }
+    // Shader maps are decoded during assembly, before the bake, so the preset cap has to be
+    // set here. Standard (and a raw --bake-size without a preset) keeps the historical 1024.
+    assemble::SetShaderTextureMaxSize(bakeQuality.areaShaderMaps ? std::max(1024, bakeQuality.maxSize) : 1024);
     card::Card c;
     int code = 0;
     LogMemory("startup");
@@ -1051,7 +1090,7 @@ int cmdConvert(const Args& a) {
         auto tb0 = std::chrono::steady_clock::now();
         {
             cbtime::Scope _("shader bake");
-            exporter::BakeShaderTextures(scene, 1024, a.has("bake-lit"), &bakeNote,
+            exporter::BakeShaderTextures(scene, bakeQuality.maxSize, a.has("bake-lit"), &bakeNote,
                                      [](const std::string& m) {
                                          std::fprintf(stderr, "  %s\n", m.c_str());
                                          const std::string key = "baked texture ";
@@ -1064,7 +1103,8 @@ int cmdConvert(const Args& a) {
                                                  if (tot > 0) printProgress(static_cast<double>(n) / static_cast<double>(tot), m);
                                              }
                                          }
-                                     }, true, !a.has("no-toon-ramp"));
+                                     }, true, !a.has("no-toon-ramp"), {},
+                                      bakeQuality.supersample, bakeQuality.islandPadding);
         }
         std::fprintf(stderr, "\n  %s (%.1fs)\n", bakeNote.c_str(), std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count());
         LogMemory("after bake");

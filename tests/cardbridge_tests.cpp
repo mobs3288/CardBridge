@@ -28,6 +28,7 @@
 #include "card/MaterialEdits.h"
 #include "card/HairAccessoryCustomizer.h"
 #include "core/FileIo.h"
+#include "core/ImageResample.h"
 #include "core/Inflate.h"
 #include "core/Lz4.h"
 #include "core/MsgPack.h"
@@ -44,6 +45,7 @@
 #include "export/PmxIk.h"
 #include "export/PmxPhysics.h"
 #include "export/Preview.h"
+#include "export/BakeQuality.h"
 #include "export/RotateGizmo.h"
 #include "export/ShaderLayer.h"
 #include "export/SkinShade.h"
@@ -8251,6 +8253,71 @@ void unitTests() {
         }
         exporter::SetColourGradeEnabled(wasEnabled);
         exporter::LoadColourGrade("");   // drop the synthetic table again: no test may leak global grade state
+    });
+
+    test("bake quality: presets and explicit sizes resolve deterministically", [] {
+        using namespace exporter;
+        BakeQuality q;
+        CHECK(ResolveBakePreset("standard", q));
+        CHECK(q.maxSize == 1024 && q.supersample == 1 && !q.islandPadding && !q.areaShaderMaps);
+        CHECK(ResolveBakePreset("high", q));
+        CHECK(q.maxSize == 2048 && q.supersample == 2 && q.islandPadding && q.areaShaderMaps);
+        CHECK(ResolveBakePreset("ultra", q));
+        CHECK(q.maxSize == 4096 && q.supersample == 2 && q.islandPadding && q.areaShaderMaps);
+        CHECK(!ResolveBakePreset("extreme", q));
+        CHECK(ClampBakeSize(0) == kMinBakeSize);
+        CHECK(ClampBakeSize(99999) == kMaxBakeSize);
+        CHECK(ClampBakeSize(1536) == 1536);
+        CHECK(SupersampleScale(1024, 1024, 1) == 1.0f);
+        CHECK(SupersampleScale(1024, 1024, 2) == 2.0f);
+        // Source at the internal cap gets no extra samples: Ultra stays practical on huge textures.
+        CHECK(SupersampleScale(4096, 4096, 2) == 1.0f);
+        CHECK(SupersampleScale(1024, 512, 2) == 2.0f);
+        CHECK(SupersampleSide(1024, 2.0f) == 2048);
+        CHECK(SupersampleSide(4096, 1.0f) == 4096);
+        int w = 0, h = 0;
+        BakedTextureSize(1024, 1024, 1024, w, h); CHECK(w == 1024 && h == 1024);
+        BakedTextureSize(2048, 2048, 1024, w, h); CHECK(w == 1024 && h == 1024);
+        BakedTextureSize(2048, 2048, 2048, w, h); CHECK(w == 2048 && h == 2048);
+        BakedTextureSize(4096, 4096, 4096, w, h); CHECK(w == 4096 && h == 4096);
+        // A small source is never upscaled, whatever the preset.
+        BakedTextureSize(1024, 1024, 4096, w, h); CHECK(w == 1024 && h == 1024);
+        BakedTextureSize(256, 512, 4096, w, h); CHECK(w == 256 && h == 512);
+        // Historical floor for tiny sources.
+        BakedTextureSize(32, 32, 1024, w, h); CHECK(w == 64 && h == 64);
+    });
+
+    test("shader map cap: default 1024, preset setter restores cleanly", [] {
+        const int before = assemble::ShaderTextureMaxSize();
+        CHECK(before == 1024);
+        assemble::SetShaderTextureMaxSize(2048);
+        CHECK(assemble::ShaderTextureMaxSize() == 2048);
+        assemble::SetShaderTextureMaxSize(before);
+        CHECK(assemble::ShaderTextureMaxSize() == 1024);
+    });
+
+    test("area resample: identity, box average, and island mask", [] {
+        const uint8_t src[16] = {0, 1, 2, 3, 10, 20, 30, 40, 100, 110, 120, 130, 200, 210, 220, 230};
+        uint8_t same[16] = {};
+        cardbridge::image::areaResample<uint8_t>(src, 2, 2, 4, same, 2, 2);
+        for (int i = 0; i < 16; ++i) CHECK(same[i] == src[i]);
+        uint8_t one[4] = {};
+        cardbridge::image::areaResample<uint8_t>(src, 2, 2, 4, one, 1, 1);
+        CHECK(one[0] == 78 && one[1] == 85 && one[2] == 93 && one[3] == 101);
+        // Only the first island contributes: no bleeding from the neighbouring texel.
+        const uint8_t mask[4] = {1, 0, 0, 0};
+        uint8_t outMask[1] = {};
+        cardbridge::image::areaResample<uint8_t>(src, 2, 2, 4, one, 1, 1, mask, outMask);
+        CHECK(outMask[0] == 1);
+        CHECK(one[0] == 0 && one[1] == 1 && one[2] == 2 && one[3] == 3);
+        const uint8_t none[4] = {0, 0, 0, 0};
+        cardbridge::image::areaResample<uint8_t>(src, 2, 2, 4, one, 1, 1, none, outMask);
+        CHECK(outMask[0] == 0);
+        // The float path used by supersampling must be exact on an identity resize.
+        const float fsrc[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+        float fsame[4] = {};
+        cardbridge::image::areaResample<float>(fsrc, 1, 1, 4, fsame, 1, 1);
+        CHECK(fsame[0] == 0.25f && fsame[1] == 0.5f && fsame[2] == 0.75f && fsame[3] == 1.0f);
     });
 
     test("inner garment masks: the covered garment comes from the card's own sub-part group", [] {

@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.12] - 2026-11-23
+
+### Added
+
+- **Configurable shader-bake texture quality**: `--bake-quality standard|high|ultra` and `--bake-size N` (64..8192). `standard` (1024, one sample per texel) is byte-identical to earlier exports; `high` (2048) and `ultra` (4096) add 2x internal supersampling with a single area-weighted downsample, UV-island-aware padding that cannot bleed between touching islands, and area-resampled shader maps at the preset cap. Nothing is upscaled beyond its source, and internal rendering is capped at 4096 per side so Ultra stays practical. 19,266 unit checks pass, including new resolution/resample/preset regression tests; a base-game card exported with `standard` is byte-identical to the pre-change build apart from the version string. See `docs/TEXTURE_QUALITY_AND_RESOLUTION.md`.
+
 ## [0.7.11] - 2026-11-23
 
 ### Fixed
