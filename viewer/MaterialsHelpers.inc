@@ -404,6 +404,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({4, 0, "applies to PMX + as-exported view; reloads the card", "Bake quality"});
         rows.push_back({2, kBakeUpscale, "Upscale PMX textures 2x (open source)", "Bake quality"});
         rows.push_back({6, kBakeUpscalerModel, "Model:", "Bake quality"});
+        rows.push_back({4, 0, "WIP: external tool + models; export only, preview does not show it", "Bake quality"});
         rows.push_back({0, -1, "Skin shading: automatic creases (cleavage, under the breasts, navel)", "Skin shading"});
         rows.push_back({1, kSkinShade, "Cleavage shading", "Skin shading"});
         rows.push_back({1, kSkinShadeUnder, "Fold under the breasts", "Skin shading"});

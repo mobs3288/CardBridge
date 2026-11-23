@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.16] - 2026-11-23
+
+### Fixed
+
+- The viewer's upscaler controls are now labelled **WIP** (badge on the switch, note in the panel and docs). Upscaling is export-only, needs external tools/models installed, and is not part of the MMD preview. No functional change.
+
 ## [0.7.15] - 2026-11-23
 
 ### Added

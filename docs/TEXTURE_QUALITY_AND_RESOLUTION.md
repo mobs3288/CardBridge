@@ -114,7 +114,7 @@ Method:
 
 No MMD process was running when this work was done, so no visual sign-off is claimed here.
 
-## 5. Optional learned upscaling (0.7.14)
+## 5. Optional learned upscaling (WIP, 0.7.14+)
 
 The resolution presets could not fix the stair-stepped edges on a cutout garment (e.g. Yoko Littner,
 `KK_237456.png`, outfit 7). Those come from **binary alpha**: the bra atlas has only alpha 0 and 255,

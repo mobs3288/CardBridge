@@ -227,8 +227,15 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                         const bool on = TweakChanged(row.id);
                         const bool failed = row.id >= kLayerBase && row.id < kBoneEdit && !g.gpu.layerOk(static_cast<size_t>(row.id - kLayerBase));
                         CheckBox(s, 14, y + 3, on, failed ? ui::kBad : ui::kAccent);
-                        const RECT swClip{36, y, kPanel - 18, y + kRowH};
+                        const bool wip = row.id == kBakeUpscale;   // the upscaler needs external tools: mark it clearly
+                        const RECT swClip{36, y, wip ? kPanel - 58 : kPanel - 18, y + kRowH};
                         s.Text(g.fontUi, failed ? ui::kBad : ui::kText, 36, y + 2, ClipText(failed ? row.label + "  (does not compile)" : row.label, 52), &swClip);
+                        if (wip) {
+                            const RECT badge{kPanel - 54, y + 4, kPanel - 16, y + kRowH - 4};
+                            s.FillRound(badge, ui::kRadSm, ui::kCardHi);
+                            s.StrokeRound(badge, ui::kRadSm, ui::kAmber);
+                            s.TextCentered(g.fontSmall, ui::kAmber, badge, "WIP");
+                        }
                     } else if (row.kind == 6) {
                         DrawPresetChips(s, row.id, row.label, y);
                     } else if (g.morphEdit >= 0 && row.id == kMorphBase + g.morphEdit) {
