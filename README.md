@@ -66,7 +66,7 @@ Converted models in MikuMikuDance:
 
 **Windows 10 or 11, 64-bit.** The recommended download is the installer:
 
-1. Download **[CardBridge-Setup-0.3.0.exe](https://github.com/mobs3288/CardBridge/releases/download/v0.3.0/CardBridge-Setup-0.3.0.exe)** (or browse **[all releases](https://github.com/mobs3288/CardBridge/releases)**).
+1. Download **[CardBridge-Setup-0.7.11.exe](https://github.com/mobs3288/CardBridge/releases/download/v0.7.11/CardBridge-Setup-0.7.11.exe)** (or browse **[all releases](https://github.com/mobs3288/CardBridge/releases)**).
 2. Run it. Windows may warn that the publisher is unrecognised — see [Troubleshooting](#troubleshooting).
 3. Choose the install directory (default: `Program Files\CardBridge`).
 4. Pick the optional shortcuts (desktop) and finish.
@@ -75,7 +75,7 @@ Converted models in MikuMikuDance:
 The installer creates the Start Menu shortcuts, registers CardBridge in **Add/Remove Programs**, and removes itself cleanly when you uninstall. Your settings, the asset library and your exports are **never** deleted by the uninstaller.
 
 **Prefer not to install?** The portable package is the same build without the installer:
-[CardBridge-Portable-0.3.0.zip](https://github.com/mobs3288/CardBridge/releases/download/v0.3.0/CardBridge-Portable-0.3.0.zip). Unzip it anywhere and run `CardBridge.exe` from the folder. Both distributions are built from the same binaries and behave identically.
+[CardBridge-Portable-0.7.11.zip](https://github.com/mobs3288/CardBridge/releases/download/v0.7.11/CardBridge-Portable-0.7.11.zip). Unzip it anywhere and run `CardBridge.exe` from the folder. Both distributions are built from the same binaries and behave identically.
 
 ### First run
 
@@ -186,7 +186,7 @@ Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memor
 
 ## Troubleshooting
 
-- **"Windows protected your PC" / unrecognised publisher** — the installer is not code-signed, so SmartScreen warns. Click **More info** → **Run anyway**. The download's `.sha256` file lets you verify the file you got matches the release you meant to download (`Get-FileHash CardBridge-Setup-0.3.0.exe -Algorithm SHA256`)
+- **"Windows protected your PC" / unrecognised publisher** — the installer is not code-signed, so SmartScreen warns. Click **More info** → **Run anyway**. The download's `.sha256` file lets you verify the file you got matches the release you meant to download (`Get-FileHash CardBridge-Setup-0.7.11.exe -Algorithm SHA256`)
 - **Missing DLLs / won't start** — CardBridge ships nothing it does not need and links its C++ runtime statically; on Windows 10/11 it needs no extra downloads. If it fails to start anyway: update Windows, check the GPU driver (or force the software renderer in Setup → Graphics), and run `CardBridge-CLI.exe` to see the error on a console
 - **First run is slow** — building the mod index takes about 15 minutes for ~4,000 mods; it is cached in `%LOCALAPPDATA%\CardBridge\modindex.json`, so later runs are fast
 - **A mod item shows as missing** — it is not in your mods folder. The issues list names the mod GUID; drop the `.zipmod` in the folder, rebuild the index from the Setup tab, and reload
