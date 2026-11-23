@@ -252,13 +252,11 @@ Useful flags: `--clothes <outfit.png>` (apply an outfit/Coordinate file in memor
 
 **Q: Is CardBridge production-ready?**
 
-> **A:** No.
+> **A:** Not in the "every card converts perfectly" sense. It's a real, shipped tool — 0.7.11 has an installer, a built-in viewer, native PMX editing and KK/KKS support, and the Release build passes 19,000+ unit checks. That says the code works; it doesn't promise that every conversion is faithful.
 >
-> Milestone 1, the headless proof of concept, is complete. However, successfully generating a PMX file doesn't mean the resulting model faithfully reproduces the original character.
+> Base-game cards work 100%. With modded cards, colours can still be wrong, hair can disappear or move, and some mod shaders don't translate to PMX. The viewer's Lit view is not the export — press `X` for "as exported", or open the PMX in MMD, to see what you actually get.
 >
-> Colours can be wrong, hair can disappear or move, materials can break, and geometry or deformation can require further work.
->
-> The feasibility study suggests the approach is viable. The complete conversion pipeline still needs to prove itself through testing.
+> In short: good enough to use, not finished. If a conversion breaks, [open an issue](https://github.com/mobs3288/CardBridge/issues) with the card and the log — that's how compatibility improves.
 
 **Q: Will it support every mod?**
 
