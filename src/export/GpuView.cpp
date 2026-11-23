@@ -1812,7 +1812,11 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     // interior lining sort through the garment — the see-through skirt in MMD view mode. Truly translucent
                     // materials keep their 0.99 alpha and still blend, so the stockings/tights do not draw as solid black.
                     const MmdLook* look = I.plain && gs.material >= 0 && static_cast<size_t>(gs.material) < I.looks.size() ? &I.looks[static_cast<size_t>(gs.material)] : nullptr;
-                    const bool plainTransparent = look ? look->diffuse.w < 0.999f : (mat.alpha || mat.translucent);
+                    // The opaque shader family is drawn by the game with depth writes even when its texture carries a cutout
+                    // mask; keep it in the opaque (depth-writing, alpha-tested) pass here too so it occludes the body and the
+                    // under-layers instead of blending over them (the see-through skirt / visible underpants). Only genuinely
+                    // translucent / alpha-shader materials stay in the blended pass.
+                    const bool plainTransparent = look ? (look->diffuse.w < 0.999f && !assemble::IsOpaqueShaded(mat)) : (mat.alpha || mat.translucent);
                     const int bucket = I.plain ? (plainTransparent ? 1 : 0)
                                        : (mat.translucent || (mat.alpha && detail::RenderQueueOf(scene, mat) >= 2500)) ? 1
                                        : (mat.alpha ? 2 : (detail::IsOverlayMaterial(scene, mat) ? 1 : 0));

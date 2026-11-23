@@ -1478,7 +1478,14 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // lighting: it produces transparent sheets that would hide the parts.
         // Keep the verified baked create-job textures and record the skip.
         // KK (Shader Forge) shaders still go through the original bake.
-        if (mat.shader.rfind("Koikano/", 0) == 0) {
+        // Hair is the exception: the plain (as-exported) renderer has no game shader and
+        // samples only SceneMaterial::texture. KK/KKS hair draws its strand pattern from
+        // _ColorMask (its _MainTex is unset), so a skipped KKS hair material reaches the
+        // plain view with no texture at all and comes out as a flat white cap over the
+        // head — an extra, differently-shaded bang that is not in the card. Baking the
+        // hair shader is safe (no see-through sheets) and gives both the view and the
+        // PMX the authored strand colour and detail.
+        if (mat.shader.rfind("Koikano/", 0) == 0 && !assemble::IsHairShaderFamily(mat.shader)) {
             ++skipKksShader;
             continue;
         }
