@@ -11,6 +11,7 @@
 #include <stb_image_write.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -475,10 +476,19 @@ struct CbSet {
 void FillConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3], CbSet& out,
                    const std::vector<std::pair<std::string, Vec4>>* globals = nullptr) {
     out.data.assign(8, {});
+    // A Unity shader can declare several constant buffers that all land in the same hardware slot (the
+    // KKS Koikano/* family does). Each such cb carries its own slice of the slot. Clearing the slot for
+    // every cb wiped the values the earlier ones had just written, so every colour, float and texture
+    // transform reached the emulator as zero: the game's shaders drew body, hands and clothes flat black
+    // or blue while the plain (as-exported) path, which does not fill constants, looked right. Clear a
+    // slot once, then grow it when a later cb needs more room; the params of all cbs share the buffer.
+    std::array<bool, 8> slotCleared{};
     for (const auto& cb : prog.cbuffers) {
         if (cb.slot < 0 || cb.slot >= 8) continue;
         auto& d = out.data[static_cast<size_t>(cb.slot)];
-        d.assign(cb.size / 4 + 16, 0.0f);
+        const size_t need = cb.size / 4 + 16;
+        if (!slotCleared[static_cast<size_t>(cb.slot)]) { d.assign(need, 0.0f); slotCleared[static_cast<size_t>(cb.slot)] = true; }
+        else if (d.size() < need) d.resize(need, 0.0f);
         for (const auto& pm : cb.params) {
             float* f = &d[pm.offset / 4];
             if (pm.isMatrix) {   // unity_ObjectToWorld / WorldToObject / MatrixVP: identity (the scene is already in world space)
@@ -695,6 +705,11 @@ bool RunVertexStage(const ShaderRuntime& sr, const assemble::SceneMaterial& mat,
     io.constantBuffers = cbs.ptr;
     for (size_t i = 0; i < mesh.vertices.size(); ++i) {
         const auto& v = mesh.vertices[i];
+        // Sm4Io is reused across vertices: clear both register banks first. A vertex program that does
+        // not write every output register would otherwise pass the previous vertex's values - including
+        // NaNs left in untouched inputs - to the pixel shader through sr.links (black hands and feet).
+        std::memset(io.input, 0, sizeof(io.input));
+        std::memset(io.output, 0, sizeof(io.output));
         for (const auto& in : vp.code.inputs) {
             if (in.reg >= 32) continue;
             float* r = io.input[in.reg];
@@ -773,7 +788,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             const auto& mesh = scene.meshes[static_cast<size_t>(mi)];
             for (size_t si = 0; si < mesh.submeshes.size(); ++si) {
                 const auto& mat = scene.materials[static_cast<size_t>(mesh.submeshes[si].material)];
-                if (mat.hidden) continue;
+                if (mat.hidden || mat.fullyCutByAlpha) continue;   // the game's alpha test removes this entire surface
                 // A co-located lining faces into its garment: culled from every view this renderer can produce.
                 const int mi2 = static_cast<int>(mesh.submeshes[si].material);
                 if (mi2 >= 0 && static_cast<size_t>(mi2) < linings.size() &&
@@ -834,7 +849,11 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             shader::Sm4Io io;   // reused per pixel (zeroed there); a fresh Sm4Io per pixel cost a heap allocation and 1 KB of member init each
             io.constantBuffers.reserve(16);
             io.textures = &mt;
-            if (sr && opt.mode == ViewMode::Lit) {   // game shaders only in Lit; diagonals replace shading entirely
+            // A baked material already carries the game shader's shaded colour in its texture. Running the
+            // shader a second time multiplies that colour by the shader's lighting again, which crushed the
+            // body, hands and clothes to a flat blue plate in the export's shaded preview. Show those
+            // materials through the plain textured path instead: the picture then matches the baked PMX.
+            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                 else {
@@ -975,7 +994,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             default: break;
                             }
                         }
-                        if (sr && opt.mode == ViewMode::Lit) {
+                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit) {
                             io.discarded = false; io.trace = false; io.frontFace = true;
                             std::memset(io.input, 0, sizeof(io.input));
                             std::memset(io.output, 0, sizeof(io.output));
@@ -1473,6 +1492,7 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
     for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
         if (cancelled && cancelled()) throw Cancelled{};
         auto& mat = scene.materials[mi];
+        if (mat.fullyCutByAlpha) continue;   // the game draws nothing for this surface; leave its authored texture alone
         // KKS character shaders (Koikano/*) parse and run for CREATE jobs, but
         // this UV-flattened material bake cannot reproduce their screen-space
         // lighting: it produces transparent sheets that would hide the parts.

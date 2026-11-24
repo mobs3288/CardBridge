@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace cardbridge::shader {
@@ -170,10 +172,13 @@ void ParseKksTail(const Bytes& sp, size_t tailAt, UnityProgram& prog) {
         CbLayout cb;
         cb.name = name;
         cb.size = size;
-        // KKS 2019 shaders address every constant through cb0 (verified from
-        // the decoded SM4 operands); the binding record's trailing word is not
-        // a register slot. FillConstants indexes by this slot.
-        cb.slot = 0;
+        // KKS 2019 shaders declare several constant buffers in this tail and the SM4 programs address
+        // them as cb0..cbN in declaration order (the decoded operands use slots 0..6 on the Koikano
+        // skin/clothes shaders). The binding record's trailing word is always 1 here, so it is not a
+        // register. Using the declaration index as the slot keeps each buffer's params in their own
+        // space: hardcoding cb0 made unrelated globals overwrite the material's colours at the same
+        // byte offset, which is why the game-shader views drew skin, hands and clothes flat black/blue.
+        cb.slot = static_cast<int>(prog.cbuffers.size());
         bool variablesOk = true;
         for (uint32_t k = 0; k < count; ++k) {
             std::string vn;
@@ -209,7 +214,7 @@ void ParseKksTail(const Bytes& sp, size_t tailAt, UnityProgram& prog) {
             if (cbIndex >= 0) {
                 uint32_t slot = 0;
                 if (!r.u32(slot)) break;
-                (void)slot;   // the word after a cbuffer name is not a cb register; KKS uses cb0
+                (void)slot;   // the word after a cbuffer name is 1 for every KKS binding, not a register
                 while (r.p + 4 <= t.size() && U32(t, r.p) == 0) r.p += 4;   // padding before the next record
             } else {
                 uint32_t f[4] = {};

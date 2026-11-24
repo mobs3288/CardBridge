@@ -4470,6 +4470,11 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
         exporter::RunCreateJobs(scene);
     }
     log("create materials done");
+    // A garment whose UVs land entirely in discarded texels of its create-job atlas is invisible in the
+    // game. Decide this once, from the authored texture and UVs, so the viewers and the PMX writer all
+    // agree and no alpha-solidified black plate appears in the views that do not alpha-test.
+    for (size_t mi = 0; mi < scene.materials.size(); ++mi)
+        scene.materials[mi].fullyCutByAlpha = ComputeFullyCutByTextureAlpha(scene, scene.materials[mi]);
     // Per-card presentation setting: the centre nose ridge is authored in the head mod's face detail mask, not in
     // the nose texture. Detect it there, keep the untouched pixels, and let the viewer slider / CLI flag dial it
     // without ever painting a feature the card does not have. Cards without a ridge detect 0 and stay as authored.

@@ -91,6 +91,12 @@
 #include <string>
 #include <vector>
 
+// Preview.cpp's shared constant-buffer filler; GpuView.cpp declares it the same way.
+namespace cardbridge::exporter::detail {
+void FillShaderConstants(const shader::UnityProgram& prog, const assemble::SceneMaterial& mat, const float lightDir[3], const float camPos[3],
+                         std::vector<std::vector<float>>& data, const std::vector<std::pair<std::string, Vec4>>* globals);
+}
+
 #ifdef _WIN32
 // Declared directly instead of including <windows.h>: its legacy `near` macro
 // collides with local variables in this test file.
@@ -1885,6 +1891,63 @@ void unitTests() {
         CHECK(!IgnoresTextureAlpha(Scene{}, m));
         Scene s; s.materials.push_back(m);
         CHECK(exporter::MmdMaterialLook(s, m).diffuse.w < 0.999f);         // MMD keeps the holes, no black band
+    });
+    test("a garment whose UVs all sample discarded alpha is cut everywhere, not a black plate", [] {
+        using namespace assemble;
+        Scene s;
+        SceneTexture atlas; atlas.name = "glove-atlas"; atlas.width = 4; atlas.height = 4; atlas.rgba.resize(4 * 4 * 4);
+        for (int y = 0; y < 4; ++y) for (int x = 0; x < 4; ++x) {
+            uint8_t* p = &atlas.rgba[static_cast<size_t>(y * 4 + x) * 4];
+            p[0] = 0; p[1] = 0; p[2] = 0;
+            p[3] = x < 2 ? 0 : 255;   // left half of the atlas is a discarded cell, right half is the garment
+        }
+        s.textures.push_back(atlas);
+        SceneMaterial m;
+        m.name = "o_gloves_maid_01"; m.shader = "Koikano/main_clothes_opaque"; m.texture = 0;
+        m.props.emplace_back("_Cutoff", Vec4{0.5f, 0.0f, 0.0f, 0.0f});
+        s.materials.push_back(m);
+        SceneMesh mesh;
+        const Vec3 pts[3] = {{-0.1f, 0, 0}, {0.1f, 0, 0}, {0, 0.2f, 0}};
+        for (const auto& p : pts) {
+            SceneVertex v; v.pos = p; v.normal = {0, 0, 1};
+            v.uv = {p.x + 0.25f, p.y - 0.75f};   // the whole triangle lands in the transparent cell
+            mesh.vertices.push_back(v);
+        }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2}; mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        ScenePart part; part.id = "outfit0.gloves"; part.group = "Outfit"; part.meshes = {0}; s.parts.push_back(part);
+        s.materials[0].fullyCutByAlpha = ComputeFullyCutByTextureAlpha(s, s.materials[0]);
+        CHECK(s.materials[0].fullyCutByAlpha);
+        CHECK(!IgnoresTextureAlpha(s, s.materials[0]));   // the "opaque" shader name must not override an all-cut mesh
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 0.999f);   // MMD blends it away
+        // The same material on a mesh that samples only the opaque cell stays opaque.
+        for (auto& v : s.meshes[0].vertices) v.uv.x += 0.5f;
+        CHECK(!ComputeFullyCutByTextureAlpha(s, s.materials[0]));
+        s.materials[0].fullyCutByAlpha = false;
+        CHECK(IgnoresTextureAlpha(s, s.materials[0]));
+        CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w > 0.999f);
+    });
+    test("shader constants: separate constant buffers keep their values at colliding byte offsets", [] {
+        namespace detail = exporter::detail;
+        shader::UnityProgram prog;
+        prog.code.programType = 0;   // pixel
+        shader::CbLayout matCb; matCb.name = "UnityPerMaterial"; matCb.slot = 0; matCb.size = 64;
+        matCb.params.push_back({"_Color", 0, 1, 4, false});
+        shader::CbLayout globalCb; globalCb.name = "UnityPerFrame"; globalCb.slot = 1; globalCb.size = 64;
+        globalCb.params.push_back({"_LightColor0", 0, 1, 4, false});
+        prog.cbuffers.push_back(matCb);
+        prog.cbuffers.push_back(globalCb);
+        assemble::SceneMaterial mat;
+        mat.name = "o_top"; mat.props.emplace_back("_Color", Vec4{0.2f, 0.3f, 0.4f, 1.0f});
+        const float L[3] = {0, 0, 1}, C[3] = {0, 0, 5};
+        std::vector<std::vector<float>> data;
+        std::vector<const float*> ptr;
+        // FillShaderConstants is Preview.cpp's shared implementation (GpuView.cpp declares it too).
+        detail::FillShaderConstants(prog, mat, L, C, data, nullptr);
+        CHECK(data.size() >= 2);
+        CHECK(data[0].size() >= 4 && data[1].size() >= 4);
+        CHECK(std::fabs(data[0][0] - 0.2f) < 1e-5f);   // the material colour survived
+        CHECK(std::fabs(data[1][0] - 1.0f) < 1e-5f);   // the builtin light in its own slot
     });
     test("export: skin/opaque coverage-mask alpha is solidified, genuine fabric alpha is kept (pantyhose backdrop)", [] {
         using namespace assemble;

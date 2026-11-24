@@ -3,7 +3,9 @@
 #include "core/Math.h"
 #include "assemble/FaceFeatures.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -129,6 +131,10 @@ struct SceneMaterial {
     // its texture's low-alpha texels: the game shows the body or the layer underneath there. BakeShaderTextures proves
     // this from the shader's own output; viewers and the PMX writer then honour the holes instead of painting them black.
     bool shaderClipsAlpha = false;
+    // The whole mesh samples alpha-discarded texels of its own texture (a garment packed into a transparent
+    // cell of a create-job atlas). The game's alpha-test shader draws nothing there; computed once after
+    // assembly from the authored texture and UVs, before any bake can change them.
+    bool fullyCutByAlpha = false;
 };
 
 // True when a shader bake produced a real alpha cutout over the texels the material's mesh covers. A shader that ignores
@@ -445,6 +451,44 @@ inline int EffectiveRenderQueue(const Scene& scene, const SceneMaterial& mat) {
     return 2000;
 }
 
+// Computes whether every triangle of a material's mesh lands in texels the game's alpha-test shader
+// discards. Create-job clothing atlases pack several garments into one image: a garment whose UVs sit in
+// a transparent cell is invisible in the game (the shader clips it), but an "opaque"-named shader made
+// the exporters draw the cell's black RGB and solidify its alpha, producing black cuffs and sleeves.
+// Four barycentric samples per triangle keep a single unlucky UV from deciding the whole material.
+inline bool ComputeFullyCutByTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
+    if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
+    if (mat.translucent || scene.materials.empty() || &mat < &scene.materials.front() || &mat > &scene.materials.back()) return false;
+    const auto& t = scene.textures[static_cast<size_t>(mat.texture)];
+    if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) return false;
+    float cutoff = 0.5f;
+    for (const auto& pr : mat.props) if (pr.first == "_Cutoff") { cutoff = pr.second.x; break; }
+    cutoff = std::min(0.99f, std::max(0.01f, cutoff));
+    const int mi = static_cast<int>(&mat - &scene.materials.front());
+    static const float kBary[4][3] = {{1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                                      {0.6f, 0.2f, 0.2f}, {0.2f, 0.6f, 0.2f}, {0.2f, 0.2f, 0.6f}};
+    size_t sampled = 0, discarded = 0;
+    for (const auto& mesh : scene.meshes)
+        for (const auto& sm : mesh.submeshes) {
+            if (sm.material != mi) continue;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                const auto& a = mesh.vertices[sm.indices[i]].uv;
+                const auto& b = mesh.vertices[sm.indices[i + 1]].uv;
+                const auto& c = mesh.vertices[sm.indices[i + 2]].uv;
+                for (const auto& w : kBary) {
+                    float u = a.x * w[0] + b.x * w[1] + c.x * w[2];
+                    float v = a.y * w[0] + b.y * w[1] + c.y * w[2];
+                    u -= std::floor(u); v -= std::floor(v);
+                    const int x = std::min(t.width - 1, static_cast<int>(u * t.width));
+                    const int y = std::min(t.height - 1, static_cast<int>((1.0f - v) * t.height));
+                    ++sampled;
+                    if (t.rgba[(static_cast<size_t>(y) * t.width + x) * 4 + 3] / 255.0f < cutoff) ++discarded;
+                }
+            }
+        }
+    return sampled >= 4 && discarded * 20 >= sampled * 19;   // at least 95% of the covered texels are cut
+}
+
 // True when the game draws this material with texture alpha ignored, including the character's own skin.
 //
 // Besides the "opaque" shader family above, KK and KKS build the body and face skin at run time (a create-job whose
@@ -454,6 +498,7 @@ inline int EffectiveRenderQueue(const Scene& scene, const SceneMaterial& mat) {
 // depth writes and the back of the head shows through the face. Identify skin structurally - shader family, or a
 // shader-less create-job material used by the character's body/head part - never by card, texture or material index.
 inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
+    if (mat.fullyCutByAlpha) return false;   // the alpha test removes this whole mesh in the game, opaque shader name or not
     if (mat.shaderClipsAlpha) return false;   // the bake proved this shader clips: its low-alpha texels are real holes
     if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
     // A material with no authored alpha flag, no translucency and an opaque render queue is drawn by

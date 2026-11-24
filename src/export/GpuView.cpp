@@ -1805,7 +1805,7 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                 if (!gm.vb) continue;
                 for (const auto& gs : gm.subs) {
                     const auto& mat = scene.materials[static_cast<size_t>(gs.material)];
-                    if (mat.hidden) continue;
+                    if (mat.hidden || mat.fullyCutByAlpha) continue;   // the game's alpha test removes this entire surface
                     // The plain (as exported / MMD) view must agree with the PMX writer: decide the bucket from the material's
                     // EXPORTED alpha (MmdLook.diffuse.w), not the scene's alpha flag. A main_alpha cutout over an opaque atlas
                     // exports opaque (the game writes depth for it): leaving it in the blended, depth-less pass let the co-located

@@ -2,6 +2,15 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.26] - 2026-11-24
+
+### Fixed
+
+- **KKS game-shader views no longer draw body, hands and clothes as flat black/blue plates.** KKS 2019 shaders declare several constant buffers that the SM4 programs address as `cb0..cbN` in declaration order, but the shader parser assigned them all to `cb0`. Unrelated builtin globals then overwrote the material's colours and texture transforms at the same byte offsets. The parser now keeps each buffer's own slot, the constant-buffer filler clears a slot only once, and vertex-stage registers are cleared between vertices. Verified on card KK_351156 (Matou Sakura alter): the Lit viewer and the headless shaded preview again show the card's dark-red dress instead of a flat blue sheet.
+- **The exported PMX no longer draws fully alpha-clipped garments as black plates.** A create-job clothing atlas can pack a garment into a transparent cell; a mesh whose UVs land entirely in discarded texels is now detected once at assembly and drawn nowhere (Lit, plain/MMD, shaded preview or PMX), instead of being alpha-solidified into black cuffs and ruffles. The "opaque" shader-family name no longer overrides that proof. Verified on KK_351156: the unwanted maid-glove cuffs disappeared from the Lit view, the MMD view and the exported PMX, with the dress, skin and genuine cutouts preserved.
+- The export's shaded preview no longer re-runs a game shader on an already-baked (lit) texture, which used to crush the outfit to a flat blue plate.
+- Regression tests: fully-cut opaque-named garments keep their cutout in MmdMaterialLook, separate constant buffers keep their values at colliding offsets, and the existing 19,295 unit checks pass.
+
 ## [0.7.24] - 2026-11-24
 
 ### Fixed
