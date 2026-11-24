@@ -36,6 +36,9 @@ public:
     const ListItem* findBase(int category, int64_t id) const;
     const ListItem* findMod(const std::string& guid, int category, int64_t id) const;
     size_t baseCount() const { return base_.size(); }
+    // Every base and mod row as a stable, sorted snapshot (card-independent).
+    std::vector<ListItem> all() const;
+    size_t modRowCount() const;
 
 private:
     std::map<std::pair<int, int64_t>, ListItem> base_;

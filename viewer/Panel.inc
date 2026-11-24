@@ -123,7 +123,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         RECT sub;
         const bool inList = IntersectRect(&sub, &clip, &listClip) != 0;
         const RECT clipText{10, l.partsTop, kPanel - 14, l.partsBottom};
-        if (!L && g.tab != TabSettings) {
+        if (!L && g.tab != TabSettings && g.tab != TabAssets) {
             s.Text(g.fontUi, g.busy ? ui::kAccent : ui::kDim, 14, l.partsTop + 4, g.busy ? "loading the card ..." : "no card loaded");
         } else if (g.showIssues) {
             // Issues, issue by issue: a coloured severity marker, the item's id in brackets, the reason,
@@ -172,6 +172,8 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                 ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(lines.size()), visible, g.partPos);
                 s.Begin(clip);
             }
+        } else if (g.tab == TabAssets) {
+            DrawAssetsTab(s, clip, l);
         } else if (g.tab == TabBones) {
             DrawBonesTab(s, clip, l, *L);
         } else if (g.tab == TabMaterials) {

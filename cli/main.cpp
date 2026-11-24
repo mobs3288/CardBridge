@@ -49,6 +49,7 @@
 #include "export/SkinAoBake.h"
 #include "mesh/Simplify.h"
 #include "library/Library.h"
+#include "library/AssetCatalog.h"
 #include "resolve/ListTable.h"
 #include "resolve/ModIndex.h"
 #include "resolve/Resolver.h"
@@ -269,6 +270,9 @@ void usage() {
         "  cardbridge library check --library <dir> [--hashes]\n"
         "  cardbridge pmx info <model.pmx> [--json]      report a PMX's format and feature counts\n"
         "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
+        "  cardbridge assets build --library <dir> --mods <dir>   index KK/KKS clothes, hair and accessories\n"
+        "  cardbridge assets list  --library <dir> --mods <dir> [--category clothing|hair|accessories|body|textures|other]\n"
+        "                          [--search <text>] [--limit N] [--json] [--cache <file>]\n"
         "\n"
         "Only 'library import' reads a game install (once, to copy files into the library).\n"
         "Exit codes: 0 ok, 1 usage, 2 not a supported card, 3 conversion failed.");
@@ -1575,6 +1579,74 @@ int cmdTransfer(const Args& a) {
     return 0;
 }
 
+int cmdAssets(const Args& a) {
+    if (a.positional.size() < 2) { usage(); return 1; }
+    const std::string& sub = a.positional[1];
+    if (sub != "build" && sub != "list") { usage(); return 1; }
+    const std::string library = normalizeSlashes(a.get("library"));
+    const std::string mods = normalizeSlashes(a.get("mods"));
+    if (library.empty()) { std::fprintf(stderr, "error: --library <dir> is required\n"); return 1; }
+
+    std::string cache = normalizeSlashes(a.get("cache"));
+    if (cache.empty()) {
+        const char* la = std::getenv("LOCALAPPDATA");
+        cache = la ? std::string(la) + "/CardBridge/assetcatalog.json" : std::string();
+    }
+    library::CatalogOptions opt;
+    opt.libraryRoot = library;
+    opt.modsRoot = mods;
+    opt.cachePath = cache;
+    opt.modCachePath = defaultCache();
+    std::vector<std::string> issues;
+    const library::AssetCatalog cat = library::BuildCatalog(opt, &issues,
+        [](size_t done, size_t total) {
+            if (total) std::printf("indexing mods %zu / %zu\n", done, total);
+        });
+    for (const std::string& issue : issues)
+        std::fprintf(stderr, "warning: %s\n", issue.c_str());
+
+    const auto counts = library::CategoryCounts(cat);
+    if (sub == "build") {
+        if (a.has("json")) {
+            nlohmann::json j;
+            for (auto c : counts) j[library::CategoryName(c.first)] = c.second;
+            j["total"] = cat.size();
+            std::printf("%s\n", j.dump(2).c_str());
+        } else {
+            std::printf("asset catalog: %zu items (%zu duplicates removed)\n", cat.size(), cat.deduplicated);
+            for (auto c : counts)
+                std::printf("  %-12s %zu\n", library::CategoryName(c.first), c.second);
+            std::printf("cache: %s\n", cache.c_str());
+        }
+        return 0;
+    }
+
+    library::AssetCategory category = library::AssetCategory::Count;
+    if (!a.get("category").empty()) category = library::CategoryFromName(a.get("category"));
+    const size_t limit = static_cast<size_t>(std::max(0, std::atoi(a.get("limit", "0").c_str())));
+    const auto rows = library::Query(cat, category, a.get("search"), limit);
+    if (a.has("json")) {
+        nlohmann::json j = nlohmann::json::array();
+        for (const library::AssetRecord* r : rows) {
+            nlohmann::json e;
+            e["key"] = r->key; e["category"] = library::CategoryName(r->category);
+            e["subcategory"] = r->subcategory; e["name"] = r->name;
+            e["id"] = r->id; e["mod"] = r->mod; e["modGuid"] = r->modGuid;
+            e["modName"] = r->modName; e["bundle"] = r->bundle; e["asset"] = r->asset;
+            e["parent"] = r->parent; e["textureDeps"] = r->textureDeps; e["flags"] = r->flags;
+            j.push_back(std::move(e));
+        }
+        std::printf("%s\n", j.dump(2).c_str());
+    } else {
+        std::printf("%zu asset(s)\n", rows.size());
+        for (const library::AssetRecord* r : rows)
+            std::printf("  %-11s %-18s %-40s id=%lld %s%s\n", library::CategoryName(r->category),
+                        r->subcategory.c_str(), r->name.c_str(), static_cast<long long>(r->id),
+                        r->mod ? "mod:" : "base", r->mod ? r->modGuid.c_str() : "");
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     std::vector<std::string> wide = utf8Args();
@@ -1596,6 +1668,7 @@ int main(int argc, char** argv) {
         else if (cmd == "transfer") rc = cmdTransfer(a);
         else if (cmd == "clothes") rc = cmdClothes(a);
         else if (cmd == "library") rc = cmdLibrary(a);
+        else if (cmd == "assets") rc = cmdAssets(a);
         else if (cmd == "pmx") rc = cmdPmx(a);
         else if (cmd == "shader") rc = cmdShader(a);
         else if (cmd == "shader-run") rc = cmdShaderRun(a);

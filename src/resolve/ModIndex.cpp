@@ -237,6 +237,14 @@ std::vector<const ModEntry*> ModIndex::findByListId(int category, int64_t id) co
     return out;
 }
 
+std::vector<const ModEntry*> ModIndex::allEntries() const {
+    std::vector<const ModEntry*> out;
+    out.reserve(count_);
+    for (const auto& [guid, entries] : byGuid_)
+        for (const ModEntry& e : entries) out.push_back(&e);
+    return out;
+}
+
 const std::vector<ModEntry>* ModIndex::find(const std::string& guid) const {
     auto it = byGuid_.find(guid);
     return it == byGuid_.end() ? nullptr : &it->second;

@@ -45,6 +45,21 @@ struct Loaded {
     std::string clothing;             // the outfit file applied in memory, if any (never saved)
 };
 
+// ---- the Assets tab: card-independent KK/KKS asset catalog ------------------
+struct AssetBrowserState {
+    std::shared_ptr<library::AssetCatalog> catalog;
+    std::string search;
+    bool editing = false;
+    library::AssetCategory filter = library::AssetCategory::Count;
+    int selected = -1;
+    float listPos = 0;
+    bool loading = false, loaded = false, failed = false;
+    std::string error;
+    std::string thumbKey;                 // which record the pixels below belong to
+    std::vector<uint8_t> thumbRgba;
+    int thumbW = 0, thumbH = 0;
+};
+
 // ---- the Optimize tab: triangle reduction & LOD generation ------------------
 // What Apply commits the export to (an empty OptApplied = the export writes the original, the default).
 struct OptApplied {
@@ -119,8 +134,8 @@ struct Tweaks {
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabBodyTransfer, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Materials", "Proportions", "Optimize", "Transfer", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabBodyTransfer, TabSettings, TabAssets, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Materials", "Proportions", "Optimize", "Transfer", "Setup", "Assets"};
 // Body Transfer tab controls. The measurements use two id ranges: one checkbox row and one editable
 // value row per measurement. All ids sit in 24000..24999, clear of every other control range.
 constexpr int kBTReference = 24000, kBTTarget = 24001, kBTRefresh = 24002, kBTOpenRef = 24003, kBTSaveSpec = 24004, kBTLoadSpec = 24005,
@@ -291,6 +306,9 @@ struct PanelLayout {
     // Materials tab hit areas: the filter dropdown and the button that opens the Material Workbench window
     // (the editor itself lives in that window, so it has no panel hit areas).
     RECT matFilter{}, matOpen{};
+    // Assets tab: a search row, category chips, the result list, then the detail/preview card.
+    RECT assetSearch{}, assetCats{}, assetDetail{};
+    int assetListTop = 0, assetListBottom = 0;
 };
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
@@ -393,6 +411,7 @@ struct App {
     OptState opt;                      // the Optimize tab (triangle reduction, presets, LODs)
     OptPending optPending;             // what the Optimize worker produced; adopted on WM_OPT_READY
     SelectiveState sel;                // the Selective Import window (Selective.inc)
+    AssetBrowserState assets;          // the Assets tab (card-independent KK/KKS catalog)
     std::atomic<bool> expBusy{false};
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
@@ -661,6 +680,12 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     l.matOpen = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + kRowH + 30};
     l.matListTop = l.partsTop + kRowH + 34;
     l.matListBottom = l.partsBottom;
+    // Assets tab: search + category chips, a scrolling result list, then a detail/preview card.
+    l.assetSearch = {10, l.partsTop, kPanel - 10, l.partsTop + kRowH};
+    l.assetCats = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + 2 * kRowH + 8};
+    l.assetListTop = l.assetCats.bottom + 6;
+    l.assetListBottom = std::max(l.assetListTop + kRowH, l.partsBottom - 6 * kRowH);
+    l.assetDetail = {6, l.assetListBottom + 4, kPanel - 6, l.partsBottom};
     return l;
 }
 
@@ -744,6 +769,8 @@ constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finis
 constexpr UINT WM_SEL_READY = WM_APP + 9;      // the Selective Import window's workers finished (wParam: 0 = imported source view, 1 = proposed scene; lParam = session)
 constexpr UINT WM_SEL_FRAME = WM_APP + 10;     // the render worker produced fresh pictures; repaint
 constexpr UINT WM_BT_READY = WM_APP + 11;      // a reference card finished loading for the Body Transfer tab
+constexpr UINT WM_ASSETS_READY = WM_APP + 12;  // the asset catalog build finished (wParam 1 = failed)
+constexpr UINT WM_ASSETS_FRAME = WM_APP + 13;  // a thumbnail decode finished (wParam: 1 = no image)
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;

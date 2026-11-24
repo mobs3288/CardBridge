@@ -365,3 +365,18 @@ clickable at a time.
 **Alternatives rejected.** A separate editor/UI for PMX (duplicates the whole tool); a lossy Scene→writer export (silently loses source data); making the card pipeline accept PMX (couples the editor to Koikatsu).
 
 **Consequences.** All existing editors work on native PMX without modification. Editing anything outside the mapped subset (bones in the document, physics, frames, non-vertex morphs) is deferred to later phases; the document remains unchanged until a corresponding editor writes it. Posing is currently a preview-only change (the document's rest pose is not baked on export) — stated in the known limitations.
+
+---
+
+## ADR-014 — The asset catalog is a card-independent projection of list tables and mod manifests
+
+**Date:** Phase 3, Koikatsu Asset Library (2026-11-24).
+**Status:** accepted — implemented and tested.
+
+**Context.** `ListTable` had only exact `(category,id)` lookups and `ModIndex` only GUID/list-id lookups; both were private and normally reached through `Resolver::resolve(card, ref)`. The viewer's asset browser must enumerate, search and preview items with **no card loaded** (including for native PMX models), so the card cannot be the catalog's entry point.
+
+**Decision.** Add stable enumeration APIs (`ListTable::all()`, `ModIndex::allEntries()`) and a new `library::AssetCatalog` that projects every base row and every compatible installed mod into flat, sorted `AssetRecord`s. The projection keeps the source's own identifiers and column values (bundle, asset, thumb, parent, texture keys, flags) and adds only a conservative category taxonomy derived from the numeric categories in source/docs. The JSON cache is validated against a fingerprint of the library's list-table files plus the mods directory, so a cache hit reads no game data. Thumbnails are decoded from `ThumbAB`/`ThumbTex` directly from the base bundle or the owning zipmod.
+
+**Alternatives rejected.** Building the catalog through `Resolver::resolve` (requires a synthetic `Card`, couples browsing to character state); enumerating only mods (misses the base game, which native-PMX users may have); storing the raw `ListItem::keys` map as the browser model (no stable dedup key, no game/category taxonomy, no cache).
+
+**Consequences.** Browsing works with no card and no running game. Unknown custom mod categories are shown under "Other" with their numeric id rather than a guessed name. A rendered mannequin preview still needs Phase 4's asset-to-scene assembly; Phase 3 previews the authored list thumbnail.

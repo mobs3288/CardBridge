@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.8.0] - 2026-11-24
+
+### Added
+
+- **Phase 3 — card-independent Koikatsu Asset Library.** A new `library::AssetCatalog` indexes every base-game list row and every installed KK/KKS zipmod into a searchable catalog (clothing, hair, accessories, body, textures, other) with display names, source package/GUID, bundle/asset references, attachment node, texture dependencies and authored flags. The cache is keyed on the library list files and the mods-folder fingerprint, so repeat opens cost no game-file reads. `cardbridge assets build|list --library ... --mods ... [--category ...] [--search ...] [--json]` exposes it from the CLI, and the viewer has an **Assets** tab with search, category chips, a result list, a metadata/preview card and decoded `ThumbTex` images when the source asset has one. The catalog needs no running game and no loaded character. See `docs/PMX_IMPORT_ROADMAP.md`.
+
 ## [0.7.35] - 2026-11-24
 
 ### Fixed

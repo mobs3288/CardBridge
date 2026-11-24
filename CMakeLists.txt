@@ -117,6 +117,7 @@ add_library(cardbridge_core STATIC
     src/export/ShaderLayer.cpp
     src/export/ColourGrade.cpp
     src/library/Library.cpp
+    src/library/AssetCatalog.cpp
     src/shape/Shape.cpp
     src/measure/BodyMeasure.cpp
     src/mesh/Simplify.cpp

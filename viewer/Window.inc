@@ -35,6 +35,7 @@ void InvalidateSliderRow(int id) {
 // cannot queue up work faster than it can be drawn.
 // Rows in the current tab's list (Parts or a slider tab; the Bones / Mats tabs have their own lists).
 int ListRowCount() {
+    if (g.tab == TabAssets) return static_cast<int>(AssetRows().size());
     if (g.tab == TabParts) {
         std::shared_ptr<Loaded> L = Current();
         if (!L) return 0;
@@ -47,6 +48,7 @@ int ListRowCount() {
 // drag that scrolls the list can cancel the click).
 void PanelListClick(int x, int y, const PanelLayout& l) {
     std::shared_ptr<Loaded> L = Current();
+    if (g.tab == TabAssets) { AssetsTabClick(x, y, l); return; }
     if (g.tab == TabParts) {
         if (!L || g.showIssues) return;
         if (L->NativePmx()) { ExplorerListClick(x, y, l, *L); return; }
@@ -382,6 +384,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, 1); g.dirty = true; InvalidateView(); return 0;
     case WM_LOG: InvalidateLog(); return 0;
     case WM_BT_READY: BodyTransferReady(static_cast<int>(wp), static_cast<int>(lp)); return 0;
+    case WM_ASSETS_READY:
+        InvalidatePanel();
+        if (wp) Log(std::string("asset library failed: ") + g.assets.error, LogKind::Error);
+        return 0;
+    case WM_ASSETS_FRAME:
+        InvalidatePanel();
+        return 0;
     case WM_PROGRESS: {
         // Keep the indeterminate chunk / percent moving: repaint the strip
         // under the toolbar and the overlay card, plus the footer hint.
@@ -704,12 +713,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button >= 10 && button < 10 + TabCount && button != 22) {
                 g.showIssues = false;
                 g.tab = button - 10;
+                if (g.tab == TabAssets) EnsureAssetCatalog();
                 g.partScroll = 0;
                 g.partPos = 0;
                 g.hoverRow = g.hoverPart = -1;
                 InvalidatePanel();
                 return 0;
             }
+            if (g.tab == TabAssets) { AssetsTabClick(x, y, l); return 0; }
             int chip = OutfitChipAt(l, x, y);
             if (chip >= 0) { ChooseOutfit(chip); return 0; }
             POINT p{x, y};
@@ -1047,6 +1058,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (y >= l.matListTop && y < l.matListBottom) g.hoverRow = (y - l.matListTop + ScrollPx(g.matPos)) / kRowH;
             } else if (L && !g.showIssues && g.tab == TabOptimize) {
                 OptTabHover(x, y);
+            } else if (g.tab == TabAssets) {
+                const int idx = (y >= l.assetListTop && y < l.assetListBottom)
+                              ? static_cast<int>((y - l.assetListTop + std::lround(g.assets.listPos * kRowH)) / kRowH) : -1;
+                g.hoverRow = idx;
             } else if ((L || g.tab == TabSettings) && !g.showIssues && g.tab != TabParts && g.tab != TabOptimize) {
                 g.hoverRow = RowIndexAt(BuildTweakRows(g.tab).size(), l, x, y);
             } else if (L && !g.showIssues && L->NativePmx()) {
@@ -1217,8 +1232,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int maxScroll = std::max(0, static_cast<int>(g.logLines.size()) - visible);
                 g.logScroll = std::max(0, std::min(maxScroll, g.logScroll + (d > 0 ? 3 : -3)));
                 InvalidateLog();
-            } else if (L || g.tab == TabSettings) {
-                if (g.tab == TabOptimize) {
+            } else if (L || g.tab == TabSettings || g.tab == TabAssets) {
+                if (g.tab == TabAssets) {
+                    const int visible = std::max(1, (l.assetListBottom - l.assetListTop) / kRowH);
+                    const int maxScroll = std::max(0, static_cast<int>(AssetRows().size()) - visible);
+                    g.assets.listPos = std::clamp(g.assets.listPos + (d > 0 ? -3.0f : 3.0f), 0.0f, static_cast<float>(maxScroll));
+                    InvalidatePanel();
+                } else if (g.tab == TabOptimize) {
                     const int maxScroll = std::max(0, OptLayoutFor(l.partsTop, 0).totalH - (l.partsBottom - l.partsTop));
                     g.optScroll = std::clamp(g.optScroll - (d > 0 ? 48 : -48), 0, maxScroll);
                     InvalidatePanel();
@@ -1310,6 +1330,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CHAR:
         if (g.morphEdit >= 0) { MorphEditChar(static_cast<wchar_t>(wp)); return 0; }   // the rename box takes printable characters
+        if (g.tab == TabAssets && g.assets.editing) { AssetsChar(static_cast<wchar_t>(wp)); return 0; }
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_KEYUP:
         if (wp == VK_SHIFT || wp == VK_LSHIFT || wp == VK_RSHIFT) g.shiftDown = false;

@@ -9,6 +9,21 @@
 
 namespace cardbridge::resolve {
 
+std::vector<ListItem> ListTable::all() const {
+    std::vector<ListItem> out;
+    out.reserve(base_.size());
+    for (const auto& [key, item] : base_) out.push_back(item);
+    for (const auto& [guid, items] : mods_)
+        for (const auto& [key, item] : items) out.push_back(item);
+    return out;
+}
+
+size_t ListTable::modRowCount() const {
+    size_t n = 0;
+    for (const auto& [guid, items] : mods_) n += items.size();
+    return n;
+}
+
 std::vector<std::string> SplitCsvLine(const std::string& line) {
     std::vector<std::string> out;
     std::string cur;

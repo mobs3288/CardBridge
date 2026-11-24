@@ -66,6 +66,8 @@ public:
     const ModEntry* findShader(const std::string& name, std::string* bundle /* abdata-relative, when found */) const;
     size_t guidCount() const { return byGuid_.size(); }
     size_t zipCount() const { return count_; }
+    // Every indexed mod file (not filtered by game); stable GUID-sorted order.
+    std::vector<const ModEntry*> allEntries() const;
 
 private:
     std::map<std::string, std::vector<ModEntry>> byGuid_;

@@ -57,6 +57,7 @@
 #include "export/SkinAoBake.h"
 #include "export/Translucency.h"
 #include "library/Library.h"
+#include "library/AssetCatalog.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
 #include "mesh/Simplify.h"
@@ -11767,6 +11768,94 @@ pmx::Model makeRoundTripFixture(bool utf8) {
     return m;
 }
 
+void assetCatalogTests() {
+    const std::string base = tempPath("asset_catalog");
+    std::filesystem::remove_all(base);
+    const std::string lib = base + "/library", mods = base + "/mods";
+    std::filesystem::create_directories(lib + "/abdata/list/characustom");
+    std::filesystem::create_directories(mods);
+    const std::string cache = tempPath("asset_catalog.json"), modCache = tempPath("asset_catalog_modcache.json");
+    fileio::RemoveFile(cache);
+    fileio::RemoveFile(modCache);
+
+    const std::string header = "1\n2\nID,Name,MainAB,MainData,Parent,ThumbAB,ThumbTex,MainTex,ColorMaskTex\n";
+    const std::string csvTop = "105\n" + header +
+        "1001,Test Top,chara/test.unity3d,top_00,a_n_bust,list/thumb.unity3d,thumb_00,tex_ab,tex_name\n";
+    const std::string csvHair = "101\n" + header +
+        "2001,Test Back Hair,chara/hair.unity3d,hair_b_00,,list/thumb.unity3d,thumb_hair,hair_ab,hair_tex\n";
+    const std::string xml = "<manifest><guid>test.catalog</guid><name>Catalog Mod</name>"
+                            "<version>2</version><author>tester</author></manifest>";
+    const std::string zip = writeStoredZip("assetcatalog_test.zipmod", {
+        {"manifest.xml", Bytes(xml.begin(), xml.end())},
+        {"abdata/list/characustom/top.csv", Bytes(csvTop.begin(), csvTop.end())},
+        {"abdata/list/characustom/hair.csv", Bytes(csvHair.begin(), csvHair.end())},
+    });
+    CHECK(!zip.empty());
+    std::error_code copyEc;
+    std::filesystem::copy_file(zip, mods + "/catalog.zipmod", copyEc);
+    CHECK(!copyEc);
+
+    library::CatalogOptions opt;
+    opt.libraryRoot = lib; opt.modsRoot = mods;
+    opt.cachePath = cache; opt.modCachePath = modCache;
+
+    std::vector<std::string> issues;
+    library::AssetCatalog cat;
+    test("asset catalog: builds from base lists and zipmods with metadata", [&] {
+    cat = library::BuildCatalog(opt, &issues);
+    CHECK(cat.size() == 2);
+    CHECK(issues.empty());
+    const library::AssetRecord* top = nullptr;
+    const library::AssetRecord* hair = nullptr;
+    for (const auto& r : cat.records) {
+        if (r.id == 1001) top = &r;
+        if (r.id == 2001) hair = &r;
+    }
+    CHECK(top != nullptr && hair != nullptr);
+    if (top && hair) {
+        CHECK(top->category == library::AssetCategory::Clothing);
+        CHECK(top->subcategory == "Tops");
+        CHECK(top->name == "Test Top");
+        CHECK(top->bundle == "chara/test.unity3d");
+        CHECK(top->asset == "top_00");
+        CHECK(top->parent == "a_n_bust");
+        CHECK(top->thumbAsset == "thumb_00");
+        CHECK(top->mod && top->modGuid == "test.catalog" && top->modName == "Catalog Mod");
+        CHECK(!top->textureDeps.empty());
+        CHECK(hair->category == library::AssetCategory::Hair);
+        CHECK(hair->subcategory == "Back hair");
+    }
+    CHECK(std::string(library::CategoryName(library::AssetCategory::Clothing)) == "Clothing");
+    CHECK(library::CategoryFromName("hair") == library::AssetCategory::Hair);
+    });
+
+    test("asset catalog: query filters by category and free text", [&] {
+        const auto clothes = library::Query(cat, library::AssetCategory::Clothing, "");
+        CHECK(clothes.size() == 1);
+        CHECK(clothes[0]->name == "Test Top");
+        const auto byName = library::Query(cat, library::AssetCategory::Count, "back hair");
+        CHECK(byName.size() == 1 && byName[0]->id == 2001);
+        CHECK(library::Query(cat, library::AssetCategory::Count, "no-such-asset").empty());
+        const auto counts = library::CategoryCounts(cat);
+        CHECK(counts.at(library::AssetCategory::Clothing) == 1);
+        CHECK(counts.at(library::AssetCategory::Hair) == 1);
+    });
+
+    test("asset catalog: the on-disk cache round-trips with its fingerprint", [&] {
+        CHECK(fileio::Exists(cache));
+        library::AssetCatalog wrong;
+        CHECK(!library::LoadCatalog(cache, "wrong-fingerprint", wrong));
+        library::AssetCatalog loaded;
+        CHECK(library::LoadCatalog(cache, library::CatalogFingerprint(opt), loaded));
+        CHECK(loaded.size() == 2);
+        CHECK(loaded.records[0].name == cat.records[0].name);
+        CHECK(loaded.records[0].modGuid == "test.catalog");
+        std::filesystem::remove_all(base);
+        fileio::RemoveFile(cache);
+        fileio::RemoveFile(modCache);
+    });
+}
+
 void pmxImportTests() {
     test("pmx import: bad magic, truncation and unknown deform types are rejected clearly", [] {
         bool threw = false;
@@ -12131,6 +12220,7 @@ void modIndexCacheTests() {
 int main() {
     unitTests();
     modIndexCacheTests();
+    assetCatalogTests();
     pmxImportTests();
     meshTests();
     exportFileNameTests();

@@ -1,6 +1,6 @@
 # Native PMX Import & Unified Editor — implementation roadmap
 
-**Status: Phases 1–2 complete** (Phase 2 on 2026-11-22). This document tracks the architectural expansion described in the project brief. Each stage ends with: architecture findings, implementation summary, files changed, decisions, test results, known limitations, remaining tasks. No stage is marked complete on the basis of code existing — behaviour is checked.
+**Status: Phases 1–3 complete** (Phase 3 on 2026-11-24). This document tracks the architectural expansion described in the project brief. Each stage ends with: architecture findings, implementation summary, files changed, decisions, test results, known limitations, remaining tasks. No stage is marked complete on the basis of code existing — behaviour is checked.
 
 **Hard rules:** CardBridge stays one application; Koikatsu is an asset *source*, never a runtime dependency of PMX editing; imported data that CardBridge cannot interpret is preserved, never silently dropped; never assume two models share a skeleton; never route an imported PMX through the Koikatsu assembly pipeline for round-trip export.
 
@@ -52,7 +52,7 @@
 |---|---|---|
 | **1 — Native PMX foundation** | Lossless document model, native importer, preservation layer, round-trip export, regression tests, `pmx info`/`pmx roundtrip` CLI | **complete** |
 | **2 — Unified editing foundation** | PMX→Scene bridge, load `.pmx` in viewer, Model Explorer, materials/textures, existing bone/pose editor, validation | **complete** |
-| 3 — Asset library | Enumerable KK/KKS catalog, category taxonomy, thumbnails, dependency index, asset browser window, dedup/caching | pending |
+| **3 — Asset library** | Enumerable KK/KKS catalog, category taxonomy, thumbnails, dependency index, asset browser, dedup/caching | **complete** |
 | 4 — Cross-model transfer | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | pending |
 | 5 — Advanced editing | Morph, physics, mesh, advanced material/texture editors | pending |
 | 6 — Final integration | Unified open/export/project workflow, UI refinement, performance, full regression | pending |
@@ -120,8 +120,31 @@
 - Physics, display frames and non-vertex morphs are visible in the Model Explorer as read-only summaries; editing them is Phase 5.
 - The GUI was not driven automatically for this phase (no headless PMX smoke script); verification is via the unit tests and the bridge's real-model check.
 
+---
+
+## Phase 3 — Koikatsu Asset Library (2026-11-24)
+
+### Implementation summary
+- `src/library/AssetCatalog.{h,cpp}`: an enumerable, card-independent catalog built from all base list-table rows and every installed KK/KKS zipmod. Records carry display name, numeric category and friendly subcategory, source (base or mod GUID/name/author/path), bundle/asset, `ThumbAB`/`ThumbTex`, attachment `Parent`, texture/mask dependencies and authored flags. A JSON cache keyed on the library's list-table files and the mods-folder fingerprint makes repeat opens free of game-file reads; duplicate keys are collapsed.
+- `ListTable::all()/modRowCount()` and `ModIndex::allEntries()` were added as stable enumeration APIs (no existing behaviour changed).
+- `LoadAssetThumbnail` decodes a list-row `ThumbTex` straight from the base library bundle or the owning zipmod.
+- CLI: `assets build` and `assets list` with `--category`, `--search`, `--limit`, `--json`, `--cache`.
+- Viewer: a 12th **Assets** tab with a search box, category chips, a scrolling result list and a metadata/preview card (including a decoded thumbnail when available). It builds the catalog on first use and needs neither a card nor a running game.
+
+### Files changed
+- New: `src/library/AssetCatalog.{h,cpp}`, `viewer/Assets.inc`.
+- Modified: `CMakeLists.txt`, `src/resolve/ListTable.{h,cpp}`, `src/resolve/ModIndex.{h,cpp}`, `cli/main.cpp`, `viewer/{main.cpp,State.inc,Panel.inc,Window.inc}`, `tests/cardbridge_tests.cpp`, `CHANGELOG.md`, `README.md`, `VERSION`, this roadmap.
+
+### Results
+- Build clean; **19,442 checks, 0 failed** (1 integration suite skipped). New catalog tests cover building from a synthetic zipmod, metadata/classification, query filtering, cache round-trip and the earlier mod-index cache tests still pass.
+- Real library (`library_full`, no mods): 1,595 items — Clothing 422, Hair 320, Accessories 212, Body 77, Textures 439, Other 125. `assets list --category clothing --limit 5` returns the expected Japanese display names.
+
+### Known limitations
+- No per-asset *rendered* mannequin preview yet (only the list row's authored `ThumbTex`); a rendered preview needs the scene-assembly work of Phase 4.
+- The category taxonomy is derived from the numeric categories actually present in source/docs; unknown custom mod categories fall under "Other" with their numeric id, not a guessed name.
+- The GUI was not driven automatically for this phase; verification is via unit tests and CLI runs.
+
 ### Remaining implementation tasks
-- **Phase 3:** enumerable KK/KKS asset catalog, taxonomy, thumbnails, dependency index, asset browser, dedup/caching.
-- **Phase 4:** accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting.
+- **Phase 4:** accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting; rendered asset preview.
 - **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
 - **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.
