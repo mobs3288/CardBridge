@@ -327,11 +327,14 @@ struct App {
     std::string wantPose;                     // --pose <file>: a pose to load once the first card is up
     std::string pendingCard;                  // a card to open once the library has been set up
     int pendingOutfit = -1;
-    // library state, built once
-    resolve::ModIndex mods;
+    // Library state. The mod database has its own lifecycle: it is keyed only
+    // by the mod source, never by the card's game or the library path. The
+    // resolver is the card-specific part (library + lists + game filter) and
+    // is rebuilt cheaply on a card/profile switch while the index is reused.
+    resolve::ModIndexCache modsCache;
     resolve::ListTable lists;
     std::shared_ptr<resolve::Resolver> resolver;   // shared with the worker threads (assembly in flight keeps it alive)
-    std::string resolverKey;
+    std::string resolverKey;                       // library|mods pair this resolver was built for — not an index key
 
     std::shared_ptr<Loaded> loaded;
     std::vector<char> hidden;      // the part checkboxes (1 = unticked)

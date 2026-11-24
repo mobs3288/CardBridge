@@ -552,17 +552,21 @@ std::string ClipText(const std::string& s, size_t maxChars) {
     return s.size() <= maxChars ? s : s.substr(0, maxChars - 3) + "...";
 }
 
-bool EnsureResolver(std::string& err) {
-    std::string key = g.settings.library + "|" + g.settings.mods;
-    if (g.resolver && key == g.resolverKey) return true;
-    if (g.settings.library.empty()) { err = "no asset library: start with --library <dir>"; return false; }
+// `libraryRoot` / `modsRoot` / `modCachePath` are snapshots StartLoad takes on
+// the UI thread: a profile switch while a card is loading must not change the
+// source underneath a build. The resolver key is the card-specific pair; the
+// mod index has its own key (mod source only) inside ModIndexCache.
+bool EnsureResolver(const std::string& libraryRoot, const std::string& modsRoot,
+                    const std::string& modCachePath, std::string& err) {
+    std::string mods = modsRoot;
+    if (g.resolver && libraryRoot + "|" + mods == g.resolverKey) return true;
+    if (libraryRoot.empty()) { err = "no asset library: start with --library <dir>"; return false; }
     std::vector<std::string> issues;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo.clear();
     }
-    if (!g.settings.mods.empty()) {
-        Log("indexing mods in " + g.settings.mods + " ...");
+    if (!mods.empty()) {
         auto modProgress = [](size_t done, size_t total) {
             // Map the mod-index range (which can be minutes on a 4,000-mod
             // folder) into the first slice of the overall loading bar.
@@ -571,36 +575,46 @@ bool EnsureResolver(std::string& err) {
             if (done % 200 == 0 || done == total) Log("indexing mods " + std::to_string(done) + " / " + std::to_string(total));
         };
         auto modCancel = [] { return ProgCancelled(); };
-        g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, modProgress, modCancel);
+        const size_t buildsBefore = g.modsCache.buildCount();
+        resolve::ModIndex::Stats st;
+        const resolve::ModIndex* index = &g.modsCache.get(mods, modCachePath, &issues, &st, modProgress, modCancel);
+        bool built = g.modsCache.buildCount() != buildsBefore;
         // A game folder instead of its mods folder: look one level down.
-        if (g.mods.guidCount() == 0 && Exists(g.settings.mods + "/mods")) {
-            g.settings.mods += "/mods";
-            g.mods = resolve::ModIndex::Build(g.settings.mods, ModCachePath(), &issues, nullptr, modProgress, modCancel);
+        if (index->guidCount() == 0 && Exists(mods + "/mods")) {
+            mods += "/mods";
+            st = resolve::ModIndex::Stats{};
+            const size_t nestedBefore = g.modsCache.buildCount();
+            index = &g.modsCache.get(mods, modCachePath, &issues, &st, modProgress, modCancel);
+            built = built || g.modsCache.buildCount() != nestedBefore;
+            g.settings.mods = mods;   // keep the persisted fallback the old code wrote
             SaveSettings(g.settings);
         }
+        if (built) Log("indexing mods in " + mods + " ...");
+        else Log("reusing mod index for " + mods);
         ProgSet(0.15, "mods indexed");
         std::lock_guard<std::recursive_mutex> lk(g.mu);
-        g.modsInfo = std::to_string(g.mods.guidCount()) + " mods found";
-        if (g.mods.guidCount() == 0) g.modsInfo = "NO mods found in that folder - press M and pick the folder that holds the .zipmod files";
-        Log(g.modsInfo, g.mods.guidCount() ? LogKind::Good : LogKind::Error);
+        g.modsInfo = std::to_string(index->guidCount()) + " mods found";
+        if (index->guidCount() == 0) g.modsInfo = "NO mods found in that folder - press M and pick the folder that holds the .zipmod files";
+        Log(g.modsInfo, index->guidCount() ? LogKind::Good : LogKind::Error);
     } else {
+        g.modsCache.get(std::string(), modCachePath, &issues);   // drop a stale index when mods are turned off
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         g.modsInfo = "no mods folder set - mod items will be missing (press M)";
         Log(g.modsInfo, LogKind::Warn);
         ProgSet(0.15, "no mods folder");
     }
     ProgSet(0.16, "checking asset library");
-    auto chk = library::CheckLibrary(g.settings.library, false);
+    auto chk = library::CheckLibrary(libraryRoot, false);
     if (!chk.ok) { err = "asset library problem: " + (chk.issues.empty() ? std::string("unusable") : chk.issues[0]); return false; }
-    const auto gameInfo = library::ReadGameInfo(g.settings.library);
+    const auto gameInfo = library::ReadGameInfo(libraryRoot);
     Log("asset library: " + (chk.profile.empty() ? std::string("base") : chk.profile) + " profile (" +
         std::string(gameInfo.name()) + (gameInfo.unityVersion.empty() ? std::string() : ", Unity " + gameInfo.unityVersion) + ")", LogKind::Good);
-    g.mods.setGame(gameInfo);   // KK-only mods are excluded when the library is KKS
+    g.modsCache.setGame(gameInfo);   // KK-only mods are excluded when the library is KKS; no rebuild
     g.lists = resolve::ListTable();
-    g.lists.loadBaseGame(library::AbdataRoot(g.settings.library), &issues);
-    g.resolver = std::make_shared<resolve::Resolver>(g.mods, g.lists, library::AbdataRoot(g.settings.library), gameInfo);
-    if (exporter::LoadColourGrade(g.settings.library)) Log("colour grading loaded (G toggles it)", LogKind::Good);
-    g.resolverKey = key;
+    g.lists.loadBaseGame(library::AbdataRoot(libraryRoot), &issues);
+    g.resolver = std::make_shared<resolve::Resolver>(g.modsCache.index(), g.lists, library::AbdataRoot(libraryRoot), gameInfo);
+    if (exporter::LoadColourGrade(libraryRoot)) Log("colour grading loaded (G toggles it)", LogKind::Good);
+    g.resolverKey = libraryRoot + "|" + mods;
     return true;
 }
 
@@ -695,7 +709,10 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
     ProgBegin("Loading " + fileio::FileName(path));
     Log("open " + fileio::FileName(path));
     InvalidatePanel();
-    std::thread([path, outfit, keepTweaks, clothingPins, prevCardPath]() {
+    // Snapshot after profile activation: switching cards/games on the UI thread
+    // cannot retarget the source while the worker is indexing.
+    const std::string libraryRoot = g.settings.library, modsRoot = g.settings.mods, modCachePath = ModCachePath();
+    std::thread([path, outfit, keepTweaks, clothingPins, prevCardPath, libraryRoot, modsRoot, modCachePath]() {
         auto t0 = std::chrono::steady_clock::now();
         auto out = std::make_shared<Loaded>();
         std::string err;
@@ -703,7 +720,7 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
         try {
             ProgSet(0.02, "indexing mods");
             if (ProgCancelled()) throw Cancelled{};
-            if (!EnsureResolver(err)) throw std::runtime_error(err);
+            if (!EnsureResolver(libraryRoot, modsRoot, modCachePath, err)) throw std::runtime_error(err);
             if (ProgCancelled()) throw Cancelled{};
             ProgSet(0.18, "reading the card");
             // The previous character's bundles are no longer needed (its

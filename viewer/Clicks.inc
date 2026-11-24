@@ -281,7 +281,7 @@ void ApplyProfile(const std::string& key, bool announce) {
     g.settings.mods = p.mods;
     g.settings.noMods = p.noMods;
     SaveSettings(g.settings);
-    g.resolver.reset();   // the next load builds a resolver over the new pair
+    g.resolver.reset();   // the next load builds a card-specific resolver over the new pair; the mod index is kept
     if (announce) Log(std::string("source profile: ") + ProfileLabel(key), LogKind::Good);
 }
 
@@ -594,7 +594,7 @@ void SettingsAction(int id) {
     }
     case kSetModsChoose: ChooseMods(); break;
     case kSetModsReindex:
-        fileio::RemoveFile(ModCachePath());
+        g.modsCache.invalidate(true, ModCachePath());   // explicit reindex: drop the in-memory index and the disk cache
         Log("the mod index will be built again", LogKind::Info);
         reloadCard();
         break;

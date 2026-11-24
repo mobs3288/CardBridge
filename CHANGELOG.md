@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.32] - 2026-11-24
+
+### Fixed
+
+- **Switching between KK and KKS cards no longer rebuilds the mod index.** Indexing was a side effect of resolver creation, keyed on the library+mods pair; changing the card's game swapped the library path and was mistaken for an indexing dependency. The mod database now has its own cache keyed only on the mod source (with a cheap path/size/mtime fingerprint for added, removed or edited zipmods), while the card's game is only a lookup filter. A concurrent card load or profile switch cannot start a second indexing job. Explicit reindex, different mod folders and KK/KKS compatibility resolution are unchanged. Eight regression tests cover both switch directions, repeated switching, source/file changes, manual reindex and concurrent loads; 19,341 unit checks pass.
+
 ## [0.7.31] - 2026-11-24
 
 ### Fixed

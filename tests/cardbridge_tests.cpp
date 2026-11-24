@@ -77,6 +77,7 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>  
@@ -89,6 +90,7 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Preview.cpp's shared constant-buffer filler; GpuView.cpp declares it the same way.
@@ -11688,10 +11690,182 @@ void pmxImportTests() {
     });
 }
 
+// Mod-index lifecycle: switching the loaded card between KK and KKS is a
+// card-specific context change (library + game filter), never an indexing
+// dependency. These tests exercise the same ModIndexCache the viewer uses.
+void modIndexCacheTests() {
+    const std::string base = tempPath("modindex_cache");
+    std::filesystem::remove_all(base);
+    const std::string modsKK = base + "/kk-mods", modsKKS = base + "/kks-mods";
+    std::filesystem::create_directories(modsKK);
+    std::filesystem::create_directories(modsKKS);
+    const std::string cache = tempPath("modindex_cache.json");
+    fileio::RemoveFile(cache);
+
+    // A tiny but real .zipmod: manifest.xml with an optional <game> tag and a
+    // character-list CSV declaring (category, id) 0/1001.
+    auto putMod = [](const std::string& dir, const std::string& file, const std::string& guid,
+                     const std::string& gameTag, int id) {
+        std::string xml = "<manifest><guid>" + guid + "</guid><name>" + guid + "</name>" +
+                          "<version>1</version><author>test</author>";
+        if (!gameTag.empty()) xml += "<game>" + gameTag + "</game>";
+        xml += "</manifest>";
+        const std::string csv = "0\nhead1\nhead2\nhead3\n" + std::to_string(id) + "\n";
+        const std::string tmp = writeStoredZip("modcache_" + file, {
+            {"manifest.xml", Bytes(xml.begin(), xml.end())},
+            {"abdata/list/characustom/test.csv", Bytes(csv.begin(), csv.end())},
+        });
+        if (tmp.empty()) return false;
+        std::error_code ec;
+        std::filesystem::rename(tmp, dir + "/" + file, ec);
+        if (ec) {
+            std::filesystem::copy_file(tmp, dir + "/" + file, std::filesystem::copy_options::overwrite_existing, ec);
+            fileio::RemoveFile(tmp);
+        }
+        return !ec;
+    };
+    CHECK(putMod(modsKK, "kkonly.zipmod", "test.kkonly", "Koikatsu", 1001));
+    CHECK(putMod(modsKKS, "kksonly.zipmod", "test.kksonly", "Koikatsu Sunshine", 1001));
+    CHECK(putMod(modsKK, "shared.zipmod", "test.shared", "", 1001));
+    CHECK(putMod(modsKKS, "shared.zipmod", "test.shared", "", 1001));
+
+    library::GameInfo kk; kk.game = library::SourceGame::Koikatsu;
+    library::GameInfo kks; kks.game = library::SourceGame::KoikatsuSunshine;
+    auto hasGuid = [](const std::vector<const resolve::ModEntry*>& hits, const char* guid) {
+        for (const auto* e : hits) if (e->guid == guid) return true;
+        return false;
+    };
+    std::vector<std::string> issues;
+
+    test("mod index: initial KK load indexes when no valid index exists", [&] {
+        resolve::ModIndexCache c;
+        CHECK(!c.hasIndex());
+        const resolve::ModIndex& idx = c.get(modsKK, cache, &issues);
+        CHECK(c.hasIndex());
+        CHECK(c.buildCount() == 1);
+        CHECK(idx.guidCount() == 2);
+        CHECK(c.root() == modsKK);
+        CHECK(issues.empty());
+    });
+
+    test("mod index: KK -> KKS reuses the index and only changes the game filter", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        c.setGame(kk);
+        const size_t before = c.buildCount();
+        auto kkHits = c.index().findByListId(0, 1001);
+        CHECK(kkHits.size() == 2);
+        CHECK(hasGuid(kkHits, "test.kkonly"));
+        CHECK(hasGuid(kkHits, "test.shared"));
+        // The card switched to KKS: same mod source, new card game.
+        c.setGame(kks);
+        c.get(modsKK, cache, &issues);
+        CHECK(c.buildCount() == before);
+        auto kksHits = c.index().findByListId(0, 1001);
+        CHECK(kksHits.size() == 1);
+        CHECK(hasGuid(kksHits, "test.shared"));
+        CHECK(!hasGuid(kksHits, "test.kkonly"));   // KK-only metadata kept, just not resolved for KKS
+        CHECK(c.index().find("test.kkonly") != nullptr);
+    });
+
+    test("mod index: KKS -> KK reuses the index and restores the KK filter", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        c.setGame(kks);
+        const size_t before = c.buildCount();
+        auto kksHits = c.index().findByListId(0, 1001);
+        CHECK(kksHits.size() == 1 && hasGuid(kksHits, "test.shared"));
+        c.setGame(kk);
+        c.get(modsKK, cache, &issues);
+        CHECK(c.buildCount() == before);
+        auto kkHits = c.index().findByListId(0, 1001);
+        CHECK(kkHits.size() == 2 && hasGuid(kkHits, "test.kkonly"));
+    });
+
+    test("mod index: repeated KK/KKS switching reuses one index", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        for (int i = 0; i < 8; ++i) {
+            c.setGame(i % 2 ? kk : kks);
+            c.get(modsKK, cache, &issues);
+        }
+        CHECK(c.buildCount() == 1);
+        CHECK(c.index().guidCount() == 2);
+    });
+
+    test("mod index: changing the actual mod source rebuilds for the new source", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        const size_t before = c.buildCount();
+        c.get(modsKKS, cache, &issues);
+        CHECK(c.buildCount() == before + 1);
+        CHECK(c.root() == modsKKS);
+        CHECK(c.index().guidCount() == 2);
+        CHECK(c.index().find("test.kksonly") != nullptr);
+        CHECK(c.index().find("test.kkonly") == nullptr);
+    });
+
+    test("mod index: adding and removing mod files refreshes the index", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        const size_t before = c.buildCount();
+        CHECK(putMod(modsKK, "added.zipmod", "test.added", "", 2001));
+        c.get(modsKK, cache, &issues);
+        CHECK(c.buildCount() == before + 1);
+        CHECK(c.index().find("test.added") != nullptr);
+        const size_t afterAdd = c.buildCount();
+        fileio::RemoveFile(modsKK + "/added.zipmod");
+        c.get(modsKK, cache, &issues);
+        CHECK(c.buildCount() == afterAdd + 1);
+        CHECK(c.index().find("test.added") == nullptr);
+    });
+
+    test("mod index: explicit reindex rebuilds even when the source is unchanged", [&] {
+        resolve::ModIndexCache c;
+        c.get(modsKK, cache, &issues);
+        const size_t before = c.buildCount();
+        c.invalidate(true, cache);
+        CHECK(!c.hasIndex());
+        CHECK(!fileio::Exists(cache));
+        c.get(modsKK, cache, &issues);
+        CHECK(c.buildCount() == before + 1);
+        CHECK(c.hasIndex());
+        CHECK(c.index().guidCount() == 2);
+    });
+
+    test("mod index: concurrent loads start only one indexing job", [&] {
+        // Build a fresh cache so this test owns the build count.
+        const std::string concurrentCache = tempPath("modindex_cache_concurrent.json");
+        fileio::RemoveFile(concurrentCache);
+        constexpr int N = 6;
+        resolve::ModIndexCache c;
+        std::atomic<int> entered{0};
+        std::atomic<bool> go{false};
+        std::vector<int> found(N, -1);
+        auto progress = [&](size_t, size_t) {
+            if (go.exchange(true)) return;
+            // Hold the first build until every other caller has reached get()
+            // and is queued behind the cache mutex.
+            for (int spin = 0; spin < 2000000 && entered.load() < N; ++spin) std::this_thread::yield();
+        };
+        std::vector<std::thread> threads;
+        for (int i = 0; i < N; ++i) threads.emplace_back([&, i] {
+            ++entered;
+            std::vector<std::string> iss;
+            found[static_cast<size_t>(i)] = static_cast<int>(c.get(modsKK, concurrentCache, &iss, nullptr, progress).guidCount());
+        });
+        for (auto& t : threads) t.join();
+        for (int n : found) CHECK(n == 2);
+        CHECK(c.buildCount() == 1);
+        fileio::RemoveFile(concurrentCache);
+    });
+}
+
 } // namespace
 
 int main() {
     unitTests();
+    modIndexCacheTests();
     pmxImportTests();
     meshTests();
     exportFileNameTests();

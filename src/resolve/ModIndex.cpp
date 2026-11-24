@@ -254,4 +254,66 @@ const ModEntry* ModIndex::findShader(const std::string& name, std::string* bundl
     return nullptr;
 }
 
+std::string ModSourceFingerprint(const std::string& root, std::vector<std::string>* issues) {
+    std::vector<std::string> files;
+    if (!root.empty()) files = fileio::ListFiles(root, {".zipmod", ".zip"}, issues);
+    std::sort(files.begin(), files.end());
+    std::string fp;
+    for (const auto& p : files) {
+        fp += p;
+        fp += '|';
+        try {
+            fp += std::to_string(fileio::FileSize(p));
+            fp += '|';
+            fp += std::to_string(fileio::LastWriteTicks(p));
+        } catch (const std::exception&) {
+            fp += '?';   // a file that vanished mid-scan must look "changed"
+        }
+        fp += ';';
+    }
+    return fp;
+}
+
+const ModIndex& ModIndexCache::get(const std::string& root, const std::string& cachePath,
+                                   std::vector<std::string>* issues, ModIndex::Stats* stats,
+                                   const Progress& progress, const Cancelled& cancelled) {
+    std::lock_guard<std::mutex> lk(mu_);   // a concurrent caller waits, then reuses what this build produced
+    if (stats) *stats = ModIndex::Stats{};
+    const library::GameInfo game = index_.game();   // the card's game is not an indexing dependency
+
+    if (root.empty()) {
+        if (!valid_ || root_ != root || cachePath_ != cachePath) {
+            index_ = ModIndex{};
+            index_.setGame(game);
+            root_ = root;
+            cachePath_ = cachePath;
+            fingerprint_.clear();
+            valid_ = true;
+        }
+        return index_;
+    }
+
+    // Don't pass the caller's `issues` here: Build reports the same problems,
+    // and a fingerprint that could not stat a file simply forces a rebuild.
+    const std::string fp = ModSourceFingerprint(root, nullptr);
+    if (valid_ && root_ == root && cachePath_ == cachePath && fingerprint_ == fp) return index_;
+
+    ModIndex built = ModIndex::Build(root, cachePath, issues, stats, progress, cancelled);
+    built.setGame(game);
+    index_ = std::move(built);
+    root_ = root;
+    cachePath_ = cachePath;
+    fingerprint_ = fp;
+    valid_ = true;
+    ++builds_;
+    return index_;
+}
+
+void ModIndexCache::invalidate(bool clearDiskCache, const std::string& cachePath) {
+    std::lock_guard<std::mutex> lk(mu_);
+    valid_ = false;   // the index stays in memory so any resolver still using it remains valid
+    fingerprint_.clear();
+    if (clearDiskCache && !cachePath.empty()) fileio::RemoveFile(cachePath);
+}
+
 } // namespace cardbridge::resolve

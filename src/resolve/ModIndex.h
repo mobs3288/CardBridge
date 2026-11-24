@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,58 @@ private:
     std::map<std::string, std::pair<std::string, size_t>> byShaderName_;                        // shader name -> (guid, index in byGuid_[guid])
     library::GameInfo game_;
     size_t count_ = 0;
+};
+
+// A cheap change-detection key for a mods directory: the sorted path + size +
+// last-write time of every .zip/.zipmod. Two equal fingerprints mean the mod
+// source is unchanged, so an already-built ModIndex can be reused. Reading
+// manifest.xml is *not* part of this (that is the expensive part Build skips
+// via its on-disk cache).
+std::string ModSourceFingerprint(const std::string& root, std::vector<std::string>* issues = nullptr);
+
+// Owns the in-memory mod database independently of the card being loaded.
+//
+// The old viewer built the index inside EnsureResolver, whose validity key was
+// the resolver's library+mods pair. Switching a KK card for a KKS card changes
+// the library path (a card-specific context), which was mistaken for an
+// indexing dependency and rebuilt the whole database. Here the only rebuild
+// triggers are: no index yet, a different mod source/configuration, mod files
+// added/removed/edited, or an explicit invalidate(). The card's game is a
+// lookup filter (setGame), never a build key. get() serialises builds, so a
+// concurrent card load or profile switch cannot start a second indexing job.
+class ModIndexCache {
+public:
+    using Progress = std::function<void(size_t, size_t)>;
+    using Cancelled = std::function<bool()>;
+
+    // Returns the index for `modsRoot`, rebuilding only when needed. An empty
+    // root yields an empty index without touching disk. Concurrent callers
+    // block and reuse the same build. `stats` describes the build (all zeros
+    // on reuse); the game filter of the current index is preserved across a
+    // rebuild.
+    const ModIndex& get(const std::string& modsRoot, const std::string& cachePath,
+                        std::vector<std::string>* issues, ModIndex::Stats* stats = nullptr,
+                        const Progress& progress = {}, const Cancelled& cancelled = {});
+
+    // Force the next get() to rebuild. `clearDiskCache` also deletes the JSON
+    // per-file manifest cache so edited/removed mods are re-read from disk.
+    void invalidate(bool clearDiskCache = false, const std::string& cachePath = {});
+
+    // Card-specific game context: affects which indexed mods are visible to
+    // lookups, never whether the index is rebuilt.
+    void setGame(const library::GameInfo& g) { index_.setGame(g); }
+
+    const ModIndex& index() const { return index_; }
+    bool hasIndex() const { return valid_; }
+    size_t buildCount() const { return builds_; }   // telemetry: how many actual builds happened
+    const std::string& root() const { return root_; }
+
+private:
+    ModIndex index_;
+    std::string root_, cachePath_, fingerprint_;
+    bool valid_ = false;
+    size_t builds_ = 0;
+    std::mutex mu_;   // one build at a time; a waiter sees the finished index
 };
 
 } // namespace cardbridge::resolve
