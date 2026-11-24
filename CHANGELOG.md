@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.24] - 2026-11-24
+
+### Fixed
+
+- **Garments no longer clip into the body on card load (the shared clothing fitting regression).** A normal viewer load again clears the shown outfit's coordinate-specific ABMX slot before assembly. Those mods (e.g. `cf_d_sk_top` X=0.755 on Oosuki Mamako's outfit 7) are authored for the game's own coordinate switch, where the cloth is re-fitted against that coordinate; applying them to CardBridge's static rig pulls skirt/apron vertices inside the body. All outfit categories benefit from the shared clear; imports still merge or replace the slot through the normal ABMX path. The nipple/areola coverage fix and every texture/render improvement from 0.7.12-0.7.22 are preserved. Verified on the supplied card: the apron silhouette is 159 px wide at the hip after the fix vs 135 px before, matching the 0.7.11 reference; 19,285 unit checks pass.
+
 ## [0.7.22] - 2026-11-24
 
 ### Fixed

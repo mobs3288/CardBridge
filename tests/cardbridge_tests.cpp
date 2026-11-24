@@ -6844,27 +6844,34 @@ void unitTests() {
         CHECK(!card::OutfitWearsTop(empty, 0));                  // no outfits: nude, keep nipples
     });
 
-    test("default load keeps the card's coordinate ABMX (skirt length); only an import clears it", [] {
-        // The authored coordinate-specific skirt scale must survive a normal load: the viewer no longer clears it.
+    test("default load clears the shown outfit's coordinate ABMX so garments do not clip into the body", [] {
+        // A coordinate-specific skirt scale (e.g. cf_d_sk_top X=0.755, as on Oosuki Mamako's outfit 7) pulls the
+        // garment into the body when the viewer applies it to the static rig. A normal load must clear the shown
+        // slot before assembly, the same as an import with an ABMX-less source; other coordinates stay untouched.
         card::AbmxTable t;
         card::AbmxMod longSkirt; longSkirt.scale = {1.0f, 2.0f, 1.15f};
-        t.bones["cf_d_sk_top"] = {longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, longSkirt};
+        card::AbmxMod narrowSkirt; narrowSkirt.scale = {0.755f, 1.0f, 0.95f};
+        t.bones["cf_d_sk_top"] = {longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, longSkirt, narrowSkirt};
         card::Card c = testMoeCard();
         c.extended = Value(Value::Map{
             {Value(std::string("KKABMPlugin.ABMData")),
              Value(Value::Array{Value(int64_t{3}), Value(Value::Map{{Value(std::string("boneData")), Value(card::PackAbmxBin(t))}})})},
         });
-        const card::AbmxMod* m = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
-        CHECK(m != nullptr && m->scale.y == 2.0f);               // authored long-skirt scale intact on load
+        const card::AbmxMod* m = card::LoadAbmx(c.extended).find("cf_d_sk_top", 6);
+        CHECK(m != nullptr && m->scale.x == 0.755f);             // the card really does author a narrow skirt for slot 6
+        CHECK(card::ClearOutfitCoordinateSlot(c, 6, 7, nullptr)); // what the viewer does before assembling outfit 7
+        const card::AbmxMod* after = card::LoadAbmx(c.extended).find("cf_d_sk_top", 6);
+        CHECK(after == nullptr || (after->scale.x == 1.0f && after->scale.y == 1.0f));  // skirt back to its authored base
+        const card::AbmxMod* other = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
+        CHECK(other != nullptr && other->scale.y == 2.0f);       // other coordinates untouched
+        CHECK(!card::ClearOutfitCoordinateSlot(c, 6, 7, nullptr));// idempotent: repeated outfit switches do nothing
         // An import with an ABMX-less source still clears only the target slot (existing merge behaviour).
         card::Card src = testMoeCard();                          // no ABMX payload
         card::ApplyClothingOptions copt; copt.outfit = 0;
         card::ClothingFile cl = card::ExtractClothingFromCard(src, 0);
         card::ApplyClothing(c, cl, copt);
-        const card::AbmxMod* after = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
-        CHECK(after == nullptr || after->scale.y == 1.0f);       // import cleared the target slot
-        const card::AbmxMod* other = card::LoadAbmx(c.extended).find("cf_d_sk_top", 1);
-        CHECK(other != nullptr && other->scale.y == 2.0f);       // other coordinates untouched
+        const card::AbmxMod* imported = card::LoadAbmx(c.extended).find("cf_d_sk_top", 0);
+        CHECK(imported == nullptr || imported->scale.y == 1.0f);  // import cleared the target slot
     });
 
     test("coordinate import: per-coordinate plugins rebase (DynamicBoneEditor, HairAccessoryCustomizer, Accessory_States, pushup)", [] {
