@@ -849,11 +849,14 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             shader::Sm4Io io;   // reused per pixel (zeroed there); a fresh Sm4Io per pixel cost a heap allocation and 1 KB of member init each
             io.constantBuffers.reserve(16);
             io.textures = &mt;
-            // A baked material already carries the game shader's shaded colour in its texture. Running the
+            // A baked material already carries the game shader's colour in its texture (the CLI bakes with
+            // lit=false, so bakedLit is false even though the texture is a finished UV sheet). Running the
             // shader a second time multiplies that colour by the shader's lighting again, which crushed the
             // body, hands and clothes to a flat blue plate in the export's shaded preview. Show those
             // materials through the plain textured path instead: the picture then matches the baked PMX.
-            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit) {   // game shaders only in Lit; diagonals replace shading entirely
+            const bool alreadyBakedTex = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
+                                         scene.textures[static_cast<size_t>(mat.texture)].bakedInShaderBake;
+            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                 else {
@@ -994,7 +997,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             default: break;
                             }
                         }
-                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit) {
+                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex) {
                             io.discarded = false; io.trace = false; io.frontFace = true;
                             std::memset(io.input, 0, sizeof(io.input));
                             std::memset(io.output, 0, sizeof(io.output));

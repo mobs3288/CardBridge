@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.27] - 2026-11-24
+
+### Fixed
+
+- The export's shaded preview now recognises every texture written by the shader bake, including the CLI's colour-only (`lit=false`) bake, so the dress no longer falls back to a flat blue plate. Hands and feet still use the KKS skin shader, which is deliberately not baked; see the remaining limitations in the investigation notes. All 19,295 unit checks pass.
+
 ## [0.7.26] - 2026-11-24
 
 ### Fixed
