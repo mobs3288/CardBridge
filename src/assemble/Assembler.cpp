@@ -4537,6 +4537,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             m.shaderClipsAlpha = true;
             m.alpha = true;
             m.translucent = false;
+            // A packed garment shell (the maid glove sleeve) has no separate authored lining: its inside
+            // must draw from the back as well, or the sleeve reads as an open, see-through sheet when the
+            // arm is viewed from below/inside. Keep both faces in every view and in the PMX.
+            m.doubleSided = true;
         }
         // Keep every triangle. The atlas padding is removed per fragment by the alpha test instead:
         // dropping triangles that merely straddle the cell boundary punched holes in the sleeve

@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.31] - 2026-11-24
+
+### Fixed
+
+- The UV1-atlas glove sleeve is drawn from both sides: its material is now double-sided in the viewers and the PMX (MMD look flags include `0x01`), so looking along/inside the arm shows a solid sleeve instead of a see-through sheet. 19,296 unit checks pass.
+
 ## [0.7.30] - 2026-11-24
 
 ### Fixed
