@@ -856,7 +856,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             // materials through the plain textured path instead: the picture then matches the baked PMX.
             const bool alreadyBakedTex = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
                                          scene.textures[static_cast<size_t>(mat.texture)].bakedInShaderBake;
-            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex) {   // game shaders only in Lit; diagonals replace shading entirely
+            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                 else {
@@ -997,7 +997,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             default: break;
                             }
                         }
-                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex) {
+                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha) {
                             io.discarded = false; io.trace = false; io.frontFace = true;
                             std::memset(io.input, 0, sizeof(io.input));
                             std::memset(io.output, 0, sizeof(io.output));

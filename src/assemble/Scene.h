@@ -135,6 +135,9 @@ struct SceneMaterial {
     // cell of a create-job atlas). The game's alpha-test shader draws nothing there; computed once after
     // assembly from the authored texture and UVs, before any bake can change them.
     bool fullyCutByAlpha = false;
+    // The mesh authored its real garment layout in UV1 because UV0 is a degenerate corner. Its create-job
+    // atlas has a cutout coverage around that layout; the game's alpha test removes those texels.
+    bool mainUvFromUv1 = false;
 };
 
 // True when a shader bake produced a real alpha cutout over the texels the material's mesh covers. A shader that ignores

@@ -1841,7 +1841,12 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         ctx->OMSetDepthStencilState(I.depth, 0);
                         ctx->OMSetBlendState(I.blend, bf, 0xFFFFFFFFu);
                     }
-                    const GpuShader* sh = (!I.plain && mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
+                    // A shader proven to alpha-clip must be drawn through the alpha-gated fallback in the
+                    // Lit view too. The uploaded game shader variant can ignore texture alpha (the KKS
+                    // clothes shader did here), painting the atlas padding as solid black ruffles while
+                    // the MMD view and PMX correctly cut those texels.
+                    const GpuShader* sh = (!I.plain && !mat.shaderClipsAlpha && mat.shaderIndex >= 0 &&
+                                           static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
                     // A co-located interior lining faces into its garment: the plain view draws the same-wound case inside-out (as the
                     // PMX writes it) and the authored-inward case is culled from outside the same way. Interior linings never use CULL_NONE,

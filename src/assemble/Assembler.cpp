@@ -121,7 +121,13 @@ void applyAbmx(Overrides& ov, UnityFile& uf, const std::string& prefabName, cons
         if (it != ov.end()) o = it->second;
         Quat baseRot = it != ov.end() && it->second.hasRot ? it->second.rot : x->rot;
         Vec3 basePos = o.pos, baseScl = o.scl;
-        if (m->hasScale()) o.scl = {baseScl.x * m->scale.x, baseScl.y * m->scale.y, baseScl.z * m->scale.z};
+        Vec3 mul = m->scale;
+        // KKABMX authors skirt bones for the game's coordinate switch, where the garment is re-fitted
+        // to that coordinate. On CardBridge's static rig an authored X shrink (e.g. 0.755) pulls the
+        // fabric inside the body instead. Keep the authored length (Y) and depth (Z) - the long-skirt
+        // silhouette is part of the card - and only stop the inward X pinch.
+        if (x->name.rfind("cf_d_sk_", 0) == 0 && mul.x < 1.0f) mul.x = 1.0f;
+        if (m->hasScale()) o.scl = {baseScl.x * mul.x, baseScl.y * mul.y, baseScl.z * mul.z};
         if (m->hasRotation()) { o.rot = quatMul(baseRot, shape::EulerToQuat(m->rotation)); o.hasRot = true; }
         if (m->hasLength()) o.pos = basePos * m->length + m->position;
         else if (m->hasPosition()) o.pos = basePos + m->position;
@@ -1549,6 +1555,21 @@ struct Builder {
         SceneMesh sm;
         sm.name = r.name;
         sm.part = part;
+        // Some garments (e.g. the base game's maid gloves) leave UV0 at a tiny corner of their texture
+        // and author the real layout in UV1; the game's clothes shader samples TEXCOORD1. Sampling UV0
+        // here hit an empty atlas cell, so the gloves drew as black ruffles or vanished entirely. Use
+        // UV1 as the main UV when UV0 is degenerate and UV1 carries a real garment layout. Keep the
+        // body/nipple placement map in uv1 untouched; this only replaces the mesh's primary UV.
+        auto uvSpanX = [](const std::vector<Vec2>& uv) {
+            if (uv.empty()) return 0.0f;
+            float lo = 1e9f, hi = -1e9f;
+            for (const auto& p : uv) { lo = std::min(lo, p.x); hi = std::max(hi, p.x); }
+            return hi - lo;
+        };
+        // The part is pushed into scene.parts only after its renderers, so identify garments by the
+        // stable part id prefix here ("outfit0.gloves", ...) rather than by the not-yet-present part.
+        const bool mainUvIsUv1 = partId.rfind("outfit", 0) == 0 &&
+                                 uvSpanX(mesh->uv0) < 0.1f && uvSpanX(mesh->uv1) > 0.5f;
         size_t n = mesh->vertexCount();
         sm.vertices.resize(n);
 
@@ -1673,7 +1694,8 @@ struct Builder {
             SceneVertex& out = sm.vertices[v];
             Vec3 p = mesh->positions[v];
             Vec3 nrm = v < mesh->normals.size() ? mesh->normals[v] : Vec3{0, 1, 0};
-            out.uv = v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{};
+            out.uv = mainUvIsUv1 ? (v < mesh->uv1.size() ? mesh->uv1[v] : Vec2{})
+                                 : (v < mesh->uv0.size() ? mesh->uv0[v] : Vec2{});
             out.uv1 = v < mesh->uv1.size() ? mesh->uv1[v] : out.uv;
             out.uv2 = v < mesh->uv2.size() ? mesh->uv2[v] : out.uv;
             out.uv3 = v < mesh->uv3.size() ? mesh->uv3[v] : out.uv;
@@ -1786,6 +1808,8 @@ struct Builder {
                 ss.material = static_cast<int>(scene.materials.size()) - 1;
             } else {
                 ss.material = materialFor(uf, r.materials[mi], partId, fallbackColor, look, r, mi, hairTintColor);
+            if (mainUvIsUv1 && ss.material >= 0 && static_cast<size_t>(ss.material) < scene.materials.size())
+                scene.materials[static_cast<size_t>(ss.material)].mainUvFromUv1 = true;
                 if (std::getenv("CARDBRIDGE_DEBUG_HAIRCOL")) {
                     const auto& m = scene.materials.back();
                     std::fprintf(stderr, "haircol %-22s %-24s shader=%-36s tex=%d", partId.c_str(), r.name.c_str(), m.shader.c_str(), m.texture);
@@ -4475,6 +4499,66 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
     // agree and no alpha-solidified black plate appears in the views that do not alpha-test.
     for (size_t mi = 0; mi < scene.materials.size(); ++mi)
         scene.materials[mi].fullyCutByAlpha = ComputeFullyCutByTextureAlpha(scene, scene.materials[mi]);
+    // A UV1-atlas garment (e.g. the maid gloves) has real cutout coverage around its packed layout: the
+    // game's alpha test removes the atlas padding, which is exactly the unwanted black ruffle/bell-cuff
+    // geometry when an opaque renderer draws that padding's black RGB. Prove the cutout from the sampled
+    // UVs and keep it in every view, instead of treating the whole material as opaque.
+    for (size_t mi = 0; mi < scene.materials.size(); ++mi) {
+        auto& m = scene.materials[mi];
+        if (!m.mainUvFromUv1 || m.fullyCutByAlpha || m.texture < 0 || static_cast<size_t>(m.texture) >= scene.textures.size()) continue;
+        const auto& t = scene.textures[static_cast<size_t>(m.texture)];
+        if (t.width <= 0 || t.height <= 0 || t.rgba.size() < static_cast<size_t>(t.width) * t.height * 4) continue;
+        size_t sampled = 0, cut = 0;
+        for (const auto& mesh : scene.meshes)
+            for (const auto& sm : mesh.submeshes) {
+                if (sm.material != static_cast<int>(mi)) continue;
+                for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                    const auto& a = mesh.vertices[sm.indices[i]].uv;
+                    const auto& b = mesh.vertices[sm.indices[i + 1]].uv;
+                    const auto& c = mesh.vertices[sm.indices[i + 2]].uv;
+                    float u = (a.x + b.x + c.x) / 3.0f, v = (a.y + b.y + c.y) / 3.0f;
+                    u -= std::floor(u); v -= std::floor(v);
+                    const int x = std::min(t.width - 1, static_cast<int>(u * t.width));
+                    const int y = std::min(t.height - 1, static_cast<int>((1.0f - v) * t.height));
+                    ++sampled;
+                    if (t.rgba[(static_cast<size_t>(y) * t.width + x) * 4 + 3] < 128) ++cut;
+                }
+            }
+        if (sampled >= 4 && cut * 20 >= sampled && cut * 20 <= sampled * 19) {
+            m.shaderClipsAlpha = true;
+            m.alpha = true;
+            m.translucent = false;
+        }
+        if (!m.shaderClipsAlpha) continue;
+        // Triangles that straddle the atlas cell boundary leave thin slivers of the cut-away ruffle in
+        // every view and in the PMX. Drop any triangle not fully covered by the authored opaque texels;
+        // blend-shape offsets stay keyed by vertex index and remain valid for the vertices we keep.
+        static const float kBary[4][3] = {{1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                                          {0.6f, 0.2f, 0.2f}, {0.2f, 0.6f, 0.2f}, {0.2f, 0.2f, 0.6f}};
+        for (auto& mesh : scene.meshes)
+            for (auto& sm : mesh.submeshes) {
+                if (sm.material != static_cast<int>(mi)) continue;
+                std::vector<uint32_t> keep;
+                keep.reserve(sm.indices.size());
+                for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                    size_t opaque = 0;
+                    for (const auto& w : kBary) {
+                        const auto& a = mesh.vertices[sm.indices[i]].uv;
+                        const auto& b = mesh.vertices[sm.indices[i + 1]].uv;
+                        const auto& c = mesh.vertices[sm.indices[i + 2]].uv;
+                        float u = a.x * w[0] + b.x * w[1] + c.x * w[2];
+                        float v = a.y * w[0] + b.y * w[1] + c.y * w[2];
+                        u -= std::floor(u); v -= std::floor(v);
+                        const int x = std::min(t.width - 1, static_cast<int>(u * t.width));
+                        const int y = std::min(t.height - 1, static_cast<int>((1.0f - v) * t.height));
+                        if (t.rgba[(static_cast<size_t>(y) * t.width + x) * 4 + 3] >= 128) ++opaque;
+                    }
+                    if (opaque == 4)
+                        for (int k = 0; k < 3; ++k) keep.push_back(sm.indices[i + static_cast<size_t>(k)]);
+                }
+                if (!keep.empty() || sm.indices.empty()) sm.indices = std::move(keep);
+            }
+    }
     // Per-card presentation setting: the centre nose ridge is authored in the head mod's face detail mask, not in
     // the nose texture. Detect it there, keep the untouched pixels, and let the viewer slider / CLI flag dial it
     // without ever painting a feature the card does not have. Cards without a ridge detect 0 and stay as authored.

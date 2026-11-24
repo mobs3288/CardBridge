@@ -2,6 +2,14 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.28] - 2026-11-24
+
+### Fixed
+
+- **The card's long skirt is back in the viewer.** A normal card load again keeps its coordinate-specific ABMX (e.g. `cf_d_sk_top` Y=2.0), matching the card picture and the CLI export. The assembler now clamps only the inward X pinch of skirt bones (`cf_d_sk_*` X<1) that used to pull the apron/skirt into the body, so the 0.7.24 clipping fix is preserved: verified on Oosuki Mamako's outfit 7 as well as the supplied card.
+- **The long, pinstriped hand sleeve is back without the black bell cuffs.** Garments that author their real layout in UV1 (the base game's maid gloves have a degenerate UV0) now use UV1 as their main UV, so the create-job atlas is sampled where the garment actually is. The atlas padding is proven as a real alpha cutout and applied in the Lit view, plain/MMD view and PMX; triangles not fully covered by the authored texels are dropped, leaving the smooth sleeve to the wrist instead of black ruffles and slivers.
+- Regression coverage: a partially cut UV1-atlas garment keeps its sleeve rather than being removed wholesale. 19,296 unit checks pass.
+
 ## [0.7.27] - 2026-11-24
 
 ### Fixed

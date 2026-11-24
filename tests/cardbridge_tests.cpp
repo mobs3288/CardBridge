@@ -1920,8 +1920,14 @@ void unitTests() {
         CHECK(s.materials[0].fullyCutByAlpha);
         CHECK(!IgnoresTextureAlpha(s, s.materials[0]));   // the "opaque" shader name must not override an all-cut mesh
         CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 0.999f);   // MMD blends it away
+        // A mesh straddling the two cells is a real cutout, not a fully clipped garment: it must not be
+        // removed wholesale (the UV1-atlas gloves keep their long sleeve and lose only the empty padding).
+        s.meshes[0].vertices[0].uv.x = 0.2f;   // one corner in the empty cell, the rest in the garment
+        s.meshes[0].vertices[1].uv.x = 0.7f;
+        s.meshes[0].vertices[2].uv.x = 0.7f;
+        CHECK(!ComputeFullyCutByTextureAlpha(s, s.materials[0]));
         // The same material on a mesh that samples only the opaque cell stays opaque.
-        for (auto& v : s.meshes[0].vertices) v.uv.x += 0.5f;
+        for (auto& v : s.meshes[0].vertices) v.uv.x = 0.75f;
         CHECK(!ComputeFullyCutByTextureAlpha(s, s.materials[0]));
         s.materials[0].fullyCutByAlpha = false;
         CHECK(IgnoresTextureAlpha(s, s.materials[0]));
