@@ -464,6 +464,18 @@ inline bool ShaderWritesDepth(const Scene& scene, const SceneMaterial& mat) {
            scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite;
 }
 
+// A shader override whose name mentions alpha is not automatically a blend: KK/KKS have many alpha
+// TEST shaders (Shader Forge/main_alpha, the studio-alpha twins that fall back to it) which discard
+// sub-_Cutoff texels but write depth for the rest. Only a shader known NOT to write depth, in a
+// transparent render queue, genuinely blends over what is behind it. An unresolved shader keeps the
+// conservative name-based answer so a real blend is never made opaque by mistake.
+inline bool OverrideAlphaBlends(const Scene& scene, int shaderIndex, int renderQueue, bool alphaNamed) {
+    if (shaderIndex < 0 || static_cast<size_t>(shaderIndex) >= scene.shaders.size()) return alphaNamed;
+    const SceneShader& sh = scene.shaders[static_cast<size_t>(shaderIndex)];
+    const int q = renderQueue >= 0 ? renderQueue : sh.queue;
+    return !sh.zWrite && q >= 2450;
+}
+
 // Computes whether every triangle of a material's mesh lands in texels the game's alpha-test shader
 // discards. Create-job clothing atlases pack several garments into one image: a garment whose UVs sit in
 // a transparent cell is invisible in the game (the shader clips it), but an "opaque"-named shader made
@@ -514,6 +526,14 @@ inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
     if (mat.fullyCutByAlpha) return false;   // the alpha test removes this whole mesh in the game, opaque shader name or not
     if (mat.shaderClipsAlpha) return false;   // the bake proved this shader clips: its low-alpha texels are real holes
     if (IsOpaqueShaded(mat) || mat.shader.find("skin") != std::string::npos) return true;
+    // MaterialEditor can bind a dedicated _AlphaMask for an alpha shader. When that mask is fully
+    // opaque the game draws the whole surface: the transparency in the *main* texture is atlas
+    // padding, not a cutout. Reading main-texture alpha there invents holes and lets the lining
+    // or body bleed through an opaque skirt. This is structural (an authored mask binding), not a
+    // card or material-name exception; cutout garments without such a mask keep their holes.
+    for (const auto& tb : mat.texProps)
+        if (tb.name == "_AlphaMask" && tb.texture >= 0 && static_cast<size_t>(tb.texture) < scene.textures.size() &&
+            TextureIsFullyOpaque(scene.textures[static_cast<size_t>(tb.texture)])) return true;
     // A material with no authored alpha flag, no translucency and an opaque render queue is drawn by
     // the game without reading texture alpha at all — whatever the UV-flat bake left in the atlas. Hair
     // is the common case: a baked strand sheet contains alpha-0 padding between its islands and jagged

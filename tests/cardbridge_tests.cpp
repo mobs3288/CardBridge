@@ -1515,6 +1515,22 @@ void unitTests() {
         s.materials[0].renderQueue = 3040;   // main_clothes_alpha is a transparent-queue shader in the game
         CHECK(exporter::MmdMaterialLook(s, s.materials[0]).diffuse.w < 1.0f);   // alphaCutout (texture-based) still marks it
     });
+    test("MaterialEditor: an alpha-named shader override blends only when the shader it resolves writes no depth", [] {
+        using namespace assemble;
+        Scene s;
+        SceneShader sh; sh.name = "Shader Forge/main_alpha"; sh.zWrite = true; sh.queue = 3040;
+        s.shaders.push_back(sh);
+        // A depth-writing alpha shader is an alpha TEST even in a transparent queue (KK's
+        // main_alpha and the studio-alpha twins that fall back to it): keep the cutout.
+        CHECK(!OverrideAlphaBlends(s, 0, -1, true));
+        CHECK(!OverrideAlphaBlends(s, 0, 3000, true));
+        // A genuine blend (ZWrite Off) keeps its authored fractional alpha.
+        s.shaders[0].zWrite = false;
+        CHECK(OverrideAlphaBlends(s, 0, -1, true));
+        // An unresolved shader keeps the conservative name-based answer.
+        CHECK(OverrideAlphaBlends(s, -1, -1, true));
+        CHECK(!OverrideAlphaBlends(s, -1, -1, false));
+    });
     test("a shader bake that comes back solid black keeps the authored texture instead of a black plate", [] {
         using namespace assemble;
         // A third-party toon shader can read a colour constant the material never declares (or an ambient
@@ -1691,6 +1707,14 @@ void unitTests() {
         CHECK(code == exporter::kLiningOutward);
         CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) == 0);   // the lining is single-sided
         CHECK((exporter::MmdMaterialLook(s, s.materials[0]).drawFlags & 0x01) != 0);   // the base keeps its authored (double-sided) flags
+    });
+    test("lining: an alpha-test cutout whose shader name mentions alpha is not mistaken for a translucent lining", [&] {
+        auto s = colocated(false, 0, 0);
+        s.materials[1].alpha = true;   // alpha-named, but depth-writing: a cutout garment, not a blend
+        CHECK(!s.materials[1].translucent);
+        CHECK(exporter::ColocatedLinings(s)[1] == exporter::kLiningNone);
+        const char code = exporter::ColocatedLinings(s)[1];
+        CHECK((exporter::MmdMaterialLook(s, s.materials[1], false, code).drawFlags & 0x01) != 0);   // keeps both faces
     });
     // The Nihilux studio-alpha case, as authored: the twin has its own vertices, the same positions, the same cell grid, but
     // antiswap (inward) winding with authored normals pointing into the garment — the old own-normals classifier read this as

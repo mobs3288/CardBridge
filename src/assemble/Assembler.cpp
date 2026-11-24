@@ -1196,10 +1196,15 @@ struct Builder {
                 sm.shaderIndex = si;
                 sm.shader = e->property;
                 sm.alpha = contains(e->property, "alpha");
-                // Any shader carrying "alpha" is a translucency shader for the purpose of the export: it stays
-                // blended (not cut out), keeps its own texture as authored, the body behind it stays visible
-                // and MikuMikuDance gets an alpha below 1 so it blends - like the game draws it.
-                if (contains(e->property, "alpha")) sm.translucent = true;
+                // Blend vs. alpha-test is a property of the shader we will ACTUALLY run, not of its name.
+                // Several game shaders carry "alpha" in the name but write depth (Shader Forge/main_alpha,
+                // the studio-alpha twins that fall back to it): they discard sub-_Cutoff texels and draw
+                // the rest solid, so the exported material must keep depth writes and full alpha. Treating
+                // them as translucent lost the cutout, put the garment in the blended pass and let the body
+                // underneath bleed through. A genuinely blended shader (ZWrite Off in a transparent queue)
+                // keeps its authored fractional alpha. When the shader could not be resolved at all, keep
+                // the old name-based behaviour so a real blend is never made opaque by mistake.
+                sm.translucent = OverrideAlphaBlends(scene, si, sm.renderQueue, sm.alpha);
                 if (m_original) sm.doubleSided = twoSided(si, e->property, *m_original);
             }
             auto setProp = [&](const std::string& name, Vec4 v) {

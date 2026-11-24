@@ -445,7 +445,12 @@ std::vector<char> ColocatedLinings(const assemble::Scene& scene) {
                 if (common * 100 < std::min(ni, nj) * 85) continue;   // fewer than 85% of the smaller multiset shared: not co-located
                 const auto& ma = scene.materials[static_cast<size_t>(subs[i].material)];
                 const auto& mb = scene.materials[static_cast<size_t>(subs[j].material)];
-                const bool aTr = ma.translucent || ma.alpha, bTr = mb.translucent || mb.alpha;
+                // Only a genuinely blended material can be a see-through lining. An alpha-test
+                // cutout (alpha-named but depth-writing, e.g. a MaterialEditor studio-alpha jacket
+                // that falls back to main_alpha) is a solid garment, not a lining: treating it as
+                // one reverses its winding and culls its front faces, so the layer underneath shows
+                // through in rectangles.
+                const bool aTr = ma.translucent, bTr = mb.translucent;
                 if (aTr == bTr) continue;   // exactly one translucent sibling: it is the lining candidate
                 const Sub& outer = aTr ? subs[j] : subs[i];   // the opaque sibling (unchanged at export)
                 const Sub& inner = aTr ? subs[i] : subs[j];   // the translucent twin (the lining)
