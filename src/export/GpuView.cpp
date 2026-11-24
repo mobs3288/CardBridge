@@ -1944,7 +1944,11 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                         const GpuTex* ft = (mat.texture >= 0 && static_cast<size_t>(mat.texture) < I.textures.size() && I.textures[static_cast<size_t>(mat.texture)].srv) ? &I.textures[static_cast<size_t>(mat.texture)] : &I.defaults[0];
                         ctx->PSSetShaderResources(0, 1, &ft->srv);
                         const bool ftClamp = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() && scene.textures[static_cast<size_t>(mat.texture)].clamp;
-                        const bool ftLod0 = gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)];
+                        // The body's red vein / body-paint map is made of thin lines in a 1024 atlas.
+                        // Mip averaging washes them out at normal zoom, so skin (and other UV1-atlas
+                        // garments) keep their authored detail by sampling the base level.
+                        const bool detailTex = mat.cardSkin || mat.mainUvFromUv1;
+                        const bool ftLod0 = detailTex || (gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)]);
                         ID3D11SamplerState* fs = ftLod0 ? (ftClamp ? I.samplerLod0Clamp : I.samplerLod0Wrap) : (ftClamp ? I.samplerClamp : I.samplerWrap);
                         ctx->PSSetSamplers(0, 1, &fs);
                         const int nm = gs.material >= 0 && static_cast<size_t>(gs.material) < I.fbNormals.size() ? gs.material : -1;
@@ -2020,7 +2024,8 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                             GPUDBG("  skipping invalid s register %u\n", tb.sampler);
                             continue;
                         }
-                        const bool lod0 = gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)];
+                        const bool detailTex = (mat.cardSkin || mat.mainUvFromUv1) && (tb.name == "_MainTex" || tb.name == "_BaseMap");
+                        const bool lod0 = detailTex || (gs.material >= 0 && static_cast<size_t>(gs.material) < I.binaryAlpha.size() && I.binaryAlpha[static_cast<size_t>(gs.material)]);
                         ID3D11SamplerState* ss = lod0 ? (clamp ? I.samplerLod0Clamp : I.samplerLod0Wrap) : (clamp ? I.samplerClamp : I.samplerWrap);
                         ctx->PSSetSamplers(tb.sampler, 1, &ss);
                     }

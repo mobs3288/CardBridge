@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.29] - 2026-11-24
+
+### Fixed
+
+- **The body's red vein / body-paint texture is now mapped onto the skin.** KK/KKS bodies leave UV0 at (0,0) for ~80% of their vertices and author the real texture layout in UV1; we sampled UV0, so the create-job texture shown in the Material Workbench never reached the rendered body. The body mesh now uses its UV1 layout as the primary UV too, and body-paint textures are sampled at LOD 0 in the viewers so the thin strokes survive mip reduction. Verified on KK_351156: the red veins appear on the legs/arms in the as-exported view and the PMX carries the same UVs. 19,296 unit checks pass.
+
 ## [0.7.28] - 2026-11-24
 
 ### Fixed

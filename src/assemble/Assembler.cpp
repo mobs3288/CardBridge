@@ -1566,10 +1566,19 @@ struct Builder {
             for (const auto& p : uv) { lo = std::min(lo, p.x); hi = std::max(hi, p.x); }
             return hi - lo;
         };
-        // The part is pushed into scene.parts only after its renderers, so identify garments by the
-        // stable part id prefix here ("outfit0.gloves", ...) rather than by the not-yet-present part.
-        const bool mainUvIsUv1 = partId.rfind("outfit", 0) == 0 &&
-                                 uvSpanX(mesh->uv0) < 0.1f && uvSpanX(mesh->uv1) > 0.5f;
+        auto uvZeroFraction = [](const std::vector<Vec2>& uv) {
+            if (uv.empty()) return 0.0f;
+            size_t zero = 0;
+            for (const auto& p : uv) if (std::fabs(p.x) < 0.02f && std::fabs(p.y) < 0.02f) ++zero;
+            return static_cast<float>(zero) / static_cast<float>(uv.size());
+        };
+        // The part is pushed into scene.parts only after its renderers, so identify the body and
+        // garments by their stable part ids here ("body", "outfit0.gloves", ...) rather than by the
+        // not-yet-present part. KK/KKS body and some garments leave UV0 at (0,0) for most vertices
+        // and author the real texture layout in UV1 (the body's red vein/body-paint map lives there).
+        const bool mainUvIsUv1 = (partId == "body" || partId.rfind("outfit", 0) == 0) &&
+                                 uvZeroFraction(mesh->uv0) > 0.5f && uvSpanX(mesh->uv1) > 0.5f;
+
         size_t n = mesh->vertexCount();
         sm.vertices.resize(n);
 

@@ -344,7 +344,8 @@ Bytes RenderPreviewPng(const assemble::Scene& scene, const PreviewOptions& opt) 
                     float scrArea = std::fabs(den) * 0.5f;
                     if (scrArea > 1e-6f && uvArea > scrArea)
                         lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
-                    if (blend && detail::IsNoseDecal(mat)) lod = 0;   // keep thin authored strokes above the cutoff
+                    if (blend && detail::IsNoseDecal(mat)) lod = 0;
+                    if (mat.cardSkin || mat.mainUvFromUv1) lod = 0;   // thin body-paint strokes must not be mip-averaged away   // keep thin authored strokes above the cutoff
                 }
                 for (int y = y0; y <= y1; ++y)
                     for (int x = x0; x <= x1; ++x) {
@@ -915,6 +916,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                     if (scrArea > 1e-6f && uvArea > scrArea)
                         lod = std::min(static_cast<int>(mp->w.size()) - 1, static_cast<int>(std::floor(0.5f * std::log2(uvArea / scrArea) + 0.5f)));
                     if (blend && detail::IsNoseDecal(mat)) lod = 0;
+                    if (mat.cardSkin || mat.mainUvFromUv1) lod = 0;   // thin body-paint strokes must not be mip-averaged away
                 }
                 for (int y = y0 - (y0 % step); y <= y1; y += step)
                     for (int x = x0 - (x0 % step); x <= x1; x += step) {
