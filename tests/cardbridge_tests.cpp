@@ -20,6 +20,10 @@
 #include "assemble/CustomHairDiag.h"
 #include "assemble/HeelConfig.h"
 #include "assemble/Pose.h"
+#include "assemble/Proportions.h"
+#include "assemble/ProportionTransfer.h"
+#include "measure/BodyMeasure.h"
+#include "measure/TransferMeasure.h"
 #include "assemble/PhysicsSim.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
@@ -2081,6 +2085,56 @@ void unitTests() {
         }
         CHECK(low > 0 && mid > 0);   // holes stay holes, the tint stays translucent - no flat black sheet
         CHECK(high == 0);
+    });
+    test("export: a transparent-queue alpha-test cutout with ZWrite On is binary, not translucent (sock tint)", [] {
+        using namespace assemble;
+        Scene s;
+        s.name = "alpha-test-sock";
+        SceneBone root; root.name = "root"; root.parent = -1; root.pos = {0, 0, 0}; root.source = "rig"; root.world = Mat4{};
+        s.bones.push_back(root);
+        SceneTexture sock; sock.name = "sock"; sock.width = 4; sock.height = 4; sock.rgba.resize(4 * 4 * 4);
+        for (size_t i = 0; i < sock.rgba.size(); i += 4) {
+            const size_t x = (i / 4) % 4;
+            sock.rgba[i] = 255; sock.rgba[i + 1] = 210; sock.rgba[i + 2] = 220;
+            sock.rgba[i + 3] = x < 2 ? 0 : 190;   // atlas padding / holes plus the game's sub-255 tint
+        }
+        s.textures.push_back(sock);
+        SceneMaterial mat; mat.name = "o_socks_knee01"; mat.shader = "Shader Forge/main_alpha";
+        mat.alpha = true; mat.texture = 0; mat.renderQueue = 3050;   // mod override: transparent queue
+        mat.shaderIndex = 0;
+        s.materials.push_back(mat);
+        SceneShader sh; sh.name = mat.shader; sh.queue = 3040; sh.zWrite = true;   // an alpha test writes depth
+        s.shaders.push_back(sh);
+        ScenePart part; part.id = "outfit5.socks"; part.group = "Outfit"; part.meshes = {0};
+        s.parts.push_back(part);
+        SceneMesh mesh;
+        for (Vec3 v : {Vec3{-0.5f, 0, 0}, Vec3{0.5f, 0, 0}, Vec3{0.5f, 1, 0}, Vec3{-0.5f, 1, 0}}) {
+            SceneVertex sv; sv.pos = v; sv.normal = {0, 0, 1}; sv.uv = {v.x + 0.5f, v.y}; sv.bone[0] = 0; sv.weight[0] = 1; mesh.vertices.push_back(sv);
+        }
+        SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2, 0, 2, 3}; mesh.submeshes.push_back(sub);
+        s.meshes.push_back(mesh);
+        card::Card c; c.path = "sock-alpha-test.png";
+        exporter::ExportOptions eo;
+        eo.outDir = tempPath("sock_alpha_test") + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        eo.overwrite = true;
+        const auto r = exporter::ExportScene(s, c, eo);
+        const pmx::Model m = pmx::ReadPmx(fileio::ReadFile(r.pmxPath));
+        CHECK(m.materials.size() == 1);
+        CHECK(m.materials[0].diffuse.w < 0.999f);   // a real cutout stays in MMD's alpha-tested blended pass
+        CHECK(m.materials[0].texture >= 0);
+        const std::string path = fileio::Join(r.folder, m.textures[static_cast<size_t>(m.materials[0].texture)]);
+        int w = 0, h = 0, ch = 0;
+        stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, 4);
+        CHECK(px != nullptr);
+        int low = 0, mid = 0, high = 0;
+        if (px) {
+            for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4) {
+                if (px[i] < 64) ++low; else if (px[i] < 250) ++mid; else ++high;
+            }
+            stbi_image_free(px);
+        }
+        CHECK(low > 0 && high > 0);   // the holes stay and the tint becomes fully opaque in MMD
+        CHECK(mid == 0);              // no 190/255 tint may survive: MMD would show the stage through the socks
     });
     test("MMD/plain view: opaque skin occludes the geometry behind the face", [] {
         using namespace assemble;
@@ -5277,6 +5331,217 @@ void unitTests() {
             CHECK(manifest.find("0.875") != std::string::npos);
         }
     });
+    // ---- body proportion transfer tests (no game bundles needed) ----
+    auto makeTransferScene = [&](float height, float headHeight, float armLength) {
+        using namespace assemble;
+        Scene s;
+        auto bone = [&](const std::string& name, int parent, Vec3 p) {
+            s.bones.push_back({name, parent, p, "rig", Mat4::TRS(p, {}, {1, 1, 1})});
+            return static_cast<int>(s.bones.size()) - 1;
+        };
+        bone("cf_j_root", -1, {0, 0, 0});
+        bone("cf_s_shoulder02_L", 0, {0.20f, 1.30f, 0});
+        bone("cf_s_shoulder02_R", 0, {-0.20f, 1.30f, 0});
+        bone("cf_s_neck", 0, {0, 1.38f, 0});
+        bone("cf_s_arm01_L", 1, {0.20f + armLength * 0.4f, 1.30f, 0});
+        bone("cf_s_arm02_L", 4, {0.20f + armLength * 0.7f, 1.30f, 0});
+        bone("cf_s_arm03_L", 5, {0.20f + armLength, 1.30f, 0});
+        bone("cf_s_arm01_R", 2, {-0.20f - armLength * 0.4f, 1.30f, 0});
+        bone("cf_s_arm02_R", 7, {-0.20f - armLength * 0.7f, 1.30f, 0});
+        bone("cf_s_arm03_R", 8, {-0.20f - armLength, 1.30f, 0});
+        bone("cf_s_forearm01_L", 6, {0.20f + armLength * 1.2f, 1.30f, 0});
+        bone("cf_s_forearm02_L", 10, {0.20f + armLength * 1.45f, 1.30f, 0});
+        bone("cf_s_wrist_L", 11, {0.20f + armLength * 1.6f, 1.30f, 0});
+        bone("cf_s_forearm01_R", 9, {-0.20f - armLength * 1.2f, 1.30f, 0});
+        bone("cf_s_forearm02_R", 13, {-0.20f - armLength * 1.45f, 1.30f, 0});
+        bone("cf_s_wrist_R", 14, {-0.20f - armLength * 1.6f, 1.30f, 0});
+        // The deform (cf_j) bones the transfer now measures and adjusts.
+        const int jsL = bone("cf_j_shoulder_L", 0, {0.20f, 1.30f, 0});
+        const int jaL = bone("cf_j_arm00_L", jsL, {0.20f + armLength * 0.4f, 1.30f, 0});
+        const int jfL = bone("cf_j_forearm01_L", jaL, {0.20f + armLength * 0.8f, 1.30f, 0});
+        bone("cf_j_hand_L", jfL, {0.20f + armLength * 1.2f, 1.30f, 0});
+        const int jsR = bone("cf_j_shoulder_R", 0, {-0.20f, 1.30f, 0});
+        const int jaR = bone("cf_j_arm00_R", jsR, {-0.20f - armLength * 0.4f, 1.30f, 0});
+        const int jfR = bone("cf_j_forearm01_R", jaR, {-0.20f - armLength * 0.8f, 1.30f, 0});
+        bone("cf_j_hand_R", jfR, {-0.20f - armLength * 1.2f, 1.30f, 0});
+        const int jtL = bone("cf_j_thigh00_L", 0, {0.09f, 0.90f, 0});
+        const int jkL = bone("cf_j_leg01_L", jtL, {0.09f, 0.50f, 0});
+        const int jlL = bone("cf_j_leg03_L", jkL, {0.09f, 0.15f, 0});
+        bone("cf_j_foot_L", jlL, {0.09f, 0.05f, 0});
+        const int jtR = bone("cf_j_thigh00_R", 0, {-0.09f, 0.90f, 0});
+        const int jkR = bone("cf_j_leg01_R", jtR, {-0.09f, 0.50f, 0});
+        const int jlR = bone("cf_j_leg03_R", jkR, {-0.09f, 0.15f, 0});
+        bone("cf_j_foot_R", jlR, {-0.09f, 0.05f, 0});
+        // The body part: one welded cylinder, enough for Measure() to find a torso contour.
+        SceneMesh body;
+        body.name = "body";
+        body.reshapable = true;
+        const int rings = 40, segs = 32;
+        for (int r = 0; r < rings; ++r) {
+            const float y = height * static_cast<float>(r) / static_cast<float>(rings - 1);
+            const float rad = 0.11f + 0.03f * std::sin(y * 2.0f / height * 3.14159265f);
+            for (int si = 0; si < segs; ++si) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(si) / static_cast<float>(segs);
+                SceneVertex v;
+                v.pos = {rad * std::cos(a), y, rad * std::sin(a)};
+                body.vertices.push_back(v);
+            }
+        }
+        SceneSubmesh sub;
+        sub.material = 0;
+        for (int r = 0; r + 1 < rings; ++r)
+            for (int si = 0; si < segs; ++si) {
+                const int a = r * segs + si, b = r * segs + (si + 1) % segs;
+                const int c = (r + 1) * segs + si, d = (r + 1) * segs + (si + 1) % segs;
+                sub.indices.insert(sub.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(c), static_cast<uint32_t>(b),
+                                                       static_cast<uint32_t>(b), static_cast<uint32_t>(c), static_cast<uint32_t>(d)});
+            }
+        body.submeshes.push_back(sub);
+        s.meshes.push_back(body);
+        SceneMaterial mat; mat.name = "body"; s.materials.push_back(mat);
+        ScenePart p; p.id = "body"; p.group = "Body"; p.meshes = {0}; s.parts.push_back(p);
+        // A separate head part: the head measurement is this part's bounding box, not the body's.
+        SceneMesh head;
+        head.name = "head";
+        for (const float y : {1.40f, 1.40f + headHeight})
+            for (const float x : {-0.09f, 0.09f})
+                for (const float z : {-0.09f, 0.09f}) {
+                    SceneVertex v; v.pos = {x, y, z}; head.vertices.push_back(v);
+                }
+        s.meshes.push_back(head);
+        ScenePart hp; hp.id = "head"; hp.group = "Head"; hp.meshes = {1}; s.parts.push_back(hp);
+        return s;
+    };
+
+    test("body transfer: measurements come from the mesh and the assembled bones", [&] {
+        const auto s = makeTransferScene(1.50f, 0.22f, 0.18f);
+        const auto set = measure::MeasureTransfer(s);
+        CHECK(set[measure::kTransferHeight].valid);
+        CHECK(std::fabs(set[measure::kTransferHeight].value - 150.0f) < 1.0f);
+        CHECK(set[measure::kTransferHeadSize].valid);
+        CHECK(std::fabs(set[measure::kTransferHeadSize].value - 22.0f) < 1e-3f);
+        CHECK(set[measure::kTransferHeadBodyRatio].valid);
+        CHECK(std::fabs(set[measure::kTransferHeadBodyRatio].value - 0.22f / 1.5f) < 1e-3f);
+        CHECK(set[measure::kTransferShoulderWidth].valid);
+        CHECK(std::fabs(set[measure::kTransferShoulderWidth].value - 40.0f) < 1e-3f);
+        CHECK(std::fabs(measure::BoneLocalLength(s, "cf_s_arm02_L") - 0.3f * 0.18f) < 1e-4f);
+        CHECK(std::fabs(measure::BoneWorldLength(s, "cf_s_arm02_L") - 0.3f * 0.18f) < 1e-4f);
+        CHECK(measure::ChainWorldLength(s, measure::ArmChain(true)) > 15.0f);
+        CHECK(std::string(measure::TransferUnit(measure::kTransferHeadBodyRatio)) == "x");
+        CHECK(std::string(measure::TransferName(measure::kTransferCalf)) == "Calf");
+    });
+
+    test("body transfer: a transfer op wins over normalize and carries length/position through JSON", [&] {
+        assemble::ProportionLayer layer;
+        assemble::CorrectionOp norm;
+        norm.kind = assemble::kBodySlider; norm.index = 4; norm.value = 0.2f;
+        layer.ops.push_back(norm);
+        assemble::CorrectionOp boneNorm;
+        boneNorm.kind = assemble::kBoneScale; boneNorm.bone = "cf_s_head"; boneNorm.scaleMul = {1.2f, 1.2f, 1.2f};
+        layer.ops.push_back(boneNorm);
+        assemble::CorrectionOp sliderT = norm;
+        sliderT.origin = assemble::kOriginTransfer; sliderT.value = 0.8f;
+        assemble::CorrectionOp boneT = boneNorm;
+        boneT.origin = assemble::kOriginTransfer; boneT.scaleMul = {1.5f, 1.5f, 1.5f};
+        boneT.hasLength = true; boneT.length = 1.3f;
+        boneT.hasPosition = true; boneT.position = {0, 0.01f, 0};
+        layer.ops.push_back(sliderT);
+        layer.ops.push_back(boneT);
+        CHECK(layer.forSlider(assemble::kBodySlider, 4)->value == 0.8f);
+        CHECK(layer.forBone("cf_s_head")->origin == assemble::kOriginTransfer);
+        const Vec3 scaled = assemble::BoneScaleCorrected({1, 1, 1}, layer, "cf_s_head");
+        CHECK(std::fabs(scaled.x - 1.5f) < 1e-5f);   // not 1.2 * 1.5
+        float len = 1.0f; Vec3 pos{};
+        assemble::BoneTransformCorrected(len, pos, layer, "cf_s_head");
+        CHECK(std::fabs(len - 1.3f) < 1e-5f);
+        CHECK(std::fabs(pos.y - 0.01f) < 1e-5f);
+        assemble::ProportionLayer back;
+        std::string err;
+        CHECK(assemble::ProportionLayerFromJson(assemble::ProportionLayerToJson(layer), back, &err));
+        CHECK(back.ops.size() == layer.ops.size());
+        CHECK(back.ops[3].hasLength && std::fabs(back.ops[3].length - 1.3f) < 1e-5f);
+        CHECK(back.ops[3].origin == assemble::kOriginTransfer);
+        assemble::ProportionLayer merged = assemble::transfer::Merge(layer, {sliderT, boneT}, true);
+        CHECK(merged.ops.size() == 2);   // conflicting normalize ops dropped
+        CHECK(merged.forSlider(assemble::kBodySlider, 4)->value == 0.8f);
+    });
+
+    test("body transfer: Build produces absolute slider and bone-length ops, and repeats are stable", [&] {
+        card::Card ref = makePropCard();
+        card::Card tgt = makePropCard();
+        auto bodyOf = [](card::Card& c, int index, double v) {
+            Value::Array a;
+            for (const auto& e : c.body.at("shapeValueBody").asArray()) a.push_back(e);
+            a[static_cast<size_t>(index)] = Value(v);
+            c.body = Value(Value::Map{{Value(std::string("shapeValueBody")), Value(std::move(a))},
+                                      {Value(std::string("typeBone")), Value(int64_t(0))}});
+        };
+        bodyOf(ref, 4, 0.85);
+        bodyOf(tgt, 4, 0.20);
+        const auto refScene = makeTransferScene(1.50f, 0.22f, 0.18f);
+        const auto tgtScene = makeTransferScene(1.35f, 0.18f, 0.12f);
+        const auto refSet = measure::MeasureTransfer(refScene);
+        const auto tgtSet = measure::MeasureTransfer(tgtScene);
+        assemble::transfer::Spec spec;
+        spec.selected[measure::kTransferBust] = true;
+        spec.selected[measure::kTransferArmLength] = true;
+        const std::vector<float> body = assemble::transfer::BodySlidersOf(tgt);
+        const auto built = assemble::transfer::Build(refScene, ref, refSet, tgtScene, tgt, tgtSet, body, spec);
+        bool foundSlider = false, foundLength = false;
+        for (const auto& op : built.ops) {
+            if (op.kind == assemble::kBodySlider && op.index == 4) {
+                foundSlider = true;
+                CHECK(std::fabs(op.value - 0.85f) < 1e-5f);
+                CHECK(op.origin == assemble::kOriginTransfer);
+            }
+            if (op.kind == assemble::kBoneScale && op.bone == "cf_j_arm00_L" && op.hasLength) {
+                foundLength = true;
+                CHECK(op.length > 1.2f && op.length <= 1.25f);  // 0.18 / 0.12 arm segments, safety-clamped
+            }
+        }
+        CHECK(foundSlider);
+        CHECK(foundLength);
+        const auto again = assemble::transfer::Build(refScene, ref, refSet, tgtScene, tgt, tgtSet, body, built);
+        CHECK(again.ops.size() == built.ops.size());
+        for (size_t i = 0; i < again.ops.size(); ++i) CHECK(again.ops[i].value == built.ops[i].value);
+        spec.selected.fill(false);
+        const auto none = assemble::transfer::Build(refScene, ref, refSet, tgtScene, tgt, tgtSet, body, spec);
+        CHECK(none.ops.empty());   // Reset to Original = no transfer ops
+    });
+
+    test("body transfer: measured refinement converges and a spec round-trips", [&] {
+        card::Card c = makePropCard();
+        const auto s = makeTransferScene(1.50f, 0.22f, 0.18f);
+        auto set = measure::MeasureTransfer(s);
+        assemble::transfer::Spec spec;
+        spec.selected[measure::kTransferBust] = true;
+        spec.refine[measure::kTransferBust] = true;
+        spec = assemble::transfer::Build(s, c, set, s, c, set, assemble::transfer::BodySlidersOf(c), spec);
+        spec.targetValue[measure::kTransferBust] = 90.0f;   // Build fills from the reference; this test drives a synthetic target
+        std::vector<float> body = assemble::transfer::BodySlidersOf(c);
+        const std::vector<float> cardBody = body;
+        const auto measureAt = [&](const std::vector<float>& trial) {
+            auto out = measure::MeasureTransfer(s);
+            out[measure::kTransferBust].value = 60.0f + trial[4] * 60.0f;   // slider 0.5 -> 90 cm
+            out[measure::kTransferBust].valid = true;
+            return out;
+        };
+        assemble::transfer::Refine(spec, body, cardBody, measureAt);
+        CHECK(std::fabs(spec.achievedValue[measure::kTransferBust] - 90.0f) < 0.5f);
+        CHECK(std::fabs(body[4] - 0.5f) < 0.02f);
+        bool opSynced = false;
+        for (const auto& op : spec.ops)
+            if (op.kind == assemble::kBodySlider && op.index == 4) { opSynced = std::fabs(op.value - body[4]) < 1e-4f; }
+        CHECK(opSynced);
+        assemble::transfer::Spec back;
+        std::string err;
+        CHECK(assemble::transfer::FromJson(assemble::transfer::ToJson(spec), back, &err));
+        CHECK(back.selected[measure::kTransferBust]);
+        CHECK(back.ops.size() == spec.ops.size());
+        CHECK(std::fabs(back.targetValue[measure::kTransferBust] - 90.0f) < 1e-4f);
+        CHECK(!assemble::transfer::FromJson("{}", back, &err));
+    });
+
     test("expression morphs: shape offsets relative to the resting weight, at the mesh's first vertex", [] {
         assemble::Scene s;
         assemble::SceneMesh mesh;

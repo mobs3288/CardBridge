@@ -119,6 +119,7 @@ Disk space: about 20 MB of application files plus the library (~0.9 GB full, ~5 
 - **Morphs** tab: the game's expression morphs as live 0–100 sliders, grouped like MMD's panels, with English aliases (MMD-standard names included)
 - **Body measurements (BWH)**: Bust / Waist / Hip as real measurements in centimetres — typing an exact value solves the shape to it
 - **Proportion correction** (opt-in, non-destructive): flags unusual values, offers half-way-to-neutral fixes, never touches your card. [`docs/PROPORTION_CORRECTION.md`](docs/PROPORTION_CORRECTION.md)
+- **Body Proportion Transfer**: pick a reference card and transfer selected measurements (height, head, bust/waist/hip, shoulders, neck, limbs) to the target while keeping its face, hair, outfit and accessories. [`docs/BODY_PROPORTION_TRANSFER.md`](docs/BODY_PROPORTION_TRANSFER.md)
 - **Material Workbench**: inspect and override mod materials live, with diagnostic viewport modes and an issues list
 - **Optimize** tab: triangle reduction and stacked LOD files (`name_lod1.pmx` … `lod4.pmx`), per-part budgets that keep faces, eyes, hair and garments intact
 - **Translucency brush**: hand-paint see-through regions onto garments; exports as a proper transparent material

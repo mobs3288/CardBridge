@@ -53,8 +53,8 @@ void DrawMaterialsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l, co
         const std::string n = std::to_string(BuildMatRows(L).size()) + " / " + std::to_string(total);
         s.TextRight(g.fontSmall, ui::kDim, kPanel - 12, l.partsTop + 4, n);
     }
-    // The launcher button (hover id 20, see ButtonAt): it opens the workbench window.
-    Button(s, l.matOpen, "Open Material Workbench", g.hoverButton == 20, false, true, Btn::Primary);
+    // The launcher button (hover id 60, see ButtonAt): it opens the workbench window.
+    Button(s, l.matOpen, "Open Material Workbench", g.hoverButton == 60, false, true, Btn::Primary);
     // The list; the editor of the selected material is in the workbench window.
     const std::vector<int> rows = BuildMatRows(L);
     const int visible = std::max(1, (l.matListBottom - l.matListTop) / kRowH);

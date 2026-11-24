@@ -62,6 +62,9 @@ struct ExportOptions {
     // Optional, non-destructive proportion correction layer active for this export (the viewer passes the same layer the
     // previewed scene was re-shaped with). Written into the manifest as "proportions": {"active": bool, "ops": [...]}.
     assemble::ProportionLayer correctionLayer;
+    // Optional measured body-transfer spec (JSON from assemble::transfer::ToJson) actually applied to the
+    // scene before export. Written verbatim as "bodyTransfer" so an export can be audited against its source.
+    std::string bodyTransferJson;
     // Optional progress sink (the viewer's live log): called with short stage descriptions.
     std::function<void(const std::string&)> log;
     // Optional determinate progress: (fraction 0..1, stage label). A negative

@@ -85,7 +85,7 @@ struct OptState {
 
 constexpr int kPanel = 380;
 constexpr int kRowH = 20;
-constexpr int kTabBottom = 248;   // the tab strip's bottom edge (kTabRowTop + 2 rows x kTabCellH + kTabRowGap = 192+52+4)
+constexpr int kTabBottom = 278;   // the tab strip's bottom edge (kTabRowTop + 3 rows x kTabCellH + 2 x kTabRowGap = 192+78+8)
 
 struct PartRow {
     int part = -1;        // -1 = a group header
@@ -119,8 +119,16 @@ struct Tweaks {
     Vec3 nippleColour{assemble::kDefaultNippleColour.x, assemble::kDefaultNippleColour.y,
                       assemble::kDefaultNippleColour.z};   // the tint when pinkNipples is on
 };
-enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabSettings, TabCount };
-const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Materials", "Proportions", "Optimize", "Setup"};
+enum Tab { TabParts = 0, TabBody, TabFace, TabLook, TabMorphs, TabBones, TabMaterials, TabProportions, TabOptimize, TabBodyTransfer, TabSettings, TabCount };
+const char* const kTabNames[TabCount] = {"Parts", "Body", "Face", "Look", "Morphs", "Bones", "Materials", "Proportions", "Optimize", "Transfer", "Setup"};
+// Body Transfer tab controls. The measurements use two id ranges: one checkbox row and one editable
+// value row per measurement. All ids sit in 24000..24999, clear of every other control range.
+constexpr int kBTReference = 24000, kBTTarget = 24001, kBTRefresh = 24002, kBTOpenRef = 24003, kBTSaveSpec = 24004, kBTLoadSpec = 24005,
+              kBTSelectAll = 24010, kBTDeselectAll = 24011, kBTApply = 24012, kBTReset = 24013, kBTPreview = 24014,
+              kBTRefine = 24015, kBTNude = 24016,
+              kBTMeasure0 = 24100, kBTMeasureMax = 24199, kBTSelect0 = 24200, kBTSelectMax = 24299;
+inline bool IsBodyTransferId(int id) { return id >= kBTMeasure0 && id < kBTMeasureMax; }
+inline int BodyTransferMeasureOf(int id) { return id >= kBTMeasure0 && id < kBTMeasureMax ? id - kBTMeasure0 : -1; }
 // Slider ids: body 0..43, face 100..151, then the look sliders; switches from 300.
 // Pose controls change the picture at once (no re-assembly): the A-pose switch and angle, and the nine fields of the selected bone (10000..10008).
 // Settings tab actions (above every other id, so the slider and switch code never mistakes one for its own).
@@ -270,7 +278,7 @@ struct TweakRow {
 };
 
 struct PanelLayout {
-    RECT logo{}, tabs[TabCount]{};   // the tab strip: 2 rows x 5 pill tabs, equal cells, no scrolling
+    RECT logo{}, tabs[TabCount]{};   // the tab strip: 3 rows x 5 pill tabs, equal cells, no scrolling
     RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
     RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
@@ -287,11 +295,38 @@ struct PanelLayout {
 
 constexpr int kBoneEditRows = 12;   // heading, nine fields, the reset row, the undo / redo / save / load row
 constexpr int kHeaderBottom = 64;   // the header band (logo, wordmark, card title) ends here
-constexpr int kTabRowTop = 192;     // the tab strip's two rows of pills
+constexpr int kTabRowTop = 192;     // the tab strip's three rows of pills
 constexpr int kTabCellH = 26;
 constexpr int kTabRowGap = 4;
 
 PanelLayout LayoutFor(int H, bool boneTab = false, int editRows = kBoneEditRows);   // defined after App (needs g)
+
+// One candidate reference card for the Body Transfer tab. Loading it never touches g.loaded: it gets
+// its own parsed card + assembled scene, exactly like Selective Import's source view.
+struct TransferRefEntry {
+    std::string path, sha256, name, error;
+    std::shared_ptr<card::Card> card;
+    std::shared_ptr<assemble::Scene> scene;
+    measure::TransferSet measurements{};
+    bool loading = false, ready = false;
+};
+
+// Per-card, non-destructive state of the Body Transfer tab. `appliedSpec` is the layer the preview was
+// built with; `spec` is what the user is editing. Reset drops the spec and restores the card's sliders.
+struct BodyTransferState {
+    std::vector<TransferRefEntry> refs;
+    int selectedRef = -1;
+    assemble::transfer::Spec spec;
+    assemble::transfer::Spec appliedSpec;
+    std::vector<float> appliedBody;           // the working slider vector captured when Apply ran
+    bool previewOriginal = false;
+    bool nudePreview = false;                 // hide outfit/accessories so the transferred body is visible
+    std::vector<char> savedHidden;            // the visibility state restored when nude preview is turned off
+    bool refine = false;                      // measured correction is opt-in: the 1-D solves can fight each other
+    bool applied = false;
+    int loadGeneration = 0;
+    std::string status;
+};
 
 // One entry of the Proportions tab's suggestion list: the op plus whether the user wants it applied.
 struct PropSugItem {
@@ -397,6 +432,8 @@ struct App {
     std::string propCardKey;                               // the card the layer currently belongs to (a different card clears it)
     std::vector<PropSugItem> propSugs;                     // the current suggestion list, with applied flags
     std::vector<assemble::ProportionFinding> propFindings;   // diagnostics, computed once per load (or on demand)
+    // Body Transfer: reference cards and the editable measurement transfer (never modifies the card).
+    BodyTransferState bt;
     // The Body tab's "Body measurements" group reads the skin. Re-measured on every reshape (the scene holds the rest
     // pose, so bone pose edits don't skew it); the baseline is the card's own measurement, captured on load.
     measure::Result bwhMeasure;
@@ -594,7 +631,7 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     l.clothingNext = {176, l.outfitClothTop, 200, l.outfitClothTop + 20};
     l.clothingExport = {206, l.outfitClothTop, 292, l.outfitClothTop + 20};
     l.clothingReset = {296, l.outfitClothTop, kPanel - 10, l.outfitClothTop + 20};
-    // The tab strip: two rows of five equal pill tabs (no scrolling). Row 1: Parts..Morphs; row 2: Bones..Setup.
+    // The tab strip: three rows of five equal pill tabs (no scrolling). The third row is Transfer + Setup.
     constexpr int kTabCellW = 68, kTabGap = 5;
     for (int i = 0; i < TabCount; ++i) {
         const int col = i % 5, row = i / 5;
@@ -706,6 +743,7 @@ constexpr UINT WM_PROGRESS = WM_APP + 7;        // a worker reported progress: r
 constexpr UINT WM_OPT_READY = WM_APP + 8;       // the Optimize generation finished (wParam: 1 cancelled, 2 failed)
 constexpr UINT WM_SEL_READY = WM_APP + 9;      // the Selective Import window's workers finished (wParam: 0 = imported source view, 1 = proposed scene; lParam = session)
 constexpr UINT WM_SEL_FRAME = WM_APP + 10;     // the render worker produced fresh pictures; repaint
+constexpr UINT WM_BT_READY = WM_APP + 11;      // a reference card finished loading for the Body Transfer tab
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;
@@ -716,6 +754,8 @@ void SelectiveClose();
 void SelectiveInvalidateView();
 void SelectivePoseChanged();                   // called when the pose moved: reskins the static previews
 void SelApply();                               // apply the selective import (through the validation guard)
+std::vector<TweakRow> BuildBodyTransferRows();   // Body Transfer tab (BodyTransfer.inc)
+void BodyTransferReady(int index, int generation);
 constexpr UINT_PTR kTimerApplyTweaks = 2;
 
 // Defined in Clicks.inc; declared here because Pose.inc (the card loader) runs

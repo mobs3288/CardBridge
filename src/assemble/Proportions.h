@@ -22,6 +22,10 @@ namespace cardbridge::assemble {
 
 enum CorrectionKind { kBodySlider = 0, kFaceSlider = 1, kBoneScale = 2 };
 
+// Where an op came from. A transfer op always wins over a normalize op on the same slider/bone so
+// applying a transfer can never be compounded by the older half-way-to-neutral correction.
+enum CorrectionOrigin { kOriginNormalize = 0, kOriginTransfer = 1 };
+
 // Safety of a suggestion: 0 = safe (in-range, halves toward neutral), 1 = approximate
 // (SliderUnlocker / ABMX, half-way back to neutral), 2 = manual review (informational only).
 inline constexpr int kSafetySafe = 0;
@@ -34,6 +38,14 @@ struct CorrectionOp {
     std::string bone;        // kBoneScale only
     Vec3 scaleMul{1, 1, 1};  // kBoneScale: multiplier on the bone's local scale
     float value = 0.5f;      // kBodySlider / kFaceSlider: absolute slider rate to use
+    // Transfer extension (normalize ops leave these at their defaults). ABMX "length" multiplies a bone's
+    // local offset from its parent; position is added after it. These are needed for segment-length transfers,
+    // which cannot be done by bone scale alone.
+    bool hasLength = false;
+    float length = 1.0f;
+    bool hasPosition = false;
+    Vec3 position{0, 0, 0};
+    int origin = kOriginNormalize;
     std::string label, why;
     int safety = kSafetySafe;
     std::string scope;       // "body" | "face" | "head"
@@ -43,19 +55,21 @@ struct ProportionLayer {
     bool enabled = true;
     std::vector<CorrectionOp> ops;
     bool empty() const { return ops.empty(); }
-    // The op for a slider (first match), or nullptr.
+    // The op for a slider (first match; a transfer op wins over a normalize op), or nullptr.
     const CorrectionOp* forSlider(int kind, int index) const {
         if (!enabled) return nullptr;
+        const CorrectionOp* found = nullptr;
         for (const CorrectionOp& o : ops)
-            if (o.kind == kind && o.index == index) return &o;
-        return nullptr;
+            if (o.kind == kind && o.index == index && (!found || o.origin > found->origin)) found = &o;
+        return found;
     }
-    // The op for a bone (first match), or nullptr.
+    // The op for a bone (first match; a transfer op wins over a normalize op), or nullptr.
     const CorrectionOp* forBone(const std::string& bone) const {
         if (!enabled) return nullptr;
+        const CorrectionOp* found = nullptr;
         for (const CorrectionOp& o : ops)
-            if (o.kind == kBoneScale && !o.bone.empty() && o.bone == bone) return &o;
-        return nullptr;
+            if (o.kind == kBoneScale && !o.bone.empty() && o.bone == bone && (!found || o.origin > found->origin)) found = &o;
+        return found;
     }
 };
 
@@ -88,8 +102,13 @@ std::vector<CorrectionOp> PresetNormalizeOverall(const card::Card& card);
 float SliderValueCorrected(float baseValue, const ProportionLayer& layer, int kind, int index);
 
 // The bone's local scale after the corrections: the computed scale (shape * ABMX) times every
-// bone op for that bone. `changed` is set when the layer affects the bone.
+// bone op for that bone. A transfer op replaces the normalize contribution for that bone so the two
+// never compound. `changed` is set when the layer affects the bone.
 Vec3 BoneScaleCorrected(Vec3 baseScale, const ProportionLayer& layer, const std::string& bone, bool* changed = nullptr);
+
+// ABMX-style length multiplier and additive position of a bone after the layer. Only transfer ops
+// carry these channels; 1 / zero for a normalize-only layer.
+void BoneTransformCorrected(float& length, Vec3& position, const ProportionLayer& layer, const std::string& bone);
 
 // Apply format / validate a layer read from a file (the CLI's --proportions). False with `error`
 // when the text is unusable. The layer is rejected wholesale on any problem, never partially applied.

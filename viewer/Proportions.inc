@@ -1,16 +1,21 @@
 // viewer fragment: the Proportions tab — optional, non-destructive character proportion correction (included after State.inc)
 
-// Forward declarations (defined later in Pose.inc / BonesDraw.inc).
+// Forward declarations (defined later in Pose.inc / BonesDraw.inc / BodyTransfer.inc).
 bool ReshapeNow(bool final);
 void ScheduleApplyTweaks();
 void SelectBone(const assemble::Scene& scene, int bone);
+assemble::ProportionLayer BodyTransferLayer();
 
 // The correction layer the currently displayed scene was built with. Everything else (the export, ReshapeNow) sees the same thing.
+// A measured transfer from the Body Transfer tab is merged in here: transfer ops win on the sliders and bones they own.
 assemble::ProportionLayer ProportionLayerNow() {
     assemble::ProportionLayer layer;
     layer.enabled = g.propEnabled;
     for (const auto& s : g.propSugs)
         if (s.applied) layer.ops.push_back(s.op);
+    const assemble::ProportionLayer transfer = BodyTransferLayer();
+    if (!transfer.ops.empty())
+        layer = assemble::transfer::Merge(layer, transfer.ops, layer.enabled || transfer.enabled);
     return layer;
 }
 

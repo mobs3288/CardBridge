@@ -33,6 +33,8 @@
 //          Shift+Left-click any slider to type its value with the keyboard (Enter commits, Esc restores)
 
 #include "assemble/Assembler.h"
+#include "assemble/ProportionTransfer.h"
+#include "measure/TransferMeasure.h"
 #include "assemble/JiggleSettings.h"
 #include "material/MaterialWorkbench.h"
 #include "material/UvDiagnostics.h"
@@ -109,6 +111,7 @@ namespace {
 #include "Progress.inc"
 #include "Proportions.inc"
 #include "Tweaks.inc"
+#include "BodyTransfer.inc"
 #include "Morphs.inc"
 #include "MaterialsHelpers.inc"
 #include "Pose.inc"

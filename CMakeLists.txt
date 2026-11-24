@@ -79,6 +79,8 @@ add_library(cardbridge_core STATIC
     src/assemble/Assembler.cpp
     src/assemble/FaceFeatures.cpp
     src/assemble/Proportions.cpp
+    src/assemble/ProportionTransfer.cpp
+    src/measure/TransferMeasure.cpp
     src/assemble/AutoCloth.cpp
     src/assemble/HeelConfig.cpp
     src/assemble/DynamicBone.cpp

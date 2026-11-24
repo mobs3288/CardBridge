@@ -459,6 +459,7 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // Something a slider or switch controls changed. Pose controls, the shape sliders and the areola size show at once; the character is only
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
+    if (g.tab == TabBodyTransfer && IsBodyTransferId(id)) { InvalidatePanel(); return; }   // edit the requested value; Apply does the reshape
     if (IsMatId(id)) { MaterialSliderEdited(id, released); return; }
     if (id == kJiggleBust || id == kJiggleButt || (id >= kJiggleMass && id <= kJiggleSimHz)) {
         if (id == kJiggleBust || id == kJiggleButt) {

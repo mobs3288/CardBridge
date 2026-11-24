@@ -212,10 +212,12 @@ bool Gather(const assemble::Scene& scene, Soup& soup) {
 // legs are left in the soup on purpose: the trunk encloses the spine, so chains off its axis lose to it. Outputs:
 // `allChains` gets every contour's length (unordered), `trunkLen` the trunk's (0 when the slice found none), `picked`
 // the trunk's points. Chains are joined on the mesh's edges (topological), not by position tolerance.
-void SliceChains(const Soup& soup, float y, std::vector<float>* allChains, float* trunkLen, std::vector<Vec3>* picked) {
+void SliceChains(const Soup& soup, float y, std::vector<float>* allChains, float* trunkLen, std::vector<Vec3>* picked,
+                 std::vector<SliceChain>* allInfo = nullptr) {
     if (allChains) allChains->clear();
     if (trunkLen) *trunkLen = 0.0f;
     if (picked) picked->clear();
+    if (allInfo) allInfo->clear();
     struct Seg {
         Vec3 p, q;             // p = the endpoint on edge ea, q = the endpoint on edge eb
         uint32_t ea = kInvalidEdge, eb = kInvalidEdge;
@@ -332,6 +334,11 @@ void SliceChains(const Soup& soup, float y, std::vector<float>* allChains, float
         allChains->reserve(found.size());
         for (const Chain& c : found) allChains->push_back(c.len);
     }
+    if (allInfo) {
+        allInfo->reserve(found.size());
+        for (const Chain& c : found)
+            allInfo->push_back({c.len, c.cx, c.cz, static_cast<int>(c.pts.size())});
+    }
     if (bestIdx == SIZE_MAX) return;
     if (trunkLen) *trunkLen = bestLen;
     if (picked) *picked = found[bestIdx].pts;
@@ -351,6 +358,27 @@ void SliceChainsForDebug(const assemble::Scene& scene, float y, std::vector<floa
     chains.clear();
     if (!Gather(scene, soup)) return;
     SliceChains(soup, y, &chains, nullptr, nullptr);
+}
+
+void SliceChainsAt(const assemble::Scene& scene, float y, std::vector<SliceChain>& chains) {
+    Soup soup;
+    chains.clear();
+    if (!Gather(scene, soup)) return;
+    SliceChains(soup, y, nullptr, nullptr, nullptr, &chains);
+    std::sort(chains.begin(), chains.end(), [](const SliceChain& a, const SliceChain& b) { return a.length > b.length; });
+}
+
+float LimbPerimeterAt(const assemble::Scene& scene, float y, float cx, float cz, float minLength) {
+    std::vector<SliceChain> chains;
+    SliceChainsAt(scene, y, chains);
+    float best = 0.0f, bestDist = std::numeric_limits<float>::max();
+    for (const SliceChain& c : chains) {
+        if (c.points < 8 || c.length < minLength) continue;   // seam rings and helper shells
+        const float dx = c.cx - cx, dz = c.cz - cz;
+        const float dist = std::sqrt(dx * dx + dz * dz);
+        if (dist < bestDist) { bestDist = dist; best = c.length; }
+    }
+    return best;
 }
 
 Result Measure(const assemble::Scene& scene) {

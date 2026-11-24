@@ -175,7 +175,10 @@ void BwhDragAt(int id, float frac) {
     BwhApplyCoupled(measure, d, g.bwhDragBase);
 }
 
+bool BTMeasureSliderFor(int id, SliderRef& r);   // BodyTransfer.inc
+
 bool SliderFor(int id, SliderRef& r) {
+    if (g.tab == TabBodyTransfer && IsBodyTransferId(id)) return BTMeasureSliderFor(id, r);
     if (IsBodyMeasureId(id)) return BwhFor(id, r);
     if (id >= 0 && id < kFaceBase) {
         if (static_cast<size_t>(id) >= g.tw.body.size()) return false;

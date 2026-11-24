@@ -394,6 +394,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         }
     }
     if (tab == TabProportions) return BuildProportionRows();
+    if (tab == TabBodyTransfer) return BuildBodyTransferRows();
     else if (tab == TabFace) addSliders(shape::FaceSliders(), kFaceBase, g.tw.face.size());
     else if (tab == TabLook) {
         rows.push_back({0, kHeightCm, "Height (cm): scales everything to that height", "Height"});
@@ -565,6 +566,8 @@ bool TweakChanged(int id) {
     if (id == kPropMaster) return g.propEnabled;
     if (id >= kPropSugs0 && id < kPropSugsMax)
         return static_cast<size_t>(id - kPropSugs0) < g.propSugs.size() && g.propSugs[static_cast<size_t>(id - kPropSugs0)].applied;
+    if (id >= kBTSelect0 && id < kBTSelectMax)
+        return static_cast<size_t>(id - kBTSelect0) < measure::kTransferCount && g.bt.spec.selected[static_cast<size_t>(id - kBTSelect0)];
     if (id >= kLayerBase && id < kBoneEdit) return g.gpu.layerEnabled(static_cast<size_t>(id - kLayerBase));
     if (id == kNippleIn) return g.tw.nippleInside;
     if (id == kAPose) return g.aPose;
@@ -601,6 +604,8 @@ void ResetTweak(int id) {
     SliderRef r;
     if (id == kPropMaster) g.propEnabled = true;
     else if (id >= kPropSugs0 && id < kPropSugsMax && static_cast<size_t>(id - kPropSugs0) < g.propSugs.size()) { g.propSugs[static_cast<size_t>(id - kPropSugs0)].applied = false; SyncProportionSliders(); }
+    else if (id >= kBTSelect0 && id < kBTSelectMax && static_cast<size_t>(id - kBTSelect0) < measure::kTransferCount)
+        g.bt.spec.selected[static_cast<size_t>(id - kBTSelect0)] = false;
     if (IsMatId(id)) {
         std::shared_ptr<Loaded> L = Current();
         if (!L || g.selMaterial < 0) return;

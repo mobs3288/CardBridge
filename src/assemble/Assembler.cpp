@@ -150,7 +150,18 @@ void applyProportionBoneScales(Overrides& ov, UnityFile& uf, const std::string& 
         LocalOverride o;
         o.pos = x->pos; o.scl = x->scl; o.rot = x->rot; o.hasRot = false;
         if (auto it = ov.find(x->name); it != ov.end()) o = it->second;
-        o.scl = {o.scl.x * op->scaleMul.x, o.scl.y * op->scaleMul.y, o.scl.z * op->scaleMul.z};
+        Vec3 mul = op->scaleMul;
+        // The same skirt-X guard applyAbmx uses: an authored inward X pinch pulls fabric through the body.
+        if (op->origin == kOriginTransfer && x->name.rfind("cf_d_sk_", 0) == 0 && mul.x < 1.0f) mul.x = 1.0f;
+        o.scl = {o.scl.x * mul.x, o.scl.y * mul.y, o.scl.z * mul.z};
+        // Transfer-only channels: ABMX "length" scales the local offset from the parent (that is what
+        // changes a segment length); position is added after it. Applied after shape and ABMX, so the
+        // multipliers are relative to the assembled target and never compound across repeated applies.
+        if (op->hasLength) {
+            const float len = std::clamp(op->length, 0.01f, 100.0f);
+            o.pos = {o.pos.x * len, o.pos.y * len, o.pos.z * len};
+        }
+        if (op->hasPosition) o.pos = o.pos + op->position;
         ov[x->name] = o;
     }
 }

@@ -2,6 +2,16 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.33] - 2026-11-24
+
+### Added
+
+- **Body Proportion Transfer**: a dedicated **Transfer** tab measures a reference card from its assembled skin and bones and transfers any selection of 14 measurements (height, head size, head-to-body ratio, bust/waist/hip, shoulders, neck, arm/upper-arm/lower-arm, leg length, thigh, calf) into a separate, non-destructive layer. The target keeps its face, hair, clothes, textures, materials, accessories and bone names; Apply re-assembles so clothing masks and attachments follow the new body, and the exported PMX plus manifest record what was applied. Includes before/after preview, reset, absolute (non-accumulating) values, measured refinement with honest residuals, and `cardbridge measure` / `cardbridge transfer` / `convert --transfer` for batch use. [`docs/BODY_PROPORTION_TRANSFER.md`](docs/BODY_PROPORTION_TRANSFER.md). 19,395 unit checks pass.
+
+### Fixed
+
+- **Transparent socks / pantyhose came back in the exported PMX (Yoko Littner, `KK_237456.png`)**: the 0.7.11 fishnet fix stopped binarising every `main_alpha` material in Unity's transparent queue (>= 3000). The Roy12 knee socks (`cf_m_socks_knee01`) are also in that queue (material override 3050, shader 3040) but are an alpha TEST: ZWrite On, a uniform ~190/255 tint over the skin and real alpha-0 cutouts. MMD read the 190 as opacity and blended the stockings with the body through them. The exporter now uses the shader's depth write to tell an alpha test from a genuine blend — a depth-writing material with mesh-sampled cutouts gets its binary 0/255 mask back, while ZWrite-Off transparent materials (the fishnet) keep their authored fractional alpha. Verified on a fresh export of `KK_237456.png`: the socks texture has only alpha 0/255 and no mid-alpha tint. See `docs/MMD_PANTYHOSE_ALPHA_FIX.md`.
+
 ## [0.7.32] - 2026-11-24
 
 ### Fixed

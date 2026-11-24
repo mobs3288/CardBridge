@@ -26,6 +26,21 @@ struct Result {
 // Exposed for the unit tests.
 float TorsoPerimeterAt(const assemble::Scene& scene, float y);
 
+// One closed contour found by a horizontal slice: its length and the centroid of its points.
+struct SliceChain {
+    float length = 0.0f;   // metres
+    float cx = 0.0f, cz = 0.0f;   // centroid, model space
+    int points = 0;
+};
+
+// Every contour at height y, largest first. Used by the limb-perimeter extraction, which must pick
+// the chain around a thigh/calf bone instead of the axis-centred torso chain TorsoPerimeterAt picks.
+void SliceChainsAt(const assemble::Scene& scene, float y, std::vector<SliceChain>& chains);
+
+// The perimeter (metres) of the closed contour nearest (cx, cz) at height y, or 0 when no limb
+// contour qualifies. `minLength` rejects the tiny rings left by seams and helper shells.
+float LimbPerimeterAt(const assemble::Scene& scene, float y, float cx, float cz, float minLength = 0.10f);
+
 // Every contour chain at height y, largest first (a slice of the trunk is one chain; arm and leg tubes make more).
 // Exposed for diagnostics and the scratch tooling.
 void SliceChainsForDebug(const assemble::Scene& scene, float y, std::vector<float>& chains);

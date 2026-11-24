@@ -86,8 +86,8 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     if (PtInRect(&l.clothingExport, p)) return 21; // export the shown outfit as an outfit file (【KoiKatuClothes】 png)
     // The Materials tab's launcher button opens the Material Workbench window. Its rect
     // exists in every layout (one LayoutFor), so it only counts on that tab, and before
-    // the tab branch below (20 would otherwise mean "tab 10").
-    if (g.tab == TabMaterials && PtInRect(&l.matOpen, p)) return 20;
+    // the tab branch below (id 60 keeps the tab range 10..10+TabCount-1 clear).
+    if (g.tab == TabMaterials && PtInRect(&l.matOpen, p)) return 60;
     if (PtInRect(&l.clearLog, p)) return 22;   // the log's inline clear button
     for (int i = 0; i < TabCount; ++i) if (PtInRect(&l.tabs[i], p)) return 10 + i;
     return 0;

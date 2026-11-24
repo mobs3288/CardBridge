@@ -12,6 +12,15 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         if (pidx >= 0) ProportionsClick(pidx, rows[static_cast<size_t>(pidx)], right);
         return;
     }
+    if (g.tab == TabBodyTransfer) {
+        const std::vector<TweakRow> rows = BuildTweakRows(g.tab);
+        const int bidx = RowIndexAt(rows.size(), l, x, y);
+        if (bidx >= 0 && (rows[static_cast<size_t>(bidx)].kind == 2 || rows[static_cast<size_t>(bidx)].kind == 5)) {
+            BodyTransferClick(bidx, rows[static_cast<size_t>(bidx)], right);
+            return;
+        }
+        // kind 1 value rows fall through to the generic slider drag / typed-entry path below.
+    }
     std::vector<TweakRow> rows = BuildTweakRows(g.tab);
     int idx = RowIndexAt(rows.size(), l, x, y);
     if (idx < 0) return;

@@ -214,16 +214,37 @@ float SliderValueCorrected(float baseValue, const ProportionLayer& layer, int ki
 Vec3 BoneScaleCorrected(Vec3 baseScale, const ProportionLayer& layer, const std::string& bone, bool* changed) {
     Vec3 r = baseScale;
     bool any = false;
-    if (layer.enabled)
+    if (layer.enabled) {
+        // A transfer op owns the bone: a normalize op on the same bone is not applied on top of it.
+        const CorrectionOp* transfer = nullptr;
         for (const CorrectionOp& o : layer.ops)
-            if (o.kind == kBoneScale && o.bone == bone) {
-                r.x *= o.scaleMul.x;
-                r.y *= o.scaleMul.y;
-                r.z *= o.scaleMul.z;
-                any = true;
-            }
+            if (o.kind == kBoneScale && o.bone == bone && o.origin == kOriginTransfer) transfer = &o;
+        if (transfer) {
+            r.x *= transfer->scaleMul.x; r.y *= transfer->scaleMul.y; r.z *= transfer->scaleMul.z;
+            any = true;
+        } else {
+            for (const CorrectionOp& o : layer.ops)
+                if (o.kind == kBoneScale && o.bone == bone) {
+                    r.x *= o.scaleMul.x;
+                    r.y *= o.scaleMul.y;
+                    r.z *= o.scaleMul.z;
+                    any = true;
+                }
+        }
+    }
     if (changed) *changed = any;
     return r;
+}
+
+void BoneTransformCorrected(float& length, Vec3& position, const ProportionLayer& layer, const std::string& bone) {
+    length = 1.0f;
+    position = {0, 0, 0};
+    if (!layer.enabled) return;
+    for (const CorrectionOp& o : layer.ops) {
+        if (o.kind != kBoneScale || o.bone != bone || o.origin != kOriginTransfer) continue;
+        if (o.hasLength) length *= o.length;
+        if (o.hasPosition) position = position + o.position;
+    }
 }
 
 bool ProportionLayerFromJson(const std::string& text, ProportionLayer& out, std::string* error) {
@@ -256,6 +277,25 @@ bool ProportionLayerFromJson(const std::string& text, ProportionLayer& out, std:
                 op.value = e.value("value", 0.5f);
                 if (!std::isfinite(op.value) || op.value < -4.0f || op.value > 5.0f) { if (error) *error = "slider value out of sane range"; return false; }
             }
+            if (op.kind == kBoneScale) {
+                op.origin = std::clamp(e.value("origin", kOriginNormalize), kOriginNormalize, kOriginTransfer);
+                op.hasLength = e.value("hasLength", false);
+                if (op.hasLength) {
+                    op.length = e.value("length", 1.0f);
+                    if (!std::isfinite(op.length) || op.length < 0.01f || op.length > 100.0f) {
+                        if (error) *error = "bone length out of sane range";
+                        return false;
+                    }
+                }
+                op.hasPosition = e.value("hasPosition", false);
+                if (op.hasPosition && e.contains("position") && e["position"].is_array() && e["position"].size() == 3) {
+                    op.position = {e["position"][0].get<float>(), e["position"][1].get<float>(), e["position"][2].get<float>()};
+                }
+                if (op.hasPosition && (std::fabs(op.position.x) > 100.0f || std::fabs(op.position.y) > 100.0f || std::fabs(op.position.z) > 100.0f)) {
+                    if (error) *error = "bone position out of sane range";
+                    return false;
+                }
+            }
             op.label = e.value("label", std::string());
             op.why = e.value("why", std::string());
             op.safety = std::clamp(e.value("safety", kSafetyApproximate), kSafetySafe, kSafetyManual);
@@ -282,6 +322,11 @@ std::string ProportionLayerToJson(const ProportionLayer& layer) {
         e["bone"] = o.bone;
         e["scale"] = {o.scaleMul.x, o.scaleMul.y, o.scaleMul.z};
         e["value"] = o.value;
+        e["origin"] = o.origin;
+        e["hasLength"] = o.hasLength;
+        e["length"] = o.length;
+        e["hasPosition"] = o.hasPosition;
+        e["position"] = {o.position.x, o.position.y, o.position.z};
         e["label"] = o.label;
         e["why"] = o.why;
         e["safety"] = o.safety;

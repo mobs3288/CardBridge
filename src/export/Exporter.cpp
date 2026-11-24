@@ -205,9 +205,10 @@ bool IsAlphaTestSolid(const assemble::Scene& scene, const assemble::SceneMateria
     // its sub-255 alpha is a tint that passes _Cutoff, not a translucency request. Genuine cutouts,
     // translucent shaders and materials whose alpha the game ignores keep their own handling.
     if (assemble::IgnoresTextureAlpha(scene, mat) || !mat.alpha || mat.translucent) return false;
-    // A transparent-queue material (>= 3000) blends its authored alpha over what is behind it (a fishnet over skin):
-    // binarising that alpha at _Cutoff makes the mesh solid black. Only alpha-test queues may be solidified.
-    if (assemble::EffectiveRenderQueue(scene, mat) >= 3000) return false;
+    // A transparent-queue material (>= 3000) with ZWrite Off blends its authored alpha over what is behind it
+    // (a fishnet over skin): binarising that alpha at _Cutoff makes the mesh solid black. A modded alpha-test
+    // shader can also live in that queue, but it writes depth; those are solid and may be solidified.
+    if (assemble::EffectiveRenderQueue(scene, mat) >= 3000 && !assemble::ShaderWritesDepth(scene, mat)) return false;
     if (HasAlphaCutout(scene, mat)) return false;
     if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
     return !assemble::TextureIsFullyOpaque(scene.textures[static_cast<size_t>(mat.texture)]);
@@ -603,9 +604,15 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
             entry["why"] = o.why;
             entry["safety"] = o.safety;
             entry["scope"] = o.scope;
+            entry["origin"] = o.origin;
+            if (o.hasLength) entry["length"] = o.length;
             corrections.push_back(std::move(entry));
         }
         j["proportions"] = {{"active", layer.enabled && !layer.ops.empty()}, {"enabled", layer.enabled}, {"ops", std::move(corrections)}};
+    }
+    if (!opt.bodyTransferJson.empty()) {
+        try { j["bodyTransfer"] = json::parse(opt.bodyTransferJson); }
+        catch (const std::exception&) { j["bodyTransfer"] = {{"error", "invalid transfer spec"}}; }
     }
     // The jiggle settings this export used, with the numbers they derive: what the viewer previews and what MikuMikuDance plays.
     {
@@ -897,11 +904,15 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
                     float cutoff = 0.5f;
                     for (const auto& pr : mat.props) if (pr.first == "_Cutoff") cutoff = pr.second.x;
                     const uint8_t cutLevel = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, cutoff * 255.0f)));
-                    // Only an alpha-TEST queue (< 3000) discards below _Cutoff and draws the rest SOLID. A
-                    // transparent-queue material (>= 3000) blends its authored alpha (a fishnet's ~200/255
-                    // tint over skin): thresholding that alpha turns the mesh into a flat black sheet.
+                    // An alpha-TEST shader discards below _Cutoff and draws the rest SOLID. Its render queue can
+                    // still be in Unity's transparent range (>= 3000) when a mod overrides it — the Roy12 knee
+                    // socks on KK_237456 are main_alpha at queue 3050 with ZWrite On — so the queue alone cannot
+                    // decide. ZWrite On means depth is written and sub-255 alpha is a tint that passed the test:
+                    // binarise its real cutouts at _Cutoff. A transparent material (ZWrite Off) keeps its authored
+                    // fractional alpha, or a fishnet's ~200/255 tint would become a flat black sheet.
                     const bool alphaTestCutout = mat.alpha && !mat.translucent && !ignoreAlpha &&
-                                                 assemble::EffectiveRenderQueue(scene, mat) < 3000 && HasAlphaCutout(scene, mat);
+                                                 (assemble::EffectiveRenderQueue(scene, mat) < 3000 || assemble::ShaderWritesDepth(scene, mat)) &&
+                                                 HasAlphaCutout(scene, mat);
                     // Anything the PMX keeps in MMD's opaque pass (diffuse alpha 1) has no texture-alpha role either, so it is
                     // solidified: the opaque shader family, the character's skin (its alpha is a coverage mask), and alpha
                     // shaders over a fully opaque atlas. Genuine blends and cutouts keep their 0.99 and their authored alpha.

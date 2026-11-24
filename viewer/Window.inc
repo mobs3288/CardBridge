@@ -381,6 +381,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         KillTimer(hwnd, 1); g.dirty = true; InvalidateView(); return 0;
     case WM_LOG: InvalidateLog(); return 0;
+    case WM_BT_READY: BodyTransferReady(static_cast<int>(wp), static_cast<int>(lp)); return 0;
     case WM_PROGRESS: {
         // Keep the indeterminate chunk / percent moving: repaint the strip
         // under the toolbar and the overlay card, plus the footer hint.
@@ -511,6 +512,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateBodyMeasurements();   // the measurements exist from the first frame, not only after an edit
         }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
+        g.bt.nudePreview = false;   // a card load rebuilds the visibility state
+        g.bt.savedHidden.clear();
         if (L && g.applyKeep)
             for (size_t i = 0; i < L->scene.parts.size(); ++i) {
                 auto it = g.keepHidden.find(L->scene.parts[i].id);
@@ -697,8 +700,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (button == 8) { MoveClothing(-1); return 0; }
             if (button == 9) { MoveClothing(1); return 0; }
             if (button == 21) { StartExportClothing(); return 0; }
-            if (button == 20 && !g.matFilterDropOpen) { OpenWorkbench(); return 0; }   // the Materials tab's launcher
-            if (button >= 10 && button != 20 && button != 22) {
+            if (button == 60 && !g.matFilterDropOpen) { OpenWorkbench(); return 0; }   // the Materials tab's launcher
+            if (button >= 10 && button < 10 + TabCount && button != 22) {
                 g.showIssues = false;
                 g.tab = button - 10;
                 g.partScroll = 0;
@@ -1068,7 +1071,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (oldButton != g.hoverButton || oldOutfit != g.hoverOutfit) {
             InvalidatePanelBand(l.open.top - 2, l.tabs[TabCount - 1].bottom + 2);
-            if (oldButton == 20 || g.hoverButton == 20) InvalidatePanelBand(l.matFilter.top - 2, l.matListTop - 2);   // the launcher button
+            if (oldButton == 60 || g.hoverButton == 60) InvalidatePanelBand(l.matFilter.top - 2, l.matListTop - 2);   // the launcher button
             if (oldButton == 22 || g.hoverButton == 22) InvalidateLog();   // the log's clear button
         }
         // The viewport's diagnostic mode strip: hover highlight (repaint only on change).

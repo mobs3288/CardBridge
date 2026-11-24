@@ -2,6 +2,8 @@
 //
 //   cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir> [options]
 //   cardbridge inspect <card.png> [--library <dir>] [--mods <dir>] [--json]
+//   cardbridge measure <card.png> [--library <dir>] [--mods <dir>] [--json]
+//   cardbridge transfer <reference.png> <target.png> <out.json> [--select height,head,bust,...] [--library <dir>] [--mods <dir>]
 //   cardbridge clothes <card.png> [--outfit N] [--name <name>] [--out <file.png>] [options]
 //   cardbridge library import --game <install> --library <dir> [--minimal]
 //   cardbridge library check  --library <dir> [--hashes]
@@ -16,10 +18,14 @@
 #include "shader/UnityShader.h"
 #include "shader/Sm4.h"
 #include <cstring>
+#include <cctype>
+#include <nlohmann/json.hpp>
 #include "assemble/Assembler.h"
 #include "assemble/JiggleSettings.h"
 #include "assemble/Pose.h"
 #include "assemble/Proportions.h"
+#include "assemble/ProportionTransfer.h"
+#include "measure/TransferMeasure.h"
 #include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/ClothingExport.h"
@@ -142,6 +148,11 @@ void usage() {
         "cardbridge " CARDBRIDGE_VERSION " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
+        "  cardbridge measure <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
+        "                                             print the 14 transferable body measurements of one card\n"
+        "  cardbridge transfer <reference.png> <target.png> <spec.json> [--select height,head,bust,...] [--refine]\n"
+        "                                             --refine opts into slow measured correction (off by default)\n"
+        "                                             measure both cards and write a transfer spec for --transfer\n"
         "             [--outfit N]                    which outfit of the card to convert (default: the card's current one)\n"
         "             [--clothes <file.png>]          an outfit source applied to that outfit in memory for this\n"
         "                                             export only; the card on disk is never saved. A regular outfit file\n"
@@ -157,6 +168,9 @@ void usage() {
         "             [--pose <file.json>]            a pose saved by the viewer (bone edits and the A-pose switch), baked in\n"
         "             [--materials <file.json>]      a material workbench file (cardbridge-materials v1), applied to the export\n"
         "             [--unity-facing]                the front toward +Z as built (the PMX default is -Z, MikuMikuDance's front)\n"
+        "             [--transfer <spec.json>]        apply a measured proportion-transfer spec written by `cardbridge transfer`.\n"
+        "                                             The target keeps its face, hair, clothes, textures and accessories; only the\n"
+        "                                             selected body measurements change. Tracked in the manifest.\n"
         "             [--proportions <file.json>]     apply an optional corrective layer (cardbridge-proportions v1:\n"
         "                                             {\"enabled\": true, \"ops\": [{\"kind\": 0|1|2, \"index\": N, \"value\": F, \"bone\": \"name\", \"scale\": [x,y,z], \"label\": \"...\", \"why\": \"...\", \"safety\": 0|1|2, \"scope\": \"body|face|head\"}]}).\n"
         "                                             kind 0 = body slider (0..43), 1 = face slider (0..51), 2 = bone scale.\n"
@@ -847,6 +861,24 @@ int cmdConvert(const Args& a) {
             if (idx < vals.size()) vals[idx] = static_cast<float>(std::atof(item.c_str() + eq + 1));
         }
     }
+    std::string transferJson;
+    if (!a.get("transfer").empty()) {
+        try {
+            const auto bytes = fileio::ReadFile(a.get("transfer"));
+            const std::string text(bytes.begin(), bytes.end());
+            assemble::transfer::Spec spec;
+            std::string err;
+            if (!assemble::transfer::FromJson(text, spec, &err)) { std::fprintf(stderr, "transfer: %s\n", err.c_str()); return 3; }
+            assemble::ProportionLayer empty;
+            ao.proportionLayer = assemble::transfer::Merge(empty, spec.ops, true);
+            transferJson = text;
+            std::fprintf(stderr, "transfer: %zu op(s) from %s\n", ao.proportionLayer.ops.size(), spec.referenceName.c_str());
+            for (const auto& note : spec.notes) std::fprintf(stderr, "  note: %s\n", note.c_str());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: cannot read transfer file %s: %s\n", a.get("transfer").c_str(), e.what());
+            return 3;
+        }
+    }
     if (a.has("normalize-head-proportions") || a.has("normalize-body-proportions") || a.has("normalize-face-proportions") ||
         a.has("normalize-overall") || !a.get("proportions").empty()) {
         assemble::ProportionLayer layer;
@@ -870,7 +902,7 @@ int cmdConvert(const Args& a) {
         if (a.has("normalize-body-proportions")) layer.ops = assemble::PresetNormalizeBody(c);
         if (a.has("normalize-face-proportions")) layer.ops = assemble::PresetNormalizeFace(c);
         if (a.has("normalize-overall")) layer.ops = assemble::PresetNormalizeOverall(c);
-        ao.proportionLayer = std::move(layer);
+        ao.proportionLayer = assemble::transfer::Merge(layer, ao.proportionLayer.ops, ao.proportionLayer.enabled || layer.enabled);
     }
     if (a.has("print-diagnostics")) {
         const auto findings = assemble::AnalyzeCard(c);
@@ -1181,6 +1213,7 @@ int cmdConvert(const Args& a) {
     eo.overwrite = a.has("overwrite");
     eo.faceMinusZ = !a.has("unity-facing");
     eo.correctionLayer = ao.proportionLayer;   // faithful when empty; corrected when --proportions/--normalize-* were given
+    eo.bodyTransferJson = transferJson;
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
     eo.jiggleButt = a.has("jiggle-butt");             // default off: the card's butt sway reads as the skirt vibrating
@@ -1413,6 +1446,135 @@ int cmdPmx(const Args& a) {
     return 1;
 }
 
+namespace {
+
+int transferIdFromName(const std::string& name) {
+    for (int i = 0; i < measure::kTransferCount; ++i) {
+        const std::string n = measure::TransferName(i);
+        std::string flat;
+        for (char c : n) if (c != ' ' && c != '-' && c != '/') flat.push_back(static_cast<char>(std::tolower(c)));
+        if (flat == name || n == name || std::to_string(i) == name) return i;
+    }
+    return -1;
+}
+
+void printMeasurements(const measure::TransferSet& set) {
+    for (int i = 0; i < measure::kTransferCount; ++i) {
+        const auto& v = set[static_cast<size_t>(i)];
+        std::printf("  %-20s %10.2f %-3s  %s%s\n", measure::TransferName(i), v.value, measure::TransferUnit(i),
+                    v.valid ? "" : "unavailable: ", v.source.c_str());
+    }
+}
+
+} // namespace
+
+int cmdMeasure(const Args& a) {
+    if (a.positional.size() < 2) { usage(); return 1; }
+    card::Card c;
+    int code = 0;
+    if (!loadCard(normalizeSlashes(a.positional[1]), c, code)) return code;
+    if (!c.supported) { std::fprintf(stderr, "%s: %s\n", c.path.c_str(), c.supportNote.c_str()); return 2; }
+    Context ctx;
+    if (!buildContext(a, ctx)) return 3;
+    assemble::AssembleOptions ao;
+    ao.sourceGame = ctx.game;
+    const assemble::Scene scene = assemble::Assemble(c, *ctx.resolver, ao);
+    const auto set = measure::MeasureTransfer(scene);
+    std::printf("body measurements for %s:\n", c.displayName().c_str());
+    printMeasurements(set);
+    if (a.has("json")) {
+        nlohmann::json j;
+        for (int i = 0; i < measure::kTransferCount; ++i) {
+            const auto& v = set[static_cast<size_t>(i)];
+            j[measure::TransferName(i)] = {{"value", v.value}, {"unit", measure::TransferUnit(i)}, {"valid", v.valid}, {"source", v.source}};
+        }
+        std::printf("%s\n", j.dump(2).c_str());
+    }
+    return 0;
+}
+
+int cmdTransfer(const Args& a) {
+    if (a.positional.size() < 4) { usage(); return 1; }
+    const std::string outPath = normalizeSlashes(a.positional[3]);
+    card::Card ref, tgt;
+    int code = 0;
+    if (!loadCard(normalizeSlashes(a.positional[1]), ref, code)) return code;
+    if (!loadCard(normalizeSlashes(a.positional[2]), tgt, code)) return code;
+    if (!ref.supported || !tgt.supported) {
+        std::fprintf(stderr, "one of the cards is unsupported\n");
+        return 2;
+    }
+    Context ctx;
+    if (!buildContext(a, ctx)) return 3;
+    assemble::AssembleOptions ao;
+    ao.sourceGame = ctx.game;
+    std::fprintf(stderr, "transfer: assembling reference %s\n", ref.displayName().c_str());
+    const assemble::Scene refScene = assemble::Assemble(ref, *ctx.resolver, ao);
+    std::fprintf(stderr, "transfer: assembling target %s\n", tgt.displayName().c_str());
+    assemble::Scene tgtScene = assemble::Assemble(tgt, *ctx.resolver, ao);
+    const auto refSet = measure::MeasureTransfer(refScene);
+    const auto tgtSet = measure::MeasureTransfer(tgtScene);
+
+    assemble::transfer::Spec spec;
+    const std::string select = a.get("select");
+    if (!select.empty()) {
+        size_t pos = 0;
+        while (pos <= select.size()) {
+            const size_t comma = select.find(',', pos);
+            const std::string token = select.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            const int id = transferIdFromName(token);
+            if (id >= 0) spec.selected[static_cast<size_t>(id)] = true;
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+    } else {
+        for (int i = 0; i < measure::kTransferCount; ++i)
+            spec.selected[static_cast<size_t>(i)] = refSet[static_cast<size_t>(i)].valid && tgtSet[static_cast<size_t>(i)].valid;
+    }
+    for (int i = 0; i < measure::kTransferCount; ++i) spec.refine[static_cast<size_t>(i)] = a.has("refine");
+    std::vector<float> body = assemble::transfer::BodySlidersOf(tgt);
+    const std::vector<float> cardBody = body;
+    spec = assemble::transfer::Build(refScene, ref, refSet, tgtScene, tgt, tgtSet, body, spec);
+
+    ao.bodyShape = body;
+    const auto measureAt = [&](const std::vector<float>& trial) {
+        ao.bodyShape = trial;
+        if (!assemble::Reshape(tgtScene, tgt, *ctx.resolver, ao)) return measure::TransferSet{};
+        return measure::MeasureTransfer(tgtScene);
+    };
+    assemble::transfer::Refine(spec, body, cardBody, measureAt);
+    // Refinement only reports rows it actually solved. Measure the applied result once with the full
+    // layer so the spec's "achieved" values are honest in the default (controls-only) path too.
+    {
+        std::vector<float> appliedBody = body;
+        for (const auto& op : spec.ops)
+            if (op.kind == assemble::kBodySlider && op.index >= 0 && static_cast<size_t>(op.index) < appliedBody.size())
+                appliedBody[static_cast<size_t>(op.index)] = op.value;
+        assemble::AssembleOptions finalAo = ao;
+        finalAo.bodyShape = appliedBody;
+        assemble::ProportionLayer none;
+        finalAo.proportionLayer = assemble::transfer::Merge(none, spec.ops, true);
+        if (assemble::Reshape(tgtScene, tgt, *ctx.resolver, finalAo)) {
+            const auto applied = measure::MeasureTransfer(tgtScene);
+            for (int i = 0; i < measure::kTransferCount; ++i)
+                if (spec.selected[static_cast<size_t>(i)]) {
+                    spec.achievedValue[static_cast<size_t>(i)] = applied[static_cast<size_t>(i)].value;
+                    spec.achievedValid[static_cast<size_t>(i)] = applied[static_cast<size_t>(i)].valid;
+                }
+        }
+    }
+    const std::string text = assemble::transfer::ToJson(spec);
+    fileio::WriteFile(outPath, reinterpret_cast<const uint8_t*>(text.data()), text.size());
+    std::printf("wrote %s (%zu transfer op(s))\n", outPath.c_str(), spec.ops.size());
+    for (int i = 0; i < measure::kTransferCount; ++i)
+        if (spec.selected[static_cast<size_t>(i)])
+            std::printf("  %-20s reference %8.2f%s -> achieved %8.2f%s\n", measure::TransferName(i), spec.targetValue[i],
+                        measure::TransferUnit(i), spec.achievedValue[i], measure::TransferUnit(i));
+    for (const auto& note : spec.notes) std::printf("  note: %s\n", note.c_str());
+    std::printf("apply with: cardbridge convert <target.png> --library ... --out ... --transfer %s\n", outPath.c_str());
+    return 0;
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     std::vector<std::string> wide = utf8Args();
@@ -1421,7 +1583,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];
@@ -1430,6 +1592,8 @@ int main(int argc, char** argv) {
     try {
         if (cmd == "convert") rc = cmdConvert(a);
         else if (cmd == "inspect") rc = cmdInspect(a);
+        else if (cmd == "measure") rc = cmdMeasure(a);
+        else if (cmd == "transfer") rc = cmdTransfer(a);
         else if (cmd == "clothes") rc = cmdClothes(a);
         else if (cmd == "library") rc = cmdLibrary(a);
         else if (cmd == "pmx") rc = cmdPmx(a);
