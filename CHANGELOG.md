@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.30] - 2026-11-24
+
+### Fixed
+
+- The UV1-atlas sleeve is complete again: dropped the per-triangle removal introduced in 0.7.28, which punched holes in the inside and outside of the glove sleeve. The atlas padding is still cut per fragment by the alpha test, so all views and the PMX keep agreeing without changing the authored garment geometry. 19,296 unit checks pass.
+
 ## [0.7.29] - 2026-11-24
 
 ### Fixed

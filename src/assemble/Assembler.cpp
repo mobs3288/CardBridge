@@ -4538,35 +4538,10 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             m.alpha = true;
             m.translucent = false;
         }
-        if (!m.shaderClipsAlpha) continue;
-        // Triangles that straddle the atlas cell boundary leave thin slivers of the cut-away ruffle in
-        // every view and in the PMX. Drop any triangle not fully covered by the authored opaque texels;
-        // blend-shape offsets stay keyed by vertex index and remain valid for the vertices we keep.
-        static const float kBary[4][3] = {{1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
-                                          {0.6f, 0.2f, 0.2f}, {0.2f, 0.6f, 0.2f}, {0.2f, 0.2f, 0.6f}};
-        for (auto& mesh : scene.meshes)
-            for (auto& sm : mesh.submeshes) {
-                if (sm.material != static_cast<int>(mi)) continue;
-                std::vector<uint32_t> keep;
-                keep.reserve(sm.indices.size());
-                for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
-                    size_t opaque = 0;
-                    for (const auto& w : kBary) {
-                        const auto& a = mesh.vertices[sm.indices[i]].uv;
-                        const auto& b = mesh.vertices[sm.indices[i + 1]].uv;
-                        const auto& c = mesh.vertices[sm.indices[i + 2]].uv;
-                        float u = a.x * w[0] + b.x * w[1] + c.x * w[2];
-                        float v = a.y * w[0] + b.y * w[1] + c.y * w[2];
-                        u -= std::floor(u); v -= std::floor(v);
-                        const int x = std::min(t.width - 1, static_cast<int>(u * t.width));
-                        const int y = std::min(t.height - 1, static_cast<int>((1.0f - v) * t.height));
-                        if (t.rgba[(static_cast<size_t>(y) * t.width + x) * 4 + 3] >= 128) ++opaque;
-                    }
-                    if (opaque == 4)
-                        for (int k = 0; k < 3; ++k) keep.push_back(sm.indices[i + static_cast<size_t>(k)]);
-                }
-                if (!keep.empty() || sm.indices.empty()) sm.indices = std::move(keep);
-            }
+        // Keep every triangle. The atlas padding is removed per fragment by the alpha test instead:
+        // dropping triangles that merely straddle the cell boundary punched holes in the sleeve
+        // (the inside and parts of the outside disappeared). The cutout flag above is enough to make
+        // all three views and the PMX agree without changing the authored garment geometry.
     }
     // Per-card presentation setting: the centre nose ridge is authored in the head mod's face detail mask, not in
     // the nose texture. Detect it there, keep the untouched pixels, and let the viewer slider / CLI flag dial it
