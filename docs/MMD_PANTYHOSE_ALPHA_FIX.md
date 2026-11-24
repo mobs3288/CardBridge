@@ -1,10 +1,18 @@
 # MMD pantyhose transparency — root cause and fix (0.6.7)
 
-> **Update (0.7.11):** binarising at `_Cutoff` is correct only for the alpha-TEST queue (2450). A material
-> in a transparent queue (Unity 3000+, e.g. the fishnet `cf_m_panst_02` at queue 3040) *blends* its
+> **Update (0.7.11):** binarising at `_Cutoff` is correct only for an alpha-TEST shader. A material
+> in a transparent queue (Unity 3000+, e.g. the fishnet `cf_m_panst_02` at queue 3040) *can blend* its
 > authored alpha over the skin — a ~200/255 dark tint draws a fishnet, not a solid sheet. Thresholding
-> that alpha made it fully opaque black in MMD. Transparent-queue materials now keep their fractional
-> alpha; alpha-test materials keep the binary cutout described below.
+> that alpha made it fully opaque black in MMD. Transparent-queue materials were therefore exempted
+> from binarisation, while alpha-test materials kept the binary cutout described below.
+>
+> **Regression fix (0.7.33):** the queue exemption was too broad. The Roy12 knee socks
+> (`cf_m_socks_knee01`, Yoko Littner outfit 5/6) are a modded `main_alpha` alpha test at material queue
+> 3050 / shader queue 3040 — but with **ZWrite On**. Its ~190/255 is a tint that passed `_Cutoff`, not
+> translucency; the export kept it and MMD drew the stage through the socks again. The exporter now
+> treats a depth-writing material with mesh-sampled cutouts as an alpha test and binarises it at
+> `_Cutoff`, regardless of queue. A transparent material with ZWrite Off (the fishnet) keeps its
+> fractional alpha. Both cases have export regression tests.
 
 ## Symptom
 

@@ -454,6 +454,16 @@ inline int EffectiveRenderQueue(const Scene& scene, const SceneMaterial& mat) {
     return 2000;
 }
 
+// A forward pass that writes depth keeps the texels it draws and discards the rest with the alpha test:
+// its sub-255 alpha is a tint, not a translucency request. Modded KK/KKS alpha shaders can sit in a
+// transparent render queue (e.g. 3040) and still have ZWrite On, so the queue alone cannot tell an alpha
+// test from a genuine blend. Only a shader known to write depth is trusted here; an unknown shader or
+// ZWrite Off keeps the authored fractional alpha.
+inline bool ShaderWritesDepth(const Scene& scene, const SceneMaterial& mat) {
+    return mat.shaderIndex >= 0 && static_cast<size_t>(mat.shaderIndex) < scene.shaders.size() &&
+           scene.shaders[static_cast<size_t>(mat.shaderIndex)].zWrite;
+}
+
 // Computes whether every triangle of a material's mesh lands in texels the game's alpha-test shader
 // discards. Create-job clothing atlases pack several garments into one image: a garment whose UVs sit in
 // a transparent cell is invisible in the game (the shader clips it), but an "opaque"-named shader made
