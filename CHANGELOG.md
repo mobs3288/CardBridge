@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.7.35] - 2026-11-24
+
+### Fixed
+
+- **Black cape restored**: the coincident-layer separation pass (0.4.11) shifted the outer cape a few millimetres off its lining on the Megumin Outfit card, which hid the black shell in the GPU viewer and left only the yellow lining visible. The pass is no longer called during assembly, so both copies are placed exactly as the card authors them. Both capes and their original colours are still in the PMX and the software preview; the trade-off is that the original z-fighting between the near-coincident copies returns.
+
 ## [0.7.33] - 2026-11-24
 
 ### Added
