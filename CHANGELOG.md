@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.9.4] - 2026-11-25
+
+### Changed
+
+- **Non-PMX export targets are labelled as work in progress.** The viewer's format chip shows `WIP glb` / `WIP gltf` / `WIP obj` in amber (PMX stays a plain supported `Fmt: pmx`), the progress/log text says `(WIP)`, and the CLI help plus README say the same. No export behaviour changed.
+
 ## [0.9.3] - 2026-11-25
 
 ### Fixed

@@ -2,7 +2,7 @@
 
 // The button hierarchy: Normal (secondary, the default), Primary (the one action the screen wants; flat accent),
 // Ghost (low-chrome inline actions), Danger (destructive). Flat fills, no gradients: an accent fill says "this does the work".
-enum class Btn : int { Normal, Primary, Ghost, Danger };
+enum class Btn : int { Normal, Primary, Ghost, Danger, Wip };
 
 bool Touches(const RECT& clip, const RECT& r) { RECT t; return IntersectRect(&t, &clip, &r) != 0; }
 bool TouchesY(const RECT& clip, int top, int bottom) { return bottom > clip.top && top < clip.bottom; }
@@ -41,6 +41,12 @@ void Button(ui::Surface& s, const RECT& r, const std::string& label, bool hot, b
         if (hot) s.FillRound(r, ui::kRad, Mix(ui::kBad, ui::kBg, 0.82f));
         s.StrokeRound(r, ui::kRad, ui::kBad);
         s.TextCentered(g.fontSemi, ui::kBad, r, label);
+        return;
+    }
+    if (kind == Btn::Wip) {   // experimental export target: amber, not the success/error colours
+        s.FillRound(r, ui::kRad, !enabled ? ui::kCard : hot ? ui::kSelect : ui::kCardHi);
+        s.StrokeRound(r, ui::kRad, ui::kAmber);
+        s.TextCentered(g.fontSemi, !enabled ? ui::kFaint : ui::kAmber, r, label);
         return;
     }
     s.FillRound(r, ui::kRad, !enabled ? ui::kCard : hot ? ui::kSelect : on ? ui::kSelect : ui::kCardHi);

@@ -89,7 +89,8 @@ void StartExport() {
         Log("proportion corrections active for the export (" + std::to_string(correctionLayer.ops.size()) + " op(s)); faithful export = reset the layer in the Proportions tab", LogKind::Info);
     material::WorkbenchState matCopy = g.mat;   // materials: snapshot for the manifest (the scene copy already carries the edits)
     const std::string matSha = L->card.sha256;
-    ProgBegin(std::string("Exporting ") + exporter::FormatName(format) + ": " + stem);
+    ProgBegin(std::string("Exporting ") + exporter::FormatName(format) +
+              (format == exporter::ExportFormat::Pmx ? "" : " (WIP)") + ": " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
     std::thread([L, outDir, stem, format, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {

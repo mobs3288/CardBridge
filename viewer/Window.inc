@@ -729,7 +729,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const exporter::ExportFormat next = static_cast<exporter::ExportFormat>((static_cast<int>(ViewerExportFormat()) + 1) % 4);
                 g.settings.exportFormat = exporter::FormatName(next);
                 SaveSettings(g.settings);
-                Log(std::string("export format: ") + exporter::FormatName(next), LogKind::Info);
+                Log(std::string("export format: ") + exporter::FormatName(next) +
+                    (next == exporter::ExportFormat::Pmx ? "" : " (work in progress)"), LogKind::Info);
                 InvalidatePanel();
                 return 0;
             }
