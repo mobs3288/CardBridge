@@ -15,6 +15,23 @@ std::vector<char> HiddenPartsNow(const assemble::Scene& scene) {
     return hidden;
 }
 
+// A same-card reload (a clothing import, an outfit switch, a re-shape) rebuilds the scene with the same
+// stable part ids, so the gizmo's move/rotate/resize edits and the delete set keep applying to the parts
+// that are still there. Drop entries whose part is gone - a replaced garment keeps its slot id, but a
+// removed layer does not - the same rule LoadPoseFile uses for ids this card no longer has.
+void KeepPartTweaksForScene(const assemble::Scene& scene) {
+    std::set<std::string> ids;
+    for (const auto& p : scene.parts) ids.insert(p.id);
+    for (auto it = g.partEdits.begin(); it != g.partEdits.end(); ) {
+        if (ids.count(it->first)) ++it;
+        else it = g.partEdits.erase(it);
+    }
+    for (auto it = g.deletedParts.begin(); it != g.deletedParts.end(); ) {
+        if (ids.count(*it)) ++it;
+        else it = g.deletedParts.erase(it);
+    }
+}
+
 // Removes one part from this session. The delete is part of the pose state, so Ctrl+Z (or loading a pose that does not
 // delete it) restores it; the export sees the same hidden flag the preview does.
 void DeletePart(int part) {

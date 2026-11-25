@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.11.1] - 2026-11-25
+
+### Fixed
+
+- **Selective clothing import no longer resets the viewer's part edits.** Moving, rotating or resizing a part with the gizmo (and deleting a part with the row's `x` chip) used to be wiped when the import reloaded the card: the reload cleared those edits unconditionally, even though they are keyed by stable part id and a same-card reload is meant to keep pose tweaks. They now survive the import and keep applying to every part that is still there; edits for garments or layers that are gone are dropped, as with a pose file. Verified with the scripted viewer: three part edits stayed at three across a selective import that was confirmed to reload and pin the imported outfit (the original code reset them to zero); 19,540 unit checks plus 100 format checks pass.
+
 ## [0.11.0] - 2026-11-25
 
 ### Added

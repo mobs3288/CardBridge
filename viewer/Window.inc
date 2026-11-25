@@ -570,8 +570,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.loadingOutfit = -1;
         g.soloPart = -1;
         g.selGizmoPart = -1;   // the scene is new: the gizmo's part index means nothing now
-        g.partEdits.clear();   // ... and neither do the old part ids
-        g.deletedParts.clear();
+        // A same-card reload keeps the part edits and deletes: they are keyed by stable part id, not by index,
+        // and clearing them here is what reset every move/rotate/resize after a selective clothing import.
+        // A different card starts clean (cleared again with the rest of the pose state below).
+        if (!g.applyKeep) {
+            g.partEdits.clear();   // ... and neither do the old part ids
+            g.deletedParts.clear();
+        }
         g.gizmoHoverAxis = g.gizmoAxis = -1;
         g.rotGizmoHoverAxis = g.rotGizmoAxis = -1;
         g.scaleGizmoHoverAxis = g.scaleGizmoAxis = -1;
@@ -633,6 +638,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g.expBusy.load()) ProgEnd();   // only close the bar here when no exported-preview bake is in flight (WM_EXP_READY closes it)
         if (L && !g.applyKeep) { g.boneEdits.clear(); g.partEdits.clear(); g.deletedParts.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
+        if (L && g.applyKeep) KeepPartTweaksForScene(L->scene);   // keep edits for parts that survived the reload (new scene is in place)
         // Materials: capture a fresh baseline for the new character.
         if (L) {
             material::CaptureOriginals(g.mat, L->scene);
