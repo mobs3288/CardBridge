@@ -3027,6 +3027,61 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                     for (const auto& sub : m.submeshes) anatomyTris += sub.indices.size() / 3;
                 }
                 if (!anatomy.meshes.empty()) {
+                    // The game binds its runtime skin texture to the mnpb/mnpa materials when the character
+                    // loads; the asset itself has no texture binding. When we draw their authored diffuse
+                    // (the card's skinMainColor) flat, MMD's diffuse+ambient lighting saturates it to white.
+                    // Reuse the body's own baked skin texture and look instead, sampling one lower-abdomen
+                    // texel from this card's body mesh. Structural (no texture + procedural shader family),
+                    // never a per-card colour, path or material exception.
+                    int skinMat = -1;
+                    for (int mi : scene.parts[static_cast<size_t>(partIdx)].meshes)
+                        for (const auto& sub : scene.meshes[static_cast<size_t>(mi)].submeshes)
+                            if (sub.material >= 0 && static_cast<size_t>(sub.material) < scene.materials.size() &&
+                                scene.materials[static_cast<size_t>(sub.material)].name.rfind("cf_m_body", 0) == 0)
+                                skinMat = sub.material;
+                    if (skinMat >= 0 && scene.materials[static_cast<size_t>(skinMat)].texture >= 0) {
+                        const auto& bodyMat = scene.materials[static_cast<size_t>(skinMat)];
+                        Vec3 centre{0, 0, 0};
+                        size_t count = 0;
+                        for (int mi : anatomy.meshes)
+                            for (const auto& v : scene.meshes[static_cast<size_t>(mi)].vertices) {
+                                centre = centre + v.pos;
+                                ++count;
+                            }
+                        if (count) {
+                            centre = centre * (1.0f / static_cast<float>(count));
+                            const Vec3 target{centre.x, centre.y + 0.9f, centre.z};   // skin just above the pieces, clear of the underhair overlay
+                            float best = std::numeric_limits<float>::max();
+                            Vec2 sample{0, 0};
+                            for (int mi : scene.parts[static_cast<size_t>(partIdx)].meshes) {
+                                const auto& bm = scene.meshes[static_cast<size_t>(mi)];
+                                if (bm.name != "o_body_a") continue;
+                                for (const auto& v : bm.vertices) {
+                                    const Vec3 d = {v.pos.x - target.x, v.pos.y - target.y, v.pos.z - target.z};
+                                    const float dist = d.x * d.x + d.y * d.y + d.z * d.z;
+                                    if (dist < best) { best = dist; sample = v.uv; }
+                                }
+                            }
+                            if (best < std::numeric_limits<float>::max()) {
+                                for (int mi : anatomy.meshes) {
+                                    auto& m = scene.meshes[static_cast<size_t>(mi)];
+                                    for (auto& v : m.vertices) v.uv = v.uv1 = sample;
+                                    for (const auto& sub : m.submeshes)
+                                        if (sub.material >= 0 && static_cast<size_t>(sub.material) < scene.materials.size()) {
+                                            auto& am = scene.materials[static_cast<size_t>(sub.material)];
+                                            if (am.texture >= 0 || !IsConstantColourShader(am.shader)) continue;
+                                            am.texture = bodyMat.texture;
+                                            am.diffuse = bodyMat.diffuse;
+                                            am.shadow = bodyMat.shadow;
+                                            am.bakedLit = bodyMat.bakedLit;
+                                            am.toon = bodyMat.toon;
+                                        }
+                                }
+                                log("body.anatomy: bound the body skin texture at uv (" +
+                                    std::to_string(sample.x) + ", " + std::to_string(sample.y) + ")");
+                            }
+                        }
+                    }
                     scene.parts.push_back(std::move(anatomy));
                     log("body.anatomy: " + std::to_string(scene.parts.back().meshes.size()) +
                         " mesh(es), " + std::to_string(anatomyVerts) + " vertices, " +

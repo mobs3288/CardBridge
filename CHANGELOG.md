@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.8.7] - 2026-11-25
+
+### Fixed
+
+- **Anatomy drew as a flat white plate in the viewers ("where must I go?" UI).** The game binds its runtime skin texture to `cf_m_mnpb` / `cf_m_mnpa`; the assets carry no texture binding and the SM4 preview cannot evaluate the procedural shader, so the mat showed its authored diffuse (0.98, 0.90, 0.87) and MMD's toon lighting saturated that to white. The extraction now reuses the body's own baked skin texture with a lower-abdomen UV sampled from the same card's body mesh; the panel's White-mode props and the material look still match the body. (`src/assemble/Assembler.cpp`)
+
 ## [0.8.6] - 2026-11-25
 
 ### Fixed
