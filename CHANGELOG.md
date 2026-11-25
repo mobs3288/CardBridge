@@ -2,12 +2,6 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
-## [0.8.7] - 2026-11-25
-
-### Added
-
-- **Session tools and investigation notes.** New `tools/*` helpers for asset dumping/inspection, plus investigation notes in `docs/FACIAL_EXPRESSION_PMX_EXPORT_INVESTIGATION.md` and `docs/GEOMETRY_INTEGRITY_INVESTIGATION.md`. `VERSION` bumped to 0.8.7.
-
 ## [0.8.6] - 2026-11-25
 
 ### Fixed
