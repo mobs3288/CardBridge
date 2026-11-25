@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.11.0] - 2026-11-25
+
+### Added
+
+- **Bra-Aware Breast Physics (on by default).** The exporter classifies the worn garments from card metadata, mesh geometry, skinning and spatial coverage before writing physics, and applies a firmer, better-damped, less-travelling breast profile only when a supportive bra is detected with high confidence. A normal shirt, pasties, a one-sided or translucent cover, an uncertain/unfamiliar garment, a missing mod item, and the new opt-out (`--no-bra-physics` / `CARDBRIDGE_NO_BRA_PHYSICS=1`, or the Look-tab switch) all keep the existing breast physics exactly as before. The supported profile is a derived copy of the tuned Subtle preset, scoped to the body's own breast chains, so hip/hair/garment physics, colliders, bones and geometry are untouched. KK and KKS share the path. 19,540 unit checks plus 100 format checks pass; real KK/KKS exports were compared body-by-body and joint-by-joint, and `pmx roundtrip` preserved structure.
+
 ## [0.10.0] - 2026-11-25
 
 ### Added

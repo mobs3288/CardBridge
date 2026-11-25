@@ -7,6 +7,7 @@
 #include "core/FileIo.h"
 #include "core/Version.h"
 #include "assemble/JiggleSettings.h"
+#include "assemble/BraPhysicsProfile.h"
 #include "export/BoneLabels.h"
 #include "export/FaceMorphs.h"
 #include "export/MmdNames.h"
@@ -647,6 +648,27 @@ nlohmann::json BuildManifest(const assemble::Scene& scene, const card::Card& car
                                      {"amplitude_depth", s.amplitudeDepth}, {"rotation_strength", s.rotationStrength},
                                      {"strength", s.strength}, {"simulation_hz", s.simulationHz}}},
                        {"derived", std::move(deriv)}};
+        json candidates = json::array();
+        for (const auto& c : opt.braClassification.candidates) {
+            json notes = json::array();
+            for (const auto& n : c.notes) notes.push_back(n);
+            candidates.push_back({{"garment", c.part}, {"verdict", assemble::GarmentSupportVerdictName(c.verdict)},
+                                  {"confidence", c.confidence}, {"evidence", std::move(notes)}});
+        }
+        json diagnostics = json::array();
+        for (const auto& d : opt.braClassification.diagnostics) diagnostics.push_back(d);
+        j["jiggle"]["bra_aware"] = {{"enabled", opt.braAwarePhysics},
+                                    {"applied", opt.braAwarePhysics && opt.physics && opt.jiggleBust && opt.braClassification.supportiveBra},
+                                    {"diagnostics", std::move(diagnostics)},
+                                    {"candidates", std::move(candidates)}};
+        if (opt.braAwarePhysics && opt.physics && opt.jiggleBust && opt.braClassification.supportiveBra) {
+            const assemble::JiggleSettings bs = assemble::SupportedBraJiggle(s);
+            j["jiggle"]["bra_aware"]["supported_settings"] = {
+                {"mass", bs.mass}, {"stiffness", bs.stiffness}, {"damping", bs.damping}, {"gravity", bs.gravity},
+                {"amplitude_vertical", bs.amplitudeVertical}, {"amplitude_horizontal", bs.amplitudeHorizontal},
+                {"amplitude_depth", bs.amplitudeDepth}, {"rotation_strength", bs.rotationStrength},
+                {"strength", bs.strength}, {"simulation_hz", bs.simulationHz}};
+        }
     }
     if (opt.materialWorkbench.is_object()) {
         nlohmann::json wb = opt.materialWorkbench;
@@ -1156,7 +1178,16 @@ ExportResult ExportSceneImpl(const assemble::Scene& scene, const card::Card& car
     if (std::getenv("CARDBRIDGE_DEBUG_MORPHS")) for (const auto& l : renameLog) std::fprintf(stderr, "rename %s\n", l.c_str());
     const FaceEffectsResult faceFx = AddFaceEffects(scene, model, meshBase, opt.outDir, opt.scale, log);
     for (const auto& m : model.morphs) morphNames.push_back(m.name);
-    if (opt.physics) AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggle);
+    {
+        // Only a confident bra verdict changes the breast chain; an absent/unknown verdict passes the original
+        // settings straight through. The derived profile is a copy, so opt.jiggle (and the live preview) stay intact.
+        const bool supported = opt.braAwarePhysics && opt.physics && opt.jiggleBust && opt.braClassification.supportiveBra;
+        const assemble::JiggleSettings braSettings = assemble::SupportedBraJiggle(opt.jiggle);
+        if (opt.physics)
+            AddPhysics(scene, model, opt.scale, opt.jiggleBust, opt.jiggleButt, opt.jiggle,
+                       supported ? &braSettings : nullptr);
+        if (supported) log("bra-aware physics: supportive bra detected; supported breast profile applied");
+    }
     std::vector<int> ikBones = AddIk(scene, model, opt.scale, !opt.mmdNames);   // MMD names: no arm IK, it would pin the arm to the rest pose against a motion's FK keys
     std::vector<int> mmdExtraBones;
     if (opt.mmdNames) {
@@ -1385,8 +1416,17 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
         if (opt.progress) opt.progress(0.45, "writing PMX");
     }
     const assemble::Scene& mainScene = eff ? *eff : scene;
+    // Garment-aware classification runs ONCE, on the original (un-simplified) scene, and its result is reused by the
+    // main PMX and every LOD. With the setting off we do not even look at the garments.
+    ExportOptions exportOpt = opt;
+    if (opt.braAwarePhysics && opt.physics && opt.jiggleBust) {
+        exportOpt.braClassification = assemble::ClassifyGarmentSupport(scene);
+        for (const auto& line : exportOpt.braClassification.diagnostics) log(line);
+    } else {
+        exportOpt.braClassification.diagnostics.push_back("bra-aware physics: disabled by the user; garment classification skipped");
+    }
     ExportTextureReuse reuse;
-    ExportResult res = ExportSceneImpl(mainScene, card, opt, nullptr, &reuse);
+    ExportResult res = ExportSceneImpl(mainScene, card, exportOpt, nullptr, &reuse);
     if (!opt.lodTargets.empty()) {
         nlohmann::json lods = nlohmann::json::array();
         auto slug = [](const std::string& s) {
@@ -1422,7 +1462,7 @@ ExportResult ExportScene(const assemble::Scene& scene, const card::Card& card, c
                 res.lods.push_back({prevFile, target.label, remaining, st.resultTriangles, st.resultVertices});
                 continue;
             }
-            ExportOptions lodOpt = opt;
+            ExportOptions lodOpt = exportOpt;   // the same classification result: geometry is not scanned again
             lodOpt.baseName = fileStem;
             lodOpt.simplifyPercent = 0.0f;        // already simplified; the LOD pass must not reduce again
             lodOpt.lodTargets.clear();

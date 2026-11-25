@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assemble/Scene.h"
+#include "assemble/GarmentSupport.h"
 #include "assemble/JiggleSettings.h"
 #include "assemble/Proportions.h"
 #include "card/CardFile.h"
@@ -40,6 +41,12 @@ struct ExportOptions {
     bool jiggleBust = true;        // breast jiggle physics (the body's own jiggle chains); default on
     bool jiggleButt = false;       // hip / butt jiggle physics; default off - the card's butt sway reads as the back of the skirt vibrating. [--jiggle-butt] enables it
     assemble::JiggleSettings jiggle = {};   // the physical breast / hip jiggle settings, shared with the live preview (see assemble/JiggleSettings.h)
+    // Bra-Aware Breast Physics. ON by default: ExportScene classifies the worn garments once and, only when a
+    // supportive bra is detected confidently, hands a derived supported-breast profile to AddPhysics. OFF skips
+    // classification entirely. `braClassification` is filled by ExportScene (and copied to the LOD exports); callers
+    // that construct options by hand need not set it.
+    bool braAwarePhysics = true;
+    assemble::GarmentSupportResult braClassification;
     bool mmdNames = true;          // the body bones and the blink morph get MikuMikuDance's standard (Japanese) names, so a motion (VMD) finds them
     bool faceMinusZ = true;        // turn the model half a turn about Y so it faces -Z, where MikuMikuDance puts a PMX's front; false = as built (+Z, Unity)
     int outfit = 0;                // recorded in the manifest

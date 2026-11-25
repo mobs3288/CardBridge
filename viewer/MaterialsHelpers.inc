@@ -438,6 +438,7 @@ std::vector<TweakRow> BuildTweakRows(int tab) {
         rows.push_back({0, kJiggleBust, "Jiggle (the exported PMX, and the physics preview)", "Jiggle"});
         rows.push_back({2, kJiggleBust, "Breast jiggle", "Jiggle"});
         rows.push_back({2, kJiggleButt, "Butt jiggle", "Jiggle"});
+        rows.push_back({2, kBraAwarePhysics, "Bra-Aware Breast Physics (supportive bra detected)", "Jiggle"});
         rows.push_back({6, kJigglePreset, "Preset:", "Jiggle"});
         rows.push_back({1, kJiggleMass, "Mass (kg)", "Jiggle"});
         rows.push_back({1, kJiggleStiffness, "Stiffness (N/m)", "Jiggle"});
@@ -574,6 +575,7 @@ bool TweakChanged(int id) {
     if (id == kPhysics) return g.physics;
     if (id == kJiggleBust) return g.jiggleBust;
     if (id == kJiggleButt) return g.jiggleButt;
+    if (id == kBraAwarePhysics) return g.braAwarePhysics;
     if (id == kAutoCloth) return g.autoCloth;
     if (id == kOriginalGarment) return g.originalGarment;   // the switch shows ON by default (like the A-pose switch)
     if (id == kBakeQuality) return g.bakeQuality != 0;
@@ -632,6 +634,7 @@ void ResetTweak(int id) {
     else if (id == kAPose) g.aPose = true;
     else if (id == kJiggleBust) g.jiggleBust = true;
     else if (id == kJiggleButt) g.jiggleButt = false;   // reset to the new default (butt jiggle off)
+    else if (id == kBraAwarePhysics) g.braAwarePhysics = true;   // default ON
     else if (id == kAutoCloth) g.autoCloth = false;
     else if (id == kOriginalGarment) g.originalGarment = true;
     else if (id == kBakeQuality) { g.bakeQuality = 0; BakeQualityChanged(); }

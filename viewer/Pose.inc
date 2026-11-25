@@ -492,6 +492,12 @@ bool IsShapeId(int id) { return (id >= 0 && id <= kNippleMm) || id == kAreola ||
 // assembled again when it cannot be re-shaped in place (after the pointer has been still for a moment).
 void TweakEdited(int id, bool released) {
     if (g.tab == TabBodyTransfer && IsBodyTransferId(id)) { InvalidatePanel(); return; }   // edit the requested value; Apply does the reshape
+    if (id == kBraAwarePhysics) {
+        g.settings.braAwarePhysics = g.braAwarePhysics;
+        SaveSettings(g.settings);
+        InvalidatePanel();
+        return;
+    }
     if (IsMatId(id)) { MaterialSliderEdited(id, released); return; }
     if (id == kJiggleBust || id == kJiggleButt || (id >= kJiggleMass && id <= kJiggleSimHz)) {
         if (id == kJiggleBust || id == kJiggleButt) {

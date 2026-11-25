@@ -174,6 +174,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     // --clothes pins to --outfit when given, otherwise to the card's current slot on load (StartLoad pins it there).
     if (!g.clothingPins.empty() && g.wantOutfit >= 0) g.clothingPins.back().dstOutfit = g.wantOutfit;
     g.jiggle = g.settings.jiggle;   // the live settings start from the persisted ones (the Look tab edits them)
+    g.braAwarePhysics = g.settings.braAwarePhysics;
     SaveSettings(g.settings);
 
     ui::Startup();

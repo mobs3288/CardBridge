@@ -38,8 +38,13 @@ constexpr uint8_t kPmxGroupChain = 1;
 // coordination 6-DOF joint per corresponding rotating link (a share of the link's hold spring on the relative rotation plus a
 // hard envelope at 75% of the link's own), so the pair reads as one connected structure with independently deformable sides
 // instead of two independent objects; common motion costs nothing (both bodies turning together keeps the relative rotation at zero).
+// `bustOverride`, when given, is used ONLY by the character's own breast chains (jiggleBust && bust); the hip chains,
+// hair, garments, colliders and every other rigid body/joint keep the ordinary `jiggle` settings. With the default
+// nullptr the function follows exactly the same path as before this parameter existed - no extra bodies, joints or
+// changed numbers anywhere. Garment-aware exports pass the derived supported-breast profile here; the profile itself
+// is a copy (see assemble/BraPhysicsProfile.h), never a mutation of `jiggle`.
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust = true, bool jiggleButt = false,
-                const assemble::JiggleSettings& jiggle = {});
+                const assemble::JiggleSettings& jiggle = {}, const assemble::JiggleSettings* bustOverride = nullptr);
 
 // Garment chains — skirts, capes, kimono panels, skirt hems — may follow the thighs through an append bone (MikuMikuDance's 付与).
 // The append rate is deliberately kept at the v0.2.1-alpha release value (kLegFollow = 0.75f), which the author approved of.

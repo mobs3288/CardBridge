@@ -74,6 +74,7 @@ void StartExport() {
     const std::string library = g.settings.library, mods = g.settings.mods;
     const std::vector<char> hiddenNow = HiddenPartsNow(L->scene);   // the hide checkboxes plus the deleted parts
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
+    const bool braAwarePhysics = g.braAwarePhysics;   // one export-only user switch, snapped at StartExport time
     const assemble::JiggleSettings jiggle = g.jiggle;   // the physical settings the preview used, shared with the PMX
     const float sag = g.sag;
     const char* fixEnv = std::getenv("CARDBRIDGE_FIX_GARMENT_INTERSECTIONS");   // 0 forces the fix off (the function also honours it); anything else turns it on
@@ -93,7 +94,7 @@ void StartExport() {
               (format == exporter::ExportFormat::Pmx ? "" : " (WIP)") + ": " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, format, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, format, library, mods, hiddenNow, jiggleBust, jiggleButt, braAwarePhysics, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -162,6 +163,7 @@ void StartExport() {
             }
             eo.jiggleBust = jiggleBust;
             eo.jiggleButt = jiggleButt;
+            eo.braAwarePhysics = braAwarePhysics;
             eo.jiggle = jiggle;
             eo.assetLibrary = library;
             eo.modsFolder = mods;

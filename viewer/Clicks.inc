@@ -1,7 +1,7 @@
 // viewer fragment: clicks, library, settings (included in order by main.cpp)
 
 // The physical jiggle rows (everything under the Jiggle group header): a right-click / group reset needs to persist the settings and re-arm the preview, not re-assemble.
-bool IsJiggleId(int id) { return (id >= kJiggleMass && id <= kJiggleSimHz) || id == kJigglePreset || id == kJiggleBust || id == kJiggleButt; }
+bool IsJiggleId(int id) { return (id >= kJiggleMass && id <= kJiggleSimHz) || id == kJigglePreset || id == kJiggleBust || id == kJiggleButt || id == kBraAwarePhysics; }
 
 // A click in the sliders list: a header resets its group, a switch toggles, a slider starts a drag; right-click resets the row.
 void TweakClick(int x, int y, const PanelLayout& l, bool right) {
@@ -90,6 +90,14 @@ void TweakClick(int x, int y, const PanelLayout& l, bool right) {
         if (right) ResetTweak(row.id); else v = !v;
         Log(row.label + ": " + (v ? "on" : "off") + " (exported PMX)");
         TweakEdited(row.id, true);
+        return;
+    }
+    if (row.kind == 2 && row.id == kBraAwarePhysics) {
+        if (right) ResetTweak(row.id); else g.braAwarePhysics = !g.braAwarePhysics;
+        g.settings.braAwarePhysics = g.braAwarePhysics;
+        SaveSettings(g.settings);
+        Log(row.label + ": " + (g.braAwarePhysics ? "on" : "off") + " (PMX export only)");
+        InvalidatePanel();
         return;
     }
     if (row.kind == 2 && row.id == kAutoCloth) {

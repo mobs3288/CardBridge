@@ -156,9 +156,11 @@ std::vector<int> PhysicsChainBones(const assemble::Scene& scene, const assemble:
 }
 
 void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bool jiggleBust, bool jiggleButt,
-                const assemble::JiggleSettings& jiggleSettings) {
+                const assemble::JiggleSettings& jiggleSettings, const assemble::JiggleSettings* bustOverride) {
     const assemble::JiggleSettings jiggleSet = assemble::SanitizeJiggleSettings(jiggleSettings);
-    const bool jiggleOn = jiggleSet.strength > 0.0f;
+    // A supported bra changes only the breast chains. Every other body/joint in the export keeps `jiggleSet`, so
+    // passing an override cannot disturb hip jiggle, hair, garments or colliders.
+    const assemble::JiggleSettings bustJiggleSet = bustOverride ? assemble::SanitizeJiggleSettings(*bustOverride) : jiggleSet;
     const int boneCount = static_cast<int>(scene.bones.size());
     const float gravity = 9.8f * scale;   // model units a second squared
     std::vector<Core> colliderCore;       // per collider body, in the order they were added
@@ -208,14 +210,18 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         bool jigBody = false;
         bool jigBust = false;  // which jiggle: the bust gets a wider envelope than the butt
         int jigSide = 0;   // +1 left (_L), -1 right (_R), 0 neither: the coordination pairing keys off it
+        const assemble::JiggleSettings* activeJiggle = &jiggleSet;
         if (ch.characterOwn) {
             const bool bust = assemble::IsBustJiggleChain(scene, ch);
-            if (bust && jiggleBust) jigBody = jiggleOn;
-            else if (!bust && jiggleButt) jigBody = jiggleOn;
+            if (bust) activeJiggle = &bustJiggleSet;
+            const bool activeOn = activeJiggle->strength > 0.0f;
+            if (bust && jiggleBust) jigBody = activeOn;
+            else if (!bust && jiggleButt) jigBody = activeOn;
             if (!jigBody) continue;   // switch off, or global strength 0: the part stays rigid, following its bone
             jigBust = bust;
             jigSide = assemble::BoneSideSign(scene.bones[static_cast<size_t>(ch.bones[0])].name);
         }
+        const assemble::JiggleSettings& js = *activeJiggle;
         const bool hairChain = !jigBody && assemble::SceneChainIsHair(scene, ch);   // imported / base hair: the authored hairstyle is the resting shape
         std::vector<int> bones = PhysicsChainBones(scene, ch);
         // A card can resolve two items onto the same part (the kimono item scans its DynamicBone components twice), which would export
@@ -270,7 +276,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
                 // The reference models' taper: the root carries the setting's mass, each link below it half. Both sides of a pair share
                 // the same numbers, like the symmetric tissue they are; the coordination joints (see the bottom of AddPhysics) keep the
                 // sides coordinated without making them rigid twins.
-                l.mass = std::max(0.01f, jiggleSet.mass * std::pow(0.5f, static_cast<float>(links.size())));
+                l.mass = std::max(0.01f, js.mass * std::pow(0.5f, static_cast<float>(links.size())));
             }
             links[b] = l;
         }
@@ -335,7 +341,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             float c = std::min(1.0f, std::max(0.0f, along(ch.boneDamping, ch.damping, l.bone)));
             // A jiggle body's damping comes from the same damper the preview uses: Bullet keeps v *= (1 - d)^dt a second, so the
             // continuous decay exp(-c / 2m) maps to d = 1 - exp(-c / 2m).
-            float damp = jigBody ? assemble::JigglePmxDamping(jiggleSet, l.mass)
+            float damp = jigBody ? assemble::JigglePmxDamping(js, l.mass)
                                  : std::min(0.9999f, 1.0f - std::pow(1.0f - c, 60.0f));
             // Hair is the other way round: MikuMikuDance's world gravity is strong against the component's (the hair components carry
             // no gravity at all in the game), so a strand gets heavy damping - enough to settle in one smooth approach, never a snap.
@@ -383,7 +389,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
         // more room than the sway, which is why the lateral motion was barely visible in MikuMikuDance.
         float jigRange[3] = {0.0f, 0.0f, 0.0f};
         if (jigBody)
-            for (int axis = 0; axis < 3; ++axis) jigRange[axis] = assemble::JiggleJointRange(jiggleSet, jigBust, axis);
+            for (int axis = 0; axis < 3; ++axis) jigRange[axis] = assemble::JiggleJointRange(js, jigBust, axis);
         // A strand is only allowed to keep mode 1 (free dynamics) when its hold spring can physically hold it near the authored pose
         // inside the envelope. If any joint's gravity torque, divided by the droop it is allowed, exceeds the spring this body can
         // stably integrate at MMD's 120 Hz, the chain cannot be held at all and it must be pinned to the bone (mode 2, physics with
@@ -447,7 +453,7 @@ void AddPhysics(const assemble::Scene& scene, pmx::Model& model, float scale, bo
             // A jiggle joint's rotational spring is the preview's linear spring about the joint: torque = k r^2 theta, i.e. the
             // body's own inertia times (stiffness / mass). It lets the part hang and swing instead of pinning it to the rest pose.
             float jigSpring = 0.0f;
-            if (jigBody) jigSpring = own * (jiggleSet.stiffness / std::max(0.01f, self.mass));
+            if (jigBody) jigSpring = own * (js.stiffness / std::max(0.01f, self.mass));
             pmx::Joint j;
             j.name = ch.name + " " + std::to_string(k);
             j.bodyA = bodyA;

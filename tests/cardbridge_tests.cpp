@@ -13,6 +13,8 @@
 // listed with its failing checks and a total. Set CARDBRIDGE_TEST_VERBOSE=1 for per-test [ RUN ]/[ OK ] lines.
 
 #include "assemble/BodySuppression.h"
+#include "assemble/GarmentSupport.h"
+#include "assemble/BraPhysicsProfile.h"
 #include "assemble/Assembler.h"
 #include "assemble/FaceFeatures.h"
 #include "assemble/AutoCloth.h"
@@ -1419,7 +1421,7 @@ void unitTests() {
         s.textures.push_back(t);
         s.materials.push_back(SceneMaterial{});
         auto addPart = [&](const std::string& id, float y0, float y1) {
-            SceneMesh m;
+            assemble::SceneMesh m;
             m.name = id;
             for (float y : {y0, y1, y1}) { SceneVertex v; v.pos = {0, y, 0}; m.vertices.push_back(v); }
             SceneSubmesh sub; sub.material = 0; sub.indices = {0, 1, 2};
@@ -1860,7 +1862,7 @@ void unitTests() {
         SceneMaterial mt; mt.shader = "Shader Forge/main_alpha"; mt.alpha = true; mt.translucent = true; mt.doubleSided = true; mt.name = "shell";
         s.materials = {mb, mt};
         auto build = [&](bool reversed) {
-            SceneMesh m;
+            assemble::SceneMesh m;
             constexpr int NX = 8, NY = 6;
             auto vid = [&](int x, int y) { return static_cast<uint32_t>(y * (NX + 1) + x); };
             for (int y = 0; y <= NY; ++y)
@@ -2064,7 +2066,7 @@ void unitTests() {
         auto addPart = [&](const char* id, const char* group, int mat) {
             const int pi = static_cast<int>(s.parts.size());
             ScenePart p; p.id = id; p.label = id; p.group = group; p.includeInExport = true; s.parts.push_back(p);
-            SceneMesh m; m.name = std::string(id) + "_mesh"; m.part = pi; m.reshapable = false;
+            assemble::SceneMesh m; m.name = std::string(id) + "_mesh"; m.part = pi; m.reshapable = false;
             for (Vec3 v : {Vec3{-0.5f, 0, 0}, Vec3{0.5f, 0, 0}, Vec3{0.5f, 1, 0}, Vec3{-0.5f, 1, 0}}) {
                 SceneVertex sv; sv.pos = v; sv.normal = {0, 0, 1}; sv.uv = {v.x + 0.5f, v.y}; sv.bone[0] = 0; sv.weight[0] = 1; m.vertices.push_back(sv);
             }
@@ -2243,7 +2245,7 @@ void unitTests() {
         SceneMaterial face; face.name = "cf_m_face_00"; face.shader = "Shader Forge/main_skin"; face.texture = 1;
         s.materials.push_back(face);
         auto quad = [](float z, int material) {
-            SceneMesh m;
+            assemble::SceneMesh m;
             for (Vec3 p : {Vec3{-0.5f, 1.0f, z}, Vec3{0.5f, 1.0f, z}, Vec3{0.5f, 1.6f, z}, Vec3{-0.5f, 1.6f, z}}) {
                 SceneVertex v; v.pos = p; v.normal = {0, 0, 1}; v.uv = {p.x + 0.5f, p.y - 1.0f}; m.vertices.push_back(v);
             }
@@ -3025,7 +3027,7 @@ void unitTests() {
         const int topJoint = static_cast<int>(sc.bones.size()); sc.bones.push_back({"outfit0.top/joint", spine, {0, 1.5f, 0}, "outfit0.top"});
         // One mesh per part, weighted to its own joint (body to the rig).
         auto mesh = [&](int bone, Vec3 p) {
-            SceneMesh m;
+            assemble::SceneMesh m;
             m.vertices.resize(3);
             for (int i = 0; i < 3; ++i) {
                 m.vertices[static_cast<size_t>(i)].pos = p;
@@ -3750,6 +3752,154 @@ void unitTests() {
         }
     });
 
+    // --- Bra-Aware Breast Physics -----------------------------------------------------------------------------------
+    test("bra-aware: the supported profile is a derived copy, firmer/damped/less travel, never more motion than the baseline", [] {
+        const assemble::JiggleSettings base;   // Natural
+        const assemble::JiggleSettings sup = assemble::SupportedBraJiggle(base);
+        CHECK(base.stiffness == 150.0f && base.damping == 10.0f && base.amplitudeVertical == 1.0f);   // untouched
+        CHECK(sup.stiffness > base.stiffness);
+        CHECK(assemble::JiggleDampingRatio(sup) >= assemble::JiggleDampingRatio(base));
+        CHECK(assemble::JiggleDampingRatio(sup) <= 0.70f);
+        CHECK(sup.amplitudeVertical < base.amplitudeVertical && sup.amplitudeDepth < base.amplitudeDepth);
+        CHECK(sup.amplitudeVertical < sup.amplitudeHorizontal);   // vertical support exceeds lateral restriction
+        CHECK(sup.rotationStrength <= base.rotationStrength && sup.strength <= base.strength);
+        CHECK(sup.mass == base.mass && sup.simulationHz == base.simulationHz);
+        CHECK(std::isfinite(assemble::JigglePmxDamping(sup, sup.mass)));
+        const assemble::JiggleSettings tiny = assemble::SupportedBraJiggle(assemble::JigglePresetSettings(assemble::JigglePreset::VeryVerySubtle));
+        CHECK(tiny.stiffness >= assemble::JigglePresetSettings(assemble::JigglePreset::VeryVerySubtle).stiffness);
+        CHECK(tiny.strength <= assemble::JigglePresetSettings(assemble::JigglePreset::VeryVerySubtle).strength);
+    });
+
+    test("bra-aware: an override changes only the breast chain; the hip chain, hair and every other body stay identical", [] {
+        assemble::Scene s;
+        s.bones.push_back({"cf_j_chest", -1, {0, 1.2f, 0}, "rig"});
+        s.bones.push_back({"cf_s_bust00_L", 0, {-0.08f, 1.15f, 0.05f}, "rig"});
+        s.bones.push_back({"cf_s_bnip02_L", 1, {-0.1f, 1.05f, 0.12f}, "rig"});
+        s.bones.push_back({"cf_s_siri_L", 0, {0.08f, 0.95f, -0.05f}, "rig"});
+        s.bones.push_back({"cf_s_siri_L2", 3, {0.08f, 0.85f, -0.08f}, "rig"});
+        s.bones.push_back({"hair_a", 0, {0, 1.1f, -0.05f}, "rig"});
+        s.bones.push_back({"hair_b", 5, {0, 1.0f, -0.08f}, "rig"});
+        auto chain = [](const char* name, bool own, std::vector<int> bones) {
+            assemble::SceneChain c; c.name = name; c.characterOwn = own; c.bones = std::move(bones);
+            c.damping = 0.1f; c.elasticity = 0.1f; c.stiffness = 0.5f; return c;
+        };
+        s.chains.push_back(chain("bust", true, {1, 2}));
+        s.chains.push_back(chain("butt", true, {3, 4}));
+        s.chains.push_back(chain("hair", false, {5, 6}));
+        auto build = [&](const assemble::JiggleSettings* bust) {
+            pmx::Model m;
+            for (const auto& b : s.bones) { pmx::Bone pb; pb.name = b.name; pb.parent = b.parent; pb.position = b.pos * 10.0f; m.bones.push_back(pb); }
+            exporter::AddPhysics(s, m, 10.0f, true, true, assemble::JiggleSettings{}, bust);
+            return m;
+        };
+        const pmx::Model plain = build(nullptr);
+        const assemble::JiggleSettings original;
+        const assemble::JiggleSettings supported = assemble::SupportedBraJiggle(original);
+        const pmx::Model bra = build(&supported);
+        CHECK(original.stiffness == 150.0f);   // applying the profile never mutates the caller's setting
+        CHECK(plain.rigidBodies.size() == bra.rigidBodies.size() && plain.joints.size() == bra.joints.size());
+        // Bodies 0..2: bust anchor/root/link; 3..5: butt; 6..7: hair. Order follows scene.chains.
+        CHECK(bra.rigidBodies[2].mass == plain.rigidBodies[2].mass);
+        // The root link's damper is below Bullet's 0.999 clamp in both profiles, so the difference is visible there
+        // (the tapered tip is clamped in both).
+        CHECK(bra.rigidBodies[1].moveDamping > plain.rigidBodies[1].moveDamping);
+        CHECK(bra.rigidBodies[2].moveDamping >= plain.rigidBodies[2].moveDamping);
+        CHECK(bra.joints[1].springRot.x > plain.joints[1].springRot.x);
+        CHECK(bra.joints[1].rotUpper.z < plain.joints[1].rotUpper.z);
+        for (size_t i : {3u, 4u, 5u, 6u, 7u})
+            CHECK(bra.rigidBodies[i].moveDamping == plain.rigidBodies[i].moveDamping &&
+                  bra.rigidBodies[i].rotDamping == plain.rigidBodies[i].rotDamping &&
+                  bra.rigidBodies[i].mass == plain.rigidBodies[i].mass);
+        for (size_t i : {2u, 3u, 4u})
+            CHECK(bra.joints[i].springRot.x == plain.joints[i].springRot.x &&
+                  bra.joints[i].rotUpper.x == plain.joints[i].rotUpper.x);
+    });
+
+    test("bra-aware: classification uses geometry, rejects shirts/pasties/one-sided covers, and works without slot metadata", [] {
+        auto sphere = [](Vec3 c, float r, int bone, int rings = 6, int segs = 10) {
+            assemble::SceneMesh m;
+            for (int i = 0; i <= rings; ++i) {
+                const float phi = 3.14159265f * static_cast<float>(i) / rings;
+                for (int j = 0; j < segs; ++j) {
+                    const float th = 6.2831853f * static_cast<float>(j) / segs;
+                    const Vec3 n{std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th)};
+                    assemble::SceneVertex v;
+                    v.pos = {c.x + n.x * r, c.y + n.y * r, c.z + n.z * r};
+                    v.normal = n; v.bone[0] = bone; v.weight[0] = 1.0f;
+                    m.vertices.push_back(v);
+                }
+            }
+            assemble::SceneSubmesh sm; sm.material = 0;
+            for (int i = 0; i < rings; ++i) for (int j = 0; j < segs; ++j) {
+                const int a = i * segs + j, b = i * segs + (j + 1) % segs;
+                const int c0 = (i + 1) * segs + j, d = (i + 1) * segs + (j + 1) % segs;
+                sm.indices.insert(sm.indices.end(), {static_cast<uint32_t>(a), static_cast<uint32_t>(b), static_cast<uint32_t>(c0),
+                                                    static_cast<uint32_t>(b), static_cast<uint32_t>(d), static_cast<uint32_t>(c0)});
+            }
+            m.submeshes.push_back(std::move(sm));
+            return m;
+        };
+        const Vec3 bustL{-0.096f, 1.154f, 0.056f}, bustR{0.096f, 1.154f, 0.056f};
+        auto scene = [&](const std::string& garment, const std::string& id, int category) {
+            assemble::Scene s;
+            s.materials.push_back(assemble::SceneMaterial{});
+            s.bones.push_back({"cf_s_waist01", -1, {0, 0.9f, 0}, "rig"});
+            s.bones.push_back({"cf_s_bust00_L", 0, {-0.09f, 1.15f, 0.0f}, "rig"});
+            s.bones.push_back({"cf_d_bust01_L", 1, {-0.10f, 1.18f, 0.06f}, "rig"});
+            s.bones.push_back({"cf_d_bust02_L", 1, {-0.10f, 1.17f, 0.09f}, "rig"});
+            s.bones.push_back({"cf_hit_bust02_L", 1, {-0.10f, 1.12f, 0.10f}, "rig"});
+            s.bones.push_back({"cf_s_bnip02_L", 1, {-0.09f, 1.15f, 0.12f}, "rig"});
+            s.bones.push_back({"cf_s_bust00_R", 0, {0.09f, 1.15f, 0.0f}, "rig"});
+            s.bones.push_back({"cf_d_bust01_R", 6, {0.10f, 1.18f, 0.06f}, "rig"});
+            s.bones.push_back({"cf_d_bust02_R", 6, {0.10f, 1.17f, 0.09f}, "rig"});
+            s.bones.push_back({"cf_hit_bust02_R", 6, {0.10f, 1.12f, 0.10f}, "rig"});
+            s.bones.push_back({"cf_s_bnip02_R", 6, {0.09f, 1.15f, 0.12f}, "rig"});
+            assemble::ScenePart body; body.id = "body"; body.meshes = {0, 1}; s.parts.push_back(body);
+            s.meshes.push_back(sphere(bustL, 0.070f, 2));
+            s.meshes.push_back(sphere(bustR, 0.070f, 7));
+            if (!garment.empty()) {
+                assemble::ScenePart part;
+                part.id = id; part.group = "Outfit"; part.category = category;
+                if (garment == "bra") {
+                    part.meshes = {static_cast<int>(s.meshes.size()), static_cast<int>(s.meshes.size()) + 1};
+                    s.meshes.push_back(sphere(bustL, 0.075f, 2));
+                    s.meshes.push_back(sphere(bustR, 0.075f, 7));
+                } else if (garment == "shirt") {
+                    part.meshes = {static_cast<int>(s.meshes.size())};
+                    s.meshes.push_back(sphere({0, 1.0f, 0.0f}, 0.24f, 0, 10, 14));
+                } else if (garment == "pasties") {
+                    part.meshes = {static_cast<int>(s.meshes.size()), static_cast<int>(s.meshes.size()) + 1};
+                    s.meshes.push_back(sphere({bustL.x, bustL.y, bustL.z + 0.08f}, 0.022f, 2, 4, 8));
+                    s.meshes.push_back(sphere({bustR.x, bustR.y, bustR.z + 0.08f}, 0.022f, 7, 4, 8));
+                }
+                s.parts.push_back(part);
+            }
+            return s;
+        };
+        const assemble::GarmentSupportResult bra = assemble::ClassifyGarmentSupport(scene("bra", "outfit0.bra", 107));
+        CHECK(bra.supportiveBra && bra.candidates.size() == 1);
+        CHECK(bra.candidates[0].verdict == assemble::GarmentSupportVerdict::Supportive);
+        CHECK(bra.candidates[0].confidence >= 0.72f);
+        // The very same geometry in an unfamiliar slot still qualifies: metadata is optional, not decisive.
+        CHECK(assemble::ClassifyGarmentSupport(scene("bra", "outfit0.modded_thing", 999), true).supportiveBra);
+        const auto shirt = assemble::ClassifyGarmentSupport(scene("shirt", "outfit0.top", 105));
+        CHECK(!shirt.supportiveBra && !shirt.candidates.empty());
+        CHECK(shirt.candidates[0].verdict == assemble::GarmentSupportVerdict::NonSupportive);
+        const auto pasties = assemble::ClassifyGarmentSupport(scene("pasties", "outfit0.bra", 107));
+        CHECK(!pasties.supportiveBra && !pasties.candidates.empty());
+        CHECK(pasties.candidates[0].verdict == assemble::GarmentSupportVerdict::NonSupportive);
+        CHECK(!assemble::ClassifyGarmentSupport(scene("", "", 0)).supportiveBra);
+        // A metadata-only bra with no geometry cannot be confirmed and must keep the baseline.
+        assemble::Scene metadataOnly = scene("", "", 0);
+        assemble::ScenePart empty; empty.id = "outfit0.bra"; empty.group = "Outfit"; empty.category = 107;
+        metadataOnly.parts.push_back(empty);
+        CHECK(!assemble::ClassifyGarmentSupport(metadataOnly).supportiveBra);
+        assemble::BreastRegion region;
+        assemble::Scene noRig;
+        std::string why;
+        CHECK(!assemble::BuildBreastRegion(noRig, region, &why) && !why.empty());
+    });
+
     test("physics: an outfit chain is simulated like any other dynamic chain — one body per valid bone, joints between consecutive bodies", [] {
         assemble::Scene s;
         s.bones.push_back({"hips", -1, {0, 1.0f, 0}, "rig"});
@@ -4385,7 +4535,7 @@ void unitTests() {
         Scene s;
         auto part = [&](const char* name, Vec3 p) {
             ScenePart sp; sp.id = name; sp.group = "Outfit"; s.parts.push_back(sp);
-            SceneMesh m; SceneVertex v; v.pos = p; v.normal = {0, 1, 0}; m.vertices.push_back(v);
+            assemble::SceneMesh m; SceneVertex v; v.pos = p; v.normal = {0, 1, 0}; m.vertices.push_back(v);
             m.part = static_cast<int>(s.parts.size()) - 1;
             s.meshes.push_back(m); s.parts.back().meshes.push_back(static_cast<int>(s.meshes.size()) - 1);
         };
@@ -5598,7 +5748,7 @@ void unitTests() {
         for (const float y : {1.40f, 1.40f + headHeight})
             for (const float x : {-0.09f, 0.09f})
                 for (const float z : {-0.09f, 0.09f}) {
-                    SceneVertex v; v.pos = {x, y, z}; head.vertices.push_back(v);
+                    assemble::SceneVertex v; v.pos = {x, y, z}; head.vertices.push_back(v);
                 }
         s.meshes.push_back(head);
         ScenePart hp; hp.id = "head"; hp.group = "Head"; hp.meshes = {1}; s.parts.push_back(hp);
@@ -10378,7 +10528,7 @@ void meshTests() {
         Scene s;
         SceneBone root; root.name = "root"; root.world = Mat4(); s.bones.push_back(root);
         auto quad = [&](const char* name, float z) {
-            SceneMesh m; m.name = name; m.reshapable = true;
+            assemble::SceneMesh m; m.name = name; m.reshapable = true;
             const Vec3 p[4] = {{-0.5f, -0.5f, z}, {0.5f, -0.5f, z}, {0.5f, 0.5f, z}, {-0.5f, 0.5f, z}};
             for (int i = 0; i < 4; ++i) {
                 SceneVertex v; v.pos = p[i]; v.normal = {0, 0, 1}; v.uv = {0, 0};
@@ -10386,7 +10536,7 @@ void meshTests() {
                 v.bone[0] = 0; v.weight[0] = 1.0f; v.local[0] = v.pos; v.nlocal[0] = v.normal;
                 m.vertices.push_back(v);
             }
-            SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
+            assemble::SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
             return m;
         };
         s.meshes.push_back(quad("lining", 0.0f));
@@ -10421,7 +10571,7 @@ void meshTests() {
         Scene s;
         SceneBone root; root.name = "root"; root.world = Mat4(); s.bones.push_back(root);
         auto quad = [&](float z, size_t extra) {
-            SceneMesh m; m.reshapable = true;
+            assemble::SceneMesh m; m.reshapable = true;
             const Vec3 p[4] = {{-0.5f, -0.5f, z}, {0.5f, -0.5f, z}, {0.5f, 0.5f, z}, {-0.5f, 0.5f, z}};
             for (int i = 0; i < 4; ++i) {
                 SceneVertex v; v.pos = p[i]; v.normal = {0, 0, 1};
@@ -10433,7 +10583,7 @@ void meshTests() {
                 v.bone[0] = 0; v.weight[0] = 1.0f; v.local[0] = v.pos; v.nlocal[0] = v.normal;
                 m.vertices.push_back(v);
             }
-            SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
+            assemble::SceneSubmesh sm; sm.material = 0; sm.indices = {0, 1, 2, 0, 2, 3}; m.submeshes.push_back(sm);
             return m;
         };
         // two normal layers 12 cm apart: not a coincidence

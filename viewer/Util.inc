@@ -97,6 +97,7 @@ struct Settings {
     float noseRidgeOpacity = 1.0f;     // independent opacity layer (0 = invisible, 1 = fully visible)
     // The physical breast / hip jiggle settings, persisted here for new cards and the export (the Look tab edits the live set).
     assemble::JiggleSettings jiggle;   // defaults: the Natural preset
+    bool braAwarePhysics = true;    // Bra-Aware Breast Physics: ON, including configs written before this setting existed
     // Display names for morphs in the Morphs tab (display only: the PMX still carries the original names, MMD motions key morphs by name).
     std::map<std::string, std::string> morphAliases;   // original morph name -> the display name the user typed
 };
@@ -144,6 +145,7 @@ Settings LoadSettings() {
         s.skinAo = static_cast<float>(j.value("skinAo", 0.85));
         s.noseRidge = static_cast<float>(j.value("noseRidge", 1.0));
         s.noseRidgeOpacity = static_cast<float>(j.value("noseRidgeOpacity", 1.0));
+        s.braAwarePhysics = j.value("braAwarePhysics", true);   // missing key in an older config => ON
         if (j.value("jiggle", nlohmann::json::object()).is_object()) {
             const auto& jj = j["jiggle"];
             auto num = [&jj](const char* key, float def) {
@@ -198,6 +200,7 @@ void SaveSettings(const Settings& s) {
         j["skinAo"] = s.skinAo;
         j["noseRidge"] = s.noseRidge;
         j["noseRidgeOpacity"] = s.noseRidgeOpacity;
+        j["braAwarePhysics"] = s.braAwarePhysics;
         j["jiggle"] = {{"mass", s.jiggle.mass}, {"stiffness", s.jiggle.stiffness}, {"damping", s.jiggle.damping}, {"gravity", s.jiggle.gravity},
                        {"amplitude_vertical", s.jiggle.amplitudeVertical}, {"amplitude_horizontal", s.jiggle.amplitudeHorizontal},
                        {"amplitude_depth", s.jiggle.amplitudeDepth}, {"rotation_strength", s.jiggle.rotationStrength},

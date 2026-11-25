@@ -208,6 +208,10 @@ void usage() {
         "                                             the card's butt sway is large and swings behind the skirt's back panel so\n"
         "                                             the whole region reads as vibrating. [--jiggle-butt] enables it for a card\n"
         "                                             that wants it; [--no-jiggle-butt] is accepted and does the same thing (default).\n"
+        "             [--no-bra-physics]            Bra-Aware Breast Physics is ON by default: a confidently detected supportive bra\n"
+        "                                             gets a firmer, better damped breast profile; no bra, an ordinary shirt, an\n"
+        "                                             uncertain garment or this switch leave the existing physics exactly unchanged.\n"
+        "                                             CARDBRIDGE_NO_BRA_PHYSICS=1 is the environment equivalent.\n"
         "                                             The jiggle is a real\n"
         "                                             mass-spring-damper, one set of physical numbers driving both the preview and\n"
         "                                             the PMX. The preset picks a tuned set (default: natural); the --jiggle-* values\n"
@@ -1268,6 +1272,7 @@ int cmdConvert(const Args& a) {
     eo.physics = !a.has("no-physics");
     eo.jiggleBust = !a.has("no-jiggle-bust");          // default on
     eo.jiggleButt = a.has("jiggle-butt");             // default off: the card's butt sway reads as the skirt vibrating
+    eo.braAwarePhysics = !a.has("no-bra-physics") && !std::getenv("CARDBRIDGE_NO_BRA_PHYSICS");   // ON by default
     eo.jiggle = jiggle;
     eo.mmdNames = !a.has("no-mmd-names");
     eo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 12.5f;
@@ -1702,7 +1707,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

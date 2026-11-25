@@ -100,6 +100,8 @@ add_library(cardbridge_core STATIC
     src/assemble/Pose.cpp
     src/assemble/PhysicsSim.cpp
     src/assemble/JiggleSettings.cpp
+    src/assemble/GarmentSupport.cpp
+    src/assemble/BraPhysicsProfile.cpp
     src/export/BoneLabels.cpp
     src/export/PmxPhysics.cpp
     src/export/PmxIk.cpp

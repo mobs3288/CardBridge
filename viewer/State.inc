@@ -307,7 +307,7 @@ constexpr int kFaceBase = 100, kNippleMm = 200, kAreola = 201, kAPoseDeg = 202, 
               kOriginalGarment = 309, kBakeQuality = 310, kBakeUpscale = 311, kBakeUpscalerModel = 312,   // Look tab: bake quality / upscale settings
               kJiggleMass = 320, kJiggleStiffness = 321, kJiggleDamping = 322, kJiggleGravity = 323,
               kJiggleAmpVertical = 324, kJiggleAmpHorizontal = 325, kJiggleAmpDepth = 326,
-              kJiggleRotation = 327, kJiggleStrength = 328, kJiggleSimHz = 329, kJigglePreset = 330,
+              kJiggleRotation = 327, kJiggleStrength = 328, kJiggleSimHz = 329, kJigglePreset = 330, kBraAwarePhysics = 331,   // Look / Jiggle: one user switch for bra-aware breast physics (ON by default)
               kTransBrush = 307, kTransErase = 308,
               kLayerBase = 400, kBoneEdit = 10000, kBoneEditCount = 9, kMatBase = 5000, kMatCount = 9,   // kAutoCloth: synthesized cloth skeleton (Look tab); switches from 400: the shader layers
               kPropMaster = 23100, kPropSugs0 = 23101, kPropSugsMax = 23199,   // Proportions tab: master switch, then one switch per suggested correction
@@ -631,6 +631,7 @@ struct App {
     bool physics = false, physicsMoving = false, physicsKick = false;
     bool jiggleBust = true, jiggleButt = false;   // the exported PMX's jiggle physics: the bust jiggle is on by default, the butt jiggle is off (the card's butt sway reads as the back of the skirt vibrating; flip in the Look tab or --jiggle-butt)
     assemble::JiggleSettings jiggle;   // the physical settings the preview and the export share (Strength replaces the old jiggle intensity)
+    bool braAwarePhysics = true;   // export: adjust breast physics only when a supportive bra is confidently detected
     bool autoCloth = false;                       // Look tab: synthesize bones/physics for hanging cloth without authored DynamicBone (sleeves, wings, tails) — off by default to match the CLI
     bool originalGarment = true;                  // Look tab: keep the card's own garment vertices, the drape exactly as the viewer shows it (no vertex fix); off = run the clipping correction in the preview and the export
     int bakeQuality = 0;                          // Look tab: shader bake quality, 0 = standard (1024), 1 = high (2048), 2 = ultra (4096); same presets as the CLI
