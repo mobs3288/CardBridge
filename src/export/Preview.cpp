@@ -872,7 +872,8 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             // materials through the plain textured path instead: the picture then matches the baked PMX.
             const bool alreadyBakedTex = mat.texture >= 0 && static_cast<size_t>(mat.texture) < scene.textures.size() &&
                                          scene.textures[static_cast<size_t>(mat.texture)].bakedInShaderBake;
-            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha) {   // game shaders only in Lit; diagonals replace shading entirely
+            const bool constantColour = mat.texture < 0 && assemble::IsConstantColourShader(mat.shader);
+            if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha && !constantColour) {   // game shaders only in Lit; diagonals replace shading entirely
                 if (vm.tangents.empty()) vm.tangents = ComputeTangents(mesh);
                 if (!RunVertexStage(*sr, mat, mesh, vm.tangents, scene.globalProps, L, camPos, vsOut)) sr = nullptr;
                 else {
@@ -1014,7 +1015,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                             default: break;
                             }
                         }
-                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha) {
+                        if (sr && opt.mode == ViewMode::Lit && !mat.bakedLit && !alreadyBakedTex && !mat.shaderClipsAlpha && !constantColour) {
                             io.discarded = false; io.trace = false; io.frontFace = true;
                             std::memset(io.input, 0, sizeof(io.input));
                             std::memset(io.output, 0, sizeof(io.output));
@@ -1799,9 +1800,15 @@ void BakeShaderTextures(assemble::Scene& scene, int maxSize, bool lit, std::stri
         // Baking that would replace the card's authored texture with a solid black plate - a hair accessory that the
         // game paints red turns into a black plate. BakeLostColour detects that degenerate result; keep the authored
         // texture (and the material's own diffuse) in that case, like an empty or KKS-skip bake.
-        if (mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
-            assemble::BakeLostColour(img, cov, scene.textures[static_cast<size_t>(mat.texture)])) {
-            scene.warn("", "material '" + mat.name + "' baked black despite an authored texture; keeping the original texture");
+        const bool lostWithTexture = mat.texture >= 0 && static_cast<size_t>(mat.texture) < originalTextures &&
+                                     assemble::BakeLostColour(img, cov, scene.textures[static_cast<size_t>(mat.texture)]);
+        // A material with no authored texture (the body's mnpb pieces, whose procedural shader supplies
+        // the look) can also bake to a solid black plate. There is no texture to fall back to, so keep
+        // the material's own diffuse colour instead of writing black pixels the viewers draw as nothing.
+        const bool lostWithoutTexture = mat.texture < 0 && assemble::BakeIsBlack(img, cov);
+        if (lostWithTexture || lostWithoutTexture) {
+            scene.warn("", "material '" + mat.name + "' baked black; keeping " +
+                           (lostWithTexture ? "the original texture" : "its own diffuse colour"));
             ++skipBlackBake;
             continue;
         }

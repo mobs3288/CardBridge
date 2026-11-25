@@ -2,6 +2,13 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.8.6] - 2026-11-25
+
+### Fixed
+
+- **Kk/KKS genital anatomy (`o_mnpa`/`o_mnpb`, `o_dankon`/`o_gomu`) was dropped during conversion.** The body assembly loop accepted only the renderer named `o_body_a`, so every other skinned renderer under `p_cf_body_00` silently disappeared; with it went the game's own genital geometry for both sexes (KK ships both sets in one prefab and shows the one matching `Parameter.sex`). The body skin pass is unchanged; the anatomy pieces now go through the same renderer/mesh/bone pipeline as a new `body.anatomy` part, keeping their own materials and textures (`body.anatomy/o_mnpa` 82 tris, `body.anatomy/o_mnpb` 114 tris; bones `cf_s_ana`, `cf_j_ana`, `cf_j_kokan`, `cf_s_waist02`, …). Male cards now export `o_dankon`/`o_gomu` (257+361 verts, 476+658 tris). Verified on the KK female card `151506026_p6.png` and the KKS card `142609856_p20.png`.
+- **Anatomy previously rendered black in the shaded/GPU views.** The game's anatomy material `cf_m_mnpb` has no texture; the SM4 emulator evaluates its procedural shader to black, so the browser of `BakeLostColour`-style "lost colour" produced a black bake and the Preview/GpuView rendering drew nothing. Anatomy meshes now take a plain constant-colour path (structural detection by shader family, no per-character names or character paths), and the "bake came back all black with no texture to fall back to" case keeps the material's own diffuse colour. Regression test added for the classification rule.
+
 ## [0.8.5] - 2026-11-25
 
 ### Added

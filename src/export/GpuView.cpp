@@ -1910,7 +1910,10 @@ bool GpuView::RenderImpl(const ViewCamera& cam, int W, int H, const std::vector<
                     // Lit view too. The uploaded game shader variant can ignore texture alpha (the KKS
                     // clothes shader did here), painting the atlas padding as solid black ruffles while
                     // the MMD view and PMX correctly cut those texels.
-                    const GpuShader* sh = (!I.plain && !mat.shaderClipsAlpha && mat.shaderIndex >= 0 &&
+                    // mnpb's procedural shader evaluates to black in our renderer; its diffuse colour is
+                    // the authored look, so it takes the plain path in both the Lit and MMD views.
+                    const bool constantColour = mat.texture < 0 && assemble::IsConstantColourShader(mat.shader);
+                    const GpuShader* sh = (!I.plain && !mat.shaderClipsAlpha && !constantColour && mat.shaderIndex >= 0 &&
                                            static_cast<size_t>(mat.shaderIndex) < I.shaders.size()) ? &I.shaders[static_cast<size_t>(mat.shaderIndex)] : nullptr;
                     const bool twoSided = I.plain && static_cast<size_t>(gs.material) < I.looks.size() ? (I.looks[static_cast<size_t>(gs.material)].drawFlags & 0x01) != 0 : mat.doubleSided;
                     // A co-located interior lining faces into its garment: the plain view draws the same-wound case inside-out (as the

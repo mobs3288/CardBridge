@@ -2862,6 +2862,29 @@ void unitTests() {
         CHECK(!assemble::IsHairShaderFamily("Koikano/main_clothes_opaque"));
         CHECK(!assemble::IsHairShaderFamily("Shader Forge/main_skin"));
     });
+    test("body renderer roles: anatomy is extracted, helpers and other-sex pieces are not", [] {
+        using assemble::BodyRendererRole;
+        auto role = [](const char* n, int sex) { return assemble::ClassifyBodyRenderer(n, sex); };
+        // The skin keeps its own path (runtime body texture / skin shading).
+        CHECK(role("o_body_a", 1) == BodyRendererRole::Skin);
+        CHECK(role("o_body_a", 0) == BodyRendererRole::Skin);
+        // Parameter.sex: 1 female, 0 male. Both sets ship in the prefab; only the card's own is kept.
+        CHECK(role("o_mnpa", 1) == BodyRendererRole::Anatomy);
+        CHECK(role("o_mnpb", 1) == BodyRendererRole::Anatomy);
+        CHECK(role("o_dankon", 1) == BodyRendererRole::Skip);
+        CHECK(role("o_gomu", 1) == BodyRendererRole::Skip);
+        CHECK(role("o_dankon", 0) == BodyRendererRole::Anatomy);
+        CHECK(role("o_gomu", 0) == BodyRendererRole::Anatomy);
+        CHECK(role("o_mnpa", 0) == BodyRendererRole::Skip);
+        CHECK(role("o_mnpb", 0) == BodyRendererRole::Skip);
+        // Unknown sex: never discard authored anatomy just because the card did not say.
+        CHECK(role("o_mnpa", -1) == BodyRendererRole::Anatomy);
+        CHECK(role("o_dankon", -1) == BodyRendererRole::Anatomy);
+        // Helpers stay excluded (shadow casters, hit volumes, tongue duplicated from the head part).
+        for (const char* n : {"o_shadowcaster", "o_shadowcaster_cm", "o_shadow", "o_shadow_low",
+                              "n_body_silhouette", "o_hit_kokan", "o_tang", "cf_j_kokan"})
+            CHECK(role(n, 1) == BodyRendererRole::Skip);
+    });
     test("KKS shader blob: DXBC stage, cbuffer slots and texture bindings", [] {
         auto put32 = [](Bytes& b, uint32_t v) { for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>(v >> (8 * i))); };
         auto text = [&](Bytes& b, const char* s) {
@@ -11116,6 +11139,46 @@ void integrationTests() {
                 if (std::abs(s - 1.0f) > 1e-3f) ++badWeights;
             }
         CHECK(badWeights == 0);
+        {   // The prefab's own genital meshes must survive extraction. They used to be dropped by a
+            // hardcoded "only o_body_a" filter, so check geometry, material and skeleton all the way in.
+            const int64_t sex = c.parameter.at("sex").asInt(-1);
+            const assemble::ScenePart* anatomy = nullptr;
+            for (const auto& p : scene.parts) if (p.id == "body.anatomy") anatomy = &p;
+            CHECK(anatomy != nullptr);
+            if (anatomy) {
+                size_t vertices = 0, triangles = 0;
+                std::set<std::string> names;
+                for (int mi : anatomy->meshes) {
+                    const auto& m = scene.meshes[static_cast<size_t>(mi)];
+                    names.insert(m.name);
+                    vertices += m.vertices.size();
+                    CHECK(!m.submeshes.empty());
+                    for (const auto& sub : m.submeshes) {
+                        triangles += sub.indices.size() / 3;
+                        CHECK(sub.material >= 0 && static_cast<size_t>(sub.material) < scene.materials.size());
+                        for (uint32_t ix : sub.indices) CHECK(ix < m.vertices.size());
+                    }
+                    for (const auto& v : m.vertices) {
+                        float sum = 0.0f;
+                        for (int k = 0; k < 4; ++k) {
+                            sum += v.weight[k];
+                            if (v.weight[k] > 0) CHECK(v.bone[k] >= 0 && static_cast<size_t>(v.bone[k]) < scene.bones.size());
+                        }
+                        CHECK(std::abs(sum - 1.0f) < 1e-3f);
+                    }
+                }
+                CHECK(vertices > 0 && triangles > 0);
+                if (sex == 1) {   // female: the game shows o_mnpa/o_mnpb, not the male pieces shipped in the same prefab
+                    CHECK(names.count("o_mnpa") == 1 && names.count("o_mnpb") == 1);
+                    CHECK(names.count("o_dankon") == 0 && names.count("o_gomu") == 0);
+                }
+                if (sex == 0) {
+                    CHECK(names.count("o_dankon") == 1);
+                    CHECK(names.count("o_mnpb") == 0);
+                }
+                std::printf("  body anatomy: %zu meshes, %zu vertices, %zu triangles\n", anatomy->meshes.size(), vertices, triangles);
+            }
+        }
         {   // a hair prefab root keeps its own transform under cf_J_FaceUp_ty (the game's SetParent(parent, false)); the base side hair
             // p_cf_hair_s_02 has a root 5.1 cm up and scaled 0.98 in x, so cancelling the root is visible
             card::Card rooted = c;
@@ -11478,6 +11541,18 @@ void integrationTests() {
         {   // read the file back with the independent reader: counts, physics, morphs and frames all hold together
             const pmxread::Model back = readPmx(fileio::ReadFile(res.pmxPath));
             CHECK(back.vertices.size() == res.vertices && back.indices.size() == res.triangles * 3 && back.materials.size() == res.materials && back.bones.size() == res.bones);
+            {   // the anatomy meshes are in the PMX, with their original material names and non-empty geometry
+                size_t anatomyMats = 0, anatomyTris = 0;
+                for (const auto& m : back.materials) {
+                    if (m.name.rfind("body.anatomy/", 0) != 0) continue;
+                    ++anatomyMats;
+                    CHECK(m.indexCount > 0);
+                    anatomyTris += m.indexCount / 3;
+                }
+                CHECK(anatomyMats >= 1);
+                CHECK(anatomyTris > 0);
+                std::printf("  PMX anatomy: %zu materials, %zu triangles\n", anatomyMats, anatomyTris);
+            }
             size_t ikBack = 0, legs = 0;
             for (const auto& l : exporter::FindLimbs(scene)) if (l.role == "foot") ++legs;   // the MMD names leave the arms to the motion's FK keys
             for (const auto& b : back.bones) if (b.isIk()) ++ikBack;

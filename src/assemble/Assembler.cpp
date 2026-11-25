@@ -2302,6 +2302,19 @@ bool IsHairShaderFamily(const std::string& shaderName) {
     return contains(shaderName, "hair");
 }
 
+BodyRendererRole ClassifyBodyRenderer(const std::string& rendererName, int cardSex) {
+    if (rendererName == "o_body_a") return BodyRendererRole::Skin;
+    // KK and KKS ship both sexes' anatomy in the body prefab. The game shows the pieces that
+    // match Parameter.sex (0 male, 1 female) and switches the other set off at run time; a
+    // converter must do the same or a female card would grow a second set of anatomy.
+    const bool female = rendererName == "o_mnpa" || rendererName == "o_mnpb";
+    const bool male = rendererName == "o_dankon" || rendererName == "o_dan_f" || rendererName == "o_gomu";
+    if (!female && !male) return BodyRendererRole::Skip;   // shadow casters, hit volumes, silhouettes, the head's tongue
+    if (cardSex == 1) return female ? BodyRendererRole::Anatomy : BodyRendererRole::Skip;
+    if (cardSex == 0) return male ? BodyRendererRole::Anatomy : BodyRendererRole::Skip;
+    return BodyRendererRole::Anatomy;   // unknown sex: keep every authored piece rather than discard geometry
+}
+
 Mat4 PrefabRootPlacement(const Mat4& parent, Vec3 position, Quat rotation, Vec3 scale) {
     return parent * Mat4::TRS(position, rotation, scale);
 }
@@ -2830,11 +2843,34 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
                                          static_cast<float>(sk.at(size_t(2)).asFloat()), 1.0f};
             std::vector<std::pair<std::string, int>> bodyOverlayTex;
             std::vector<std::pair<std::string, Vec4>> bodyOverlayColors;
-            for (const auto& r : base->renderersUnder(bodyRoot)) {
-                if (!r.enabled) continue;
-                if (r.name != "o_body_a") {   // helpers, shadow casters, anatomy meshes that are hidden in the character maker
-                    continue;
+            const int cardSex = static_cast<int>(card.parameter.at("sex").asInt(-1));
+            const bool dbgBodyParts = std::getenv("CARDBRIDGE_DEBUG_BODY_PARTS") != nullptr;
+            const auto bodyRenderers = base->renderersUnder(bodyRoot);
+            if (dbgBodyParts) {
+                // One line per body component: what was taken, what was skipped and why. Mesh names and
+                // counts come from the asset; no character data or binary payloads are printed.
+                for (const auto& r : bodyRenderers) {
+                    std::string why;
+                    auto mesh = r.mesh.isNull() ? std::nullopt : base->readMesh(r.mesh, &why);
+                    size_t tris = 0;
+                    if (mesh) for (const auto& t : mesh->subMeshTriangles) tris += t.size() / 3;
+                    const auto role = ClassifyBodyRenderer(r.name, cardSex);
+                    const bool anatomyPart = ClassifyBodyRenderer(r.name, -1) == BodyRendererRole::Anatomy;
+                    const char* what = role == BodyRendererRole::Skin ? "skin" :
+                                       role == BodyRendererRole::Anatomy ? "anatomy" :
+                                       anatomyPart ? "anatomy of the other sex" :
+                                       !r.enabled ? "disabled renderer" :
+                                       (r.name == "o_tang") ? "tongue (supplied by the head part)" :
+                                       (r.name.rfind("o_hit_", 0) == 0) ? "hit volume" : "shadow/silhouette helper";
+                    std::fprintf(stderr, "body part: renderer '%s' mesh='%s' verts=%zu tris=%zu -> %s (%s)\n",
+                                 r.name.c_str(), mesh ? mesh->name.c_str() : "?",
+                                 mesh ? mesh->vertexCount() : 0, tris, what,
+                                 role == BodyRendererRole::Skip ? what : "extracted");
                 }
+            }
+            for (const auto& r : bodyRenderers) {
+                if (!r.enabled) continue;
+                if (ClassifyBodyRenderer(r.name, cardSex) != BodyRendererRole::Skin) continue;
                 // Skin: the body's base texture tinted by its colour mask with the card's two skin colours (the game does
                 // the same at run time; overlays for paint, sunburn, nipples and underhair are not applied).
                 ItemLook bodyLook;
@@ -2957,10 +2993,47 @@ Scene Assemble(const card::Card& card, resolve::Resolver& resolver, const Assemb
             if (scene.createJobs.empty())   // the body's create material did not run
                 scene.warn("body", "body skin texture is built at runtime by the game from the card's skin settings; "
                                    "the card's base skin colour is used instead");
+            scene.parts.push_back(std::move(part));
+            log("body: " + std::to_string(scene.parts.back().meshes.size()) + " mesh(es)");
+            LogMemory("assemble after body");
+
+            // The anatomy pieces are authored as separate, skinned renderers in the same body prefab.
+            // The skin pass above only accepted o_body_a, so the game's own genital geometry never
+            // reached the scene. Take these through the same renderer/mesh pipeline, but keep their
+            // own materials and textures: the body's runtime skin look belongs to o_body_a alone.
+            {
+                ScenePart anatomy;
+                anatomy.id = "body.anatomy";
+                anatomy.label = "Genital anatomy";
+                anatomy.group = "Body";
+                anatomy.status = "resolved-base";
+                anatomy.bundle = "chara/oo_base.unity3d";
+                const int anatomyIdx = static_cast<int>(scene.parts.size());
+                size_t anatomyVerts = 0, anatomyTris = 0;
+                for (const auto& r : bodyRenderers) {
+                    if (!r.enabled || ClassifyBodyRenderer(r.name, cardSex) != BodyRendererRole::Anatomy) continue;
+                    b.extraTex.clear();
+                    b.runtime.clear();
+                    b.stOverride.clear();
+                    const int mi = b.addRenderer(*base, r, bodyRoot, anatomyIdx, "body.anatomy",
+                                                Mat4{}, 0, &skin, false, nullptr);
+                    if (mi < 0) {
+                        scene.warn("body.anatomy", "renderer '" + r.name + "' could not be read");
+                        continue;
+                    }
+                    anatomy.meshes.push_back(mi);
+                    const auto& m = scene.meshes[static_cast<size_t>(mi)];
+                    anatomyVerts += m.vertices.size();
+                    for (const auto& sub : m.submeshes) anatomyTris += sub.indices.size() / 3;
+                }
+                if (!anatomy.meshes.empty()) {
+                    scene.parts.push_back(std::move(anatomy));
+                    log("body.anatomy: " + std::to_string(scene.parts.back().meshes.size()) +
+                        " mesh(es), " + std::to_string(anatomyVerts) + " vertices, " +
+                        std::to_string(anatomyTris) + " triangles");
+                }
+            }
         }
-        scene.parts.push_back(std::move(part));
-        log("body: " + std::to_string(scene.parts.back().meshes.size()) + " mesh(es)");
-        LogMemory("assemble after body");
     }
 
     // --- card items ------------------------------------------------------

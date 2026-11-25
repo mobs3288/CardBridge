@@ -30,6 +30,14 @@ inline bool HasUsableSkin(const unity::RendererInfo& r, const unity::MeshData& m
     return r.skinned && !r.boneXforms.empty() && !mesh.skin.empty() && !mesh.bindPoses.empty();
 }
 
+// Roles of the renderers that ship under the base body prefab. The skin is the one named
+// o_body_a. The anatomy pieces are ordinary skinned meshes with their own materials and
+// bind poses (o_mnpa/o_mnpb for a female card, o_dankon/o_gomu for a male one); they used
+// to be dropped along with the shadow casters, hit volumes and the tongue the head prefab
+// already supplies. Exposed so the extraction rule can be regression-tested without assets.
+enum class BodyRendererRole { Skip, Skin, Anatomy };
+BodyRendererRole ClassifyBodyRenderer(const std::string& rendererName, int cardSex);
+
 // An outer top sub-part's OverInnerMask applies to the inner garment of the same top: the sibling sub-part created
 // from the card's own subPartsId with a lower list category (e.g. the shirt under a jacket), never an unrelated
 // garment and never the cover itself. Exposed for tests so the rule can be checked without a real card/library.

@@ -64,27 +64,36 @@ inline bool TextureIsFullyOpaque(const SceneTexture& t) {
     return true;
 }
 
-// True when a shader bake came back as a solid black plate over the texels its mesh covered, while the
-// authored texture it sampled carried real colour. That means the shader failed to reproduce the material
-// (typically it multiplies the source by a colour constant the material does not declare, so it reads zero):
-// baking it would replace the card's texture with black — a hair accessory that should be red turns into a
-// black plate. Callers must keep the authored texture instead, like an empty bake. `cov` marks covered texels;
-// `img` is the bake's RGBA float buffer.
-inline bool BakeLostColour(const std::vector<float>& img, const std::vector<uint8_t>& cov, const SceneTexture& src) {
-    const size_t n = src.rgba.size() / 4;
-    if (n == 0 || cov.empty() || img.size() < cov.size() * 4) return false;
+// True when a shader bake came back as a solid black plate over the texels its mesh covered. `cov`
+// marks covered texels; `img` is the bake's RGBA float buffer. A handful of sparse, dark decal strokes
+// is not a lost colour, so require a solid patch of at least 16 texels before judging a bake.
+inline bool BakeIsBlack(const std::vector<float>& img, const std::vector<uint8_t>& cov) {
+    if (cov.empty() || img.size() < cov.size() * 4) return false;
     double bakeLum = 0.0;
     size_t bakedTexels = 0;
     for (size_t i = 0; i < cov.size(); ++i)
         if (cov[i] && img[i * 4 + 3] >= 0.5f) {
+            // A shader that divides by a zero constant writes NaN; the PNG encoder turns those
+            // into black. Treat a non-finite bake as lost colour too, not as a bright pixel.
+            if (!std::isfinite(img[i * 4]) || !std::isfinite(img[i * 4 + 1]) || !std::isfinite(img[i * 4 + 2])) return true;
             bakeLum += (static_cast<double>(img[i * 4]) + img[i * 4 + 1] + img[i * 4 + 2]) / 3.0;
             ++bakedTexels;
         }
-    if (bakedTexels < 16) return false;
+    return bakedTexels >= 16 && bakeLum / bakedTexels < 0.02;
+}
+
+// True when a shader bake came back as a solid black plate over the texels its mesh covered, while the
+// authored texture it sampled carried real colour. That means the shader failed to reproduce the material
+// (typically it multiplies the source by a colour constant the material does not declare, so it reads zero):
+// baking it would replace the card's texture with black — a hair accessory that should be red turns into a
+// black plate. Callers must keep the authored texture instead, like an empty bake.
+inline bool BakeLostColour(const std::vector<float>& img, const std::vector<uint8_t>& cov, const SceneTexture& src) {
+    const size_t n = src.rgba.size() / 4;
+    if (n == 0 || !BakeIsBlack(img, cov)) return false;
     double srcLum = 0.0;
     for (size_t i = 0; i < n; ++i)
         srcLum += (static_cast<double>(src.rgba[i * 4]) + src.rgba[i * 4 + 1] + src.rgba[i * 4 + 2]) / (3.0 * 255.0);
-    return bakeLum / bakedTexels < 0.02 && srcLum / n > 0.05;
+    return srcLum / n > 0.05;
 }
 
 struct SceneTexBinding {
@@ -522,6 +531,15 @@ inline bool ComputeFullyCutByTextureAlpha(const Scene& scene, const SceneMateria
 // the same arrangement. Treating those alpha holes as a cutout sends the skin to MMD's blended pass, where it loses
 // depth writes and the back of the head shows through the face. Identify skin structurally - shader family, or a
 // shader-less create-job material used by the character's body/head part - never by card, texture or material index.
+// The game's mnpb material (body anatomy) has no texture binding: its look comes from a
+// procedural shader with constants the material does not store. The SM4 emulator evaluates
+// that shader to black, both when baking a texture and in the Lit preview. Draw these through
+// the plain diffuse path instead - the material keeps the card's skin colour and its geometry.
+// Family-based, so it covers KK's Shader Forge name and the KKS / modded twins alike.
+inline bool IsConstantColourShader(const std::string& shaderName) {
+    return shaderName.find("mnpb") != std::string::npos;
+}
+
 inline bool IgnoresTextureAlpha(const Scene& scene, const SceneMaterial& mat) {
     if (mat.fullyCutByAlpha) return false;   // the alpha test removes this whole mesh in the game, opaque shader name or not
     if (mat.shaderClipsAlpha) return false;   // the bake proved this shader clips: its low-alpha texels are real holes
