@@ -70,6 +70,8 @@ public:
     ~GpuView();
     GpuView(const GpuView&) = delete;
     GpuView& operator=(const GpuView&) = delete;
+    GpuView(GpuView&&) noexcept;
+    GpuView& operator=(GpuView&&) noexcept;
 
     // Creates the Direct3D device: by default the best-suited hardware adapter (AdapterSelect.h), else WARP on the CPU.
     // False with `why` when none works; kind() then says Software and the caller falls back to RenderView. The preference
@@ -151,6 +153,11 @@ public:
     // Re-skins the loaded meshes with per-bone matrices (assemble::SkinMatrices): a pose edit shows at once, no new Load. nullptr or empty
     // goes back to the rest pose. The camera framing stays that of the rest pose so the picture does not jump while a bone moves.
     void SetSkin(const std::vector<Mat4>* skin);
+
+    // Per-part rigid transforms applied to each part's vertices in bind space before the skin matrices (the gizmo's part
+    // edits). Indexed by scene part; a missing / identity entry leaves the part alone. Stored, so a Refresh or a morph
+    // update re-skins with them; passing nullptr or an empty vector clears them.
+    void SetPartTransforms(const std::vector<Mat4>* transforms);
 
     // The viewer's live blend shapes (the Morphs tab): per scene mesh, the accumulated offsets at the current weights (parallel to
     // Scene::meshes; empty vectors for the meshes no active morph touches). Copied, so the caller may reuse its own buffer. Storage only:

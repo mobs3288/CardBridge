@@ -2,6 +2,7 @@
 
 #include "core/Bytes.h"
 #include "core/FileIo.h"
+#include "core/Timing.h"
 #include "core/ZipArchive.h"
 
 #include <nlohmann/json.hpp>
@@ -285,7 +286,9 @@ std::string ModSourceFingerprint(const std::string& root, std::vector<std::strin
 const ModIndex& ModIndexCache::get(const std::string& root, const std::string& cachePath,
                                    std::vector<std::string>* issues, ModIndex::Stats* stats,
                                    const Progress& progress, const Cancelled& cancelled) {
+    cbtime::Scope waitScope("sync: mod index cache lock");
     std::lock_guard<std::mutex> lk(mu_);   // a concurrent caller waits, then reuses what this build produced
+    waitScope.Stop();                      // only the wait is reported, not the indexing itself
     if (stats) *stats = ModIndex::Stats{};
     const library::GameInfo game = index_.game();   // the card's game is not an indexing dependency
 

@@ -81,6 +81,7 @@ void StartExport() {
     const bool upscaleTextures = g.upscaleTextures;
     const char* const upscaleModel = g.upscaleUseEsrgan ? "realesrgan" : "waifu2x";
     const assemble::Pose pose = BuildPose(*L, false);   // no sag here: BakeSettledPhysics adds it once (same as CLI, same as the viewer preview)
+    const std::map<std::string, assemble::PartPose> partEdits = g.partEdits;   // the gizmo's part edits ride into the PMX
     const assemble::ProportionLayer correctionLayer = ProportionLayerNow();   // the layer the scene on screen was re-shaped with
     const std::string bodyTransferJson = (g.bt.applied && !g.bt.previewOriginal) ? assemble::transfer::ToJson(g.bt.appliedSpec) : std::string();
     if (!correctionLayer.empty() && correctionLayer.enabled)
@@ -90,13 +91,14 @@ void StartExport() {
     ProgBegin("Exporting PMX: " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
             assemble::Scene scene = std::move(sceneCopy);   // bake the copy, not what the viewport is drawing
             ProgSet(0.03, "posing");
             if (ProgCancelled()) throw Cancelled{};
+            assemble::ApplyPartTransforms(scene, partEdits);   // gizmo edits go into the bind pose first, so the bone pose carries them too
             assemble::BakePose(scene, pose);    // the A-pose and the bone edits become the model's rest pose
             assemble::BakeSettledPhysics(scene, jiggleBust, jiggleButt, jiggle, sag);   // the bust/hips as they hang under gravity
             // garment-vs-body clipping correction: the Look tab's "Original garment" switch (on = the card's own vertices,
@@ -304,7 +306,9 @@ static bool UploadLitGpu(const std::shared_ptr<Loaded>& L) {
     ProgSet(0.97, "uploading shaders to GPU");
     ProgFlush();
     std::string gpuWhy;
+    cbtime::Scope uploadScope("UI: GPU upload (Lit view)");
     if (g.gpu.Load(L->scene, &gpuWhy, [](double f, const std::string& stage) { ProgSet(0.97 + 0.03 * std::clamp(f, 0.0, 1.0), stage); }, [] { return ProgCancelled(); })) {
+        uploadScope.Stop();
         g.gpuScene = L;
         g.gpuOk = true;
         const size_t fb = g.gpu.fallbackMaterials();
@@ -332,16 +336,36 @@ void ToggleAsExported() {
     if (!g.gpu.ready()) { Log("as exported needs the Direct3D 11 view", LogKind::Warn); return; }
     if (g.expOk && g.expFor == L && g.expGrade == exporter::ColourGradeEnabled()) { g.showExp = true; MorphsOnExportViewLoaded(); g.dirty = true; Log("as exported: on"); return; }
     if (g.expBusy.exchange(true)) { Log("the export preview is still being baked", LogKind::Warn); return; }
+    int gen = 0;
+    { std::lock_guard<std::recursive_mutex> lock(g.mu); gen = ++g.expGen; }
     const bool grade = exporter::ColourGradeEnabled();
     const exporter::BakeQuality bakeQuality = ViewerBakeQuality();
     const bool applyOpt = g.opt.applied.set && g.opt.applied.reduction > 0.0f;
     const float optReduction = g.opt.applied.reduction;
     ProgBegin("Rendering as-exported preview (MMD look)");
     Log(std::string("baking the export preview (colour only, toon ramps, ") + (grade ? "graded" : "not graded") + ")");
-    auto copy = std::make_shared<assemble::Scene>(L->scene);
-    std::thread([L, grade, copy, applyOpt, optReduction, bakeQuality]() {
+    exporter::GpuOptions go;
+    go.preference = g.settings.gpu.empty() ? "auto" : g.settings.gpu;
+    go.skin = g.settings.skin.empty() ? "gpu" : g.settings.skin;
+    const std::string skinMode = go.skin;
+    std::thread([L, grade, applyOpt, optReduction, bakeQuality, go, skinMode, gen]() {
+        // Snapshot under the scene lock on the worker. UI edits take the same
+        // lock, so the copy cannot see a half-applied material or pose change;
+        // the UI thread only waits for the lock if it edits during the
+        // hundred-odd milliseconds the copy takes, not on every message.
+        std::shared_ptr<assemble::Scene> copy;
+        {
+            cbtime::Scope waitScope("sync: scene snapshot lock");
+            std::lock_guard<std::recursive_mutex> lock(g.mu);
+            waitScope.Stop();
+            cbtime::Scope copyScope("worker: copy scene for export bake");
+            copy = std::make_shared<assemble::Scene>(L->scene);
+        }
         std::shared_ptr<assemble::Scene> sc;
         bool cancelled = false;
+        auto up = std::make_shared<PendingExportUpload>();
+        up->forCharacter = L;
+        up->grade = grade;
         try {
             if (applyOpt) {   // the Optimize tab's Apply commits: the as-exported preview shows the simplified model too
                 mesh::SimplifyOptions so;
@@ -365,6 +389,23 @@ void ToggleAsExported() {
                 bakeQuality.supersample, bakeQuality.islandPadding);
             if (!expNote.empty()) Log("  " + expNote);
             if (ProgCancelled()) throw Cancelled{};
+            // Upload into a private view on this worker. The UI thread keeps drawing
+            // its previous GPU view until WM_EXP_READY swaps the finished one in, so
+            // neither thread ever touches the same D3D11 device.
+            ProgSet(0.92, "uploading to GPU");
+            auto view = std::make_unique<exporter::GpuView>();
+            if (!view->Init(go, &up->why)) throw std::runtime_error(up->why.empty() ? std::string("no Direct3D 11 device") : up->why);
+            view->SetPlain(true);
+            view->SetSkinMode(skinMode);
+            {
+                cbtime::Scope uploadScope("worker: GPU upload (export view)");
+                up->ok = view->Load(*sc, &up->why,
+                    [](double f, const std::string& stage) { ProgSet(0.92 + 0.08 * std::clamp(f, 0.0, 1.0), stage); },
+                    [] { return ProgCancelled(); });
+            }
+            if (ProgCancelled()) throw Cancelled{};
+            up->scene = sc;
+            up->view = std::move(view);
         } catch (const Cancelled&) {
             cancelled = true;
             Log("as-exported preview cancelled", LogKind::Warn);
@@ -373,11 +414,16 @@ void ToggleAsExported() {
             Log(std::string("export preview failed: ") + e.what(), LogKind::Error);
             sc.reset();
         }
-        {
+        bool stale = false;
+        {   // generation and publication share the lock, so a new bake cannot be overwritten
             std::lock_guard<std::recursive_mutex> lock(g.mu);
-            g.expPending = sc; g.expPendingFor = L; g.expPendingGrade = grade;
+            stale = g.expGen.load() != gen;
+            if (!stale) {
+                g.expPending = sc; g.expPendingFor = L; g.expPendingGrade = grade;
+                g.expUploadPending = std::move(up);
+            }
         }
-        PostMessageW(g.hwnd, WM_EXP_READY, cancelled ? 1 : 0, 0);
+        PostMessageW(g.hwnd, WM_EXP_READY, (cancelled || stale) ? 1 : 0, static_cast<LPARAM>(gen));
     }).detach();
 }
 

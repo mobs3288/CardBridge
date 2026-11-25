@@ -37,6 +37,8 @@ namespace cardbridge::exporter {
 struct Pt { float x, y, z; };   // used by the framing helpers (detail) and the software raster below
 
 namespace detail {   // shared with GpuView.cpp
+bool IdentityPartXf(const Mat4& m) { const Mat4 id{}; for (int i = 0; i < 16; ++i) if (m.m[i] != id.m[i]) return false; return true; }
+
 // The game runs in linear light: sRGB textures are decoded when sampled, colour properties reach the shader as linear values and
 // the frame is encoded when it is written. CARDBRIDGE_GAMMA=1 combines everything as stored instead (the old look, for comparing).
 bool LinearLight() { static const bool on = !std::getenv("CARDBRIDGE_GAMMA"); return on; }
@@ -810,14 +812,24 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             vm.done = true;
             const auto& restMesh = scene.meshes[static_cast<size_t>(mi)];
             const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-            // The live morphs' offsets ride on the copied mesh, before the pose (bind-space, like the game)
+            const int part = restMesh.part;
+            const bool partMoved = opt.partTransform && part >= 0 && static_cast<size_t>(part) < opt.partTransform->size();
+            const Mat4 xf = partMoved ? (*opt.partTransform)[static_cast<size_t>(part)] : Mat4{};
+            const bool moved = partMoved && !detail::IdentityPartXf(xf);
+            // The live morphs' offsets ride on the copied mesh, before the pose (bind-space, like the game).
+            // The part edit is applied next, also in bind space, so it stays glued to the character through the skin.
             const std::vector<Vec3>* md = morphedMesh(mi) ? &(*opt.morphDelta)[static_cast<size_t>(mi)] : nullptr;
-            if (posed || md) {
+            if (posed || md || moved) {
                 vm.posed = restMesh;
                 if (md)
                     for (size_t i = 0; i < vm.posed.vertices.size(); ++i) {
                         Vec3& p = vm.posed.vertices[i].pos;
                         p.x += (*md)[i].x; p.y += (*md)[i].y; p.z += (*md)[i].z;
+                    }
+                if (moved)
+                    for (auto& v : vm.posed.vertices) {
+                        v.pos = xf.point(v.pos);
+                        v.normal = normalize(xf.dir(v.normal));
                     }
                 if (posed)
                     for (auto& v : vm.posed.vertices) {
@@ -825,13 +837,16 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                         v.normal = normalize(assemble::SkinDirection(v, *opt.skin));
                     }
             }
-            const auto& mesh = (posed || md) ? vm.posed : restMesh;
+            const auto& mesh = (posed || md || moved) ? vm.posed : restMesh;
             vm.P.resize(mesh.vertices.size());
             vm.NZ.resize(mesh.vertices.size());
             for (size_t i = 0; i < mesh.vertices.size(); ++i) project(mesh.vertices[i], vm.P[i], vm.NZ[i]);
         }
         const bool posed = opt.skin && opt.skin->size() >= scene.bones.size() && !opt.skin->empty();
-        return (posed || morphedMesh(mi)) ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
+        const int part = scene.meshes[static_cast<size_t>(mi)].part;
+        const bool moved = opt.partTransform && part >= 0 && static_cast<size_t>(part) < opt.partTransform->size() &&
+                           !detail::IdentityPartXf((*opt.partTransform)[static_cast<size_t>(part)]);
+        return (posed || moved || morphedMesh(mi)) ? vm.posed : scene.meshes[static_cast<size_t>(mi)];
     };
     auto drawSub = [&](int mi, int subIdx, bool blend, bool highlight) {
             const auto& mesh = meshOf(mi);

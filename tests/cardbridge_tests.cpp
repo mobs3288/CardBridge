@@ -1659,6 +1659,51 @@ void unitTests() {
         CHECK(exporter::HasAlphaCutout(realCut, realCut.materials[0]));
         CHECK(exporter::MmdMaterialLook(realCut, realCut.materials[0]).diffuse.w < 0.999f);
     });
+    test("depth-writing alpha shader: a small real cutout is not solidified into a black hem", [] {
+        using namespace assemble;
+        auto make = [](int cutTexels, bool depthWriting) {
+            Scene s;
+            SceneShader sh; sh.name = "Shader Forge/main_alpha"; sh.zWrite = depthWriting; sh.queue = 3040;
+            s.shaders.push_back(sh);
+            SceneTexture t; t.name = "pareo"; t.width = 16; t.height = 16; t.rgba.resize(16 * 16 * 4);
+            for (size_t i = 0; i < t.rgba.size(); i += 4) {
+                t.rgba[i] = 120; t.rgba[i + 1] = 200; t.rgba[i + 2] = 60;
+                const int x = static_cast<int>((i / 4) % 16), y = static_cast<int>((i / 4) / 16);
+                t.rgba[i + 3] = (y == 0 && x < cutTexels) ? 0 : 255;
+            }
+            s.textures.push_back(t);
+            SceneMaterial m; m.name = "pareo"; m.shader = "Shader Forge/main_alpha";
+            m.alpha = true; m.shaderIndex = 0; m.texture = 0;
+            s.materials.push_back(m);
+            SceneMesh mesh;
+            for (int y = 0; y < 16; ++y) for (int x = 0; x < 16; ++x) {
+                SceneVertex v; v.pos = {static_cast<float>(x), static_cast<float>(y), 0};
+                v.normal = {0, 0, 1}; v.uv = {(x + 0.5f) / 16, (y + 0.5f) / 16};
+                mesh.vertices.push_back(v);
+            }
+            for (int y = 0; y < 15; ++y) for (int x = 0; x < 15; ++x) {
+                const unsigned a = static_cast<unsigned>(y * 16 + x);
+                SceneSubmesh sub; sub.material = 0; sub.indices = {a, a + 1u, a + 16u, a + 1u, a + 17u, a + 16u};
+                mesh.submeshes.push_back(sub);
+            }
+            s.meshes.push_back(mesh);
+            return s;
+        };
+        Scene real = make(8, true);   // half of one texture row (~3% of covered texels) is really cut
+        CHECK(exporter::HasAlphaCutout(real, real.materials[0]));
+        CHECK(!exporter::IsAlphaTestSolid(real, real.materials[0]));
+        CHECK(exporter::MmdMaterialLook(real, real.materials[0]).diffuse.w < 0.999f);
+        const auto before = real.textures[0].rgba;
+        exporter::SolidifyAlphaTestSolidTextures(real);
+        CHECK(real.materials[0].texture == 0);   // the cutout keeps its real alpha mask
+        CHECK(real.textures[0].rgba == before);
+        Scene stray = make(1, true);   // one padding texel stays solid
+        CHECK(!exporter::HasAlphaCutout(stray, stray.materials[0]));
+        CHECK(exporter::IsAlphaTestSolid(stray, stray.materials[0]));
+        CHECK(exporter::MmdMaterialLook(stray, stray.materials[0]).diffuse.w > 0.999f);
+        Scene unresolved = make(8, false);   // no proved depth write: keep the conservative 5% proof
+        CHECK(!exporter::HasAlphaCutout(unresolved, unresolved.materials[0]));
+    });
     // A doubled surface (opaque base + translucent twin) — the co-located lining pattern (A) seen from both sides:
     // indices/winding/order identical except the translucent twin can be wound differently and (optionally) have an
     // island triangulated elsewhere entirely (partial overlap). mode: 0 same winding, 1 reversed (the author reversed
@@ -2160,6 +2205,22 @@ void unitTests() {
         }
         CHECK(low > 0 && high > 0);   // the holes stay and the tint becomes fully opaque in MMD
         CHECK(mid == 0);              // no 190/255 tint may survive: MMD would show the stage through the socks
+    });
+    test("viewer: a worker-built GPU view can be moved to the UI thread", [] {
+        // The export preview is uploaded on the bake worker into a private GpuView
+        // and handed over with a move, so no D3D11 object is shared by two threads.
+        exporter::GpuOptions go;
+        go.preference = "warp"; go.skin = "cpu";
+        std::string why;
+        auto worker = std::make_unique<exporter::GpuView>();
+        const bool initialised = worker->Init(go, &why);
+        CHECK(initialised == worker->ready());
+        const bool wasReady = worker->ready();
+        exporter::GpuView ui;
+        ui = std::move(*worker);
+        CHECK(ui.ready() == wasReady);   // the device and its state came across
+        exporter::GpuView ui2(std::move(ui));
+        CHECK(ui2.ready() == wasReady);
     });
     test("MMD/plain view: opaque skin occludes the geometry behind the face", [] {
         using namespace assemble;
@@ -4278,6 +4339,54 @@ void unitTests() {
         bool same = a1.size() == a2.size();
         for (size_t i = 0; same && i < a1.size(); ++i) for (int k = 0; k < 16; ++k) same = same && std::fabs(a1[i].m[k] - a2[i].m[k]) < 1e-6f;
         CHECK(same);
+    });
+
+    test("part gizmo: a bind-space rigid edit moves only its own part and round-trips through the pose file", [] {
+        using namespace assemble;
+        auto near = [](Vec3 a, Vec3 b, float eps = 1e-4f) { return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps; };
+        PartPose id;
+        const Mat4 identity{};
+        bool isId = true;
+        for (int i = 0; i < 16; ++i) if (PartTransform(id).m[i] != identity.m[i]) isId = false;
+        CHECK(IsIdentity(id) && isId);
+        PartPose move;
+        move.pos = {0.5f, -0.25f, 0.0f};
+        CHECK(!IsIdentity(move));
+        const Mat4 xf = PartTransform(move);
+        CHECK(near(xf.point({1, 2, 3}), {1.5f, 1.75f, 3.0f}, 1e-5f));
+        PartPose turn;
+        turn.pivot = {1, 0, 0};
+        turn.rot = RotationAxisAngle({0, 0, 1}, 1.5707963f);
+        CHECK(near(PartTransform(turn).point({1, 2, 3}), {-1, 0, 3}, 1e-5f));   // turns about the part's centre
+
+        Scene s;
+        auto part = [&](const char* name, Vec3 p) {
+            ScenePart sp; sp.id = name; sp.group = "Outfit"; s.parts.push_back(sp);
+            SceneMesh m; SceneVertex v; v.pos = p; v.normal = {0, 1, 0}; m.vertices.push_back(v);
+            m.part = static_cast<int>(s.parts.size()) - 1;
+            s.meshes.push_back(m); s.parts.back().meshes.push_back(static_cast<int>(s.meshes.size()) - 1);
+        };
+        part("outfit0.top", {1, 2, 3});
+        part("outfit0.bot", {4, 5, 6});
+        std::map<std::string, PartPose> edits;
+        edits["outfit0.top"] = move;
+        ApplyPartTransforms(s, edits);
+        CHECK(near(s.meshes[0].vertices[0].pos, {1.5f, 1.75f, 3.0f}, 1e-5f));
+        CHECK(near(s.meshes[1].vertices[0].pos, {4, 5, 6}, 1e-5f));   // a shared-bone neighbour is untouched
+        ApplyPartTransforms(s, std::map<std::string, PartPose>{});   // an empty edit set is a no-op
+
+        PoseFile f;
+        f.parts.emplace_back("outfit0.top", turn);
+        std::string err;
+        PoseFile back;
+        CHECK(PoseFileFromJson(PoseFileToJson(f), back, &err));
+        CHECK(back.parts.size() == 1 && back.parts[0].first == "outfit0.top");
+        for (int i = 0; i < 16; ++i) CHECK(std::fabs(back.parts[0].second.rot.m[i] - turn.rot.m[i]) < 1e-5f);
+        CHECK(near(back.parts[0].second.pivot, turn.pivot, 1e-6f));
+        // Old pose files and malformed part entries are still handled the way the rest of the loader handles them.
+        CHECK(PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"bones":{}})", back, &err) && back.parts.empty());
+        CHECK(!PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"parts":{"x":{"position":[1,2]}}})", back, &err));
+        CHECK(!PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"parts":{"x":{"rotation_matrix":[1,2,3]}}})", back, &err));
     });
 
     test("dragging a bone: turns about world axes keep the parent and A-pose frames, Euler round trip", [] {

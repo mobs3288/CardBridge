@@ -309,21 +309,21 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
                         }
                         const COLORREF col = off ? ui::kDim : !ok ? ui::kBad : ui::kText;
-                        const bool acc = p.group == "Accessories";   // the gizmo chip on the right end of accessory rows
+                        const bool gizmo = !p.meshes.empty();   // every part with geometry gets the move / rotate chips
                         CheckBox(s, 16, y + 3, !off, ok ? ui::kAccent : ui::kBad);
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
                         if (p.fromClothing) name += "  (added)";
-                        if (acc && AccessorySelected() == row.part) name += g.gizmoMode == 0 ? "  ·  xyz" : "  ·  rot";
-                        // Name and the right-aligned triangle count share the row.
-                        const RECT partClip{38, y, acc ? kPanel - 136 : kPanel - 64, y + kRowH};
-                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, acc ? 30 : 44), &partClip);
+                        if (gizmo && GizmoPartSelected() == row.part) name += g.gizmoMode == 0 ? "  ·  xyz" : "  ·  rot";
+                        // Name and the right-aligned triangle count share the row; the two chips sit at its right end.
+                        const RECT partClip{38, y, gizmo ? kPanel - 136 : kPanel - 64, y + kRowH};
+                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, gizmo ? 30 : 44), &partClip);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
-                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, acc ? kPanel - 70 : kPanel - 16, y + 4, tris);
-                        if (acc) {
-                            const bool sel = AccessorySelected() == row.part;
-                            DrawAccessoryRotateChip(s, y, sel && g.gizmoMode == 1, g.hoverRotChip == idx);
-                            DrawAccessoryChip(s, y, sel && g.gizmoMode == 0, g.hoverAccChip == idx);
+                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, gizmo ? kPanel - 70 : kPanel - 16, y + 4, tris);
+                        if (gizmo) {
+                            const bool sel = GizmoPartSelected() == row.part;
+                            DrawGizmoRotateChip(s, y, sel && g.gizmoMode == 1, g.hoverRotChip == idx);
+                            DrawGizmoChip(s, y, sel && g.gizmoMode == 0, g.hoverAccChip == idx);
                         }
                     }
                 }
@@ -377,7 +377,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
             if (static_cast<size_t>(g.hoverPart) < L->partTriangles.size()) hint += "  ·  " + Count(L->partTriangles[static_cast<size_t>(g.hoverPart)]) + " tris";
             if (!p.modName.empty()) hint += "  ·  " + p.modName;
             if (static_cast<size_t>(g.hoverPart) < g.hidden.size() && g.hidden[static_cast<size_t>(g.hoverPart)]) hint += "  ·  hidden";
-        } else if (const int acc = AccessorySelected(); acc >= 0 && L && static_cast<size_t>(acc) < L->scene.parts.size()) {
+        } else if (const int acc = GizmoPartSelected(); acc >= 0 && L && static_cast<size_t>(acc) < L->scene.parts.size()) {
             hint = g.gizmoMode == 0
                 ? "gizmo move  ·  drag an axis to move " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its move chip to reset  ·  Esc deselects"
                 : "gizmo rotate  ·  drag a ring to rotate " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its rotate chip to reset  ·  Esc deselects";
@@ -515,7 +515,7 @@ void Paint(HWND hwnd) {
     for (const RECT& p : parts) { RECT t; viewDamaged = viewDamaged || IntersectRect(&t, &p, &viewport) != 0; }
     const bool renderNeeded = g.dirty || g.fw != W || g.fh != H;
     if (renderNeeded) {
-        Render(W, H);
+        { cbtime::Scope s("UI: Paint/Render"); Render(W, H); }
         g.dirty = false;
         g.prof.render += NowMs() - tPaint;
         ++g.prof.renders;

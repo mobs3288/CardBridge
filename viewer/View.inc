@@ -4,10 +4,17 @@
 void Render(int w, int h) {
     std::shared_ptr<Loaded> L = Current();
     if (w < 8 || h < 8) return;
+    // A card load publishes its scene before the (background) export-view bake/upload
+    // has a GPU picture ready. Rasterising that scene now - even unshaded - is the one
+    // remaining multi-hundred-millisecond job on the UI thread during loading, and the
+    // overlay already covers the view. Keep the previous frame until a real GPU view
+    // (or, with no GPU at all, the next idle frame) can draw it.
+    if ((g.busy.load() || g.progActive.load()) && !g.gpuOk && !g.expOk) return;
     g.fw = w; g.fh = h;
     g.gizmoState = exporter::MoveGizmoState{};   // re-filled only when this picture draws the move gizmo (stale picks from the last picture are never used)
     g.rotGizmoState = exporter::RotateGizmoState{};   // likewise the rotate gizmo; only the mode's gizmo is drawn
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
+    const std::vector<Mat4> partXf = PartTransforms(L->scene);   // the gizmo's edits, for the software fallback view
     g.hidden.resize(L->scene.parts.size(), 0);
     g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
     // MaterialID isolate (ADR-008): only the parts using the selected material stay visible.
@@ -52,28 +59,41 @@ void Render(int w, int h) {
                 for (const auto& sub : L->scene.meshes[static_cast<size_t>(mi)].submeshes) if (sub.material == g.selMaterial) { highlight = static_cast<int>(pi); break; }
             }
     }
-    if (highlight < 0) highlight = AccessorySelected();   // the selected accessory stays lit (all the gizmo touches it)
+    if (highlight < 0) highlight = GizmoPartSelected();   // the selected accessory stays lit (all the gizmo touches it)
     g.vopt.highlightPart = highlight;
-    if (g.showExp && g.expOk && g.expFor == L && g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); DrawAxisWidget(g.frame, w, h); DrawTransCursor(w, h); return; }   // as exported
+    if (g.showExp && g.expOk && g.expFor == L) {
+        bool gpuDrawn = false;
+        { cbtime::Scope s("UI: Render/GpuView export"); gpuDrawn = g.gpuExp.Render(g.cam, w, h, &g.effHidden, g.frame, highlight); }
+        if (gpuDrawn) { g.lastGpu = &g.gpuExp; DrawSkeleton(w, h); DrawPartGizmo(w, h); DrawAxisWidget(g.frame, w, h); DrawTransCursor(w, h); return; }   // as exported
+    }
     if (g.shaded && g.gpuOk && g.gpuScene == L) {   // Direct3D 11: the game's shaders at full rate (or a diagnostic mode on the GPU fallback shader)
         g.gpu.SetDiagnosticMode(static_cast<int>(g.vopt.mode), diags.empty() ? nullptr : &diags);
-        if (g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, highlight)) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); DrawAccessoryGizmo(w, h); DrawAxisWidget(g.frame, w, h); DrawTransCursor(w, h); return; }
+        bool gpuDrawn = false;
+        { cbtime::Scope s("UI: Render/GpuView lit"); gpuDrawn = g.gpu.Render(g.cam, w, h, &g.effHidden, g.frame, highlight); }
+        if (gpuDrawn) { g.lastGpu = &g.gpu; DrawSkeleton(w, h); DrawPartGizmo(w, h); DrawAxisWidget(g.frame, w, h); DrawTransCursor(w, h); return; }
         g.gpuOk = false;
     }
     g.lastGpu = nullptr;
     g.boneScreen.clear();
     // Software shaders are slow: only once the view has been still for a moment.
+    // A card/bake load is worse: it sets dirty right when the GPU view is not ready yet,
+    // so the UI thread used to rasterise the whole scene with the game's shader VM for
+    // seconds while the loading bar was up (Windows "Not Responding"). The flat preview
+    // is only on screen for the moment before the GPU view takes over; skip shading while
+    // any job owns the bar, and paint the real view when that job ends.
     const bool still = GetTickCount64() - g.lastInput > 300;
-    g.vopt.shaded = g.shaded && still;
+    const bool loading = g.busy.load() || g.progActive.load();
+    g.vopt.shaded = g.shaded && still && !loading;
     if (g.shaded && !still) SetTimer(g.hwnd, 1, 320, nullptr);   // come back and draw the shaded picture
     g.vopt.hiddenParts = &g.effHidden;
     g.vopt.step = g.interacting ? 3 : 1;
     g.vopt.skin = g.skin.empty() ? nullptr : &g.skin;   // the software view shows the pose (and the physics) too
+    g.vopt.partTransform = &partXf;
     g.vopt.morphDelta = g.morphDelta.empty() ? nullptr : &g.morphDelta;   // ... and the Morphs tab's live blend shapes
     const assemble::Scene* previewSrc = &L->scene;
     if (g.opt.previewLod == 1 && g.opt.simplified) previewSrc = g.opt.simplified.get();
     else if (g.opt.previewLod >= 2) { const OptLod& lv = g.opt.lods[static_cast<size_t>(g.opt.previewLod - 2)]; if (lv.scene) previewSrc = lv.scene.get(); }
-    exporter::RenderView(*previewSrc, g.cam, w, h, g.vopt, *g.state, g.frame);
+    { cbtime::Scope s("UI: Render/RenderView software"); exporter::RenderView(*previewSrc, g.cam, w, h, g.vopt, *g.state, g.frame); }
     DrawAxisWidget(g.frame, w, h);   // the orientation tripod, always on, top-right
     DrawTransCursor(w, h);
 }

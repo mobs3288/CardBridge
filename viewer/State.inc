@@ -10,6 +10,7 @@ struct LogLine {
 // ---- the pose the user has made: bone edits and the A-pose, what undo and redo move between ----
 struct PoseState {
     std::map<std::string, assemble::BonePose> edits;
+    std::map<std::string, assemble::PartPose> parts;   // gizmo edits, keyed by scene part id
     bool aPose = true;   // MikuMikuDance's rest pose: a motion (VMD) is keyed for arms about 40 degrees down
     float aPoseDeg = 40.0f;
 };
@@ -25,6 +26,18 @@ bool SamePoseState(const PoseState& a, const PoseState& b) {
     }
     for (const auto& [name, e] : b.edits)
         if (!a.edits.count(name) && !rest(e)) return false;
+    auto samePart = [](const assemble::PartPose& x, const assemble::PartPose& y) {
+        if (x.pos.x != y.pos.x || x.pos.y != y.pos.y || x.pos.z != y.pos.z || x.pivot.x != y.pivot.x || x.pivot.y != y.pivot.y || x.pivot.z != y.pivot.z) return false;
+        for (int i = 0; i < 16; ++i) if (x.rot.m[i] != y.rot.m[i]) return false;
+        return true;
+    };
+    for (const auto& [id, e] : a.parts) {
+        auto it = b.parts.find(id);
+        const assemble::PartPose other = it == b.parts.end() ? assemble::PartPose{} : it->second;
+        if (!samePart(e, other)) return false;
+    }
+    for (const auto& [id, e] : b.parts)
+        if (!a.parts.count(id) && !assemble::IsIdentity(e)) return false;
     return true;
 }
 
@@ -43,6 +56,18 @@ struct Loaded {
     std::vector<size_t> partTriangles;
     std::vector<std::string> notes;   // card-level problems
     std::string clothing;             // the outfit file applied in memory, if any (never saved)
+};
+
+// A GPU copy built entirely on the export-bake worker. The worker owns its own
+// GpuView (and D3D11 device), so the UI thread keeps rendering the previous view
+// while the new one uploads. Adopted - and the old view released - in WM_EXP_READY.
+struct PendingExportUpload {
+    std::shared_ptr<assemble::Scene> scene;
+    std::shared_ptr<Loaded> forCharacter;
+    std::unique_ptr<exporter::GpuView> view;
+    bool grade = false;
+    bool ok = false;
+    std::string why;
 };
 
 // ---- the Assets tab: card-independent KK/KKS asset catalog ------------------
@@ -406,6 +431,7 @@ struct App {
     // "As exported" (X): a baked copy of the scene (colour only, graded like the preview when G is on) drawn with plain materials.
     exporter::GpuView gpuExp;
     std::shared_ptr<assemble::Scene> expScene, expPending;   // pending: filled by the bake thread, taken over on WM_EXP_READY
+    std::shared_ptr<PendingExportUpload> expUploadPending;   // worker-built GPU copy, adopted on WM_EXP_READY
     std::shared_ptr<Loaded> expFor, expPendingFor;           // the loaded character the baked copy belongs to
     bool showExp = false, expOk = false, expGrade = false, expPendingGrade = false;
     OptState opt;                      // the Optimize tab (triangle reduction, presets, LODs)
@@ -413,6 +439,7 @@ struct App {
     SelectiveState sel;                // the Selective Import window (Selective.inc)
     AssetBrowserState assets;          // the Assets tab (card-independent KK/KKS catalog)
     std::atomic<bool> expBusy{false};
+    std::atomic<int> expGen{0};                // bumped on a new character or a new bake: a stale worker may not publish
     exporter::ViewOptions vopt;
     std::vector<uint32_t> frame;
     int fw = 0, fh = 0;
@@ -552,10 +579,12 @@ struct App {
     int hoverBone = -1;                       // the bone under the pointer (in the view or the tree), lit up in the overlay
     int dragBone = -1;                        // the bone being turned (or moved) with the left button in the view
     bool dragMove = false;
-    // The accessory move/rotate gizmo: shown in the view when an accessory part is selected in the list (its chips);
-    // dragging an axis moves it, dragging a ring rotates it (as bone edits on its root bones, so undo / save / export see it).
+    // The part move/rotate gizmo: shown in the view when any part is selected in the list (its chips); dragging an axis
+    // moves it, dragging a ring rotates it. The edit is a rigid bind-space transform on that part's own vertices, so a
+    // garment sharing the body's bones moves alone yet stays glued to the character through any bone pose.
     int viewHoverBall = -1;   // the navigation widget's ball under the pointer (0 +X, 1 +Y, 2 +Z, 3 -X, 4 -Y, 5 -Z); -1 = none
-    int selAccessory = -1;                    // scene.parts index of the accessory the gizmo holds, -1 = none
+    std::map<std::string, assemble::PartPose> partEdits;   // gizmo edits, keyed by scene part id (undo / save / export see them)
+    int selGizmoPart = -1;                    // scene.parts index of the part the gizmo holds, -1 = none
     int gizmoMode = 0;                        // 0 = move (arrows), 1 = rotate (rings): which gizmo the chips on the row picked
     int gizmoHoverAxis = -1;                  // the axis under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
     int gizmoAxis = -1;                       // the axis being dragged, -1 = none
@@ -619,7 +648,9 @@ struct App {
     std::vector<LogLine> logLines;
     HFONT fontTitle = nullptr, fontUi = nullptr, fontBold = nullptr, fontMono = nullptr, fontLog = nullptr, fontSmall = nullptr, fontSemi = nullptr;   // fontSemi: 11 px semibold, section captions
 };
-App g;
+// Intentionally never destroyed: workers are detached and may still be unwinding
+// while the process is exiting. A leaked singleton has no destructor for them to race with.
+App& g = *new App();
 
 // The label for the pinned clothing on screen: empty when nothing is pinned; the last layer's name with
 // a "(+N more)" suffix when several Selective Import layers are stacked.

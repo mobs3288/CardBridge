@@ -143,6 +143,13 @@ bool HasCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat)
 // a cutout (the rear hair then lost depth writes and showed the background). Each triangle contributes
 // four barycentric samples so a small UV island cannot be decided by one unlucky sample; at least 5% of
 // the mesh's samples must be discarded. A mesh that only covers opaque texels stays opaque.
+//
+// A depth-writing alpha shader is different: the game really discards sub-_Cutoff texels there, so a
+// discarded texel the mesh covers is a hole, not stray padding the game ignores. Alpha-named shaders that
+// only tint (no resolved depth write) keep the conservative 5% proof; for a proven alpha test a 1% floor
+// is enough. Without it, a garment whose cut edge falls just under 5% (the swimsuit pareo's hem on
+// KK_237456) is declared "alpha test solid", its whole texture alpha is solidified, and the discarded
+// atlas texels become a solid black band at the hem in the viewer and the PMX.
 bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial& mat) {
     if (assemble::IgnoresTextureAlpha(scene, mat)) return false;   // the game never reads this material's texture alpha
     if (mat.texture < 0 || static_cast<size_t>(mat.texture) >= scene.textures.size()) return false;
@@ -170,7 +177,10 @@ bool HasAlphaCutout(const assemble::Scene& scene, const assemble::SceneMaterial&
             }
         }
     }
-    return sampled >= 4 && discarded * 20 >= sampled;   // at least 5% of the covered texels are cut
+    const bool depthWritingAlphaTest = mat.alpha && assemble::ShaderWritesDepth(scene, mat);
+    // At least 1% of the covered texels for a proven alpha test, 5% otherwise (see comment above).
+    const int percent = depthWritingAlphaTest ? 1 : 5;
+    return sampled >= 4 && discarded * 100 >= sampled * percent;
 }
 
 // The material's mesh is modelled as two co-located layers (an outer and an inner surface sharing one vertex grid, the game's

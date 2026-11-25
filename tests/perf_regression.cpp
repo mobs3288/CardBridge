@@ -81,6 +81,17 @@ static void testTimingRecorder() {
     cbtime::Report();
     cbtime::Reset();
     CHECK_MSG(true, "timing scope + report run clean with CARDBRIDGE_TIMING unset");
+
+    // The slowest visit is recorded separately from the total: a UI-thread
+    // hitch is a large max, even when the total over a whole load is small.
+    cbtime::Recorder::Instance().Add("ui hitch regression", 5.0);
+    cbtime::Recorder::Instance().Add("ui hitch regression", 250.0);
+    const cbtime::Agg stats = cbtime::Recorder::Instance().Stats("ui hitch regression");
+    CHECK_MSG(stats.count == 2, "timing recorder counts both visits");
+    CHECK_MSG(stats.ms == 255.0, "timing recorder accumulates total time");
+    CHECK_MSG(stats.max == 250.0, "timing recorder keeps the slowest visit");
+    cbtime::Reset();
+    CHECK_MSG(cbtime::Recorder::Instance().Stats("ui hitch regression").count == 0, "reset clears stage stats");
 }
 
 static void testDecodedTextureCache() {

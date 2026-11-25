@@ -64,6 +64,7 @@ static bool IsDecalTexture(const assemble::Scene& scene, int ti) {
 namespace {
 
 template <class T> void Rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
+bool IdentityXf(const Mat4& m) { const Mat4 id{}; for (int i = 0; i < 16; ++i) if (m.m[i] != id.m[i]) return false; return true; }
 
 struct GVert {
     float pos[3], nrm[3], tan[4];
@@ -127,6 +128,8 @@ struct GpuView::Impl {
     ID3D11ComputeShader* skCs = nullptr;
     ID3D11Buffer* skBones = nullptr;    // structured buffer of bone matrix rows (4 float4 per bone)
     ID3D11ShaderResourceView* skBonesSrv = nullptr;
+    ID3D11Buffer* skPartCb = nullptr;   // per-mesh part transform, bound for the skinning dispatch only (64 bytes)
+    std::vector<Mat4> partXf;           // per scene part, applied to its vertices in bind space before skinning
     bool skinOnGpu = false;
     // Benchmark timing queries (created lazily, used only when SetBenchQueries(true)).
     // Timestamp/disjoint give pure GPU compute time when the driver reports a
@@ -503,11 +506,16 @@ struct SVVert { float3 pos; float3 nrm; float4 tan; float2 uv; float4 col; float
 StructuredBuffer<SVVert> g_in : register(t0);
 StructuredBuffer<float4> g_bones : register(t1);
 RWStructuredBuffer<SVVert> g_out : register(u0);
+// The gizmo's part edit: applied in bind space, before the bones, so the part stays glued to the character.
+cbuffer PartXf : register(b0) { row_major float4x4 g_partXf; };
 [numthreads(64, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID) {
     uint count, stride; g_in.GetDimensions(count, stride);
     if (dtid.x >= count) return;
     SVVert v = g_in[dtid.x];
+    v.pos = mul(g_partXf, float4(v.pos, 1)).xyz;
+    v.nrm = mul(g_partXf, float4(v.nrm, 0)).xyz;
+    v.tan.xyz = mul(g_partXf, float4(v.tan.xyz, 0)).xyz;
     uint boneRows, boneStride; g_bones.GetDimensions(boneRows, boneStride);
     uint numBones = boneRows / 4u;
     float3 p = 0, n = 0, t = 0;
@@ -548,6 +556,13 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         if (!ok && std::getenv("CARDBRIDGE_DEBUG_SKIN")) std::fprintf(stderr, "skin cs create failed\n");
         Rel(cb); Rel(err);
         if (!ok) { Rel(skCs); return false; }
+        if (!skPartCb) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 64;
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            if (FAILED(dev->CreateBuffer(&bd, nullptr, &skPartCb))) { Rel(skCs); return false; }
+        }
         return true;
     }
 
@@ -594,8 +609,11 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         }
         return true;
     }
-    bool DispatchSkin(GpuMesh& g) {
+    bool DispatchSkin(GpuMesh& g, int part) {
         if (!skCs || !g.restSrv || !g.posedUav || g.rest.empty()) return false;
+        const Mat4 xf = part >= 0 && static_cast<size_t>(part) < partXf.size() ? partXf[static_cast<size_t>(part)] : Mat4{};
+        ctx->UpdateSubresource(skPartCb, 0, nullptr, &xf.m[0], 0, 0);
+        ctx->CSSetConstantBuffers(0, 1, &skPartCb);
         ID3D11ShaderResourceView* tv[2] = {g.restSrv, skBonesSrv};
         ID3D11UnorderedAccessView* tu[1] = {g.posedUav};
         const bool timed = benchQueries && EnsureBenchQueries();
@@ -630,6 +648,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         if (wireRs) { wireRs->Release(); wireRs = nullptr; }
         Rel(olVs); Rel(olPs); Rel(olIl); Rel(olCb);
         Rel(skCs);
+        Rel(skPartCb);
+        partXf.clear();
         Rel(benchTsStart); Rel(benchTsEnd); Rel(benchTsDisjoint); Rel(benchEvent);
         benchQueries = false; benchPending = false; benchLastMs = -1.0;
         Clear();
@@ -759,6 +779,10 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 
 GpuView::GpuView() : impl_(new Impl()) {}
 GpuView::~GpuView() = default;
+// A view can be uploaded on a worker and handed to the UI thread with a move, so
+// the D3D11 device and the uploading thread are never touched by two threads at once.
+GpuView::GpuView(GpuView&&) noexcept = default;
+GpuView& GpuView::operator=(GpuView&&) noexcept = default;
 bool GpuView::ready() const { return impl_->dev != nullptr; }
 void GpuView::Shutdown() { impl_->ReleaseDevice(); }
 GpuKind GpuView::kind() const { return impl_->kind; }
@@ -917,7 +941,14 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
     auto useGpu = [&](const GpuMesh& m) { return gpuReady && wantGpu(m) && m.posedBuf != nullptr; };
     I.skinOnGpu = false;
     if (gpuReady) {
-        for (auto& g : I.meshes) if (!g.rest.empty() && useGpu(g)) { I.DispatchSkin(g); I.skinOnGpu = true; }
+        for (size_t mi = 0; mi < I.meshes.size(); ++mi) {
+            GpuMesh& g = I.meshes[mi];
+            if (!g.rest.empty() && useGpu(g)) {
+                const int part = mi < I.scene->meshes.size() ? I.scene->meshes[mi].part : -1;
+                I.DispatchSkin(g, part);
+                I.skinOnGpu = true;
+            }
+        }
     }
     std::vector<GVert> posedVerts;
     for (size_t mi = 0; mi < I.meshes.size() && mi < I.scene->meshes.size(); ++mi) {
@@ -926,10 +957,21 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
         if (g.rest.empty()) continue;
         if (useGpu(g)) continue;   // already dispatched above; nothing to upload
         const auto& verts = I.scene->meshes[mi].vertices;
+        const int part = I.scene->meshes[mi].part;
+        const Mat4 px = part >= 0 && static_cast<size_t>(part) < I.partXf.size() ? I.partXf[static_cast<size_t>(part)] : Mat4{};
         const std::vector<GVert>* src = &g.rest;
-        if (posed) {
+        if (posed || !IdentityXf(px)) {
             posedVerts = g.rest;
-            for (size_t v = 0; v < posedVerts.size() && v < verts.size(); ++v) {
+            if (!IdentityXf(px))
+                for (GVert& o : posedVerts) {
+                    const Vec3 p = px.point({o.pos[0], o.pos[1], o.pos[2]});
+                    const Vec3 n = px.dir({o.nrm[0], o.nrm[1], o.nrm[2]});
+                    const Vec3 t = px.dir({o.tan[0], o.tan[1], o.tan[2]});
+                    o.pos[0] = p.x; o.pos[1] = p.y; o.pos[2] = p.z;
+                    o.nrm[0] = n.x; o.nrm[1] = n.y; o.nrm[2] = n.z;
+                    o.tan[0] = t.x; o.tan[1] = t.y; o.tan[2] = t.z;
+                }
+            if (posed) for (size_t v = 0; v < posedVerts.size() && v < verts.size(); ++v) {
                 // the vertex's blended skin matrix, applied to its position, normal and tangent.
                 // Bounds and weight checks match SkinPoint and the compute shader.
                 Mat4 m;
@@ -959,9 +1001,9 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
         if (g.posedBuf) {
             I.ctx->UpdateSubresource(g.posedBuf, 0, nullptr, src->data(), 0, 0);
             g.vb = g.posedBuf;
-        } else if (g.restBuf && !posed) {
+        } else if (g.restBuf && !posed && IdentityXf(px)) {
             g.vb = g.restBuf;
-        } else if (posed) {
+        } else if (posed || !IdentityXf(px)) {
             I.ctx->UpdateSubresource(g.vb, 0, nullptr, src->data(), 0, 0);
         } else if (g.restBuf) {
             g.vb = g.restBuf;
@@ -969,6 +1011,28 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
             I.ctx->UpdateSubresource(g.vb, 0, nullptr, g.rest.data(), 0, 0);
         }
     }
+}
+
+void GpuView::SetPartTransforms(const std::vector<Mat4>* transforms) {
+    Impl& I = *impl_;
+    if (!I.dev || !I.scene) return;
+    const std::vector<Mat4> xf = transforms ? *transforms : std::vector<Mat4>{};
+    bool same = xf.size() == I.partXf.size();
+    for (size_t i = 0; same && i < xf.size(); ++i)
+        for (int e = 0; e < 16; ++e) if (xf[i].m[e] != I.partXf[i].m[e]) { same = false; break; }
+    if (same) return;
+    I.partXf = xf;
+    // A part edit alone is a pose as far as the draw path is concerned: give the skinning pass identity bones so the
+    // uploaded rest buffers are re-skinned with the part transforms instead of being drawn untouched.
+    std::vector<Mat4> identity;
+    const std::vector<Mat4>* skin = nullptr;
+    if (!I.skinCopy.empty()) skin = &I.skinCopy;
+    else {
+        bool any = false;
+        for (const auto& m : I.partXf) if (!IdentityXf(m)) { any = true; break; }
+        if (any) { identity.assign(I.scene->bones.size(), Mat4{}); skin = &identity; }
+    }
+    SetSkin(skin);
 }
 
 void GpuView::SetMorphDelta(const std::vector<std::vector<Vec3>>* delta) {
@@ -1305,6 +1369,7 @@ void GpuView::Unload() {
     I.morphDelta.clear();
     I.morphedMeshes.clear();
     I.skinCopy.clear();
+    I.partXf.clear();
     I.lastM[0] = 0;
     I.lastW = I.lastH = 0;
 }

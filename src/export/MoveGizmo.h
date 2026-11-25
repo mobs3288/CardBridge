@@ -8,7 +8,7 @@
 
 namespace cardbridge::exporter {
 
-// The translate gizmo for an accessory: three axis arrows (X red, Y green, Z blue) drawn over a finished picture of GpuView::Render,
+// The translate gizmo for a scene part: three axis arrows (X red, Y green, Z blue) drawn over a finished picture of GpuView::Render,
 // anchored at `origin` (model space). Hovering or dragging an axis brightens it; the other two dim while one is dragged. Screen-space
 // size: the arrows are ~64 px regardless of zoom. The returned state says where each axis landed in pixels, for picking; x < 0 in it
 // means the gizmo was not drawn (the view has no picture yet).

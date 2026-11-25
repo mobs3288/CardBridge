@@ -82,6 +82,9 @@ struct ViewOptions {
     // Every vertex is skinned by it before it is drawn; the framing stays that of the rest pose so the picture does not jump while a bone
     // moves. nullptr or empty = the rest pose.
     const std::vector<Mat4>* skin = nullptr;
+    // The gizmo's per-part transforms, indexed by scene part, applied to that part's vertices in bind space before the skin
+    // matrices (the same order as the Direct3D view). nullptr or identity entries leave the part alone.
+    const std::vector<Mat4>* partTransform = nullptr;
     // Which viewport diagnostic to shade by (spec S13, ADR-008): Lit keeps the game's shaders/lookup path untouched.
     // Unlit = texture x diffuse, no shading. MaterialID = one colour per material. Modes never write back to the scene.
     ViewMode mode = ViewMode::Lit;

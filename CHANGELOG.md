@@ -2,6 +2,17 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.8.5] - 2026-11-25
+
+### Added
+
+- **Part gizmo for every scene part.** The move/rotate gizmo is no longer limited to accessories: any part row can now move or turn its own vertices as a rigid bind-space edit, with the pivot at the part's bind-space centre. The edit stays glued to the character through bone poses, is applied in both GPU and software previews and baked into the scene copy on export. Pose files carry an optional `parts` object (older files stay valid) and undo sees each gesture as one step.
+
+### Fixed
+
+- **Black band on the swimsuit pareo's hem in the MMD / "as exported" view (Yoko Littner, `KK_237456.png`, outfit 4).** The 0.8.0 alpha-shader classification correctly stopped treating every depth-writing `main_alpha` material as a blend, but the pareo's hem samples discarded texels in 3.99% of its covered UVs — just below the exporter's 5% cutout proof. It was therefore treated as "alpha test solid": the black atlas padding at the hem was solidified into an opaque black band. A depth-writing alpha shader really discards sub-`_Cutoff` texels, so for those materials the proof threshold is now 1% (5% is kept for every other material). The 0.8.0 alpha-shader, lining and `_AlphaMask` fixes are unchanged. Verified in the PMX preview and the live viewer's MMD mode: hem black pixels 24.95% → 0%, matching the 0.7.11 reference; 19,473 unit checks pass.
+- **Viewer no longer shows Windows "Not Responding" while cards/outfits load.** The card, ZIPMOD indexing, parsing, mesh building and texture decoding already ran on worker threads, but the UI thread still painted a full software-shaded viewport frame right after a load — measured at 2.1 s on one card — and then uploaded the baked export view's shaders/textures synchronously. The viewport now skips software shading and scene rasterisation while a load owns the progress bar, and the export preview is uploaded into a private `GpuView` on the bake worker and adopted on the UI thread by a move (generation-guarded so stale results cannot overwrite a newer character). The scene snapshot for the bake is also taken on the worker under the existing scene lock. Measured longest UI-thread frame during loading dropped from 2.1 s to 13-66 ms, with zero unanswered `WM_NULL` polls during loading (the existing startup device init still takes ~0.5 s). Added per-stage `max` timing (JSON `max` field), a `tools/measure_ui_responsiveness.ps1` harness, and tests for the recorder's max aggregation and the movable GPU view. 19,473 unit checks pass.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added

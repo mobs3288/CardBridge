@@ -9,7 +9,7 @@
 
 namespace cardbridge::exporter {
 
-// The rotate gizmo for an accessory: one ring per axis (X red, Y green, Z blue) drawn over a finished picture of
+// The rotate gizmo for a scene part: one ring per axis (X red, Y green, Z blue) drawn over a finished picture of
 // GpuView::Render, centred at `origin` (model space). Hovering or dragging a ring brightens it; the other two dim while one is
 // dragged. Screen-space size: the rings are ~46 px in radius regardless of zoom. The returned state says where each ring's
 // polyline landed in pixels, for picking; x < 0 in it means the gizmo was not drawn (the view has no picture yet).

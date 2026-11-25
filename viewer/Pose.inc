@@ -1,4 +1,5 @@
 // viewer fragment: posing, physics, load (included in order by main.cpp)
+std::vector<Mat4> PartTransforms(const assemble::Scene& scene);   // Gizmo.inc: the gizmo's per-part bind-space edits
 
 // ---- posing ---------------------------------------------------------------------------------------------------------
 // includeSag: the live preview (and the physics anchors) start from the sagged pose. The export passes false:
@@ -55,6 +56,11 @@ void ApplyPoseLive(double seconds = 0.0) {
     const std::vector<Mat4>* sk = g.skin.empty() ? nullptr : &g.skin;
     if (g.gpuOk) g.gpu.SetSkin(sk);
     if (g.expOk) g.gpuExp.SetSkin(sk);
+    const std::vector<Mat4> partXf = L ? PartTransforms(L->scene) : std::vector<Mat4>{};
+    // SetSkin above re-skins with the transforms from the last edit; SetPartTransforms then picks up any change (and makes
+    // an edit alone count as a pose, so the GPU view does not fall back to its untouched rest buffers).
+    if (g.gpuOk) g.gpu.SetPartTransforms(&partXf);
+    if (g.expOk) g.gpuExp.SetPartTransforms(&partXf);
     SelectivePoseChanged();   // the static previews in the Selective Import window follow the same pose
     g.dirty = true;
     InvalidateView();
@@ -80,6 +86,7 @@ std::string PosePathFromUser(bool save) {
 PoseState CapturePose() {
     PoseState st;
     st.edits = g.boneEdits;
+    st.parts = g.partEdits;
     st.aPose = g.aPose;
     st.aPoseDeg = g.aPoseDeg;
     return st;
@@ -87,6 +94,7 @@ PoseState CapturePose() {
 
 void RestorePose(const PoseState& st) {
     g.boneEdits = st.edits;
+    g.partEdits = st.parts;
     g.aPose = st.aPose;
     g.aPoseDeg = st.aPoseDeg;
     ApplyPoseLive();
@@ -131,6 +139,8 @@ assemble::PoseFile CurrentPoseFile() {
     pf.aPoseDegrees = g.aPoseDeg;
     for (const auto& [name, e] : g.boneEdits)
         if (!assemble::IsIdentity(e)) pf.bones.emplace_back(name, e);
+    for (const auto& [id, e] : g.partEdits)
+        if (!assemble::IsIdentity(e)) pf.parts.emplace_back(id, e);
     return pf;
 }
 
@@ -163,17 +173,27 @@ void LoadPoseFile(const std::string& given = std::string()) {
     const PoseState before = CapturePose();
     g.undoBaseValid = false;
     g.boneEdits.clear();
+    g.partEdits.clear();
     size_t unknown = 0;
     for (const auto& [name, e] : pf.bones) {
         if (L->scene.boneIndex(name) < 0) { ++unknown; continue; }
         g.boneEdits[name] = e;
+    }
+    size_t unknownParts = 0;
+    for (const auto& [id, e] : pf.parts) {
+        bool found = false;
+        for (const auto& p : L->scene.parts) if (p.id == id) { found = true; break; }
+        if (!found) { ++unknownParts; continue; }
+        g.partEdits[id] = e;
     }
     g.aPose = pf.aPose;
     g.aPoseDeg = pf.aPoseDegrees;
     ApplyPoseLive();
     InvalidatePanel();
     PoseChanged(before);
-    Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s)" + (unknown ? ", " + std::to_string(unknown) + " bone(s) this rig does not have skipped" : std::string()), unknown ? LogKind::Warn : LogKind::Good);
+    Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s), " + std::to_string(pf.parts.size() - unknownParts) + " part edit(s)" +
+        ((unknown || unknownParts) ? ", " + std::to_string(unknown + unknownParts) + " entry/entries this card does not have skipped" : std::string()),
+        (unknown || unknownParts) ? LogKind::Warn : LogKind::Good);
 }
 
 // The physical jiggle settings changed (a Look-tab slider, a preset chip or a reset): persist them as the default for new cards, re-arm the
@@ -718,10 +738,13 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
         auto out = std::make_shared<Loaded>();
         std::string err;
         bool cancelled = false;
+        cbtime::Scope totalScope("load: total card load");
         try {
             ProgSet(0.02, "indexing mods");
             if (ProgCancelled()) throw Cancelled{};
+            cbtime::Scope resolverScope("load: resolver + mod index");
             if (!EnsureResolver(libraryRoot, modsRoot, modCachePath, err)) throw std::runtime_error(err);
+            resolverScope.Stop();
             if (ProgCancelled()) throw Cancelled{};
             ProgSet(0.18, "reading the card");
             // The previous character's bundles are no longer needed (its
@@ -737,7 +760,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
                 g.sel.importedCache.clear();
                 g.sel.importedCacheLru.clear();
             }
+            cbtime::Scope cardScope("load: read card PNG");
             card::Card c = card::LoadCard(path);
+            cardScope.Stop();
             if (!c.supported) throw std::runtime_error(c.supportNote);
             // The card's current coordinate when none is asked for; an
             // out-of-range slot falls back to the first, the way Assembler does.
@@ -898,7 +923,9 @@ void StartLoad(const std::string& path, int outfit, bool keepTweaks = false) {
             };
             ao.cancelled = [] { return ProgCancelled(); };
             if (ProgCancelled()) throw Cancelled{};
+            cbtime::Scope assembleScope("load: assemble scene");
             out->scene = assemble::Assemble(c, *g.resolver, ao);
+            assembleScope.Stop();
             if (!originalGarment) {
                 // The viewer's own copy of the export's clipping correction: the preview shows exactly the garment the PMX carries.
                 const auto fix = assemble::FixGarmentIntersections(out->scene);

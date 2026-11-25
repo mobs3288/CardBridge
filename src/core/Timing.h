@@ -26,8 +26,9 @@ namespace cardbridge {
 namespace cbtime {
 
 struct Agg {
-    double ms = 0.0;
+    double ms = 0.0;   // total time spent in this stage
     long count = 0;
+    double max = 0.0;  // slowest single visit (a long visit is what makes a UI thread unresponsive)
 };
 
 class Recorder {
@@ -49,12 +50,20 @@ public:
         Agg& e = agg_[name];
         e.ms += ms;
         e.count += 1;
+        if (ms > e.max) e.max = ms;
     }
     // Drops every recorded stage (benchmarks want per-iteration numbers).
     void Reset() {
         std::lock_guard<std::mutex> lk(mu_);
         agg_.clear();
         scopes_ = 0;
+    }
+    // A copy of one stage's accumulated stats (used by the regression tests and
+    // by callers that want the slowest visit without printing a report).
+    Agg Stats(const std::string& name) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = agg_.find(name);
+        return it == agg_.end() ? Agg{} : it->second;
     }
     // Prints (or writes as JSON) the breakdown. `total_ms` is the wall time the
     // caller measured for the whole command, when it has one (0 = omit it).
@@ -75,7 +84,7 @@ public:
                     const Agg& a = agg_[name];
                     if (!first) std::fprintf(f, ",\n");
                     first = false;
-                    std::fprintf(f, "    {\"name\": \"%s\", \"ms\": %.3f, \"count\": %ld}", name.c_str(), a.ms, a.count);
+                    std::fprintf(f, "    {\"name\": \"%s\", \"ms\": %.3f, \"max\": %.3f, \"count\": %ld}", name.c_str(), a.ms, a.max, a.count);
                 }
                 std::fprintf(f, "\n  ]\n}\n");
                 std::fclose(f);
@@ -88,14 +97,14 @@ public:
         for (const auto& [neg, name] : byTime) {
             const Agg& a = agg_[name];
             known += a.ms;
-            std::fprintf(stderr, "  %-34s %9.1f ms  x%ld\n", name.c_str(), a.ms, a.count);
+            std::fprintf(stderr, "  %-34s %9.1f ms  max %8.1f ms  x%ld\n", name.c_str(), a.ms, a.max, a.count);
         }
         std::fprintf(stderr, "  %-34s %9.1f ms\n", "(sum of stages)", known);
         if (total_ms > 0.0) std::fprintf(stderr, "  %-34s %9.1f ms\n", "(wall clock)", total_ms);
         std::fprintf(stderr, "----------------------------------------\n");
     }
 private:
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::map<std::string, Agg> agg_;
     long scopes_ = 0;
 };

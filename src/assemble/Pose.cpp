@@ -28,6 +28,46 @@ bool IsIdentity(const BonePose& p) {
     return p.pos.x == 0 && p.pos.y == 0 && p.pos.z == 0 && p.rot.x == 0 && p.rot.y == 0 && p.rot.z == 0 && p.scl.x == 1 && p.scl.y == 1 && p.scl.z == 1;
 }
 
+bool IsIdentity(const PartPose& p) {
+    if (p.pos.x != 0 || p.pos.y != 0 || p.pos.z != 0) return false;
+    const Mat4 id{};
+    for (int i = 0; i < 16; ++i) if (p.rot.m[i] != id.m[i]) return false;
+    return true;
+}
+
+Mat4 PartTransform(const PartPose& p) {
+    const Mat4 toPivot = Mat4::TRS(p.pivot * -1.0f, Quat{}, Vec3{1, 1, 1});
+    const Mat4 fromPivot = Mat4::TRS(p.pivot + p.pos, Quat{}, Vec3{1, 1, 1});
+    return fromPivot * p.rot * toPivot;
+}
+
+void ApplyPartTransforms(Scene& scene, const std::map<std::string, PartPose>& edits) {
+    if (edits.empty()) return;
+    for (size_t pi = 0; pi < scene.parts.size(); ++pi) {
+        const auto it = edits.find(scene.parts[pi].id);
+        if (it == edits.end() || IsIdentity(it->second)) continue;
+        const Mat4 xf = PartTransform(it->second);
+        for (int mi : scene.parts[pi].meshes) {
+            if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
+            SceneMesh& mesh = scene.meshes[static_cast<size_t>(mi)];
+            for (auto& v : mesh.vertices) {
+                if (std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z)) v.pos = xf.point(v.pos);
+                if (std::isfinite(v.normal.x) && std::isfinite(v.normal.y) && std::isfinite(v.normal.z)) v.normal = normalize(xf.dir(v.normal));
+                if (!mesh.reshapable) continue;
+                for (int k = 0; k < 4; ++k) {
+                    if (std::isfinite(v.local[k].x)) v.local[k] = xf.point(v.local[k]);
+                    if (std::isfinite(v.nlocal[k].x)) v.nlocal[k] = normalize(xf.dir(v.nlocal[k]));
+                }
+            }
+            for (auto& shape : mesh.shapes) {
+                for (auto& off : shape.offsets) off.second = xf.dir(off.second);
+                if (shape.local.size() != shape.offsets.size()) continue;
+                for (auto& loc : shape.local) for (auto& l : loc) l = xf.dir(l);
+            }
+        }
+    }
+}
+
 bool Pose::empty() const {
     for (const auto& b : bones) if (!IsIdentity(b)) return false;
     for (const auto& q : base) if (q.x != 0 || q.y != 0 || q.z != 0) return false;
@@ -503,6 +543,14 @@ std::string PoseFileToJson(const PoseFile& file) {
     j["bones"] = json::object();
     for (const auto& [name, e] : file.bones)
         j["bones"][name] = {{"position", {e.pos.x, e.pos.y, e.pos.z}}, {"rotation_euler_degrees", {e.rot.x, e.rot.y, e.rot.z}}, {"scale", {e.scl.x, e.scl.y, e.scl.z}}};
+    if (!file.parts.empty()) {
+        j["parts"] = json::object();
+        for (const auto& [id, e] : file.parts) {
+            json mat = json::array();
+            for (float x : e.rot.m) mat.push_back(x);
+            j["parts"][id] = {{"position", {e.pos.x, e.pos.y, e.pos.z}}, {"pivot", {e.pivot.x, e.pivot.y, e.pivot.z}}, {"rotation_matrix", mat}};
+        }
+    }
     return j.dump(2) + "\n";
 }
 
@@ -530,6 +578,29 @@ bool PoseFileFromJson(const std::string& text, PoseFile& out, std::string* error
             if (!b.is_object() || !vec(b, "position", e.pos) || !vec(b, "rotation_euler_degrees", e.rot) || !vec(b, "scale", e.scl))
                 return fail("bone \"" + name + "\" needs position, rotation_euler_degrees and scale as three numbers each");
             f.bones.emplace_back(name, e);
+        }
+    }
+    if (j.contains("parts")) {
+        if (!j["parts"].is_object()) return fail("\"parts\" is not an object");
+        auto vec = [&](const json& b, const char* key, Vec3& v) {
+            if (!b.contains(key)) return true;
+            const json& a = b[key];
+            if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) return false;
+            v = {a[0].get<float>(), a[1].get<float>(), a[2].get<float>()};
+            return true;
+        };
+        for (const auto& [name, b] : j["parts"].items()) {
+            PartPose e;
+            if (!b.is_object() || !vec(b, "position", e.pos) || !vec(b, "pivot", e.pivot)) return fail("part \"" + name + "\" needs position and pivot as three numbers each");
+            if (b.contains("rotation_matrix")) {
+                const json& a = b["rotation_matrix"];
+                if (!a.is_array() || a.size() != 16) return fail("part \"" + name + "\" has a rotation_matrix that is not 16 numbers");
+                for (size_t i = 0; i < 16; ++i) {
+                    if (!a[i].is_number()) return fail("part \"" + name + "\" has a non-numeric rotation_matrix entry");
+                    e.rot.m[i] = a[i].get<float>();
+                }
+            }
+            f.parts.emplace_back(name, e);
         }
     }
     out = std::move(f);

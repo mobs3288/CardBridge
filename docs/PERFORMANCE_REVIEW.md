@@ -170,6 +170,45 @@ algorithms already match the MMD path; `skin-bench` measures it).
    it was repaired in the smallest possible way to make the tree build at all.
    Nothing of yours was reverted or reordered.
 
+## Viewer loading responsiveness (UI thread)
+
+The viewer's card/outfit load already ran on a detached worker, but the window
+could still stop answering messages. Measured with `CARDBRIDGE_TIMING=1` and
+`tools/measure_ui_responsiveness.ps1` (polls `WM_NULL` with
+`SendMessageTimeout(SMTO_ABORTIFHUNG)` every 100 ms while loading):
+
+| Stage | before | after |
+|---|---|---|
+| longest `UI: Frame` during load | 2,091 ms | 13-66 ms |
+| longest `UI: Render/RenderView software` | 2,085 ms | not called during load |
+| `UI: GPU upload (export view)` | 460-599 ms | 0 (runs as `worker: GPU upload`) |
+| `UI: copy scene for export bake` | 78-207 ms | 0 (runs as `worker: copy scene`) |
+| unanswered `WM_NULL` polls while loading | 8-15 (200 ms each) | 0 |
+
+Root cause: `WM_LOADED` marks the view dirty at the moment the GPU export view
+is not ready yet, so `Frame()` -> `Paint()` -> `RenderView()` ran the game's
+software shader VM synchronously on the UI thread. That frame is now skipped
+while a job owns the progress bar: the loading overlay covers the view and the
+background bake publishes a GPU view shortly afterwards. The exported preview's
+scene copy, shader/texture upload and D3D11 resource creation also moved to the
+bake worker, which builds its own `GpuView`; the UI thread adopts it with a move
+in `WM_EXP_READY`. A generation counter makes sure a bake/upload from a previous
+character is discarded instead of overwriting the new one.
+
+Timing scopes are named `UI: ...`, `load: ...`, `worker: ...` and `sync: ...` in
+the JSON report; `sync:` scopes measure mutex wait only. Each stage now also
+reports `max` (slowest visit), which is the number that matters for a UI hitch.
+
+Run it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\measure_ui_responsiveness.ps1 -Card <card.png> [-Clothes <outfit.png>] -Seconds 60
+```
+
+Remaining: the initial Direct3D 11 device creation still blocks the UI thread
+for roughly 0.5 s at startup, before any load begins. It is not part of the
+loading pipeline and is unchanged.
+
 ## Remaining bottlenecks (after)
 
 * **The SM4 interpreter** (~10 s of the ~20 s convert). It is the reference

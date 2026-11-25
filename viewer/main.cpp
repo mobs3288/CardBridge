@@ -261,16 +261,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             if (m.message == WM_QUIT) { quit = true; break; }
             TranslateMessage(&m);
+            // Measure each synchronous handler: anything long here is a window that stops answering
+            // WM_NULL (Windows "Not Responding"), even when the loading itself runs on a worker.
+            const bool timing = cbtime::Recorder::Instance().Enabled();
+            cbtime::Scope msgTime(timing ? std::string("UI: message ") + std::to_string(m.message) : std::string());
             DispatchMessageW(&m);
+            msgTime.Stop();
             if (NowMs() - t0 > 6.0) break;
         }
         if (quit) break;
-        Frame();
+        {
+            cbtime::Scope frameTime("UI: Frame");
+            Frame();
+        }
         const bool physicsLive = g.physics && (g.physicsMoving || g.physicsKick);   // the jiggle is still moving: repaint like a game loop
         const bool again = g.animating || g.dragPending || g.progActive.load() || physicsLive;
         if (!again) MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         else MsgWaitForMultipleObjectsEx(0, nullptr, physicsLive ? 8 : 33, QS_ALLINPUT, 0);
     }
+    // Tell any detached loader/bake workers to stop at their next cancellation
+    // point. They are never joined: shutting down must not wait for a heavy bake,
+    // and the App singleton is deliberately immortal so they cannot touch a destroyed g.
+    g.progCancel.store(true);
+    g.progActive.store(false);
     g.panel.Reset();   // GDI+ objects must go before GDI+ does
     g.wb.Reset();
     cbtime::Report();
