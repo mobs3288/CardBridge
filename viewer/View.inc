@@ -16,7 +16,7 @@ void Render(int w, int h) {
     if (!L || L->scene.parts.empty()) { g.frame.assign(static_cast<size_t>(w) * h, 0xFFE2E4E8u); return; }
     const std::vector<Mat4> partXf = PartTransforms(L->scene);   // the gizmo's edits, for the software fallback view
     g.hidden.resize(L->scene.parts.size(), 0);
-    g.effHidden = exporter::EffectiveHiddenParts(L->scene, g.hidden);
+    g.effHidden = exporter::EffectiveHiddenParts(L->scene, HiddenPartsNow(L->scene));
     // MaterialID isolate (ADR-008): only the parts using the selected material stay visible.
     if (g.viewIsolate && g.selMaterial >= 0) {
         g.effHidden.assign(L->scene.parts.size(), 1);

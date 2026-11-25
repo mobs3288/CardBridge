@@ -87,6 +87,7 @@ PoseState CapturePose() {
     PoseState st;
     st.edits = g.boneEdits;
     st.parts = g.partEdits;
+    st.deletedParts = g.deletedParts;
     st.aPose = g.aPose;
     st.aPoseDeg = g.aPoseDeg;
     return st;
@@ -95,6 +96,7 @@ PoseState CapturePose() {
 void RestorePose(const PoseState& st) {
     g.boneEdits = st.edits;
     g.partEdits = st.parts;
+    g.deletedParts = st.deletedParts;
     g.aPose = st.aPose;
     g.aPoseDeg = st.aPoseDeg;
     ApplyPoseLive();
@@ -141,6 +143,7 @@ assemble::PoseFile CurrentPoseFile() {
         if (!assemble::IsIdentity(e)) pf.bones.emplace_back(name, e);
     for (const auto& [id, e] : g.partEdits)
         if (!assemble::IsIdentity(e)) pf.parts.emplace_back(id, e);
+    pf.deletedParts.assign(g.deletedParts.begin(), g.deletedParts.end());
     return pf;
 }
 
@@ -174,6 +177,7 @@ void LoadPoseFile(const std::string& given = std::string()) {
     g.undoBaseValid = false;
     g.boneEdits.clear();
     g.partEdits.clear();
+    g.deletedParts.clear();
     size_t unknown = 0;
     for (const auto& [name, e] : pf.bones) {
         if (L->scene.boneIndex(name) < 0) { ++unknown; continue; }
@@ -186,14 +190,22 @@ void LoadPoseFile(const std::string& given = std::string()) {
         if (!found) { ++unknownParts; continue; }
         g.partEdits[id] = e;
     }
+    size_t unknownDeleted = 0;
+    for (const auto& id : pf.deletedParts) {
+        bool found = false;
+        for (const auto& p : L->scene.parts) if (p.id == id) { found = true; break; }
+        if (!found) { ++unknownDeleted; continue; }
+        g.deletedParts.insert(id);   // HiddenPartsNow applies it; the hide checkboxes stay as they were
+    }
     g.aPose = pf.aPose;
     g.aPoseDeg = pf.aPoseDegrees;
     ApplyPoseLive();
     InvalidatePanel();
     PoseChanged(before);
-    Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s), " + std::to_string(pf.parts.size() - unknownParts) + " part edit(s)" +
-        ((unknown || unknownParts) ? ", " + std::to_string(unknown + unknownParts) + " entry/entries this card does not have skipped" : std::string()),
-        (unknown || unknownParts) ? LogKind::Warn : LogKind::Good);
+    Log("loaded the pose from " + path + ": " + std::to_string(pf.bones.size() - unknown) + " bone edit(s), " + std::to_string(pf.parts.size() - unknownParts) + " part edit(s), " +
+        std::to_string(g.deletedParts.size()) + " deleted part(s)" +
+        ((unknown || unknownParts || unknownDeleted) ? ", " + std::to_string(unknown + unknownParts + unknownDeleted) + " entry/entries this card does not have skipped" : std::string()),
+        (unknown || unknownParts || unknownDeleted) ? LogKind::Warn : LogKind::Good);
 }
 
 // The physical jiggle settings changed (a Look-tab slider, a preset chip or a reset): persist them as the default for new cards, re-arm the

@@ -65,6 +65,13 @@ namespace {
 
 template <class T> void Rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
 bool IdentityXf(const Mat4& m) { const Mat4 id{}; for (int i = 0; i < 16; ++i) if (m.m[i] != id.m[i]) return false; return true; }
+// A non-uniform part resize needs the inverse transpose for normals; positions still use the matrix itself.
+Mat4 NormalXf(const Mat4& m) {
+    const Mat4 inv = inverse(m);
+    Mat4 t;
+    for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) t.m[i * 4 + j] = inv.m[j * 4 + i];
+    return t;
+}
 
 struct GVert {
     float pos[3], nrm[3], tan[4];
@@ -507,14 +514,14 @@ StructuredBuffer<SVVert> g_in : register(t0);
 StructuredBuffer<float4> g_bones : register(t1);
 RWStructuredBuffer<SVVert> g_out : register(u0);
 // The gizmo's part edit: applied in bind space, before the bones, so the part stays glued to the character.
-cbuffer PartXf : register(b0) { row_major float4x4 g_partXf; };
+cbuffer PartXf : register(b0) { row_major float4x4 g_partXf; row_major float4x4 g_partNormalXf; };
 [numthreads(64, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID) {
     uint count, stride; g_in.GetDimensions(count, stride);
     if (dtid.x >= count) return;
     SVVert v = g_in[dtid.x];
     v.pos = mul(g_partXf, float4(v.pos, 1)).xyz;
-    v.nrm = mul(g_partXf, float4(v.nrm, 0)).xyz;
+    v.nrm = normalize(mul(g_partNormalXf, float4(v.nrm, 0)).xyz);
     v.tan.xyz = mul(g_partXf, float4(v.tan.xyz, 0)).xyz;
     uint boneRows, boneStride; g_bones.GetDimensions(boneRows, boneStride);
     uint numBones = boneRows / 4u;
@@ -558,7 +565,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
         if (!ok) { Rel(skCs); return false; }
         if (!skPartCb) {
             D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = 64;
+            bd.ByteWidth = 128;   // g_partXf + g_partNormalXf
             bd.Usage = D3D11_USAGE_DEFAULT;
             bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             if (FAILED(dev->CreateBuffer(&bd, nullptr, &skPartCb))) { Rel(skCs); return false; }
@@ -612,7 +619,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     bool DispatchSkin(GpuMesh& g, int part) {
         if (!skCs || !g.restSrv || !g.posedUav || g.rest.empty()) return false;
         const Mat4 xf = part >= 0 && static_cast<size_t>(part) < partXf.size() ? partXf[static_cast<size_t>(part)] : Mat4{};
-        ctx->UpdateSubresource(skPartCb, 0, nullptr, &xf.m[0], 0, 0);
+        const Mat4 pair[2] = {xf, NormalXf(xf)};
+        ctx->UpdateSubresource(skPartCb, 0, nullptr, &pair[0].m[0], 0, 0);
         ctx->CSSetConstantBuffers(0, 1, &skPartCb);
         ID3D11ShaderResourceView* tv[2] = {g.restSrv, skBonesSrv};
         ID3D11UnorderedAccessView* tu[1] = {g.posedUav};
@@ -959,13 +967,14 @@ void GpuView::SetSkin(const std::vector<Mat4>* skin) {
         const auto& verts = I.scene->meshes[mi].vertices;
         const int part = I.scene->meshes[mi].part;
         const Mat4 px = part >= 0 && static_cast<size_t>(part) < I.partXf.size() ? I.partXf[static_cast<size_t>(part)] : Mat4{};
+        const Mat4 pnx = NormalXf(px);
         const std::vector<GVert>* src = &g.rest;
         if (posed || !IdentityXf(px)) {
             posedVerts = g.rest;
             if (!IdentityXf(px))
                 for (GVert& o : posedVerts) {
                     const Vec3 p = px.point({o.pos[0], o.pos[1], o.pos[2]});
-                    const Vec3 n = px.dir({o.nrm[0], o.nrm[1], o.nrm[2]});
+                    const Vec3 n = normalize(pnx.dir({o.nrm[0], o.nrm[1], o.nrm[2]}));
                     const Vec3 t = px.dir({o.tan[0], o.tan[1], o.tan[2]});
                     o.pos[0] = p.x; o.pos[1] = p.y; o.pos[2] = p.z;
                     o.nrm[0] = n.x; o.nrm[1] = n.y; o.nrm[2] = n.z;

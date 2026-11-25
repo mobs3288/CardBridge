@@ -72,7 +72,7 @@ void StartExport() {
     }
     const exporter::ExportFormat format = ViewerExportFormat();   // toolbar chip; native PMX documents above stay PMX-only
     const std::string library = g.settings.library, mods = g.settings.mods;
-    const std::vector<char> hiddenNow = g.hidden;
+    const std::vector<char> hiddenNow = HiddenPartsNow(L->scene);   // the hide checkboxes plus the deleted parts
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
     const assemble::JiggleSettings jiggle = g.jiggle;   // the physical settings the preview used, shared with the PMX
     const float sag = g.sag;

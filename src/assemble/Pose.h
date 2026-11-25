@@ -21,16 +21,18 @@ struct BonePose {
 bool IsIdentity(const BonePose& p);
 
 // A rigid edit of one scene part, independent of the bones that skin it. It is applied to the part's mesh vertices in bind
-// space, before skinning: the part is moved/turned with the character, not in screen space, so a body pose still carries the
-// edit with it (a shirt moved up stays on the torso when the arm goes down). `pivot` is the part's bind-space centre - the
-// point the gizmo turns it about; `pos` is the bind-space offset; `rot` composes the world-axis turns of the drags.
+// space, before skinning: the part is moved/turned/resized with the character, not in screen space, so a body pose still carries
+// the edit with it (a shirt moved up stays on the torso when the arm goes down). `pivot` is the part's bind-space centre - the
+// point the gizmo turns and scales it about; `pos` is the bind-space offset; `rot` composes the world-axis turns of the drags;
+// `scl` is the per-axis resize (1 = untouched).
 struct PartPose {
     Vec3 pos{0, 0, 0};
     Vec3 pivot{0, 0, 0};
     Mat4 rot{};
+    Vec3 scl{1, 1, 1};
 };
 bool IsIdentity(const PartPose& p);
-// Bind-space matrix: pivot + pos + rot * (v - pivot).
+// Bind-space matrix: pivot + pos + rot * scl * (v - pivot) (resize about the part's own centre).
 Mat4 PartTransform(const PartPose& p);
 // Bakes the part edits into a scene's vertices (preview and export use the same helper on their own scene copy). No-op for an
 // identity edit. Meshes belonging to other parts, and the skeleton, are never touched.
@@ -107,15 +109,17 @@ Vec3 MoveBone(const Scene& scene, const Pose& pose, size_t bone, Vec3 worldDelta
 
 // A pose as a small JSON file: per edited bone (by name) the local translation, Euler degrees and scale, plus the A-pose switch. The
 // viewer saves and loads it, `cardbridge convert --pose <file>` bakes it into the PMX like --apose does. Part gizmo edits travel
-// alongside the bones (optional "parts" object; old pose files stay valid).
+// alongside the bones (optional "parts" object; old pose files stay valid), as does the list of deleted parts.
 //   { "format": "cardbridge-pose", "version": 1, "a_pose": true, "a_pose_degrees": 40,
 //     "bones": { "cf_j_arm00_L": { "position": [0, 0, 0], "rotation_euler_degrees": [0, 0, 20], "scale": [1, 1, 1] } },
-//     "parts": { "outfit0.top": { "position": [0, 0.02, 0], "pivot": [0, 1, 0], "rotation_matrix": [16 numbers] } } }
+//     "parts": { "outfit0.top": { "position": [0, 0.02, 0], "pivot": [0, 1, 0], "rotation_matrix": [16 numbers], "scale": [1, 1, 1] } },
+//     "deleted_parts": ["hair.front"] }
 struct PoseFile {
     bool aPose = false;
     float aPoseDegrees = 40.0f;
     std::vector<std::pair<std::string, BonePose>> bones;   // edited bones only, in file order
     std::vector<std::pair<std::string, PartPose>> parts;   // edited parts only, in file order
+    std::vector<std::string> deletedParts;                // parts removed in the viewer, by id
 };
 std::string PoseFileToJson(const PoseFile& file);
 // False with `error` for text that is not a pose file (not JSON, another format or a newer version, a field of the wrong shape). A bone with

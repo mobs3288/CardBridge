@@ -1,6 +1,38 @@
 // viewer fragment: part list, skeleton (included in order by main.cpp)
 
 // ---- part list --------------------------------------------------------------------------------------------------------
+// Deleted parts are gone from the list, the live preview and the export. The set is keyed by stable part id, so undo, a pose
+// file and a re-shape all see the same decision without renumbering the scene's part indices.
+bool PartDeleted(const assemble::Scene& scene, size_t i) {
+    return i < scene.parts.size() && g.deletedParts.count(scene.parts[i].id) != 0;
+}
+
+// The viewer's hide checkboxes plus the delete set: what the renderers and the export get.
+std::vector<char> HiddenPartsNow(const assemble::Scene& scene) {
+    std::vector<char> hidden = g.hidden;
+    hidden.resize(scene.parts.size(), 0);
+    for (size_t i = 0; i < scene.parts.size(); ++i) if (PartDeleted(scene, i)) hidden[i] = 1;
+    return hidden;
+}
+
+// Removes one part from this session. The delete is part of the pose state, so Ctrl+Z (or loading a pose that does not
+// delete it) restores it; the export sees the same hidden flag the preview does.
+void DeletePart(int part) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || part < 0 || static_cast<size_t>(part) >= L->scene.parts.size()) return;
+    const std::string id = L->scene.parts[static_cast<size_t>(part)].id;
+    if (g.deletedParts.count(id)) return;
+    g.deletedParts.insert(id);   // HiddenPartsNow applies it; the hide checkbox itself is left alone so undo needs no hidden state
+    if (g.selGizmoPart == part) g.selGizmoPart = -1;
+    g.soloPart = -1;
+    CommitPoseEdit();   // the press captured the state before the delete: one undo step
+    Log("deleted " + id + "  (Ctrl+Z brings it back)");
+    g.dirty = true;
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidatePanel();
+    InvalidateFooter();
+}
+
 std::vector<PartRow> BuildRows(const Loaded& L) {
     const assemble::Scene& scene = L.scene;
     std::vector<PartRow> rows;
@@ -9,17 +41,22 @@ std::vector<PartRow> BuildRows(const Loaded& L) {
     const bool baseReplaced = L.card.hasClothing && L.card.clothingOutfit == L.outfit;
     auto addGroup = [&](const std::string& group) {
         bool any = false;
-        for (const auto& p : scene.parts) {
+        for (size_t i = 0; i < scene.parts.size(); ++i) {
+            const auto& p = scene.parts[i];
             if (DisplayGroup(p) != group || p.underPiece) continue;   // under pieces follow their garments and the Nude body box
+            if (PartDeleted(scene, i)) continue;
             if (!any) { rows.push_back({-1, group, false}); any = true; }
-            rows.push_back({static_cast<int>(&p - scene.parts.data()), group, false});
+            rows.push_back({static_cast<int>(i), group, false});
         }
         if (!any && group == "Outfit" && baseReplaced)
             rows.push_back({-1, std::string("Outfit"), true});   // the base outfit this slot replaced (kept visible, marked)
     };
     for (const char* group : order) { addGroup(group); seen.insert(group); }
-    for (const auto& p : scene.parts)
-        if (!seen.count(DisplayGroup(p)) && !p.underPiece) { addGroup(DisplayGroup(p)); seen.insert(DisplayGroup(p)); }
+    for (size_t i = 0; i < scene.parts.size(); ++i)
+        if (!seen.count(DisplayGroup(scene.parts[i])) && !scene.parts[i].underPiece && !PartDeleted(scene, i)) {
+            addGroup(DisplayGroup(scene.parts[i]));
+            seen.insert(DisplayGroup(scene.parts[i]));
+        }
     // Collapsed groups lose their part rows but keep the header (the replaced-base header is never collapsible).
     std::vector<PartRow> out;
     std::string collapsed;
@@ -44,11 +81,11 @@ int RowAt(const std::vector<PartRow>& rows, const PanelLayout& l, int x, int y) 
 void ToggleGroup(const std::string& group, assemble::Scene& scene) {
     bool allOn = true;
     for (size_t i = 0; i < scene.parts.size() && i < g.hidden.size(); ++i) {
-        if (DisplayGroup(scene.parts[i]) != group || scene.parts[i].underPiece) continue;
+        if (DisplayGroup(scene.parts[i]) != group || scene.parts[i].underPiece || PartDeleted(scene, i)) continue;
         if (g.hidden[i]) { allOn = false; break; }
     }
     for (size_t i = 0; i < scene.parts.size() && i < g.hidden.size(); ++i)
-        if (DisplayGroup(scene.parts[i]) == group && !scene.parts[i].underPiece) g.hidden[i] = allOn ? 1 : 0;
+        if (DisplayGroup(scene.parts[i]) == group && !scene.parts[i].underPiece && !PartDeleted(scene, i)) g.hidden[i] = allOn ? 1 : 0;
     g.soloPart = -1;
     // Hiding shoes re-drives the foot pitch (settleHeels reads visibleInPreview);
     // nudging the body through the same re-pose path keeps everything honest.

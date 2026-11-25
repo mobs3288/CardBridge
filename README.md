@@ -116,6 +116,7 @@ Disk space: about 20 MB of application files plus the library (~0.9 GB full, ~5 
 
 - Built-in 3D viewer (Direct3D 11, GPU-skinned; software fallback) showing exactly what the game's shaders draw
 - Visibility controls: hover to highlight, click to hide/show, right-click to solo, group fold — hidden parts are dropped from the export entirely
+- **Part editing**: every part row has move / rotate / resize gizmo chips and an `x` chip — resize a part along X/Y/Z from the view, or delete it from the preview and every export; right-click a gizmo chip to reset just that edit, `Ctrl+Z` undoes, and pose files carry the edits and deletions
 - **Bones** tab: move/rotate/scale sliders with Shift-click exact entry, A-pose preset, undo/redo (`Ctrl+Z`/`Y`), pose save/load to JSON
 - **Morphs** tab: the game's expression morphs as live 0–100 sliders, grouped like MMD's panels, with English aliases (MMD-standard names included)
 - **Body measurements (BWH)**: Bust / Waist / Hip as real measurements in centimetres — typing an exact value solves the shape to it

@@ -315,22 +315,25 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
                             s.FillRound(RECT{8, y + 4, 11, y + kRowH - 4}, 1, ui::kAccent);
                         }
                         const COLORREF col = off ? ui::kDim : !ok ? ui::kBad : ui::kText;
-                        const bool gizmo = !p.meshes.empty();   // every part with geometry gets the move / rotate chips
+                        const bool gizmo = !p.meshes.empty();   // every part with geometry gets the move / rotate / resize chips
                         CheckBox(s, 16, y + 3, !off, ok ? ui::kAccent : ui::kBad);
                         std::string name = p.nudeSwitch ? std::string("nude  (whole body, under clothes too)") : p.id;
                         if (!ok) name += "  (" + p.status + ")";
                         if (p.fromClothing) name += "  (added)";
-                        if (gizmo && GizmoPartSelected() == row.part) name += g.gizmoMode == 0 ? "  ·  xyz" : "  ·  rot";
-                        // Name and the right-aligned triangle count share the row; the two chips sit at its right end.
-                        const RECT partClip{38, y, gizmo ? kPanel - 136 : kPanel - 64, y + kRowH};
-                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, gizmo ? 30 : 44), &partClip);
+                        if (gizmo && GizmoPartSelected() == row.part)
+                            name += g.gizmoMode == 0 ? "  xyz" : g.gizmoMode == 1 ? "  rot" : "  size";
+                        // Name and the right-aligned triangle count share the row; the chips sit at its right end.
+                        const RECT partClip{38, y, gizmo ? kPanel - 164 : kPanel - 142, y + kRowH};
+                        s.Text(g.fontMono, col, 38, y + 3, ClipText(name, gizmo ? 26 : 32), &partClip);
                         const std::string tris = Count(static_cast<size_t>(row.part) < L->partTriangles.size() ? L->partTriangles[static_cast<size_t>(row.part)] : 0);
-                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, gizmo ? kPanel - 70 : kPanel - 16, y + 4, tris);
+                        s.TextRight(g.fontSmall, off ? ui::kFaint : ui::kDim, kPanel - 122, y + 4, tris);
                         if (gizmo) {
                             const bool sel = GizmoPartSelected() == row.part;
+                            DrawGizmoScaleChip(s, y, sel && g.gizmoMode == 2, g.hoverScaleChip == idx);
                             DrawGizmoRotateChip(s, y, sel && g.gizmoMode == 1, g.hoverRotChip == idx);
                             DrawGizmoChip(s, y, sel && g.gizmoMode == 0, g.hoverAccChip == idx);
                         }
+                        DrawDeleteChip(s, y, g.hoverDeleteChip == idx);
                     }
                 }
                 ScrollBar(s, l.partsTop, l.partsBottom, static_cast<int>(rows.size()), visible, g.partPos);
@@ -386,7 +389,9 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         } else if (const int acc = GizmoPartSelected(); acc >= 0 && L && static_cast<size_t>(acc) < L->scene.parts.size()) {
             hint = g.gizmoMode == 0
                 ? "gizmo move  ·  drag an axis to move " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its move chip to reset  ·  Esc deselects"
-                : "gizmo rotate  ·  drag a ring to rotate " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its rotate chip to reset  ·  Esc deselects";
+                : g.gizmoMode == 1
+                ? "gizmo rotate  ·  drag a ring to rotate " + L->scene.parts[static_cast<size_t>(acc)].id + "  ·  right-click its rotate chip to reset  ·  Esc deselects"
+                : "gizmo resize  ·  drag a square handle along X/Y/Z  ·  right-click its resize chip to reset  ·  Esc deselects";
         } else if (!modsInfo.empty() && !L) {
             hint = modsInfo;
         }
@@ -607,6 +612,7 @@ void ResetView(float yaw) { g.cam = {}; g.cam.yawDeg = yaw; g.dirty = true; Inva
 
 void ShowAll() {
     g.hidden.assign(g.hidden.size(), 0);
+    g.deletedParts.clear();   // "show every part" also brings back rows deleted with the x chip
     g.soloPart = -1;
     for (auto L = Current(); L; L = nullptr)
         for (size_t i = 0; i < L->scene.parts.size(); ++i)

@@ -109,6 +109,7 @@ add_library(cardbridge_core STATIC
     src/export/SkeletonOverlay.cpp
     src/export/MoveGizmo.cpp
     src/export/RotateGizmo.cpp
+    src/export/ScaleGizmo.cpp
     src/export/OutfitIcon.cpp
     src/export/OutfitTemplate.cpp
     src/export/Preview.cpp

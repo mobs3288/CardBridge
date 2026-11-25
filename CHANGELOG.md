@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.10.0] - 2026-11-25
+
+### Added
+
+- **Delete and resize any part in the viewer.** Every part row now has an `x` chip: it removes that part from the live preview and from every export (PMX, glTF/GLB, OBJ), and the row disappears from the list. Deletes are part of the pose state, so `Ctrl+Z` restores them, "show every part" clears them, and pose files carry them (`deleted_parts`) for older files to stay valid. Each part with geometry also gains a third gizmo chip: drag a square X/Y/Z handle in the view to resize the part along that axis about its own bind-space centre. The scale rides with the bones like the existing move/rotate edits, is baked into the exported scene, survives save/load and undo, and right-clicking the chip resets just the scale (move and rotation are kept). Positions, normals and tangents use the inverse transpose under non-uniform scaling in both the Direct3D and software previews. 19,503 unit checks plus 100 format checks pass.
+
 ## [0.9.4] - 2026-11-25
 
 ### Changed

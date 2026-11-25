@@ -4412,6 +4412,41 @@ void unitTests() {
         CHECK(!PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"parts":{"x":{"rotation_matrix":[1,2,3]}}})", back, &err));
     });
 
+    test("part resize: scales about the pivot, keeps normals correct and round-trips through the pose file", [] {
+        using namespace assemble;
+        auto near = [](Vec3 a, Vec3 b, float eps = 1e-4f) { return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps; };
+        PartPose size;
+        size.pivot = {1, 0, 0};
+        size.scl = {2, 0.5f, 3};
+        CHECK(!IsIdentity(size));
+        CHECK(near(PartTransform(size).point({2, 2, 3}), {3, 1, 9}, 1e-5f));   // pivot + scl * (v - pivot)
+        // A turned then resized part: rotation still composes with the resize.
+        PartPose both = size;
+        both.rot = RotationAxisAngle({0, 0, 1}, 1.5707963f);
+        CHECK(near(PartTransform(both).point({1, 2, 3}), {0, 0, 9}, 1e-5f));
+
+        Scene s;
+        ScenePart sp; sp.id = "outfit0.top"; sp.group = "Outfit"; s.parts.push_back(sp);
+        SceneMesh m; SceneVertex v; v.pos = {2, 2, 3}; v.normal = normalize({1, 1, 0}); m.vertices.push_back(v);
+        m.part = 0; s.meshes.push_back(m); s.parts[0].meshes.push_back(0);
+        std::map<std::string, PartPose> edits;
+        edits["outfit0.top"] = size;
+        ApplyPartTransforms(s, edits);
+        CHECK(near(s.meshes[0].vertices[0].pos, {3, 1, 9}, 1e-5f));
+        CHECK(near(s.meshes[0].vertices[0].normal, normalize({0.5f, 2.0f, 0.0f}), 1e-4f));   // inverse transpose, not the matrix itself
+
+        PoseFile f;
+        f.parts.emplace_back("outfit0.top", size);
+        f.deletedParts.push_back("hair.front");
+        std::string err;
+        PoseFile back;
+        CHECK(PoseFileFromJson(PoseFileToJson(f), back, &err));
+        CHECK(back.parts.size() == 1 && near(back.parts[0].second.scl, size.scl, 1e-6f));
+        CHECK(back.deletedParts.size() == 1 && back.deletedParts[0] == "hair.front");
+        CHECK(PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"parts":{"x":{"position":[0,0,0],"pivot":[0,0,0]}}})", back, &err) && IsIdentity(back.parts[0].second));
+        CHECK(!PoseFileFromJson(R"({"format":"cardbridge-pose","version":1,"deleted_parts":[7]})", back, &err));
+    });
+
     test("dragging a bone: turns about world axes keep the parent and A-pose frames, Euler round trip", [] {
         using namespace assemble;
         // Euler -> matrix -> Euler comes back (away from the poles)

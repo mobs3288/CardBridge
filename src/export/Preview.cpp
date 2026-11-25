@@ -816,6 +816,11 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
             const bool partMoved = opt.partTransform && part >= 0 && static_cast<size_t>(part) < opt.partTransform->size();
             const Mat4 xf = partMoved ? (*opt.partTransform)[static_cast<size_t>(part)] : Mat4{};
             const bool moved = partMoved && !detail::IdentityPartXf(xf);
+            Mat4 normalXf;
+            if (moved) {   // a non-uniform resize needs the inverse transpose for normals
+                const Mat4 inv = inverse(xf);
+                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) normalXf.m[i * 4 + j] = inv.m[j * 4 + i];
+            }
             // The live morphs' offsets ride on the copied mesh, before the pose (bind-space, like the game).
             // The part edit is applied next, also in bind space, so it stays glued to the character through the skin.
             const std::vector<Vec3>* md = morphedMesh(mi) ? &(*opt.morphDelta)[static_cast<size_t>(mi)] : nullptr;
@@ -829,7 +834,7 @@ void RenderView(const assemble::Scene& scene, const ViewCamera& cam, int W, int 
                 if (moved)
                     for (auto& v : vm.posed.vertices) {
                         v.pos = xf.point(v.pos);
-                        v.normal = normalize(xf.dir(v.normal));
+                        v.normal = normalize(normalXf.dir(v.normal));
                     }
                 if (posed)
                     for (auto& v : vm.posed.vertices) {

@@ -1,9 +1,9 @@
-// viewer fragment: the part move/rotate gizmo (included in order by main.cpp, after Parts.inc)
-// Every part row offers two chips: a move cross (arrows in the view) and a rotate ring (rings in the view). Only the picked
-// gizmo is drawn; both leave their edits on the same part. The edit is a rigid transform of that part's own vertices in bind
-// space, applied before the skin matrices in the preview (GpuView / RenderView) and baked into the scene copy at export.
-// That way a garment skinned to the body's bones can be moved alone, yet stays glued to the character through any bone pose,
-// and undo / save / load / the PMX all see it. The pivot is the part's bind-space centre: rotations turn around it.
+// viewer fragment: the part move/rotate/resize gizmo (included in order by main.cpp, after Parts.inc)
+// Every part row offers three gizmo chips: a move cross (arrows), a rotate ring (rings) and a resize square (axis handles).
+// Only the picked gizmo is drawn; all three leave their edits on the same part. The edit is a transform of that part's own
+// vertices in bind space, applied before the skin matrices in the preview (GpuView / RenderView) and baked into the scene
+// copy at export. That way a garment skinned to the body's bones can be moved, turned or resized alone, yet stays glued to
+// the character through any bone pose, and undo / save / load / the PMX all see it. The pivot is the part's bind-space centre.
 
 inline Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }   // the core header has no Vec3 minus (as in measure/BodyMeasure.cpp)
 
@@ -134,6 +134,34 @@ bool RotatePartGizmo(int axis, float radians) {
     return true;
 }
 
+// Resizes the part's edit along one of its own bind-space axes. The handle drag is in screen pixels, converted to a factor
+// by the handle's projected length, so the part grows by the same amount the pointer moves along the axis. Scaling happens
+// about the same pivot the rotation uses; the skin still carries the result through any bone pose.
+bool ScalePartGizmo(int axis, float factor) {
+    std::shared_ptr<Loaded> L = Current();
+    const int pi = GizmoPartSelected();
+    if (!L || pi < 0 || axis < 0 || axis > 2 || !(factor > 0.0f) || factor == 1.0f) return false;
+    assemble::PartPose& e = PartEditFor(pi);
+    float* scl[3] = {&e.scl.x, &e.scl.y, &e.scl.z};
+    const float next = std::clamp(*scl[static_cast<size_t>(axis)] * factor, 0.02f, 50.0f);
+    if (next == *scl[static_cast<size_t>(axis)]) return false;
+    *scl[static_cast<size_t>(axis)] = next;
+    return true;
+}
+
+// Applies the pointer movement of the current resize drag once per picture (like the move and rotate drags).
+void DragScaleGizmo(float dx, float dy) {
+    if (g.scaleGizmoAxis < 0 || g.scaleGizmoAxis > 2) return;
+    const int a = g.scaleGizmoAxis;
+    const float px = std::max(12.0f, g.scaleGizmoState.axisLen[a]);
+    const float d = dx * g.scaleGizmoState.dirX[a] + dy * g.scaleGizmoState.dirY[a];
+    const float safe = std::clamp(d / px, -0.5f, 0.5f);   // never a huge jump for a nearly edge-on handle
+    const float factor = 1.0f + safe;
+    if (!ScalePartGizmo(a, factor)) return;
+    g.scaleGizmoAcc[a] *= factor;
+    ApplyPoseLive();
+}
+
 // Applies the pointer movement of the current gizmo drag as a move along the grabbed axis (once per picture, like a bone drag).
 void DragPartGizmo(float dx, float dy) {
     if (g.gizmoAxis < 0 || g.gizmoAxis > 2) return;
@@ -202,10 +230,25 @@ void ResetPartRot(int part) {
     Log("reset the rotation of " + L->scene.parts[static_cast<size_t>(part)].id);
 }
 
+void ResetPartScale(int part) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || part < 0 || static_cast<size_t>(part) >= L->scene.parts.size()) return;
+    const auto it = g.partEdits.find(L->scene.parts[static_cast<size_t>(part)].id);
+    if (it == g.partEdits.end() || (it->second.scl.x == 1 && it->second.scl.y == 1 && it->second.scl.z == 1)) {
+        Log(L->scene.parts[static_cast<size_t>(part)].id + " has no resize edit");
+        return;
+    }
+    it->second.scl = {1, 1, 1};
+    if (assemble::IsIdentity(it->second)) g.partEdits.erase(it);
+    ApplyPoseLive();
+    Log("reset the scale of " + L->scene.parts[static_cast<size_t>(part)].id);
+}
+
 // Burns the gizmo into the finished picture (like the skeleton overlay). Called from Render after it has drawn the scene.
 void DrawPartGizmo(int w, int h) {
     g.gizmoState = exporter::MoveGizmoState{};
     g.rotGizmoState = exporter::RotateGizmoState{};
+    g.scaleGizmoState = exporter::ScaleGizmoState{};
     std::shared_ptr<Loaded> L = Current();
     const int pi = GizmoPartSelected();
     if (!L || pi < 0 || !g.lastGpu) return;
@@ -216,23 +259,32 @@ void DrawPartGizmo(int w, int h) {
     if (!PartGizmoOrigin(*L, origin)) return;
     if (g.gizmoMode == 0)
         g.gizmoState = exporter::DrawMoveGizmo(*g.lastGpu, g.frame, w, h, origin, g.gizmoHoverAxis, g.gizmoAxis);
-    else
+    else if (g.gizmoMode == 1)
         g.rotGizmoState = exporter::DrawRotateGizmo(*g.lastGpu, g.frame, w, h, origin, g.rotGizmoHoverAxis, g.rotGizmoAxis);
+    else
+        g.scaleGizmoState = exporter::DrawScaleGizmo(*g.lastGpu, g.frame, w, h, origin, g.scaleGizmoHoverAxis, g.scaleGizmoAxis);
 }
 
 // True when the gizmo the current mode picks was drawn in the last picture (and could be picked).
-bool PartGizmoDrawn() { return g.gizmoMode == 0 ? g.gizmoState.ox >= 0.0f : g.rotGizmoState.ox >= 0.0f; }
-
-// The axis (arrow or ring, whichever the mode picks) nearest to a point within `radius` pixels; -1 for none.
-int PickPartGizmoAxis(float x, float y, float radius) {
-    if (g.gizmoMode == 0) return exporter::PickMoveGizmoAxis(g.gizmoState, x, y, radius);
-    return exporter::PickRotateGizmoAxis(g.rotGizmoState, x, y, radius);
+bool PartGizmoDrawn() {
+    if (g.gizmoMode == 0) return g.gizmoState.ox >= 0.0f;
+    if (g.gizmoMode == 1) return g.rotGizmoState.ox >= 0.0f;
+    return g.scaleGizmoState.ox >= 0.0f;
 }
 
-// The chips that select a part for a gizmo: a "move" cross and a "rotate" arc on the row.
+// The axis (arrow, ring or square handle, whichever the mode picks) nearest to a point within `radius` pixels; -1 for none.
+int PickPartGizmoAxis(float x, float y, float radius) {
+    if (g.gizmoMode == 0) return exporter::PickMoveGizmoAxis(g.gizmoState, x, y, radius);
+    if (g.gizmoMode == 1) return exporter::PickRotateGizmoAxis(g.rotGizmoState, x, y, radius);
+    return exporter::PickScaleGizmoAxis(g.scaleGizmoState, x, y, radius);
+}
+
+// The chips that select a part for a gizmo: a "move" cross, a "rotate" arc and a "resize" square on the row.
 constexpr int kAccChipW = 22, kAccChipH = 14;
 RECT GizmoChipRect(int rowTop) { return RECT{kPanel - 34, rowTop + 3, kPanel - 34 + kAccChipW, rowTop + 3 + kAccChipH}; }
 RECT GizmoRotateChipRect(int rowTop) { return RECT{kPanel - 62, rowTop + 3, kPanel - 62 + kAccChipW, rowTop + 3 + kAccChipH}; }
+RECT GizmoScaleChipRect(int rowTop) { return RECT{kPanel - 90, rowTop + 3, kPanel - 90 + kAccChipW, rowTop + 3 + kAccChipH}; }
+RECT DeleteChipRect(int rowTop) { return RECT{kPanel - 116, rowTop + 3, kPanel - 116 + kAccChipW, rowTop + 3 + kAccChipH}; }
 
 void DrawGizmoChip(ui::Surface& s, int y, bool selected, bool hot) {
     const RECT r = GizmoChipRect(y);
@@ -268,4 +320,28 @@ void DrawGizmoRotateChip(ui::Surface& s, int y, bool selected, bool hot) {
     const float tx = -std::sin(ea), ty = std::cos(ea);   // the tangent (increasing angle)
     const float bx = std::cos(ea), by = std::sin(ea);    // the outward radius
     s.FillTriangle(ex + tx * 2.8f, ey + ty * 2.8f, ex + bx * 2.1f, ey + by * 2.1f, ex - bx * 2.1f, ey - by * 2.1f, ink);
+}
+
+// A little square at a corner of the chip: the resize handle's shape in the view.
+void DrawGizmoScaleChip(ui::Surface& s, int y, bool selected, bool hot) {
+    const RECT r = GizmoScaleChipRect(y);
+    const COLORREF ink = selected ? ui::kOnAccent : (hot ? ui::kAccentHi : ui::kSub);
+    s.FillRound(r, ui::kRad, selected ? ui::kAccent : (hot ? ui::kSelect : ui::kCard));
+    s.StrokeRound(r, ui::kRad, selected ? ui::kAccent : (hot ? ui::kAccent : ui::kLine));
+    const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f, a = 4.0f;
+    s.Line(cx - a, cy - a, cx + a, cy - a, ink, 1.4f);
+    s.Line(cx + a, cy - a, cx + a, cy + a, ink, 1.4f);
+    s.Line(cx + a, cy + a, cx - a, cy + a, ink, 1.4f);
+    s.Line(cx - a, cy + a, cx - a, cy - a, ink, 1.4f);
+}
+
+// The x chip removes the part from the scene and the export. Undo (Ctrl+Z) brings it back.
+void DrawDeleteChip(ui::Surface& s, int y, bool hot) {
+    const RECT r = DeleteChipRect(y);
+    const COLORREF ink = hot ? ui::kBad : ui::kSub;
+    s.FillRound(r, ui::kRad, hot ? ui::kSelect : ui::kCard);
+    s.StrokeRound(r, ui::kRad, hot ? ui::kBad : ui::kLine);
+    const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f, a = 3.6f;
+    s.Line(cx - a, cy - a, cx + a, cy + a, ink, 1.4f);
+    s.Line(cx + a, cy - a, cx - a, cy + a, ink, 1.4f);
 }

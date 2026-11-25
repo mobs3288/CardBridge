@@ -30,6 +30,7 @@ bool IsIdentity(const BonePose& p) {
 
 bool IsIdentity(const PartPose& p) {
     if (p.pos.x != 0 || p.pos.y != 0 || p.pos.z != 0) return false;
+    if (p.scl.x != 1 || p.scl.y != 1 || p.scl.z != 1) return false;
     const Mat4 id{};
     for (int i = 0; i < 16; ++i) if (p.rot.m[i] != id.m[i]) return false;
     return true;
@@ -38,8 +39,21 @@ bool IsIdentity(const PartPose& p) {
 Mat4 PartTransform(const PartPose& p) {
     const Mat4 toPivot = Mat4::TRS(p.pivot * -1.0f, Quat{}, Vec3{1, 1, 1});
     const Mat4 fromPivot = Mat4::TRS(p.pivot + p.pos, Quat{}, Vec3{1, 1, 1});
-    return fromPivot * p.rot * toPivot;
+    const Mat4 scale = Mat4::TRS(Vec3{}, Quat{}, p.scl);   // resize in the part's own axes, about its centre
+    return fromPivot * p.rot * scale * toPivot;
 }
+
+namespace {
+// Normals under a non-uniform resize follow the inverse transpose, not the transform itself. The part transform is
+// invertible (scl is clamped away from zero), so this is exact; identity edits take the same path harmlessly.
+Mat4 normalMatrix(const Mat4& m) {
+    const Mat4 inv = inverse(m);
+    Mat4 t;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) t.m[i * 4 + j] = inv.m[j * 4 + i];
+    return t;
+}
+} // namespace
 
 void ApplyPartTransforms(Scene& scene, const std::map<std::string, PartPose>& edits) {
     if (edits.empty()) return;
@@ -47,16 +61,17 @@ void ApplyPartTransforms(Scene& scene, const std::map<std::string, PartPose>& ed
         const auto it = edits.find(scene.parts[pi].id);
         if (it == edits.end() || IsIdentity(it->second)) continue;
         const Mat4 xf = PartTransform(it->second);
+        const Mat4 nm = normalMatrix(xf);
         for (int mi : scene.parts[pi].meshes) {
             if (mi < 0 || static_cast<size_t>(mi) >= scene.meshes.size()) continue;
             SceneMesh& mesh = scene.meshes[static_cast<size_t>(mi)];
             for (auto& v : mesh.vertices) {
                 if (std::isfinite(v.pos.x) && std::isfinite(v.pos.y) && std::isfinite(v.pos.z)) v.pos = xf.point(v.pos);
-                if (std::isfinite(v.normal.x) && std::isfinite(v.normal.y) && std::isfinite(v.normal.z)) v.normal = normalize(xf.dir(v.normal));
+                if (std::isfinite(v.normal.x) && std::isfinite(v.normal.y) && std::isfinite(v.normal.z)) v.normal = normalize(nm.dir(v.normal));
                 if (!mesh.reshapable) continue;
                 for (int k = 0; k < 4; ++k) {
                     if (std::isfinite(v.local[k].x)) v.local[k] = xf.point(v.local[k]);
-                    if (std::isfinite(v.nlocal[k].x)) v.nlocal[k] = normalize(xf.dir(v.nlocal[k]));
+                    if (std::isfinite(v.nlocal[k].x)) v.nlocal[k] = normalize(nm.dir(v.nlocal[k]));
                 }
             }
             for (auto& shape : mesh.shapes) {
@@ -548,9 +563,11 @@ std::string PoseFileToJson(const PoseFile& file) {
         for (const auto& [id, e] : file.parts) {
             json mat = json::array();
             for (float x : e.rot.m) mat.push_back(x);
-            j["parts"][id] = {{"position", {e.pos.x, e.pos.y, e.pos.z}}, {"pivot", {e.pivot.x, e.pivot.y, e.pivot.z}}, {"rotation_matrix", mat}};
+            j["parts"][id] = {{"position", {e.pos.x, e.pos.y, e.pos.z}}, {"pivot", {e.pivot.x, e.pivot.y, e.pivot.z}},
+                              {"rotation_matrix", mat}, {"scale", {e.scl.x, e.scl.y, e.scl.z}}};
         }
     }
+    if (!file.deletedParts.empty()) j["deleted_parts"] = file.deletedParts;
     return j.dump(2) + "\n";
 }
 
@@ -591,7 +608,7 @@ bool PoseFileFromJson(const std::string& text, PoseFile& out, std::string* error
         };
         for (const auto& [name, b] : j["parts"].items()) {
             PartPose e;
-            if (!b.is_object() || !vec(b, "position", e.pos) || !vec(b, "pivot", e.pivot)) return fail("part \"" + name + "\" needs position and pivot as three numbers each");
+            if (!b.is_object() || !vec(b, "position", e.pos) || !vec(b, "pivot", e.pivot) || !vec(b, "scale", e.scl)) return fail("part \"" + name + "\" needs position and pivot as three numbers each, and scale when present");
             if (b.contains("rotation_matrix")) {
                 const json& a = b["rotation_matrix"];
                 if (!a.is_array() || a.size() != 16) return fail("part \"" + name + "\" has a rotation_matrix that is not 16 numbers");
@@ -601,6 +618,13 @@ bool PoseFileFromJson(const std::string& text, PoseFile& out, std::string* error
                 }
             }
             f.parts.emplace_back(name, e);
+        }
+    }
+    if (j.contains("deleted_parts")) {
+        if (!j["deleted_parts"].is_array()) return fail("\"deleted_parts\" is not an array");
+        for (const json& id : j["deleted_parts"]) {
+            if (!id.is_string()) return fail("\"deleted_parts\" has an entry that is not a string");
+            f.deletedParts.push_back(id.get<std::string>());
         }
     }
     out = std::move(f);

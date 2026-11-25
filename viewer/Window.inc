@@ -69,27 +69,31 @@ void PanelListClick(int x, int y, const PanelLayout& l) {
             }
             return;
         }
+        const int ry = l.partsTop + idx * kRowH - ScrollPx(g.partPos);
+        const POINT cp{x, y};
+        const RECT delChip = DeleteChipRect(ry);
+        if (PtInRect(&delChip, cp)) { DeletePart(row.part); return; }   // x chip: gone from preview and export
         if (static_cast<size_t>(row.part) >= g.hidden.size()) return;
         {
             const auto& pp = L->scene.parts[static_cast<size_t>(row.part)];
             if (!pp.meshes.empty()) {   // every part with geometry offers the gizmo chips
-                const int ry = l.partsTop + idx * kRowH - ScrollPx(g.partPos);
-                const POINT cp{x, y};
                 const RECT chip = GizmoChipRect(ry);
                 const RECT rotChip = GizmoRotateChipRect(ry);
-                const bool moveHit = PtInRect(&chip, cp), rotHit = PtInRect(&rotChip, cp);
-                if (moveHit || rotHit) {   // the gizmo chips, not the hide/show toggle
-                    const int mode = moveHit ? 0 : 1;
+                const RECT scaleChip = GizmoScaleChipRect(ry);
+                const bool moveHit = PtInRect(&chip, cp), rotHit = PtInRect(&rotChip, cp), scaleHit = PtInRect(&scaleChip, cp);
+                if (moveHit || rotHit || scaleHit) {   // the gizmo chips, not the hide/show toggle
+                    const int mode = moveHit ? 0 : rotHit ? 1 : 2;
                     const bool sel = GizmoPartSelected() == row.part && g.gizmoMode == mode;
                     g.selGizmoPart = sel ? -1 : row.part;
                     if (!sel) g.gizmoMode = mode;   // switching chips switches the gizmo; deselecting keeps the last mode
                     if (sel) Log("gizmo off (" + pp.id + ")");
                     else {
                         if (mode == 0) Log("gizmo move: " + pp.id + "  (drag an axis in the view, X/Y/Z; right-click the move chip to reset)");
-                        else Log("gizmo rotate: " + pp.id + "  (drag a ring in the view, X/Y/Z; right-click the rotate chip to reset)");
+                        else if (mode == 1) Log("gizmo rotate: " + pp.id + "  (drag a ring in the view, X/Y/Z; right-click the rotate chip to reset)");
+                        else Log("gizmo resize: " + pp.id + "  (drag a square handle in the view, X/Y/Z; right-click the resize chip to reset)");
                         if (!g.gpuOk && !(g.showExp && g.expOk)) Log("the gizmo needs the Direct3D view", LogKind::Warn);
                     }
-                    g.gizmoHoverAxis = g.rotGizmoHoverAxis = -1;   // the pointer is over the panel, not over an axis of the new gizmo
+                    g.gizmoHoverAxis = g.rotGizmoHoverAxis = g.scaleGizmoHoverAxis = -1;   // the pointer is over the panel, not over an axis of the new gizmo
                     g.dirty = true;
                     InvalidateRect(g.hwnd, nullptr, FALSE);
                     InvalidatePanel();
@@ -157,6 +161,11 @@ void ApplyPending() {
         InvalidateList();
     } else if (g.drag == 7) {
         DragPartRotateGizmo();
+        InvalidateList();
+    } else if (g.drag == 8 && (g.scaleGizmoDragDx != 0.0f || g.scaleGizmoDragDy != 0.0f)) {
+        const float dx = g.scaleGizmoDragDx, dy = g.scaleGizmoDragDy;
+        g.scaleGizmoDragDx = g.scaleGizmoDragDy = 0.0f;
+        DragScaleGizmo(dx, dy);
         InvalidateList();
     }
 }
@@ -360,7 +369,7 @@ void DumpTestLayout() {
     j["clothingApplied"] = L ? L->clothing : std::string();
     j["state"] = {{"loaded", L != nullptr}, {"busy", g.busy.load()}, {"gpu", g.gpuOk}, {"physics", g.physics}, {"aPose", g.aPose}, {"showBones", g.showBones},
                   {"diagMode", g.gpu.DiagnosticMode()}, {"diagError", g.gpu.DiagnosticError()},
-                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}, {"camYaw", g.cam.yawDeg}, {"camPitch", g.cam.pitchDeg}, {"camZoom", g.cam.zoom}, {"drag", g.drag}, {"selGizmoPart", g.selGizmoPart}, {"gizmoMode", g.gizmoMode}, {"axesHover", g.viewHoverBall}};
+                  {"showExp", g.showExp}, {"expOk", g.expOk}, {"exporting", g.exporting.load()}, {"undo", g.undoStack.size()}, {"redo", g.redoStack.size()}, {"edits", static_cast<size_t>(std::count_if(g.boneEdits.begin(), g.boneEdits.end(), [](const auto& e) { return !assemble::IsIdentity(e.second); }))}, {"selBone", g.selBoneName}, {"selMaterial", g.selMaterial}, {"matUndo", g.mat.undoStack.size()}, {"matRedo", g.mat.redoStack.size()}, {"matOverrides", g.mat.OverrideCount()}, {"camYaw", g.cam.yawDeg}, {"camPitch", g.cam.pitchDeg}, {"camZoom", g.cam.zoom}, {"drag", g.drag}, {"selGizmoPart", g.selGizmoPart}, {"gizmoMode", g.gizmoMode}, {"partEdits", g.partEdits.size()}, {"deletedParts", g.deletedParts.size()}, {"axesHover", g.viewHoverBall}};
     if (L) j["state"]["bones"] = L->scene.bones.size();
     {   // the loading bar: title / stage / fraction so scripted runs can check it
         const ProgSnapshot ps = GetProgSnapshot();
@@ -562,9 +571,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.soloPart = -1;
         g.selGizmoPart = -1;   // the scene is new: the gizmo's part index means nothing now
         g.partEdits.clear();   // ... and neither do the old part ids
+        g.deletedParts.clear();
         g.gizmoHoverAxis = g.gizmoAxis = -1;
         g.rotGizmoHoverAxis = g.rotGizmoAxis = -1;
-        g.hoverAccChip = g.hoverRotChip = -1;
+        g.scaleGizmoHoverAxis = g.scaleGizmoAxis = -1;
+        g.hoverAccChip = g.hoverRotChip = g.hoverScaleChip = g.hoverDeleteChip = -1;
         g.state = exporter::NewViewState();
         g.gpuOk = false;
         g.gpuScene.reset();
@@ -620,7 +631,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else { g.morphCatalog = {}; g.morphWeights.clear(); g.morphDelta.clear(); g.gpu.SetMorphDelta(nullptr); g.gpuExp.SetMorphDelta(nullptr); }
         morphScope.Stop();
         if (!g.expBusy.load()) ProgEnd();   // only close the bar here when no exported-preview bake is in flight (WM_EXP_READY closes it)
-        if (L && !g.applyKeep) { g.boneEdits.clear(); g.partEdits.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
+        if (L && !g.applyKeep) { g.boneEdits.clear(); g.partEdits.clear(); g.deletedParts.clear(); g.undoStack.clear(); g.redoStack.clear(); g.selBoneName.clear(); g.boneScroll = 0; g.bonePos = 0; SeedOpenBones(L->scene); }
         else if (L && g.openBones.empty()) SeedOpenBones(L->scene);
         // Materials: capture a fresh baseline for the new character.
         if (L) {
@@ -819,12 +830,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g.gizmoAcc[0] = g.gizmoAcc[1] = g.gizmoAcc[2] = 0.0f;
                     g.gizmoDragDx = g.gizmoDragDy = 0.0f;
                     g.drag = 4;
-                } else {
+                } else if (g.gizmoMode == 1) {
                     g.rotGizmoAxis = axis;
                     g.rotGizmoAcc[0] = g.rotGizmoAcc[1] = g.rotGizmoAcc[2] = 0.0f;
                     g.rotGizmoPtrX = float(x - kPanel); g.rotGizmoPtrY = float(y);
                     exporter::RotateGizmoPointerAngle(g.rotGizmoState, axis, g.rotGizmoPtrX, g.rotGizmoPtrY, g.rotGizmoTheta);   // if it fails, the drag just holds the edit
                     g.drag = 7;
+                } else {
+                    g.scaleGizmoAxis = axis;
+                    g.scaleGizmoAcc[0] = g.scaleGizmoAcc[1] = g.scaleGizmoAcc[2] = 1.0f;
+                    g.scaleGizmoDragDx = g.scaleGizmoDragDy = 0.0f;
+                    g.drag = 8;
                 }
                 InvalidateView();
                 return 0;
@@ -871,6 +887,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         if (PtInRect(&chip, cp)) { ResetPartMove(part); g.dirty = true; InvalidateView(); InvalidatePanel(); InvalidateFooter(); return 0; }   // right-click the move chip resets the move
                         const RECT rotChip = GizmoRotateChipRect(ry);
                         if (PtInRect(&rotChip, cp)) { ResetPartRot(part); g.dirty = true; InvalidateView(); InvalidatePanel(); InvalidateFooter(); return 0; }   // right-click the rotate chip resets the rotation
+                        const RECT scaleChip = GizmoScaleChipRect(ry);
+                        if (PtInRect(&scaleChip, cp)) { ResetPartScale(part); g.dirty = true; InvalidateView(); InvalidatePanel(); InvalidateFooter(); return 0; }   // right-click the resize chip resets the scale
                     }
                     if (g.soloPart == part) {
                         g.hidden.assign(g.hidden.size(), 0);
@@ -989,6 +1007,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.dragPending = true;
             return 0;
         }
+        if (g.drag == 8) {
+            g.scaleGizmoDragDx += static_cast<float>(x - g.last.x);
+            g.scaleGizmoDragDy += static_cast<float>(y - g.last.y);
+            g.last = {x, y};
+            g.lastInput = GetTickCount64();
+            g.dragPending = true;
+            return 0;
+        }
         if (g.drag) {
             float dx = static_cast<float>(x - g.last.x), dy = static_cast<float>(y - g.last.y);
             if (g.drag == 1) { g.cam.yawDeg -= dx * 0.5f; g.cam.pitchDeg = std::max(-89.0f, std::min(89.0f, g.cam.pitchDeg - dy * 0.5f)); }
@@ -1025,30 +1051,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const int ri = (y - l.boneListTop + ScrollPx(g.bonePos)) / kRowH;
                 if (ri >= 0 && static_cast<size_t>(ri) < rows.size()) hoverBone = rows[static_cast<size_t>(ri)].bone;
             }
-        int hoverAcc = -1, hoverRot = -1;   // the row of the accessory chips under the pointer, -1 = none
+        int hoverAcc = -1, hoverRot = -1, hoverScale = -1, hoverDelete = -1;   // the row of the part chips under the pointer, -1 = none
         {
-            const int oldChip = g.hoverAccChip, oldRotChip = g.hoverRotChip;
+            const int oldChip = g.hoverAccChip, oldRotChip = g.hoverRotChip, oldScaleChip = g.hoverScaleChip, oldDeleteChip = g.hoverDeleteChip;
             if (x < kPanel && g.tab == TabParts && !g.showIssues)
                 if (std::shared_ptr<Loaded> LL = Current(); LL && !LL->NativePmx()) {
                     std::vector<PartRow> rows = BuildRows(*LL);
                     int idx = RowAt(rows, l, x, y);
                     if (idx >= 0) {
                         const PartRow& rr = rows[static_cast<size_t>(idx)];
-                        if (rr.part >= 0 && !LL->scene.parts[static_cast<size_t>(rr.part)].meshes.empty()) {
+                        if (rr.part >= 0) {
                             const int ry = l.partsTop + idx * kRowH - ScrollPx(g.partPos);
                             const POINT cp{x, y};
-                            const RECT chip = GizmoChipRect(ry);
-                            if (PtInRect(&chip, cp)) hoverAcc = idx;
-                            const RECT rotChip = GizmoRotateChipRect(ry);
-                            if (PtInRect(&rotChip, cp)) hoverRot = idx;
+                            const RECT delChip = DeleteChipRect(ry);
+                            if (PtInRect(&delChip, cp)) hoverDelete = idx;
+                            if (!LL->scene.parts[static_cast<size_t>(rr.part)].meshes.empty()) {
+                                const RECT chip = GizmoChipRect(ry);
+                                if (PtInRect(&chip, cp)) hoverAcc = idx;
+                                const RECT rotChip = GizmoRotateChipRect(ry);
+                                if (PtInRect(&rotChip, cp)) hoverRot = idx;
+                                const RECT scaleChip = GizmoScaleChipRect(ry);
+                                if (PtInRect(&scaleChip, cp)) hoverScale = idx;
+                            }
                         }
                     }
                 }
             g.hoverAccChip = hoverAcc;
             g.hoverRotChip = hoverRot;
-            if (oldChip != g.hoverAccChip || oldRotChip != g.hoverRotChip) {
+            g.hoverScaleChip = hoverScale;
+            g.hoverDeleteChip = hoverDelete;
+            if (oldChip != g.hoverAccChip || oldRotChip != g.hoverRotChip || oldScaleChip != g.hoverScaleChip || oldDeleteChip != g.hoverDeleteChip) {
                 const int px = ScrollPx(g.partPos);
-                for (int idx : {oldChip, g.hoverAccChip, oldRotChip, g.hoverRotChip})
+                for (int idx : {oldChip, g.hoverAccChip, oldRotChip, g.hoverRotChip, oldScaleChip, g.hoverScaleChip, oldDeleteChip, g.hoverDeleteChip})
                     if (idx >= 0) InvalidatePanelBand(std::max(l.partsTop, l.partsTop + idx * kRowH - px), std::min(l.partsBottom, l.partsTop + (idx + 1) * kRowH - px));
             }
         }
@@ -1064,8 +1098,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const int hoverAxis = (g.selGizmoPart >= 0 && PartGizmoDrawn()) ? PickPartGizmoAxis(float(x - kPanel), float(y), 10.0f) : -1;
             if (g.gizmoMode == 0) {
                 if (hoverAxis != g.gizmoHoverAxis) { g.gizmoHoverAxis = hoverAxis; g.dirty = true; InvalidateView(); }
-            } else {
+            } else if (g.gizmoMode == 1) {
                 if (hoverAxis != g.rotGizmoHoverAxis) { g.rotGizmoHoverAxis = hoverAxis; g.dirty = true; InvalidateView(); }
+            } else {
+                if (hoverAxis != g.scaleGizmoHoverAxis) { g.scaleGizmoHoverAxis = hoverAxis; g.dirty = true; InvalidateView(); }
             }
         }
         if (hoverBone != g.hoverBone) {
@@ -1142,8 +1178,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         if (g.hoverBone >= 0) { g.hoverBone = -1; g.dirty = true; InvalidateView(); }
         if (g.transHoverX >= 0) { g.transHoverX = -1; g.transHoverY = -1; g.dirty = true; InvalidateView(); }
-        if (g.selGizmoPart >= 0) { g.gizmoHoverAxis = g.rotGizmoHoverAxis = -1; g.dirty = true; InvalidateView(); }
-        if (g.hoverAccChip >= 0 || g.hoverRotChip >= 0) { g.hoverAccChip = g.hoverRotChip = -1; InvalidatePanel(); }
+        if (g.selGizmoPart >= 0) { g.gizmoHoverAxis = g.rotGizmoHoverAxis = g.scaleGizmoHoverAxis = -1; g.dirty = true; InvalidateView(); }
+        if (g.hoverAccChip >= 0 || g.hoverRotChip >= 0 || g.hoverScaleChip >= 0 || g.hoverDeleteChip >= 0) {
+            g.hoverAccChip = g.hoverRotChip = g.hoverScaleChip = g.hoverDeleteChip = -1; InvalidatePanel();
+        }
         if (g.viewHoverBall >= 0) { g.viewHoverBall = -1; g.dirty = true; InvalidateView(); }
         if (g.matDropHover >= 0) { g.matDropHover = -1; InvalidatePanel(); }
         if (g.hoverRow >= 0 || g.hoverPart >= 0 || g.hoverButton || g.hoverOutfit >= 0 || g.viewHoverCell >= 0) {
@@ -1209,26 +1247,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.dirty = true; InvalidateView();
             return 0;
         }
-        if (g.drag == 4 || g.drag == 7) {
+        if (g.drag == 4 || g.drag == 7 || g.drag == 8) {
             if (std::shared_ptr<Loaded> LL = Current(); LL) {
                 const int pi = GizmoPartSelected();
                 if (g.drag == 4) {
                     if (g.gizmoAcc[0] != 0.0f || g.gizmoAcc[1] != 0.0f || g.gizmoAcc[2] != 0.0f) {
                         char msg[192];
-                        std::snprintf(msg, sizeof msg, "accessory %s moved by %+.1f / %+.1f / %+.1f cm (X/Y/Z)", pi >= 0 ? LL->scene.parts[static_cast<size_t>(pi)].id.c_str() : "?",
+                        std::snprintf(msg, sizeof msg, "part %s moved by %+.1f / %+.1f / %+.1f cm (X/Y/Z)", pi >= 0 ? LL->scene.parts[static_cast<size_t>(pi)].id.c_str() : "?",
                                       static_cast<double>(g.gizmoAcc[0]) * 100.0, static_cast<double>(g.gizmoAcc[1]) * 100.0, static_cast<double>(g.gizmoAcc[2]) * 100.0);
                         Log(msg);
                     }
-                } else {
+                } else if (g.drag == 7) {
                     if (g.rotGizmoAcc[0] != 0.0f || g.rotGizmoAcc[1] != 0.0f || g.rotGizmoAcc[2] != 0.0f) {
                         char msg[192];
-                        std::snprintf(msg, sizeof msg, "accessory %s rotated by %+.1f / %+.1f / %+.1f degrees (X/Y/Z)", pi >= 0 ? LL->scene.parts[static_cast<size_t>(pi)].id.c_str() : "?",
+                        std::snprintf(msg, sizeof msg, "part %s rotated by %+.1f / %+.1f / %+.1f degrees (X/Y/Z)", pi >= 0 ? LL->scene.parts[static_cast<size_t>(pi)].id.c_str() : "?",
                                       static_cast<double>(g.rotGizmoAcc[0]), static_cast<double>(g.rotGizmoAcc[1]), static_cast<double>(g.rotGizmoAcc[2]));
+                        Log(msg);
+                    }
+                } else {
+                    if (g.scaleGizmoAcc[0] != 1.0f || g.scaleGizmoAcc[1] != 1.0f || g.scaleGizmoAcc[2] != 1.0f) {
+                        char msg[192];
+                        std::snprintf(msg, sizeof msg, "part %s resized to %.2f / %.2f / %.2f (X/Y/Z)", pi >= 0 ? LL->scene.parts[static_cast<size_t>(pi)].id.c_str() : "?",
+                                      static_cast<double>(g.scaleGizmoAcc[0]), static_cast<double>(g.scaleGizmoAcc[1]), static_cast<double>(g.scaleGizmoAcc[2]));
                         Log(msg);
                     }
                 }
             }
-            g.gizmoAxis = -1; g.rotGizmoAxis = -1; g.drag = 0; g.interacting = false; ReleaseCapture();
+            g.gizmoAxis = -1; g.rotGizmoAxis = -1; g.scaleGizmoAxis = -1; g.drag = 0; g.interacting = false; ReleaseCapture();
             g.dirty = true; InvalidateView(); InvalidatePanel(); InvalidateFooter();
             return 0;
         }
@@ -1356,7 +1401,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool gizmoHot = false;
             if (p.x >= kPanel && GizmoPartSelected() >= 0 && PartGizmoDrawn())
                 gizmoHot = PickPartGizmoAxis(float(p.x - kPanel), float(p.y), 9.0f) >= 0;
-            SetCursor(LoadCursor(nullptr, gizmoHot ? IDC_SIZEALL : (hand || g.hoverAccChip >= 0 || g.hoverRotChip >= 0) ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursor(nullptr, gizmoHot ? IDC_SIZEALL : (hand || g.hoverAccChip >= 0 || g.hoverRotChip >= 0 || g.hoverScaleChip >= 0 || g.hoverDeleteChip >= 0) ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -1404,13 +1449,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateMat(); return 0;
         }
         if (wp == VK_ESCAPE && GetProgSnapshot().active) { ProgRequestCancel(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
-        if (wp == VK_ESCAPE && GizmoPartSelected() >= 0) {   // deselect the accessory gizmo
+        if (wp == VK_ESCAPE && GizmoPartSelected() >= 0) {   // deselect the part gizmo
             const int pi = GizmoPartSelected();
             std::string id = pi >= 0 ? Current()->scene.parts[static_cast<size_t>(pi)].id : std::string();
             g.selGizmoPart = -1;
-            g.gizmoHoverAxis = g.rotGizmoHoverAxis = -1;
+            g.gizmoHoverAxis = g.rotGizmoHoverAxis = g.scaleGizmoHoverAxis = -1;
             if (g.drag == 4) { g.gizmoAxis = -1; g.drag = 0; g.interacting = false; ReleaseCapture(); }
             if (g.drag == 7) { g.rotGizmoAxis = -1; g.drag = 0; g.interacting = false; ReleaseCapture(); }
+            if (g.drag == 8) { g.scaleGizmoAxis = -1; g.drag = 0; g.interacting = false; ReleaseCapture(); }
             Log("gizmo off" + (id.empty() ? std::string("") : (" (" + id + ")")));
             g.dirty = true;
             InvalidateRect(hwnd, nullptr, FALSE);

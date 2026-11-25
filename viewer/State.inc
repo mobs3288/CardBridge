@@ -7,10 +7,14 @@ struct LogLine {
     LogKind kind = LogKind::Info;
 };
 
+// The hide checkboxes plus the parts deleted from this session (Parts.inc); renderers and export both take this.
+std::vector<char> HiddenPartsNow(const assemble::Scene& scene);
+
 // ---- the pose the user has made: bone edits and the A-pose, what undo and redo move between ----
 struct PoseState {
     std::map<std::string, assemble::BonePose> edits;
     std::map<std::string, assemble::PartPose> parts;   // gizmo edits, keyed by scene part id
+    std::set<std::string> deletedParts;                // parts removed with the row's x chip, keyed by scene part id
     bool aPose = true;   // MikuMikuDance's rest pose: a motion (VMD) is keyed for arms about 40 degrees down
     float aPoseDeg = 40.0f;
 };
@@ -26,8 +30,10 @@ bool SamePoseState(const PoseState& a, const PoseState& b) {
     }
     for (const auto& [name, e] : b.edits)
         if (!a.edits.count(name) && !rest(e)) return false;
+    if (a.deletedParts != b.deletedParts) return false;
     auto samePart = [](const assemble::PartPose& x, const assemble::PartPose& y) {
         if (x.pos.x != y.pos.x || x.pos.y != y.pos.y || x.pos.z != y.pos.z || x.pivot.x != y.pivot.x || x.pivot.y != y.pivot.y || x.pivot.z != y.pivot.z) return false;
+        if (x.scl.x != y.scl.x || x.scl.y != y.scl.y || x.scl.z != y.scl.z) return false;
         for (int i = 0; i < 16; ++i) if (x.rot.m[i] != y.rot.m[i]) return false;
         return true;
     };
@@ -584,8 +590,9 @@ struct App {
     // garment sharing the body's bones moves alone yet stays glued to the character through any bone pose.
     int viewHoverBall = -1;   // the navigation widget's ball under the pointer (0 +X, 1 +Y, 2 +Z, 3 -X, 4 -Y, 5 -Z); -1 = none
     std::map<std::string, assemble::PartPose> partEdits;   // gizmo edits, keyed by scene part id (undo / save / export see them)
+    std::set<std::string> deletedParts;       // parts removed with the row's x chip (undo / save / export see them)
     int selGizmoPart = -1;                    // scene.parts index of the part the gizmo holds, -1 = none
-    int gizmoMode = 0;                        // 0 = move (arrows), 1 = rotate (rings): which gizmo the chips on the row picked
+    int gizmoMode = 0;                        // 0 = move (arrows), 1 = rotate (rings), 2 = resize (square handles)
     int gizmoHoverAxis = -1;                  // the axis under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
     int gizmoAxis = -1;                       // the axis being dragged, -1 = none
     exporter::MoveGizmoState gizmoState;      // where the last picture drew the move gizmo (x < 0: not drawn)
@@ -596,11 +603,18 @@ struct App {
     float rotGizmoAcc[3] = {0, 0, 0};         // degrees turned about each axis during the current drag (for the log line)
     float rotGizmoTheta = 0.0f;               // the pointer's angle in the ring plane at the last applied step of the drag
     float rotGizmoPtrX = 0.0f, rotGizmoPtrY = 0.0f;   // the last pointer position of the current ring drag (view pixels)
+    int scaleGizmoHoverAxis = -1;             // the square handle under the pointer in the view (-1 none, 0 X, 1 Y, 2 Z)
+    int scaleGizmoAxis = -1;                  // the square handle being dragged, -1 = none
+    exporter::ScaleGizmoState scaleGizmoState;   // where the last picture drew the resize gizmo (x < 0: not drawn)
+    float scaleGizmoAcc[3] = {1, 1, 1};       // scale factor applied per axis during the current drag (for the log line)
+    float scaleGizmoDragDx = 0.0f, scaleGizmoDragDy = 0.0f;   // pointer movement of the current resize drag
     bool transMmdWasActive = false;           // the stroke started while the "as exported" view showed (so the bake returns to it after release)
     bool transRebakePending = false;          // the brush changed pixels; rebake the exported preview instead of staying on the interactive view
     float gizmoDragDx = 0.0f, gizmoDragDy = 0.0f;   // pointer movement of the current drag, applied once per picture
-    int hoverAccChip = -1;                    // the accessory move chip under the pointer in the panel, -1 = none
-    int hoverRotChip = -1;                    // the accessory rotate chip under the pointer in the panel, -1 = none
+    int hoverAccChip = -1;                    // the part's move chip under the pointer in the panel, -1 = none
+    int hoverRotChip = -1;                    // the part's rotate chip under the pointer in the panel, -1 = none
+    int hoverScaleChip = -1;                  // the part's resize chip under the pointer in the panel, -1 = none
+    int hoverDeleteChip = -1;                 // the part's delete chip under the pointer in the panel, -1 = none
     // Translucent clothes (Look tab): the brush paints the see-through area of the garment under the cursor. The mask is
     // baked into the garment's own texture (see export/Translucency.cpp): session-only, kept in the scene, undone by the toggle.
     bool transBrush = false;                  // the toggle: off by default, like every brush that changes pixels
