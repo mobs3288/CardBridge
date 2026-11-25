@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.9.1] - 2026-11-25
+
+### Fixed
+
+- **Viewer toolbar cropped on the right after adding the format chip.** The new chip widened the header row past the 380 px panel (`asExported` ended at x=450), so the rightmost buttons were cut off. The toolbar is compacted to fit within x=370 (10 px margin) and the chip shows just `Fmt: pmx|glb|gltf|obj`.
+
 ## [0.9.0] - 2026-11-25
 
 ### Added

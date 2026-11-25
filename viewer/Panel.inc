@@ -19,7 +19,7 @@ void DrawPanel(ui::Surface& s, const RECT& clip) {
         Button(s, l.open, "Open", g.hoverButton == 1, false, true);   // secondary: the file picker, not the work
         const std::string fmtLabel = exporter::FormatName(ViewerExportFormat());
         Button(s, l.exportPmx, g.exporting ? "Exporting..." : ("Export " + fmtLabel), g.hoverButton == 2, false, L != nullptr && !g.busy && !g.exporting, Btn::Primary);
-        Button(s, l.exportFormat, "Format: " + fmtLabel, g.hoverButton == 61, false, !g.busy && !g.exporting);
+        Button(s, l.exportFormat, "Fmt: " + fmtLabel, g.hoverButton == 61, false, !g.busy && !g.exporting);
         Button(s, l.issues, "Issues", g.hoverButton == 3, g.showIssues, L != nullptr);
         Button(s, l.reset, "Reset view", g.hoverButton == 4, false, L != nullptr);
         Button(s, l.all, "All", g.hoverButton == 5, false, L != nullptr);

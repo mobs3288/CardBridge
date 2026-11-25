@@ -324,7 +324,7 @@ Each milestone builds cleanly, passes tests, and leaves PMX byte-for-byte unchan
 6. Technical limitations — §6.
 7. Milestone plan — §7.
 
-Post-implementation results are recorded in `CHANGELOG.md` (0.9.0) and below.
+Post-implementation results are recorded in `CHANGELOG.md` (0.9.0/0.9.1) and below.
 
 ---
 

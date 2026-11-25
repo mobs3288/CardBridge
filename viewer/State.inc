@@ -675,13 +675,14 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     l.logo = {12, 10, 50, 50};
     // Header band 0..kHeaderBottom; the toolbar sits 8 px below it.
     const int by = kHeaderBottom + 8, bh = 30;
-    l.open = {10, by, 62, by + bh};
-    l.exportPmx = {68, by, 162, by + bh};
-    l.exportFormat = {166, by, 250, by + bh};   // clicks cycle PMX -> GLB -> glTF -> OBJ
-    l.issues = {254, by, 308, by + bh};
-    l.reset = {312, by, 382, by + bh};
-    l.all = {386, by, 412, by + bh};
-    l.asExported = {416, by, 450, by + bh};
+    // The whole toolbar must fit inside kPanel (380) with a 10 px right margin.
+    l.open = {10, by, 52, by + bh};
+    l.exportPmx = {56, by, 140, by + bh};
+    l.exportFormat = {144, by, 196, by + bh};   // clicks cycle pmx -> glb -> gltf -> obj
+    l.issues = {200, by, 242, by + bh};
+    l.reset = {246, by, 310, by + bh};
+    l.all = {314, by, 336, by + bh};
+    l.asExported = {340, by, 370, by + bh};
     // The outfit picker: a name line, then a row of numbered slots, then the imported-outfit status line with its reset button.
     l.outfitNameTop = 116;
     l.outfitChipsTop = 136;
