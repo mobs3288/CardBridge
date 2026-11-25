@@ -70,6 +70,7 @@ void StartExport() {
         }).detach();
         return;
     }
+    const exporter::ExportFormat format = ViewerExportFormat();   // toolbar chip; native PMX documents above stay PMX-only
     const std::string library = g.settings.library, mods = g.settings.mods;
     const std::vector<char> hiddenNow = g.hidden;
     const bool jiggleBust = g.jiggleBust, jiggleButt = g.jiggleButt;
@@ -88,10 +89,10 @@ void StartExport() {
         Log("proportion corrections active for the export (" + std::to_string(correctionLayer.ops.size()) + " op(s)); faithful export = reset the layer in the Proportions tab", LogKind::Info);
     material::WorkbenchState matCopy = g.mat;   // materials: snapshot for the manifest (the scene copy already carries the edits)
     const std::string matSha = L->card.sha256;
-    ProgBegin("Exporting PMX: " + stem);
+    ProgBegin(std::string("Exporting ") + exporter::FormatName(format) + ": " + stem);
     Log("export started: " + outDir + (pose.empty() ? std::string() : std::string(" (posed)")), LogKind::Info);
     assemble::Scene sceneCopy = L->scene;   // taken here: a slider may re-shape the character while the export runs
-    std::thread([L, outDir, stem, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
+    std::thread([L, outDir, stem, format, library, mods, hiddenNow, jiggleBust, jiggleButt, jiggle, sag, originalGarment, pose, partEdits, matCopy, matSha, correctionLayer, bodyTransferJson, bakeQuality, upscaleTextures, upscaleModel, sceneCopy = std::move(sceneCopy)]() mutable {
         auto t0 = std::chrono::steady_clock::now();
         bool cancelled = false;
         try {
@@ -123,7 +124,26 @@ void StartExport() {
                 if (!bakeNote.empty()) Log("  " + bakeNote);
             }
             if (ProgCancelled()) throw Cancelled{};
-            ProgSet(0.52, "writing PMX");
+            ProgSet(0.52, std::string("writing ") + exporter::FormatName(format));
+            if (format != exporter::ExportFormat::Pmx) {
+                exporter::ModelExportOptions mo;
+                mo.format = format;
+                mo.outDir = outDir;
+                mo.baseName = stem;
+                mo.log = [](const std::string& m) { Log("  " + m); };
+                mo.progress = [](double f, const std::string& stage) {
+                    ProgSet(f >= 0.0 ? 0.52 + f * 0.48 : -1.0, stage);
+                };
+                mo.cancelled = [] { return ProgCancelled(); };
+                const exporter::ModelExportResult r = exporter::ExportModel(scene, L->card, mo);
+                if (ProgCancelled()) throw Cancelled{};
+                char m[512];
+                std::snprintf(m, sizeof m, "export done in %.1fs: %s (%s vertices, %s triangles, %zu textures)",
+                              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), r.primaryPath.c_str(),
+                              Count(r.vertices).c_str(), Count(r.triangles).c_str(), r.textures);
+                Log(m, LogKind::Good);
+                for (const auto& w : r.warnings) Log("note: " + w, LogKind::Warn);
+            } else {
             exporter::ExportOptions eo;
             eo.outDir = outDir;
             eo.baseName = stem;
@@ -163,6 +183,7 @@ void StartExport() {
             std::snprintf(msg, sizeof msg, "export done in %.1fs: %s (%s vertices, %s triangles, %zu textures)", secs, r.pmxPath.c_str(),
                           Count(r.vertices).c_str(), Count(r.triangles).c_str(), r.textures);
             Log(msg, LogKind::Good);
+            }
         } catch (const Cancelled&) {
             cancelled = true;
             Log("export cancelled; the partial folder " + outDir + " is kept (delete it if you do not need it)", LogKind::Warn);

@@ -28,4 +28,6 @@ Write-Host "Built: $build\bin"
 if ($Test) {
     & (Join-Path $build 'bin\cardbridge_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+    & (Join-Path $build 'bin\cardbridge_format_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'format export tests failed' }
 }

@@ -76,6 +76,7 @@ int ButtonAt(const PanelLayout& l, int x, int y) {
     POINT p{x, y};
     if (PtInRect(&l.open, p)) return 1;
     if (PtInRect(&l.exportPmx, p)) return 2;
+    if (PtInRect(&l.exportFormat, p)) return 61;  // cycle the export target
     if (PtInRect(&l.issues, p)) return 3;
     if (PtInRect(&l.reset, p)) return 4;
     if (PtInRect(&l.all, p)) return 5;

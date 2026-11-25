@@ -46,6 +46,7 @@
 #include "export/ColourGrade.h"
 #include "export/BakeQuality.h"
 #include "export/Exporter.h"
+#include "export/ModelExport.h"
 #include "export/GpuView.h"
 #include "export/MoveGizmo.h"
 #include "export/RotateGizmo.h"

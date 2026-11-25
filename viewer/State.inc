@@ -319,7 +319,7 @@ struct TweakRow {
 
 struct PanelLayout {
     RECT logo{}, tabs[TabCount]{};   // the tab strip: 3 rows x 5 pill tabs, equal cells, no scrolling
-    RECT open{}, exportPmx{}, issues{}, reset{}, all{}, asExported{};
+    RECT open{}, exportPmx{}, exportFormat{}, issues{}, reset{}, all{}, asExported{};
     RECT clothingReset{}, clothingExport{}, clothingPrev{}, clothingNext{};
     int outfitNameTop = 0, outfitChipsTop = 0, outfitClothTop = 0;
     int partsTop = 0, partsBottom = 0, logTop = 0, logBottom = 0, footerTop = 0;
@@ -652,6 +652,14 @@ struct App {
 // while the process is exiting. A leaked singleton has no destructor for them to race with.
 App& g = *new App();
 
+// The toolbar's format chip cycles this persisted setting; both the button label and
+// the export worker read it through this one helper.
+exporter::ExportFormat ViewerExportFormat() {
+    exporter::ExportFormat f = exporter::ExportFormat::Pmx;
+    if (!exporter::ParseExportFormat(g.settings.exportFormat, f)) f = exporter::ExportFormat::Pmx;
+    return f;
+}
+
 // The label for the pinned clothing on screen: empty when nothing is pinned; the last layer's name with
 // a "(+N more)" suffix when several Selective Import layers are stacked.
 std::string ClothingDisplayName() {
@@ -669,10 +677,11 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     const int by = kHeaderBottom + 8, bh = 30;
     l.open = {10, by, 62, by + bh};
     l.exportPmx = {68, by, 162, by + bh};
-    l.issues = {168, by, 222, by + bh};
-    l.reset = {228, by, 298, by + bh};
-    l.all = {304, by, 330, by + bh};
-    l.asExported = {336, by, 370, by + bh};
+    l.exportFormat = {166, by, 250, by + bh};   // clicks cycle PMX -> GLB -> glTF -> OBJ
+    l.issues = {254, by, 308, by + bh};
+    l.reset = {312, by, 382, by + bh};
+    l.all = {386, by, 412, by + bh};
+    l.asExported = {416, by, 450, by + bh};
     // The outfit picker: a name line, then a row of numbered slots, then the imported-outfit status line with its reset button.
     l.outfitNameTop = 116;
     l.outfitChipsTop = 136;

@@ -75,6 +75,7 @@ const char* ProfileLabel(const std::string& key) {
 struct Settings {
     std::string library, mods;
     std::string exportDir;   // where exports go without asking; empty = ask every time
+    std::string exportFormat = "pmx";   // pmx | glb | gltf | obj (the toolbar's format chip)
     std::string layers;      // an extra folder of shader layers (.hlsl)
     std::string gpu = "auto";   // "auto" (discrete GPU first), "hardware", "warp" (CPU), "software" (software renderer); next start
     std::string skin = "gpu";   // "gpu" (compute shader) or "cpu" (CPU skinning loop)
@@ -106,6 +107,7 @@ Settings LoadSettings() {
         s.library = j.value("library", "");
         s.mods = j.value("mods", "");
         s.exportDir = j.value("exportDir", "");
+        s.exportFormat = j.value("exportFormat", "pmx");
         s.layers = j.value("layers", "");
         s.gpu = j.value("gpu", "auto");
         s.skin = j.value("skin", "gpu");
@@ -175,6 +177,7 @@ void SaveSettings(const Settings& s) {
         j["library"] = s.library;
         j["mods"] = s.mods;
         j["exportDir"] = s.exportDir;
+        j["exportFormat"] = s.exportFormat;
         j["layers"] = s.layers;
         j["gpu"] = s.gpu;
         j["skin"] = s.skin;

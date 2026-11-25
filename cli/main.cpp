@@ -35,6 +35,7 @@
 #include "core/Timing.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
+#include "export/ModelExport.h"
 #include "material/MaterialWorkbench.h"
 #include <stb_image_write.h>
 
@@ -149,6 +150,10 @@ void usage() {
         "cardbridge " CARDBRIDGE_VERSION " - Koikatsu character card to PMX, offline\n"
         "\n"
         "  cardbridge convert <card.png> --library <dir> --mods <dir> --out <dir>\n"
+        "             [--format pmx|glb|gltf|obj]        export target (default: pmx, unchanged). glb/gltf/obj consume the\n"
+        "                                             same assembled character, in metres, Y-up; no game or Blender needed.\n"
+        "             [--no-textures] [--no-armature] [--no-skinning] [--no-morphs] [--no-mtl] [--combine-objects]\n"
+        "                                             format-specific export options (ignored for pmx)\n"
         "  cardbridge measure <card.png> [--library <dir>] [--mods <dir>] [--json]\n"
         "                                             print the 14 transferable body measurements of one card\n"
         "  cardbridge transfer <reference.png> <target.png> <spec.json> [--select height,head,bust,...] [--refine]\n"
@@ -1210,6 +1215,42 @@ int cmdConvert(const Args& a) {
                 for (size_t i = 0; i < px.size(); ++i) { gpuRgba[i * 4] = (px[i] >> 16) & 255; gpuRgba[i * 4 + 1] = (px[i] >> 8) & 255; gpuRgba[i * 4 + 2] = px[i] & 255; gpuRgba[i * 4 + 3] = 255; }
             }
         }
+    }
+
+    exporter::ExportFormat format = exporter::ExportFormat::Pmx;
+    if (!exporter::ParseExportFormat(a.get("format").empty() ? "pmx" : a.get("format"), format)) {
+        std::fprintf(stderr, "--format must be pmx, glb, gltf or obj\n");
+        return 1;
+    }
+    if (format != exporter::ExportFormat::Pmx) {
+        // New interchange formats share the same assembled scene and the same bake/pose
+        // preparation as PMX; only the serializer differs. PMX keeps its own full option set.
+        exporter::ModelExportOptions mo;
+        mo.format = format;
+        mo.outDir = out;
+        mo.overwrite = a.has("overwrite");
+        mo.exportTextures = !a.has("no-textures");
+        mo.exportArmature = !a.has("no-armature");
+        mo.exportSkinning = !a.has("no-skinning");
+        mo.exportMorphs = !a.has("no-morphs");
+        mo.exportAnimation = a.has("animation");
+        mo.separateObjects = !a.has("combine-objects");
+        mo.exportMtl = !a.has("no-mtl");
+        mo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 1.0f;
+        mo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
+        mo.progress = [](double f, const std::string& stage) { printProgress(f, "exporting: " + stage); };
+        try {
+            cbtime::Scope _("export");
+            const exporter::ModelExportResult r = exporter::ExportModel(scene, c, mo);
+            std::printf("wrote %s (%s)\n  %zu vertices, %zu triangles, %zu materials, %zu bones, %zu textures, %zu morphs\n  manifest: %s\n",
+                        r.primaryPath.c_str(), exporter::FormatName(format), r.vertices, r.triangles,
+                        r.materials, r.bones, r.textures, r.morphs, r.manifestPath.c_str());
+            for (const auto& w : r.warnings) std::fprintf(stderr, "  note: %s\n", w.c_str());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "export failed: %s\n", e.what());
+            return 3;
+        }
+        return 0;
     }
 
     exporter::ExportOptions eo;

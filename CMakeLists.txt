@@ -92,6 +92,10 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxReader.cpp
     src/pmx/PmxToScene.cpp
     src/export/Exporter.cpp
+    src/export/ModelExport.cpp
+    src/export/FormatCommon.cpp
+    src/gltf/GltfWriter.cpp
+    src/obj/ObjWriter.cpp
     src/export/SkinBench.cpp
     src/assemble/Pose.cpp
     src/assemble/PhysicsSim.cpp
@@ -203,6 +207,14 @@ add_executable(cardbridge_tests tests/cardbridge_tests.cpp)
 target_link_libraries(cardbridge_tests PRIVATE cardbridge_core stb_image)
 if(WIN32 AND NOT MSVC)
     target_link_options(cardbridge_tests PRIVATE -static)
+endif()
+
+# Independent format-writer tests (GLB/glTF/OBJ) - kept separate so each milestone's
+# serializer checks can be run on their own without the large character test suite.
+add_executable(cardbridge_format_tests tests/format_tests.cpp)
+target_link_libraries(cardbridge_format_tests PRIVATE cardbridge_core stb_image)
+if(WIN32 AND NOT MSVC)
+    target_link_options(cardbridge_format_tests PRIVATE -static)
 endif()
 
 # Regression tests for the performance work (the timing recorder, the LZ4 block

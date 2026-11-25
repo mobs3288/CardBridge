@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.9.0] - 2026-11-25
+
+### Added
+
+- **Industry-standard export formats: glTF 2.0 / GLB and OBJ / MTL.** CardBridge is no longer exclusively a Koikatsu-to-MMD converter. The new `--format glb|gltf|obj` option (and the viewer's **Format** chip) writes from the *same canonical assembled `Scene`* the PMX exporter consumes — no second card parser, no duplicated mesh/material/texture/skinning logic. glTF carries geometry, normals, derived tangents, UV0–3, metallic-roughness materials with PNG textures (embedded in GLB, external for `.gltf`), alpha modes, texture transforms, mesh nodes, a joint hierarchy with inverse bind matrices, 4-influence skinning and named **sparse** morph targets; no animation array is written because the canonical scene has no animation source data. OBJ/MTL writes static geometry, groups, per-mesh objects, material assignments and external textures, and reports what a static format cannot carry. Coordinates use one shared left-to-right-handed conversion (mirror X, flip winding and V, Y-up, metres) applied to geometry, bones and morph deltas together. Output is atomic (temp file + rename) with cancellation and named limitation warnings in `cardbridge-export.json`. PMX is completely unchanged and remains the default. Architecture, conversion policy, library evaluation and compatibility matrix: [`docs/EXPORT_FORMAT_ARCHITECTURE.md`](docs/EXPORT_FORMAT_ARCHITECTURE.md). FBX and USD were evaluated and deliberately deferred (no licence-compatible native writer fits the standalone architecture). 19,493 existing checks plus 83 new format checks pass.
+
 ## [0.8.7] - 2026-11-25
 
 ### Fixed

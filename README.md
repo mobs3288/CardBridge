@@ -104,7 +104,8 @@ Disk space: about 20 MB of application files plus the library (~0.9 GB full, ~5 
 **Conversion and export**
 
 - Reads Koikatsu character cards (`.png`) into a full part tree: body, head, hair, clothing, accessories
-- Writes a self-contained export next to the PMX: PNG textures, and a `.cardbridge.json` manifest (part tree, stable IDs, per-part export toggles, material ranges, validation status)
+- Exports the assembled character to **PMX** (MMD), **GLB / glTF 2.0** and **OBJ / MTL** from the same canonical scene (`convert --format pmx|glb|gltf|obj`, or the viewer's Format chip); glTF includes armature, skinning and named morph targets; OBJ is static geometry
+- Writes a self-contained export next to the model: PNG textures, and a manifest (part tree, stable IDs, per-part export toggles, material ranges, validation status)
 - Preview baked into every export (`_preview.png`) — judge the result without opening the PMX
 - Merged-physics export: DynamicBone chains (hair, skirts, ribbons) and bust soft-physics chains
 - MMD-ready rig: Japanese MMD morph/bone names, A-pose rest pose by default, ground/self shadows

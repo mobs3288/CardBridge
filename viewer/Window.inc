@@ -219,7 +219,7 @@ void DumpTestLayout() {
     j["bakeQuality"] = g.bakeQuality;   // Look tab preset: so a scripted click can verify the chip set it
     j["tabs"] = nlohmann::json::array();
     for (int i = 0; i < TabCount; ++i) j["tabs"].push_back({(l.tabs[i].left + l.tabs[i].right) / 2, (l.tabs[i].top + l.tabs[i].bottom) / 2, true});
-    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
+    j["buttons"] = {{"open", {(l.open.left + l.open.right) / 2, (l.open.top + l.open.bottom) / 2}}, {"export", {(l.exportPmx.left + l.exportPmx.right) / 2, (l.exportPmx.top + l.exportPmx.bottom) / 2}}, {"exportFormat", {(l.exportFormat.left + l.exportFormat.right) / 2, (l.exportFormat.top + l.exportFormat.bottom) / 2}}, {"resetClothing", {(l.clothingReset.left + l.clothingReset.right) / 2, (l.clothingReset.top + l.clothingReset.bottom) / 2}}, {"exportClothing", {(l.clothingExport.left + l.clothingExport.right) / 2, (l.clothingExport.top + l.clothingExport.bottom) / 2}}};
     std::shared_ptr<Loaded> L = Current();
     // The Optimize tab's controls (centre of each hit area), for scripted runs and the smoke test.
     if (L && g.tab == TabOptimize) {
@@ -725,6 +725,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int button = ButtonAt(l, x, y);
             if (button == 1) { OpenCard(); return 0; }
             if (button == 2) { ExportFolderIfNeeded(); return 0; }
+            if (button == 61) {
+                const exporter::ExportFormat next = static_cast<exporter::ExportFormat>((static_cast<int>(ViewerExportFormat()) + 1) % 4);
+                g.settings.exportFormat = exporter::FormatName(next);
+                SaveSettings(g.settings);
+                Log(std::string("export format: ") + exporter::FormatName(next), LogKind::Info);
+                InvalidatePanel();
+                return 0;
+            }
             if (button == 3) { if (Current()) ToggleIssues(); return 0; }
             if (button == 4) { if (Current()) ResetView(0); return 0; }
             if (button == 5) { if (Current()) ShowAll(); return 0; }
