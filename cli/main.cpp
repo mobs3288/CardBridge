@@ -215,7 +215,7 @@ void usage() {
         "                                             units: mass kg, stiffness N/m, damping N s/m, gravity x9.81 m/s^2, simulation_hz\n"
         "                                             is the fixed preview rate; sag scales the static hang (1 = the card's own, 0 = none, 2 = double)\n"
         "             [--height-cm F]               scale everything so the model stands F cm tall (measured head to feet)\n"
-        "             [--simplify N]               reduce the written PMX's triangles by N percent (0-80; off by default). The face and\n"
+        "             [--simplify N]               reduce the written model's triangles by N percent (0-80; off by default), for PMX, glTF and OBJ. The face and\n"
         "                                             eyes are kept nearly as-is, the hair and body a little, the clothes and accessories\n"
         "                                             the most; UVs, material boundaries, bone weights and blend shapes are preserved\n"
         "             [--lods] [--lod-targets A,B,C,D]\n"
@@ -1237,6 +1237,11 @@ int cmdConvert(const Args& a) {
         mo.separateObjects = !a.has("combine-objects");
         mo.exportMtl = !a.has("no-mtl");
         mo.scale = a.opt.count("scale") ? static_cast<float>(std::atof(a.get("scale").c_str())) : 1.0f;
+        if (a.opt.count("simplify")) {
+            const double pct = std::atof(a.get("simplify").c_str());
+            if (!std::isfinite(pct)) { std::fprintf(stderr, "--simplify needs a number (percent, 0..80)\n"); return 1; }
+            mo.simplifyPercent = static_cast<float>(std::clamp(pct, 0.0, 80.0));
+        }
         mo.log = [](const std::string& m) { std::fprintf(stderr, "  %s\n", m.c_str()); };
         mo.progress = [](double f, const std::string& stage) { printProgress(f, "exporting: " + stage); };
         try {

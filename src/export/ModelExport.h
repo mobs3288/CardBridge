@@ -35,6 +35,7 @@ struct ModelExportOptions {
     bool exportMtl = true;         // OBJ only
 
     float scale = 1.0f;            // metres per scene unit; glTF/OBJ only (PMX keeps 12.5)
+    float simplifyPercent = 0.0f;  // triangle reduction for the new formats too (0 = original geometry)
 
     std::function<void(const std::string&)> log;
     std::function<void(double, const std::string&)> progress;

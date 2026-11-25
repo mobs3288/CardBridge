@@ -1,10 +1,13 @@
 #include "export/ModelExport.h"
 #include "export/Exporter.h"
+#include "core/Bytes.h"
 #include "gltf/GltfWriter.h"
 #include "obj/ObjWriter.h"
+#include "mesh/Simplify.h"
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 
 namespace cardbridge::exporter {
 
@@ -40,6 +43,34 @@ bool ParseExportFormat(const std::string& text, ExportFormat& out) {
 
 ModelExportResult ExportModel(const assemble::Scene& scene, const card::Card& card, const ModelExportOptions& opt) {
     ModelExportResult result;
+    // The new formats share the PMX simplification path: it works on a deep copy, so the
+    // caller's scene (and the live viewer) is never simplified. Blend shapes and weights
+    // travel with the surviving vertices.
+    std::shared_ptr<assemble::Scene> simplified;
+    const assemble::Scene* source = &scene;
+    if (opt.format != ExportFormat::Pmx && opt.simplifyPercent > 0.0f) {
+        const float requested = std::clamp(opt.simplifyPercent, 0.0f, 95.0f) / 100.0f;
+        mesh::SimplifyOptions so;
+        so.maxReduction = requested;
+        so.cancelled = opt.cancelled;
+        mesh::SceneSimplifyStats st;
+        simplified = mesh::SimplifyScene(scene, requested, so, st,
+            opt.progress ? std::function<void(float, const std::string&)>([&opt](float f, const std::string& s) {
+                opt.progress(f * 0.45, "simplifying: " + s);
+            }) : std::function<void(float, const std::string&)>{});
+        for (const auto& w : st.warnings) {
+            result.warnings.push_back(w);
+            if (opt.log) opt.log("warning: " + w);
+        }
+        if (!simplified) {
+            if (opt.cancelled && opt.cancelled()) throw Cancelled{};
+            throw FormatError("simplification failed");
+        }
+        if (opt.log) opt.log("simplified for export: " + std::to_string(st.originalTriangles) +
+                             " -> " + std::to_string(st.resultTriangles) + " triangles");
+        source = simplified.get();
+    }
+    const assemble::Scene& model = *source;
     switch (opt.format) {
         case ExportFormat::Pmx: {
             // Keep the established PMX path byte-for-byte: only the general options are forwarded.
@@ -63,13 +94,13 @@ ModelExportResult ExportModel(const assemble::Scene& scene, const card::Card& ca
             break;
         }
         case ExportFormat::Glb:
-            gltf::WriteGlb(scene, card, opt, result);
+            gltf::WriteGlb(model, card, opt, result);
             break;
         case ExportFormat::Gltf:
-            gltf::WriteGltf(scene, card, opt, result);
+            gltf::WriteGltf(model, card, opt, result);
             break;
         case ExportFormat::Obj:
-            obj::WriteObj(scene, card, opt, result);
+            obj::WriteObj(model, card, opt, result);
             break;
     }
     return result;

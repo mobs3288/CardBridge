@@ -130,6 +130,7 @@ void StartExport() {
                 mo.format = format;
                 mo.outDir = outDir;
                 mo.baseName = stem;
+                if (g.opt.applied.set) mo.simplifyPercent = std::clamp(g.opt.applied.reduction, 0.0f, 0.9f) * 100.0f;
                 mo.log = [](const std::string& m) { Log("  " + m); };
                 mo.progress = [](double f, const std::string& stage) {
                     ProgSet(f >= 0.0 ? 0.52 + f * 0.48 : -1.0, stage);

@@ -375,11 +375,11 @@ and PMX remains non-atomic (unchanged by this milestone).
 
 * `cardbridge_tests.exe`: **19,493 checks, 0 failed** (2 integration suites skipped —
   they need `CARDBRIDGE_TEST_LIBRARY/_MODS/_CARD`; unchanged from before this work).
-* `cardbridge_format_tests.exe`: **83 checks, 0 failed** — GLB container/JSON/accessor
+* `cardbridge_format_tests.exe`: **96 checks, 0 failed** — GLB container/JSON/accessor
   read-back including the X-mirror check, skin joint + IBM counts, embedded PNG,
   morph target names/weights, glTF external `.bin`/PNG round-trip with decoded image
   dimensions, OBJ/MTL index/material/texture validation, malformed-texture failure
-  with no partial file, overwrite guard, and cancellation.
+  with no partial file, overwrite guard, cancellation, and simplification on a copy of the scene.
 * Full Release build with w64devkit GCC 16.2 + Ninja: clean (no new warnings).
 
 ### 9.5 Blender import validation

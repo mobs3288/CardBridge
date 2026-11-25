@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.9.2] - 2026-11-25
+
+### Added
+
+- **`--simplify N` now applies to glTF/GLB/OBJ exports too** (it used to be PMX-only), and the viewer's Optimize tab applies it to whichever format is selected. It reuses the same copy-on-write simplifier (UV/normal/material seams, 4-influence weights and blend shapes are preserved), so a lighter model can be written for viewers with triangle budgets without touching the scene being edited. 19,493 existing checks plus 96 format checks pass.
+
 ## [0.9.1] - 2026-11-25
 
 ### Fixed

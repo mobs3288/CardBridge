@@ -136,6 +136,35 @@ assemble::Scene MakeScene() {
     return s;
 }
 
+// A dense interior grid survives decimation (the 2-triangle fixture above has only locked borders).
+assemble::Scene MakeGridScene(int n) {
+    assemble::Scene s = MakeScene();
+    s.meshes.clear();
+    assemble::SceneMesh mesh;
+    mesh.name = "grid";
+    mesh.part = 0;
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            assemble::SceneVertex v;
+            v.pos = {static_cast<float>(x), static_cast<float>(y), 0.0f};
+            v.normal = {0, 0, 1};
+            v.uv = {static_cast<float>(x) / (n - 1), static_cast<float>(y) / (n - 1)};
+            v.uv1 = v.uv; v.uv2 = v.uv; v.uv3 = v.uv;
+            v.bone[0] = 0; v.weight[0] = 1.0f;
+            mesh.vertices.push_back(v);
+        }
+    assemble::SceneSubmesh sm;
+    sm.material = 0;
+    for (int y = 0; y < n - 1; ++y)
+        for (int x = 0; x < n - 1; ++x) {
+            const uint32_t a = static_cast<uint32_t>(y * n + x), b = a + 1, c = a + n, d = c + 1;
+            sm.indices.insert(sm.indices.end(), {a, b, c, b, d, c});
+        }
+    mesh.submeshes.push_back(sm);
+    s.meshes.push_back(std::move(mesh));
+    return s;
+}
+
 exporter::ModelExportOptions Options(exporter::ExportFormat format, const std::string& dir) {
     exporter::ModelExportOptions o;
     o.format = format;
@@ -339,6 +368,23 @@ void TestErrorsAndCancellation() {
     }
 }
 
+void TestSimplifyOption() {
+    const std::string dir = TempDir("simplify");
+    auto scene = MakeGridScene(16);
+    const size_t originalTriangles = scene.meshes[0].submeshes[0].indices.size() / 3;
+    auto opt = Options(exporter::ExportFormat::Glb, dir);
+    opt.simplifyPercent = 40.0f;
+    const auto result = exporter::ExportModel(scene, {}, opt);
+    CHECK(result.triangles > 0 && result.triangles < originalTriangles);
+    const std::string path = fileio::Join(dir, "testchar.glb");
+    CHECK(fileio::Exists(path));
+    const GlbParts g = ReadGlb(path);
+    CHECK(g.doc["asset"]["version"] == "2.0");
+    CHECK(!g.doc["meshes"].empty());
+    // The simplifier works on a copy: the caller's scene must be untouched.
+    CHECK(scene.meshes[0].submeshes[0].indices.size() / 3 == originalTriangles);
+}
+
 void TestFormatNames() {
     exporter::ExportFormat f = exporter::ExportFormat::Pmx;
     CHECK(exporter::ParseExportFormat("GLB", f) && f == exporter::ExportFormat::Glb);
@@ -356,6 +402,7 @@ int main() {
     Test("gltf external resources", TestGltf);
     Test("obj/mtl serializer round-trip", TestObj);
     Test("format errors, overwrite and cancellation", TestErrorsAndCancellation);
+    Test("simplification for new formats runs on a copy", TestSimplifyOption);
     Test("format names", TestFormatNames);
     std::printf("\n%d checks, %d failed\n", gRun, gFailed);
     return gFailed ? 1 : 0;
