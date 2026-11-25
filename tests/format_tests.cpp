@@ -216,6 +216,7 @@ void TestGlb() {
     const GlbParts g = ReadGlb(fileio::Join(dir, "testchar.glb"));
     CHECK(g.doc["asset"]["version"] == "2.0");
     CHECK(g.doc.contains("scene") && !g.doc["scenes"].empty());
+    CHECK(!g.doc["scenes"][0]["nodes"].empty());   // Blender cannot import an empty scene
     CHECK(g.doc["buffers"].size() == 1);
     CHECK(!g.doc["buffers"][0].contains("uri"));
     CHECK(g.doc["buffers"][0]["byteLength"].get<size_t>() <= g.bin.size());
@@ -238,6 +239,9 @@ void TestGlb() {
     CHECK(AccessorCount(g.doc, g.doc["skins"][0]["inverseBindMatrices"].get<size_t>()) == 2);
     CHECK(g.doc["nodes"].size() >= 4);
     CHECK(prim.contains("targets"));
+    CHECK(prim["targets"][0].contains("POSITION"));   // flat attribute dict, not {"attributes": {...}}
+    const auto& morphAcc = g.doc["accessors"][prim["targets"][0]["POSITION"].get<size_t>()];
+    CHECK(morphAcc.contains("min") && morphAcc.contains("max"));   // required for POSITION accessors
     CHECK(g.doc["meshes"][0]["extras"]["targetNames"].size() >= 1);
     CHECK(g.doc["meshes"][0]["weights"].size() == prim["targets"].size());
 
@@ -264,6 +268,7 @@ void TestGltf() {
     const std::string text(reinterpret_cast<const char*>(modelBytes.data()), modelBytes.size());
     const json doc = json::parse(text);
     CHECK(doc["asset"]["version"] == "2.0");
+    CHECK(!doc["scenes"][0]["nodes"].empty());
     CHECK(doc["buffers"][0].contains("uri"));
     const std::string binName = doc["buffers"][0]["uri"].get<std::string>();
     const std::string binPath = fileio::Join(dir, binName);

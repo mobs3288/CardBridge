@@ -375,7 +375,7 @@ and PMX remains non-atomic (unchanged by this milestone).
 
 * `cardbridge_tests.exe`: **19,493 checks, 0 failed** (2 integration suites skipped —
   they need `CARDBRIDGE_TEST_LIBRARY/_MODS/_CARD`; unchanged from before this work).
-* `cardbridge_format_tests.exe`: **96 checks, 0 failed** — GLB container/JSON/accessor
+* `cardbridge_format_tests.exe`: **100 checks, 0 failed** — GLB container/JSON/accessor
   read-back including the X-mirror check, skin joint + IBM counts, embedded PNG,
   morph target names/weights, glTF external `.bin`/PNG round-trip with decoded image
   dimensions, OBJ/MTL index/material/texture validation, malformed-texture failure
@@ -384,10 +384,17 @@ and PMX remains non-atomic (unchanged by this milestone).
 
 ### 9.5 Blender import validation
 
-Structural validation is automated above and does not depend on Blender. A visual
-import check in Blender (geometry, UVs, materials, transparency, armature deformation
-and facial morphs) is a human confirmation step — the exporter deliberately has no
-Blender runtime dependency. The user reported the bone/armature result as OK.
+**Performed** with Blender 5.3.0's standard importers in headless mode on the
+synthetic fixture: GLB → `IMPORT OK meshes=2 triangles=82 armatures=1 morphs=2`;
+glTF (external `.bin` + PNG) → the same; OBJ → `IMPORT OK meshes=1 triangles=2`.
+The Khronos glTF validator reports 0 errors / 0 warnings. This caught three real
+spec violations (empty `scenes[0].nodes`, morph targets wrapped in `attributes`,
+missing morph POSITION bounds) that the in-tree parser had missed; all are fixed
+and now have regression checks.
+
+A visual/aesthetic pass on a **real card** (UVs, transparency, deformation when bones
+move, facial morphs) remains a human confirmation step — the exporter deliberately
+has no Blender runtime dependency. The user reported the bone/armature result as OK.
 
 ### 9.6 Performance and memory
 

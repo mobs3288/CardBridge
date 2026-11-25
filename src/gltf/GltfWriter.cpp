@@ -242,10 +242,19 @@ private:
         }
         std::vector<float> values;
         values.reserve(target.deltas.size() * 3);
+        // POSITION accessors must declare bounds, including morph targets. A sparse
+        // accessor is zero everywhere else, so zero is always part of the range.
+        a.min = {0.0, 0.0, 0.0};
+        a.max = {0.0, 0.0, 0.0};
         for (const auto& d : target.deltas) {
             values.push_back(Number(d.x).get<float>());
             values.push_back(Number(d.y).get<float>());
             values.push_back(Number(d.z).get<float>());
+            const double xyz[3] = {d.x, d.y, d.z};
+            for (int c = 0; c < 3; ++c) {
+                a.min[static_cast<size_t>(c)] = std::min(a.min[static_cast<size_t>(c)], xyz[c]);
+                a.max[static_cast<size_t>(c)] = std::max(a.max[static_cast<size_t>(c)], xyz[c]);
+            }
         }
         a.sparseValues = AddView(reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(float));
         return PushAccessor(a);
@@ -504,7 +513,9 @@ private:
             json primitiveTargets = json::array();
             for (const auto& t : targets) {
                 const size_t acc = AddSparse(t, n);
-                primitiveTargets.push_back(json{{"attributes", {{"POSITION", acc}}}});
+                // glTF morph targets are a flat attribute dictionary, NOT an
+                // {"attributes": {...}} wrapper (that is only for the primitive itself).
+                primitiveTargets.push_back(json{{"POSITION", acc}});
             }
 
             json primitives = json::array();
@@ -542,6 +553,7 @@ private:
                          {"mesh", doc_["meshes"].size() - 1}};
             meshNodes_.push_back(static_cast<int>(doc_["nodes"].size()));
             doc_["nodes"].push_back(std::move(node));
+            doc_["scenes"][0]["nodes"].push_back(meshNodes_.back());
             result_.vertices += n;
         }
     }
@@ -561,6 +573,7 @@ private:
 
         const int container = static_cast<int>(doc_["nodes"].size());
         doc_["nodes"].push_back(json{{"name", "Skeleton"}, {"children", json::array()}});
+        doc_["scenes"][0]["nodes"].push_back(container);
         std::vector<int> jointNodes(nb, -1);
         std::vector<std::vector<int>> children(nb);
         for (size_t i = 0; i < nb; ++i) {
@@ -573,9 +586,16 @@ private:
             const Mat4 local = parent[i] < 0 ? worlds[i] : LocalMatrix(worlds[static_cast<size_t>(parent[i])], worlds[i]);
             float matrix[16];
             ToColumnMajor(local, matrix);
-            json node = {{"name", scene_.bones[i].name.empty() ? ("bone_" + std::to_string(i)) : scene_.bones[i].name},
-                         {"matrix", json::array()}};
-            for (float v : matrix) node["matrix"].push_back(Number(v));
+            json node = {{"name", scene_.bones[i].name.empty() ? ("bone_" + std::to_string(i)) : scene_.bones[i].name}};
+            // The spec asks importers not to be given the identity matrix explicitly.
+            static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            bool isIdentity = true;
+            for (int k = 0; k < 16; ++k)
+                if (std::fabs(matrix[k] - identity[k]) > 1e-7f) { isIdentity = false; break; }
+            if (!isIdentity) {
+                node["matrix"] = json::array();
+                for (float v : matrix) node["matrix"].push_back(Number(v));
+            }
             if (!children[i].empty()) node["children"] = children[i];
             doc_["nodes"][static_cast<size_t>(jointNodes[i])] = std::move(node);
         }

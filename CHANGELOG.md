@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.9.3] - 2026-11-25
+
+### Fixed
+
+- **glTF files could not be imported in Blender ("Couldn't parse glTF").** Three spec violations in the generated document: the default scene's `nodes` array was empty (nothing to import), morph targets were wrapped in `{"attributes": {...}}` instead of being a flat attribute dictionary, and sparse morph POSITION accessors lacked the required `min`/`max`. Identity bone matrices are also omitted now. Verified with Blender 5.3's standard glTF importer in headless mode: GLB and glTF both import with geometry, armature and morph targets; OBJ imports with geometry. The Khronos glTF validator reports **0 errors**. 19,493 existing checks plus 100 format checks pass.
+
 ## [0.9.2] - 2026-11-25
 
 ### Added
