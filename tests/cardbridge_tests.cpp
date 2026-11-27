@@ -68,6 +68,9 @@
 #include "pmx/PmxToScene.h"
 #include "pmx/PmxBodyRestore.h"
 #include "pmx/PmxAssetApply.h"
+#include "pmx/BoneAliases.h"
+#include "pmx/BoneMatcher.h"
+#include "pmx/PmxTransform.h"
 #include "assemble/KkBodyTemplate.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
@@ -12327,6 +12330,96 @@ void bodyRestoreTests() {
     });
 }
 
+void boneMatchingTests() {
+    test("bone aliases: Japanese, English and KK names resolve to one semantic id", [] {
+        const auto jp = pmx::IdentifyBone("頭");
+        const auto en = pmx::IdentifyBone("Head");
+        const auto kk = pmx::IdentifyBone("cf_j_head");
+        CHECK(jp.valid && en.valid && kk.valid);
+        CHECK(jp.canonical == "head" && en.canonical == "head" && kk.canonical == "head");
+        CHECK(pmx::EquivalentBone(jp, en) && pmx::EquivalentBone(en, kk));
+        CHECK(pmx::IdentifyBone("上半身").canonical == "upper_body");
+        CHECK(pmx::IdentifyBone("LowerBody").canonical == "lower_body");
+        CHECK(pmx::IdentifyBone("ひざ").canonical == "knee");
+        CHECK(pmx::IdentifyBone("cf_j_forearm01_L").canonical == "elbow");
+    });
+
+    test("bone aliases: side, twist and IK distinctions are preserved", [] {
+        const auto left = pmx::IdentifyBone("左腕");
+        const auto right = pmx::IdentifyBone("右腕");
+        const auto kkLeft = pmx::IdentifyBone("cf_j_arm00_L");
+        const auto kkRight = pmx::IdentifyBone("cf_j_arm00_R");
+        CHECK(left.side == pmx::BoneSide::Left && right.side == pmx::BoneSide::Right);
+        CHECK(kkLeft.side == pmx::BoneSide::Left && kkRight.side == pmx::BoneSide::Right);
+        CHECK(pmx::EquivalentBone(left, kkLeft));
+        CHECK(!pmx::EquivalentBone(left, right));
+        CHECK(!pmx::EquivalentBone(left, kkRight));
+        CHECK(pmx::IdentifyBone("腕捩").twist);
+        CHECK(!pmx::EquivalentBone(pmx::IdentifyBone("腕捩"), pmx::IdentifyBone("腕")));
+        CHECK(pmx::IdentifyBone("cf_j_arm00_L_IK").ik);
+        CHECK(!pmx::EquivalentBone(pmx::IdentifyBone("cf_j_arm00_L_IK"), kkLeft));
+        CHECK(pmx::NormalizeBoneName("cf_j_head") == pmx::NormalizeBoneName("CFJHEAD"));
+        CHECK(pmx::NormalizeBoneName("頭") == "頭");
+    });
+
+    test("bone matcher: multi-stage resolution and conservative geometric fallback", [] {
+        const std::vector<std::string> srcNames = {"頭", "上半身", "custom_bone_A", "cf_j_arm00_L_IK"};
+        const std::vector<Vec3> srcPos = {{0, 1.6f, 0}, {0, 1.2f, 0}, {0.3f, 1.0f, 0}, {-0.5f, 1.0f, 0}};
+        const std::vector<int> srcParent = {-1, 0, -1, 1};
+        const std::vector<std::string> dstNames = {"cf_j_head", "cf_j_spine01", "another_name", "cf_j_arm00_L_IK"};
+        const std::vector<Vec3> dstPos = srcPos;
+        const std::vector<int> dstParent = {-1, 0, 1, 1};
+        const auto maps = pmx::ResolveBones(srcNames, srcPos, srcParent, dstNames, dstPos, dstParent);
+        CHECK(maps.size() == 4);
+        CHECK(maps[0].target == 0 && maps[0].method == pmx::MatchMethod::Alias);
+        CHECK(maps[1].target == 1 && maps[1].method == pmx::MatchMethod::Alias);
+        CHECK(maps[2].target == 2 && maps[2].method == pmx::MatchMethod::Geometric);
+        CHECK(maps[3].target == 3 && maps[3].ok());   // identical IK-qualified names
+        CHECK(maps[0].confidence > maps[2].confidence);
+    });
+
+    test("bone matcher: geometric fallback rejects distant or ambiguous candidates", [] {
+        const std::vector<std::string> src = {"unknown_bone"};
+        const std::vector<Vec3> sp = {{0, 0, 0}};
+        const std::vector<int> spar = {-1};
+        const std::vector<std::string> dst = {"a", "b", "c", "d"};
+        const std::vector<Vec3> dp = {{-3, 0, 0}, {-0.05f, 0, 0}, {0.05f, 0, 0}, {3, 0, 0}};  // two close -> ambiguous
+        const std::vector<int> dpar = {-1, -1, -1, -1};
+        const auto maps = pmx::ResolveBones(src, sp, spar, dst, dp, dpar);
+        CHECK(maps.size() == 1);
+        CHECK(maps[0].ambiguous);
+        CHECK(maps[0].target < 0);
+        pmx::BoneMatchOptions strict;
+        strict.allowGeometric = false;
+        const auto strictMaps = pmx::ResolveBones(src, sp, spar, dst, dp, dpar, strict);
+        CHECK(strictMaps[0].target < 0 && !strictMaps[0].ok());
+    });
+
+    test("transform: points, normals and skin weights are handled consistently", [] {
+        pmx::AssetTransform t;
+        t.translation = {1, 2, 3};
+        t.rotationDeg = {0, 90, 0};
+        t.scale = {2, 1, 1};
+        const Vec3 p = pmx::TransformPoint({1, 0, 0}, t);
+        CHECK(std::fabs(p.x - 1.0f) < 1e-4f && std::fabs(p.y - 2.0f) < 1e-4f && std::fabs(p.z - 1.0f) < 1e-4f);
+        const Vec3 n = pmx::TransformNormal({1, 0, 0}, t);
+        CHECK(std::fabs(n.x) < 1e-4f && std::fabs(n.z + 1.0f) < 1e-4f);
+        CHECK(std::fabs(std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z) - 1.0f) < 1e-4f);
+        library::AssetTemplate asset;
+        library::AssetVertex v;
+        v.pos = {1, 0, 0}; v.normal = {1, 0, 0};
+        v.bone[0] = 0; v.weight[0] = 0.5f; v.bone[1] = 1; v.weight[1] = 0.5f;
+        asset.vertices.push_back(v);
+        asset.boneNames = {"a", "b"};
+        asset.bonePositions = {{1, 0, 0}, {0, 1, 0}};
+        const auto moved = pmx::ApplyTransform(asset, t);
+        CHECK(moved.vertices[0].weight[0] == 0.5f && moved.vertices[0].weight[1] == 0.5f);
+        CHECK(moved.vertices[0].pos.x != asset.vertices[0].pos.x);
+        CHECK(moved.bonePositions[0].x != asset.bonePositions[0].x);
+        CHECK(asset.vertices[0].pos.x == 1.0f);   // source untouched
+    });
+}
+
 void crossModelTransferTests() {
     auto syntheticAsset = [](const pmx::Model& doc, bool compatible) {
         library::AssetTemplate asset;
@@ -12384,7 +12477,9 @@ void crossModelTransferTests() {
     test("cross-model transfer: missing required bones produce a clear rejection", [&] {
         pmx::Model doc = makeRoundTripFixture(false);
         const auto asset = syntheticAsset(doc, false);
-        const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, doc);
+        pmx::BoneMatchOptions strict;
+        strict.allowGeometric = false;
+        const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, doc, strict);
         CHECK(!fit.compatible);
         CHECK(fit.reason.find("incompatible") != std::string::npos);
         CHECK(fit.matchedBones == 0);
@@ -12782,6 +12877,7 @@ int main() {
     modIndexCacheTests();
     assetCatalogTests();
     bodyRestoreTests();
+    boneMatchingTests();
     crossModelTransferTests();
     pmxImportTests();
     meshTests();

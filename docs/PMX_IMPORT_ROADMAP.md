@@ -173,9 +173,13 @@ Asset catalog record → card-free prefab/geometry extractor → explicit compat
 ### Next steps in Phase 4
 - MMD↔KK alias/compatibility layer and a warned geometric fallback; asset texture write path; new-bone/chain grafting; viewer Assets-tab "Apply" with a compatibility report and a transform editor whose values are baked into the document at apply time.
 
+### Compatibility pipeline expansion (2026-11-27)
+Stages A–D of `docs/PMX_ASSET_GRAFTING_PLAN.md` landed: bone alias registry, multi-stage matcher with conservative geometric fallback, expanded fit classifications and a generic transform API; CLI gained `--auto`, `--map`, transform flags and `--json-report` (exit 3 incompatible / 4 ambiguous). Tests: **19,650 checks, 0 failed**. Material/texture import, viewer workflow and opt-in bone grafting remain pending with documented blockers in that plan.
+
 ### Remaining implementation tasks
 - **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
 - **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.
+- **Phase 4 remainder:** stages E/F/H of `docs/PMX_ASSET_GRAFTING_PLAN.md`.
 
 ---
 

@@ -94,6 +94,9 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxToScene.cpp
     src/pmx/PmxBodyRestore.cpp
     src/pmx/PmxAssetApply.cpp
+    src/pmx/BoneAliases.cpp
+    src/pmx/BoneMatcher.cpp
+    src/pmx/PmxTransform.cpp
     src/export/Exporter.cpp
     src/export/ModelExport.cpp
     src/export/FormatCommon.cpp

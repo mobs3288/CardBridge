@@ -34,6 +34,7 @@
 #include "pmx/PmxReader.h"
 #include "pmx/PmxBodyRestore.h"
 #include "pmx/PmxAssetApply.h"
+#include "pmx/PmxTransform.h"
 #include "assemble/KkBodyTemplate.h"
 #include "core/Timing.h"
 #include "export/ColourGrade.h"
@@ -1550,16 +1551,99 @@ int cmdPmx(const Args& a) {
                 std::fprintf(stderr, "error: %s\n", error.c_str());
                 return 3;
             }
-            const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, m);
-            std::printf("asset %s: %d/%d required bones matched, scale %.3f, %zu vertices, %zu indices\n",
-                        found->name.c_str(), fit.matchedBones, fit.requiredBones, fit.scale,
-                        asset.vertices.size(), asset.indices.size());
-            for (const std::string& w : fit.warnings) std::printf("  %s\n", w.c_str());
+            pmx::AssetTransform tr;
+            tr.translation = {static_cast<float>(std::atof(a.get("tx", "0").c_str())),
+                              static_cast<float>(std::atof(a.get("ty", "0").c_str())),
+                              static_cast<float>(std::atof(a.get("tz", "0").c_str()))};
+            tr.rotationDeg = {static_cast<float>(std::atof(a.get("rx", "0").c_str())),
+                              static_cast<float>(std::atof(a.get("ry", "0").c_str())),
+                              static_cast<float>(std::atof(a.get("rz", "0").c_str()))};
+            tr.scale = {static_cast<float>(std::atof(a.get("sx", "1").c_str())),
+                        static_cast<float>(std::atof(a.get("sy", "1").c_str())),
+                        static_cast<float>(std::atof(a.get("sz", "1").c_str()))};
+            const library::AssetTemplate aligned = pmx::ApplyTransform(asset, tr);
+            pmx::BoneMatchOptions mo;
+            mo.allowGeometric = a.has("auto") || a.has("geometric");
+            pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(aligned, m, mo);
+            // Optional explicit bone mapping: --map "source>destination,..." (names, not indices).
+            const std::string manual = a.get("map");
+            if (!manual.empty()) {
+                size_t start = 0;
+                while (start < manual.size()) {
+                    const size_t end = manual.find(',', start);
+                    const std::string pair = manual.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                    const size_t sep = pair.find('>');
+                    if (sep != std::string::npos) {
+                        const std::string src = pair.substr(0, sep), dst = pair.substr(sep + 1);
+                        int si = -1, ti = -1;
+                        for (size_t i = 0; i < aligned.boneNames.size(); ++i) if (aligned.boneNames[i] == src) { si = static_cast<int>(i); break; }
+                        for (size_t i = 0; i < m.bones.size(); ++i)
+                            if (m.bones[i].name == dst || m.bones[i].nameEn == dst) { ti = static_cast<int>(i); break; }
+                        if (si >= 0 && ti >= 0 && static_cast<size_t>(si) < fit.mappings.size()) {
+                            auto& mapping = fit.mappings[static_cast<size_t>(si)];
+                            mapping.target = ti; mapping.method = pmx::MatchMethod::Alias;
+                            mapping.confidence = 1.0f; mapping.ambiguous = false; mapping.note = "manual mapping";
+                        } else {
+                            std::fprintf(stderr, "warning: manual mapping '%s' refers to unknown bones\n", pair.c_str());
+                        }
+                    }
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+                fit.matchedBones = fit.ambiguousBones = fit.missingBones = 0;
+                for (size_t i = 0; i < aligned.boneNames.size(); ++i) {
+                    bool required = false;
+                    for (const auto& v : aligned.vertices)
+                        for (int k = 0; k < 4; ++k)
+                            if (v.weight[k] > 0.0f && v.bone[k] == static_cast<int>(i)) { required = true; break; }
+                    if (!required) continue;
+                    const auto& mp = fit.mappings[i];
+                    if (mp.ok()) ++fit.matchedBones;
+                    else if (mp.ambiguous) ++fit.ambiguousBones;
+                    else ++fit.missingBones;
+                }
+                if (fit.missingBones) { fit.status = pmx::FitStatus::Incompatible; fit.compatible = false; fit.reason = "incompatible skeleton after manual mapping"; }
+                else if (fit.ambiguousBones) { fit.status = pmx::FitStatus::RequiresManualMapping; fit.compatible = false; fit.reason = "ambiguous mappings remain"; }
+                else { fit.status = fit.warnings.empty() ? pmx::FitStatus::Compatible : pmx::FitStatus::CompatibleWithWarnings; fit.compatible = true; fit.reason.clear(); }
+            }
+            if (a.has("json-report")) {
+                nlohmann::json j;
+                j["asset"] = found->key;
+                j["status"] = pmx::FitStatusName(fit.status);
+                j["reason"] = fit.reason;
+                j["required"] = fit.requiredBones;
+                j["matched"] = fit.matchedBones;
+                j["ambiguous"] = fit.ambiguousBones;
+                j["missing"] = fit.missingBones;
+                j["scale"] = fit.scale;
+                j["hierarchy"] = fit.hierarchyCompatibility;
+                j["indexCapacityOk"] = fit.indexCapacityOk;
+                j["warnings"] = fit.warnings;
+                auto& rows = j["mappings"] = nlohmann::json::array();
+                for (const auto& mp : fit.mappings) {
+                    nlohmann::json e;
+                    e["source"] = mp.source < 0 ? std::string() : aligned.boneNames[static_cast<size_t>(mp.source)];
+                    e["target"] = mp.target < 0 ? std::string() : m.bones[static_cast<size_t>(mp.target)].name;
+                    e["method"] = pmx::MatchMethodName(mp.method);
+                    e["confidence"] = mp.confidence;
+                    e["deviation"] = mp.deviation;
+                    e["ambiguous"] = mp.ambiguous;
+                    e["note"] = mp.note;
+                    rows.push_back(std::move(e));
+                }
+                std::printf("%s\n", j.dump(2).c_str());
+            } else {
+                std::printf("asset %s: %s (%d/%d required bones, %d ambiguous, %d missing), scale %.3f, hierarchy %.2f\n",
+                            found->name.c_str(), pmx::FitStatusName(fit.status), fit.matchedBones,
+                            fit.requiredBones, fit.ambiguousBones, fit.missingBones, fit.scale,
+                            fit.hierarchyCompatibility);
+                for (const std::string& w : fit.warnings) std::printf("  %s\n", w.c_str());
+            }
             if (!fit.compatible) {
                 std::fprintf(stderr, "error: %s\n", fit.reason.c_str());
-                return 3;
+                return fit.status == pmx::FitStatus::RequiresManualMapping ? 4 : 3;
             }
-            const pmx::AssetApplyResult r = pmx::ApplyAsset(m, asset, fit);
+            const pmx::AssetApplyResult r = pmx::ApplyAsset(m, aligned, fit);
             if (!r.ok) { std::fprintf(stderr, "error: %s\n", r.error.c_str()); return 3; }
             const Bytes written = pmx::WritePmx(m);
             fileio::WriteFile(out, written.data(), written.size());
@@ -1780,7 +1864,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine", "auto", "geometric", "json-report"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

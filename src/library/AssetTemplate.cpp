@@ -22,6 +22,13 @@ int globalBone(const unity::UnityFile& file, int64_t xformId, AssetTemplate& out
     const Mat4 world = file.worldMatrix(xformId);
     out.boneNames.push_back(name);
     out.bonePositions.push_back({world.m[3], world.m[7], world.m[11]});
+    int parent = -1;
+    if (const unity::Xform* child = file.xform(xformId))
+        if (child->parent)
+            if (const unity::Xform* px = file.xform(child->parent))
+                for (size_t i = 0; i < out.boneNames.size(); ++i)
+                    if (out.boneNames[i] == px->name) { parent = static_cast<int>(i); break; }
+    out.boneParents.push_back(parent);
     return static_cast<int>(out.boneNames.size()) - 1;
 }
 

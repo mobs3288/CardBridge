@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.14.0] - 2026-11-27
+
+### Added
+
+- **PMX asset grafting compatibility pipeline (stages A–D).** A centralized bone alias registry resolves Japanese MMD, English MMD, KK and KKS names to one semantic id while preserving left/right, twist, IK and helper distinctions. A deterministic multi-stage matcher (exact → normalized → alias → hierarchy → conservative geometric fallback) records method, confidence, positional deviation and ambiguity for every mapping; ambiguous candidates are never silently accepted. `pmx::AnalyzeAssetFit` now reports four compatibility classifications, hierarchy agreement, index capacity and structured mappings; `pmx::ApplyAsset` only uses resolved mappings. A generic transform API applies translation, rotation and uniform/non-uniform scale to positions and normals (inverse-transpose) without touching skin weights or the source template. CLI `pmx apply-asset` gained `--auto/--geometric`, `--map`, transform flags and `--json-report` (exit 3 incompatible, 4 ambiguous). Tests: 19,650 checks pass. Material/texture import, viewer workflow and opt-in bone grafting remain pending — see `docs/PMX_ASSET_GRAFTING_PLAN.md`.
+
 ## [0.13.0] - 2026-11-27
 
 ### Added

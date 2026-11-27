@@ -24,6 +24,7 @@ struct AssetTemplate {
     std::vector<uint32_t> indices;
     std::vector<std::string> boneNames;
     std::vector<Vec3> bonePositions;
+    std::vector<int> boneParents;         // renderer bone hierarchy, -1 for roots
     std::vector<std::string> warnings;
 };
 

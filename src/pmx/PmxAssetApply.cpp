@@ -1,17 +1,10 @@
 #include "pmx/PmxAssetApply.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
-#include <map>
 
 namespace cardbridge::pmx {
 namespace {
-
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
-}
 
 float length(Vec3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
 
@@ -23,76 +16,141 @@ uint64_t indexCapacity(int size) {
 
 } // namespace
 
-AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model& doc) {
-    AssetFitReport report;
-    std::map<std::string, int> byName;
-    for (size_t i = 0; i < doc.bones.size(); ++i) {
-        if (!doc.bones[i].name.empty()) byName[lower(doc.bones[i].name)] = static_cast<int>(i);
-        if (!doc.bones[i].nameEn.empty()) byName[lower(doc.bones[i].nameEn)] = static_cast<int>(i);
+const char* FitStatusName(FitStatus s) {
+    switch (s) {
+        case FitStatus::Compatible: return "compatible";
+        case FitStatus::CompatibleWithWarnings: return "compatible-with-warnings";
+        case FitStatus::RequiresManualMapping: return "requires-manual-mapping";
+        default: return "incompatible";
     }
-    std::vector<int> mapping(asset.boneNames.size(), -1);
+}
+
+AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model& doc,
+                               const BoneMatchOptions& options) {
+    AssetFitReport report;
+    report.materialCompatibility = "source materials/textures are not imported by this operation";
     std::vector<bool> required(asset.boneNames.size(), false);
     for (const auto& v : asset.vertices)
         for (int k = 0; k < 4; ++k)
             if (v.weight[k] > 0.0f && v.bone[k] >= 0 && static_cast<size_t>(v.bone[k]) < required.size())
                 required[static_cast<size_t>(v.bone[k])] = true;
-    for (size_t i = 0; i < asset.boneNames.size(); ++i) {
-        if (!required[i]) continue;
-        report.requiredBones++;
-        auto it = byName.find(lower(asset.boneNames[i]));
-        if (it != byName.end()) { mapping[i] = it->second; report.matchedBones++; }
-        else if (report.warnings.size() < 8)
-            report.warnings.push_back("missing required bone: " + asset.boneNames[i]);
-    }
+    report.requiredBones = static_cast<int>(std::count(required.begin(), required.end(), true));
     if (!report.requiredBones) {
         report.reason = "asset has no skinned influences";
         return report;
     }
-    if (report.matchedBones != report.requiredBones) {
-        report.reason = "incompatible skeleton: " + std::to_string(report.matchedBones) + " of " +
-                        std::to_string(report.requiredBones) + " required bones are present in this PMX";
+
+    std::vector<std::string> targetNames;
+    std::vector<Vec3> targetPositions;
+    std::vector<int> targetParents;
+    targetNames.reserve(doc.bones.size());
+    targetPositions.reserve(doc.bones.size());
+    targetParents.reserve(doc.bones.size());
+    for (const Bone& b : doc.bones) {
+        targetNames.push_back(b.nameEn.empty() ? b.name : b.nameEn);
+        targetPositions.push_back(b.position);
+        targetParents.push_back(b.parent);
+    }
+    report.mappings = ResolveBones(asset.boneNames, asset.bonePositions, asset.boneParents,
+                                   targetNames, targetPositions, targetParents, options);
+
+    for (size_t i = 0; i < required.size(); ++i) {
+        if (!required[i]) continue;
+        const BoneMapping& m = report.mappings[i];
+        if (m.ok()) {
+            report.matchedBones++;
+            if (m.method == MatchMethod::Geometric || m.confidence < 0.7f)
+                report.warnings.push_back(asset.boneNames[i] + " -> " + targetNames[static_cast<size_t>(m.target)] +
+                                          " via " + MatchMethodName(m.method) + " (confidence " +
+                                          std::to_string(m.confidence) + ")");
+        } else if (m.ambiguous) {
+            report.ambiguousBones++;
+            report.warnings.push_back("ambiguous bone: " + asset.boneNames[i] + " (" + m.note + ")");
+        } else {
+            report.missingBones++;
+            if (report.warnings.size() < 10)
+                report.warnings.push_back("missing required bone: " + asset.boneNames[i]);
+        }
+    }
+    if (report.missingBones) {
+        report.status = FitStatus::Incompatible;
+        report.reason = "incompatible skeleton: " + std::to_string(report.missingBones) +
+                        " required bone(s) unresolved";
         return report;
     }
+    if (report.ambiguousBones) {
+        report.status = FitStatus::RequiresManualMapping;
+        report.reason = "ambiguous bone mappings require manual resolution";
+        return report;
+    }
+
     const uint64_t need = static_cast<uint64_t>(doc.vertices.size()) + asset.vertices.size();
-    if (need > indexCapacity(doc.format.vertexSize())) {
+    report.indexCapacityOk = need <= indexCapacity(doc.format.vertexSize());
+    if (!report.indexCapacityOk) {
+        report.status = FitStatus::Incompatible;
         report.reason = "asset would overflow the PMX vertex index size (" +
                         std::to_string(doc.format.vertexSize()) + " bytes)";
         return report;
     }
-    struct Match { Vec3 asset, pmx; };
-    std::vector<Match> matches;
-    for (size_t i = 0; i < asset.boneNames.size(); ++i) {
-        if (mapping[i] < 0 || i >= asset.bonePositions.size()) continue;
-        matches.push_back({asset.bonePositions[i], doc.bones[static_cast<size_t>(mapping[i])].position});
+
+    int withParent = 0, parentAgrees = 0;
+    struct Pair { Vec3 a, b; };
+    std::vector<Pair> pairs;
+    for (size_t i = 0; i < required.size(); ++i) {
+        if (!required[i]) continue;
+        const BoneMapping& m = report.mappings[i];
+        if (!m.ok()) continue;
+        if (i < asset.boneParents.size() && asset.boneParents[i] >= 0) {
+            ++withParent;
+            const BoneMapping& pm = report.mappings[static_cast<size_t>(asset.boneParents[i])];
+            if (pm.ok() && pm.target == doc.bones[static_cast<size_t>(m.target)].parent) ++parentAgrees;
+        }
+        if (i < asset.bonePositions.size())
+            pairs.push_back({asset.bonePositions[i], doc.bones[static_cast<size_t>(m.target)].position});
     }
-    if (matches.empty()) { report.reason = "no matched rest-bone positions to fit from"; return report; }
-    Vec3 ac{0, 0, 0}, pc{0, 0, 0};
-    for (const Match& m : matches) {
-        ac.x += m.asset.x; ac.y += m.asset.y; ac.z += m.asset.z;
-        pc.x += m.pmx.x; pc.y += m.pmx.y; pc.z += m.pmx.z;
-    }
-    const float inv = 1.0f / static_cast<float>(matches.size());
-    ac.x *= inv; ac.y *= inv; ac.z *= inv;
-    pc.x *= inv; pc.y *= inv; pc.z *= inv;
-    std::vector<float> ratios;
-    for (const Match& m : matches) {
-        const Vec3 da{m.asset.x - ac.x, m.asset.y - ac.y, m.asset.z - ac.z};
-        const float la = length(da);
-        if (la > 1e-4f) {
-            const Vec3 dp{m.pmx.x - pc.x, m.pmx.y - pc.y, m.pmx.z - pc.z};
-            ratios.push_back(length(dp) / la);
+    report.hierarchyCompatibility = withParent ? static_cast<float>(parentAgrees) / withParent : 1.0f;
+    if (report.hierarchyCompatibility < 0.7f)
+        report.warnings.push_back("skeleton hierarchy agreement is low (" +
+                                  std::to_string(report.hierarchyCompatibility) + ")");
+
+    if (pairs.size() >= 2) {
+        Vec3 ac{0, 0, 0}, pc{0, 0, 0};
+        for (const Pair& p : pairs) {
+            ac.x += p.a.x; ac.y += p.a.y; ac.z += p.a.z;
+            pc.x += p.b.x; pc.y += p.b.y; pc.z += p.b.z;
+        }
+        const float inv = 1.0f / static_cast<float>(pairs.size());
+        ac.x *= inv; ac.y *= inv; ac.z *= inv;
+        pc.x *= inv; pc.y *= inv; pc.z *= inv;
+        std::vector<float> ratios;
+        for (const Pair& p : pairs) {
+            const Vec3 da{p.a.x - ac.x, p.a.y - ac.y, p.a.z - ac.z};
+            const float la = length(da);
+            if (la > 1e-4f) ratios.push_back(length(Vec3{p.b.x - pc.x, p.b.y - pc.y, p.b.z - pc.z}) / la);
+        }
+        if (!ratios.empty()) {
+            std::sort(ratios.begin(), ratios.end());
+            report.scale = ratios[ratios.size() / 2];
+            if (std::fabs(report.scale - 1.0f) > 0.25f) {
+                report.warnings.push_back("measured scale " + std::to_string(report.scale) +
+                                          " is outside the safe range; keeping 1.0");
+                report.scale = 1.0f;
+            }
         }
     }
-    if (!ratios.empty()) {
-        std::sort(ratios.begin(), ratios.end());
-        const float median = ratios[ratios.size() / 2];
-        if (std::fabs(median - 1.0f) <= 0.25f) report.scale = median;
-        else report.warnings.push_back("measured scale " + std::to_string(median) +
-                                       " is outside the safe range; keeping 1.0");
+    if (!pairs.empty()) {
+        // Recompute centroids for the final translation (pairs may be empty above).
+        Vec3 ac{0, 0, 0}, pc{0, 0, 0};
+        for (const Pair& p : pairs) {
+            ac.x += p.a.x; ac.y += p.a.y; ac.z += p.a.z;
+            pc.x += p.b.x; pc.y += p.b.y; pc.z += p.b.z;
+        }
+        const float inv = 1.0f / static_cast<float>(pairs.size());
+        ac.x *= inv; ac.y *= inv; ac.z *= inv;
+        pc.x *= inv; pc.y *= inv; pc.z *= inv;
+        report.translation = {pc.x - ac.x * report.scale, pc.y - ac.y * report.scale, pc.z - ac.z * report.scale};
     }
-    report.translation = {pc.x - ac.x * report.scale, pc.y - ac.y * report.scale, pc.z - ac.z * report.scale};
-    report.warnings.insert(report.warnings.begin(),
-        "fit from " + std::to_string(matches.size()) + " matched bones; scale " + std::to_string(report.scale));
+    report.status = report.warnings.empty() ? FitStatus::Compatible : FitStatus::CompatibleWithWarnings;
     report.compatible = true;
     return report;
 }
@@ -100,16 +158,11 @@ AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model&
 AssetApplyResult ApplyAsset(Model& doc, const library::AssetTemplate& asset, const AssetFitReport& fit) {
     AssetApplyResult result;
     if (!fit.compatible) { result.error = fit.reason.empty() ? "asset is not compatible" : fit.reason; return result; }
-    std::map<std::string, int> byName;
-    for (size_t i = 0; i < doc.bones.size(); ++i) {
-        if (!doc.bones[i].name.empty()) byName[lower(doc.bones[i].name)] = static_cast<int>(i);
-        if (!doc.bones[i].nameEn.empty()) byName[lower(doc.bones[i].nameEn)] = static_cast<int>(i);
-    }
-    std::vector<int> mapping(asset.boneNames.size(), -1);
-    for (size_t i = 0; i < asset.boneNames.size(); ++i) {
-        auto it = byName.find(lower(asset.boneNames[i]));
-        if (it != byName.end()) mapping[i] = it->second;
-    }
+    std::vector<int> boneMap(asset.boneNames.size(), -1);
+    for (const BoneMapping& m : fit.mappings)
+        if (m.source >= 0 && static_cast<size_t>(m.source) < boneMap.size() && m.ok())
+            boneMap[static_cast<size_t>(m.source)] = m.target;
+
     const size_t base = doc.vertices.size();
     const size_t baseIndices = doc.indices.size();
     std::vector<int> remap(asset.vertices.size(), -1);
@@ -123,8 +176,8 @@ AssetApplyResult ApplyAsset(Model& doc, const library::AssetTemplate& asset, con
         nv.uv = v.uv;
         int n = 0;
         for (int k = 0; k < 4; ++k) {
-            if (v.weight[k] <= 0.0f || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= mapping.size()) continue;
-            const int mapped = mapping[static_cast<size_t>(v.bone[k])];
+            if (v.weight[k] <= 0.0f || v.bone[k] < 0 || static_cast<size_t>(v.bone[k]) >= boneMap.size()) continue;
+            const int mapped = boneMap[static_cast<size_t>(v.bone[k])];
             if (mapped < 0) continue;
             nv.bone[n] = mapped; nv.weight[n] = v.weight[k]; ++n;
         }
