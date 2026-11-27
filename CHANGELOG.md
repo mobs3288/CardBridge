@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.15.0] - 2026-11-27
+
+### Added
+
+- **Stage E — complete PMX material & texture import for grafted assets.** `AssetTemplate` now carries actual source materials (diffuse/ambient/specular/shininess/edge/alpha/flags/texture roles) and encoded texture bytes, extracted card-free from base libraries and zipmods with per-submesh material associations. `ExportDocument` gained an in-memory texture write path with case-insensitive collision handling, content dedup, path-traversal sanitization and deterministic relative paths; the existing disk-backed behavior is unchanged. `ApplyAsset` appends one PMX material per source submesh with correct `indexCount`, texture indices and transparency instead of a plain white material, and the CLI applies transactionally with `--no-textures` and material/texture fields in `--json-report`. Tests: 19,690 checks pass. Real-world check: a base accessory applied to the supplied third-party Rin PMX produced +399 vertices, +930 indices, +1 material and +4 resolved textures. See `docs/PMX_ASSET_GRAFTING_PLAN.md`.
+
 ## [0.14.0] - 2026-11-27
 
 ### Added

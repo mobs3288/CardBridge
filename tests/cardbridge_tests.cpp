@@ -12420,6 +12420,107 @@ void boneMatchingTests() {
     });
 }
 
+void stageETests() {
+    test("stage E: in-memory texture export is collision-safe and portable", [] {
+        const std::string dst = tempPath("stage_e_export");
+        std::filesystem::remove_all(dst);
+        pmx::Model doc = makeRoundTripFixture(false);
+        const Bytes png = tinyPng();
+        Bytes png2 = png;
+        png2.push_back(0x42);   // different content -> different filename
+        doc.textures = {"tex.png", "TEX.PNG", "../evil.png"};
+        const std::vector<Bytes> overrides = {png, png2, png};
+        const std::string path = pmx::ExportDocument(doc, "", dst, "model", overrides);
+        CHECK(fileio::Exists(path));
+        CHECK(fileio::Exists(dst + "/textures/tex.png"));
+        CHECK(fileio::Exists(dst + "/textures/tex_2.png"));
+        const pmx::Model written = pmx::ReadPmxFile(path);
+        CHECK(written.textures.size() == 3);
+        CHECK(written.textures[0] == "textures/tex.png");
+        const auto lowerOf = [](std::string s) { for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+        CHECK(lowerOf(written.textures[1]) == "textures/tex_2.png");   // case-insensitive collision
+        CHECK(written.textures[2].find("textures/") == 0);
+        CHECK(written.textures[2].find("..") == std::string::npos);   // no traversal
+        CHECK(written.format.trailing == doc.format.trailing);
+    });
+
+    test("stage E: multi-material asset appends correct materials, indices and textures", [] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        const auto vertices0 = doc.vertices;
+        const auto indices0 = doc.indices;
+        const auto materials0 = doc.materials;
+        const auto textures0 = doc.textures;
+        const auto morphs0 = doc.morphs;
+        const auto trailing0 = doc.format.trailing;
+
+        library::AssetTemplate asset;
+        asset.name = "multi";
+        asset.boneNames = {"bone0"};
+        asset.bonePositions = {doc.bones[0].position};
+        asset.boneParents = {-1};
+        for (int i = 0; i < 6; ++i) {
+            library::AssetVertex v;
+            v.pos = {static_cast<float>(i) * 0.1f, 0, 0};
+            v.normal = {0, 1, 0};
+            v.uv = {static_cast<float>(i) * 0.1f, 0.5f};
+            v.bone[0] = 0; v.weight[0] = 1.0f;
+            asset.vertices.push_back(v);
+        }
+        asset.indices = {0, 1, 2, 3, 4, 5};
+        asset.submeshRanges = {{0, 3}, {3, 3}};
+        library::AssetMaterial m0;
+        m0.name = "cloth"; m0.diffuse = {1, 0, 0, 1};
+        m0.diffuseTexture = 0; m0.drawFlags = 0x1E;
+        library::AssetMaterial m1;
+        m1.name = "lace"; m1.diffuse = {0, 0, 1, 0.5f};
+        m1.diffuseTexture = 0; m1.drawFlags = 0x1F;
+        asset.materials = {m0, m1};
+        asset.submeshMaterials = {0, 1};
+        library::AssetTexture tex;
+        tex.name = "cloth.png"; tex.role = "diffuse"; tex.bytes = tinyPng();
+        asset.textures.push_back(tex);
+
+        const auto fit = pmx::AnalyzeAssetFit(asset, doc);
+        CHECK(fit.compatible);
+        CHECK(fit.materialCompatibility.find("1 texture") != std::string::npos);
+        const auto r = pmx::ApplyAsset(doc, asset, fit);
+        CHECK(r.ok);
+        CHECK(r.addedMaterials == 2 && r.addedTextures == 1);
+        CHECK(doc.materials.size() == materials0.size() + 2);
+        CHECK(doc.textures.size() == textures0.size() + 1);
+        CHECK(doc.materials[materials0.size()].indexCount == 3);
+        CHECK(doc.materials[materials0.size() + 1].indexCount == 3);
+        CHECK(doc.materials[materials0.size()].diffuse.x == 1.0f);
+        CHECK(doc.materials[materials0.size() + 1].diffuse.w == 0.5f);
+        CHECK(doc.materials[materials0.size()].texture == static_cast<int>(textures0.size()));
+        CHECK(doc.textures.back() == "textures/cloth.png");
+        for (size_t i = 0; i < vertices0.size(); ++i) CHECK(doc.vertices[i].position.x == vertices0[i].position.x);
+        CHECK(doc.indices.size() == indices0.size() + 6);
+        CHECK(doc.morphs.size() == morphs0.size());
+        CHECK(doc.format.trailing == trailing0);
+        const Bytes bytes = pmx::WritePmx(doc);
+        const pmx::Model again = pmx::ReadPmx(bytes);
+        CHECK(again.materials.size() == doc.materials.size());
+        CHECK(again.textures.size() == doc.textures.size());
+        CHECK(again.materials[materials0.size() + 1].diffuse.w == 0.5f);
+    });
+
+    test("stage E: transform preserves material and texture payloads", [] {
+        library::AssetTemplate asset;
+        library::AssetMaterial m; m.name = "keep"; m.diffuse = {1, 0, 0, 1};
+        asset.materials.push_back(m);
+        library::AssetTexture tex; tex.name = "keep.png"; tex.bytes = tinyPng();
+        asset.textures.push_back(tex);
+        asset.submeshRanges = {{0, 3}};
+        pmx::AssetTransform t; t.translation = {1, 2, 3};
+        const auto moved = pmx::ApplyTransform(asset, t);
+        CHECK(moved.materials.size() == 1 && moved.materials[0].name == "keep");
+        CHECK(moved.textures.size() == 1 && moved.textures[0].bytes == tex.bytes);
+        CHECK(moved.submeshRanges.size() == 1);
+        CHECK(asset.materials.size() == 1 && asset.textures.size() == 1);
+    });
+}
+
 void crossModelTransferTests() {
     auto syntheticAsset = [](const pmx::Model& doc, bool compatible) {
         library::AssetTemplate asset;
@@ -12508,6 +12609,20 @@ void crossModelTransferTests() {
         }
         if (!loaded) { ++g_skipped; return; }
         CHECK(loaded == 1);
+        // Stage E: real catalog assets must carry material and texture data.
+        library::AssetTemplate materialAsset;
+        std::string matError;
+        for (const auto& rec : catalog.records) {
+            if (rec.asset.empty() || rec.asset.rfind("p_", 0) != 0) continue;
+            library::AssetTemplateOptions tOpt;
+            tOpt.libraryRoot = library;
+            if (library::LoadAssetTemplate(rec, tOpt, materialAsset, matError) && !materialAsset.materials.empty()) break;
+        }
+        CHECK(!materialAsset.materials.empty());
+        CHECK(!materialAsset.submeshRanges.empty());
+        if (materialAsset.textures.empty())
+            std::printf("  note: sampled real asset has no extractable textures\n");
+        else CHECK(!materialAsset.textures[0].bytes.empty());
     });
 }
 
@@ -12878,6 +12993,7 @@ int main() {
     assetCatalogTests();
     bodyRestoreTests();
     boneMatchingTests();
+    stageETests();
     crossModelTransferTests();
     pmxImportTests();
     meshTests();

@@ -32,4 +32,12 @@ void ApplySceneMaterials(const assemble::Scene& scene, Model& doc);
 std::string ExportDocument(const Model& doc, const std::string& pmxDir,
                            const std::string& outDir, const std::string& baseName);
 
+// Same export, with in-memory encoded texture bytes for selected texture
+// indices (empty entry = use the disk-backed path). Names are collision-safe
+// and case-insensitive; duplicate content is written only once. The 4-arg
+// overload keeps the original disk-backed behaviour byte-for-byte.
+std::string ExportDocument(const Model& doc, const std::string& pmxDir,
+                           const std::string& outDir, const std::string& baseName,
+                           const std::vector<Bytes>& textureOverrides);
+
 } // namespace cardbridge::pmx

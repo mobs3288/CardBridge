@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <map>
 
 namespace cardbridge::pmx {
 namespace {
@@ -221,26 +222,51 @@ void ApplySceneMaterials(const assemble::Scene& scene, Model& doc) {
 
 std::string ExportDocument(const Model& doc, const std::string& pmxDir,
                            const std::string& outDir, const std::string& baseName) {
+    return ExportDocument(doc, pmxDir, outDir, baseName, {});
+}
+
+std::string ExportDocument(const Model& doc, const std::string& pmxDir,
+                           const std::string& outDir, const std::string& baseName,
+                           const std::vector<Bytes>& textureOverrides) {
     Model out = doc;
     fileio::CreateDirectories(outDir);
     const std::string texDir = join(outDir, "textures");
     fileio::CreateDirectories(texDir);
     std::vector<std::string> used;
-    for (std::string& rel : out.textures) {
+    std::map<uint64_t, std::string> byContent;   // in-memory bytes are written once
+    for (size_t ti = 0; ti < out.textures.size(); ++ti) {
+        std::string& rel = out.textures[ti];
         const std::string src = slashes(rel);
+        const bool memoryBacked = ti < textureOverrides.size() && !textureOverrides[ti].empty();
+        const Bytes bytes = memoryBacked ? textureOverrides[ti] : Bytes{};
         const std::string full = (!src.empty() && src[0] == '/') ? src : join(pmxDir, src);
         std::string name = fileio::FileName(src);
         if (name.empty()) name = "texture.png";
         std::string unique = name;
-        for (int n = 2; std::find(used.begin(), used.end(), unique) != used.end(); ++n) {
+        if (memoryBacked) {
+            const uint64_t hash = fnv1a(bytes.data(), bytes.size());
+            auto existing = byContent.find(hash);
+            if (existing != byContent.end()) { rel = "textures/" + existing->second; continue; }
+            byContent[hash] = name;
+        }
+        // Case-insensitive uniqueness: Windows filesystems cannot hold two
+        // names that differ only by case.
+        auto taken = [&](const std::string& candidate) {
+            const std::string want = lower(candidate);
+            return std::find_if(used.begin(), used.end(), [&](const std::string& u) { return lower(u) == want; }) != used.end();
+        };
+        for (int n = 2; taken(unique); ++n) {
             const size_t dot = name.rfind('.');
             unique = (dot == std::string::npos ? name : name.substr(0, dot)) + "_" + std::to_string(n) +
                      (dot == std::string::npos ? "" : name.substr(dot));
         }
         used.push_back(unique);
         try {
-            const Bytes bytes = fileio::ReadFile(full);
-            fileio::WriteFile(join(texDir, unique), bytes.data(), bytes.size());
+            if (memoryBacked) fileio::WriteFile(join(texDir, unique), bytes.data(), bytes.size());
+            else {
+                const Bytes disk = fileio::ReadFile(full);
+                fileio::WriteFile(join(texDir, unique), disk.data(), disk.size());
+            }
         } catch (const std::exception&) {
             // Keep the reference: a missing source texture stays a missing file
             // with the same relative path instead of silently pointing elsewhere.

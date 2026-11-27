@@ -1,6 +1,6 @@
 # PMX Asset Grafting Compatibility & Import Pipeline
 
-**Status: Stages A–D implemented; G partial; E/F/H pending with blockers documented** (2026-11-27). This document is the plan for extending the Phase 4 foundation (`library::LoadAssetTemplate`, `pmx::AnalyzeAssetFit`, `pmx::ApplyAsset`) into a generic PMX asset integration tool. Stages are independently testable; each ends with a build + test run. No stage is marked complete without tests.
+**Status: Stages A–E implemented; G partial; F/H pending with blockers documented** (2026-11-27). This document is the plan for extending the Phase 4 foundation (`library::LoadAssetTemplate`, `pmx::AnalyzeAssetFit`, `pmx::ApplyAsset`) into a generic PMX asset integration tool. Stages are independently testable; each ends with a build + test run. No stage is marked complete without tests.
 
 ## Investigation summary (current source)
 
@@ -21,7 +21,7 @@
 | B | Multi-stage deterministic matcher + conservative geometric fallback; structured mapping records | **implemented** |
 | C | Expanded compatibility report (classifications, confidence, hierarchy, capacity, materials) | **implemented** (material note only; extraction is Stage E) |
 | D | Generic transform/alignment API (translation, rotation, uniform/non-uniform scale, normals) wired into apply | **implemented** |
-| E | Material + texture extraction/import with collision-safe paths and graceful missing textures | **pending** — needs an in-memory texture write path in `ExportDocument` |
+| E | Material + texture extraction/import with collision-safe paths and graceful missing textures | **implemented** (E1–E7) |
 | F | Viewer preview/compatibility/apply/undo/save workflow | **pending** — needs a Scene→document write path and a new custom message |
 | G | CLI enhancements + JSON report + meaningful exit codes + full regression | **partial** — options, JSON report and exit codes landed; full regression below |
 | H | Explicit opt-in bone/chain grafting (new bones appended, references remapped, validated) | **pending** — depends on E/F plumbing and reference validation |
@@ -36,10 +36,33 @@
 - Tests: **19,650 checks, 0 failed**. New coverage for aliases, side/twist/IK distinctions, all match stages, geometric ambiguity, transforms and normal handling. Real-library asset extraction still passes.
 - CLI on the supplied Rin PMX with `--auto --json-report`: `N_move` reports `multiple geometric candidates`, exit 4 — a structured, explicit result instead of a hard rejection.
 
+### Stage E results (E1–E7)
+- `AssetTemplate` now carries extracted material records (diffuse/ambient/specular/shininess/edge/alpha/flags/texture roles), in-memory encoded textures, per-submesh material indices and index ranges. `LoadAssetTemplate` reads them card-free from `RendererInfo.materials` + `SubmeshMaterialSlot` + `MaterialData`, deduplicates textures by source id, and records warnings.
+- Texture bytes: decoded via the existing `DecodeTexture` and re-encoded to PNG with `exportcommon::EncodePng` (Unity compressed formats are never written raw under a `.png` name). Original encoded bytes are not exposed by the current Unity reader — documented limitation.
+- `ExportDocument` gained a 5th overload taking per-index in-memory texture bytes; the 4-arg disk-backed path is unchanged. Collision handling is case-insensitive, name-based and content-deduplicated for in-memory entries; path traversal is sanitized.
+- `AnalyzeAssetFit` now checks texture/material index capacity and reports material/texture counts. `ApplyAsset` appends one PMX material per source submesh with correct `indexCount`, texture indices, alpha and edge/draw flags; all original sections remain untouched.
+- CLI apply is transactional (working copy committed only on success), writes textures via the in-memory export path, supports `--no-textures`, and reports material/texture counts in `--json-report`.
+- Tests: **19,690 checks, 0 failed**. New coverage: in-memory export collisions/portability, multi-material appends, alpha preservation, transform payload preservation, original-section integrity and real-library material/texture extraction.
+- Real-world CLI: accessory `カフス右用` applied to the supplied third-party Rin PMX with a manual bone map: +399 vertices, +930 indices, +1 material, +4 textures, all resolved in `textures/`.
+
+### Known Stage E limitations
+- Source shader features that PMX cannot express (MaterialEditor overrides, custom lighting, some alpha-test semantics) are reported as warnings, not silently substituted.
+- Extracted texture filenames are source-id based (e.g. path id), which is deterministic and collision-safe but not human-friendly.
+- No rendered mannequin preview of the applied asset (Stage F).
+
 ### Blockers for remaining stages
-- **E:** `ExportDocument` (`PmxToScene.cpp:222-254`) copies texture files only from disk; `AssetTemplate` carries no decoded texture bytes. Need to add an in-memory texture write path and material property extraction before a collision-safe texture import can be correct.
-- **F:** native export (`viewer/Export.inc:43-72`) is document-authoritative and there is no general Scene→document write path; applying an asset in the viewer requires a new worker + message + undo stack entry. Independent of A–D.
+- **F:** native export (`viewer/Export.inc:43-72`) is document-authoritative and there is no general Scene→document write path; applying an asset in the viewer requires a new worker + message + undo stack entry. Independent of A–E.
 - **H:** appending bones requires validating every existing reference (IK, rigid bodies, joints, frame items, morph offsets) against appended indices; must be separate from ordinary apply and therefore follows E/F validation patterns.
+
+## Stage E plan (material & texture pipeline)
+
+- **E1 Data model:** `AssetTemplate` gains material records (name, shader, diffuse/specular/ambient/edge, alpha, flags, texture roles) and in-memory texture payloads (source id, name, format, role, origin, encoded bytes, dimensions), plus per-submesh material indices and index ranges. `PmxTransform` copies them automatically (`out = source`).
+- **E2 Card-free extraction:** `LoadAssetTemplate` reads `RendererInfo.materials` + `SubmeshMaterialSlot` + `MaterialData` (no card), records submesh ranges in index order, resolves textures through `Resolver` (`findAsset`/`findTexture`/loose zip PNG), deduplicates by source id, and reports missing/invalid data in `AssetTemplate::warnings`.
+- **E3 Texture bytes:** prefer original encoded bytes for loose ZIP PNGs; otherwise decode with the existing `DecodeTexture` and encode to PNG with `exportcommon::EncodePng`. Compressed Unity formats are never written raw under a `.png` name.
+- **E4 ExportDocument overload:** keep the 4-arg disk-backed function unchanged; add a texture-override overload that writes in-memory bytes with collision-safe, case-insensitive, deterministic relative paths; content dedup only for overrides.
+- **E5 Material integration:** `ApplyAsset` appends one PMX material per extracted submesh with correct `indexCount`, diffuse/specular/ambient/edge/flags and texture indices; texture and material index capacity are checked in `AnalyzeAssetFit`. Original materials/textures are never edited.
+- **E6 Transactional CLI:** apply to a working copy, commit only on success; `--no-textures` keeps the old direct-write layout; `--json-report` adds material/texture diagnostics; progress stays on stderr.
+- **E7 Tests:** synthetic multi-material/texture extraction, in-memory export, collision/path-traversal, alpha preservation, capacity checks, unchanged original sections, plus real-library asset extraction; full regression gate at 19,650 checks.
 
 ## Hard rules
 

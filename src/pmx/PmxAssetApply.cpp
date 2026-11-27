@@ -1,6 +1,7 @@
 #include "pmx/PmxAssetApply.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace cardbridge::pmx {
@@ -28,7 +29,8 @@ const char* FitStatusName(FitStatus s) {
 AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model& doc,
                                const BoneMatchOptions& options) {
     AssetFitReport report;
-    report.materialCompatibility = "source materials/textures are not imported by this operation";
+    report.materialCompatibility = std::to_string(asset.materials.size()) + " material(s), " +
+                                   std::to_string(asset.textures.size()) + " texture(s)";
     std::vector<bool> required(asset.boneNames.size(), false);
     for (const auto& v : asset.vertices)
         for (int k = 0; k < 4; ++k)
@@ -92,6 +94,19 @@ AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model&
                         std::to_string(doc.format.vertexSize()) + " bytes)";
         return report;
     }
+    const auto capacity = [](int size) -> uint64_t {
+        return size == 1 ? 127 : (size == 2 ? 32767 : 0x7FFFFFFFu);
+    };
+    const uint64_t needTex = static_cast<uint64_t>(doc.textures.size()) + asset.textures.size();
+    const uint64_t needMat = static_cast<uint64_t>(doc.materials.size()) +
+                             std::max<size_t>(1, asset.submeshRanges.size());
+    if (needTex > capacity(doc.format.textureSize()) || needMat > capacity(doc.format.materialSize())) {
+        report.status = FitStatus::Incompatible;
+        report.reason = "asset would overflow the PMX texture or material index size";
+        return report;
+    }
+    if (asset.submeshRanges.empty() && !asset.materials.empty())
+        report.warnings.push_back("submesh material associations were not extracted");
 
     int withParent = 0, parentAgrees = 0;
     struct Pair { Vec3 a, b; };
@@ -188,19 +203,80 @@ AssetApplyResult ApplyAsset(Model& doc, const library::AssetTemplate& asset, con
         doc.vertices.push_back(nv);
     }
     if (doc.vertices.size() == base) { result.error = "no asset vertex could be bound"; return result; }
-    for (uint32_t idx : asset.indices)
-        if (idx < remap.size() && remap[idx] >= 0) doc.indices.push_back(static_cast<uint32_t>(remap[idx]));
-    Material mat;
-    mat.name = asset.name.empty() ? "Applied asset" : asset.name;
-    mat.nameEn = mat.name;
-    mat.diffuse = {1, 1, 1, 1};
-    mat.ambient = {0.5f, 0.5f, 0.5f};
-    mat.drawFlags = 0x1E;
-    mat.edgeColor = {0, 0, 0, 1};
-    mat.edgeSize = 1.0f;
-    mat.toonFlag = 1;
-    mat.indexCount = static_cast<uint32_t>(doc.indices.size() - baseIndices);
-    doc.materials.push_back(mat);
+
+    const size_t baseMaterials = doc.materials.size();
+    const size_t baseTextures = doc.textures.size();
+    result.textureStart = baseTextures;
+    auto safeStem = [](std::string s) {
+        for (char& c : s) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if (!std::isalnum(u) && c != '-' && c != '_' && c != '.') c = '_';
+        }
+        return s.substr(0, 80);
+    };
+    for (const library::AssetTexture& tex : asset.textures) {
+        std::string name = safeStem(tex.name.empty() ? "texture.png" : tex.name);
+        std::string unique = name;
+        for (int n = 2; std::find(doc.textures.begin(), doc.textures.end(), "textures/" + unique) != doc.textures.end(); ++n) {
+            const size_t dot = name.rfind('.');
+            unique = (dot == std::string::npos ? name : name.substr(0, dot)) + "_" + std::to_string(n) +
+                     (dot == std::string::npos ? "" : name.substr(dot));
+        }
+        doc.textures.push_back("textures/" + unique);
+        result.importedTextureBytes.push_back(tex.bytes);
+    }
+    auto mapTexture = [&](int local) -> int {
+        if (local < 0 || static_cast<size_t>(local) >= asset.textures.size()) return -1;
+        return static_cast<int>(baseTextures + static_cast<size_t>(local));
+    };
+
+    // Preserve submesh material association. PMX assigns faces to materials by
+    // contiguous index ranges, so ranges are appended in extraction order.
+    std::vector<std::pair<size_t, size_t>> ranges = asset.submeshRanges;
+    if (ranges.empty()) ranges.emplace_back(0, asset.indices.size());
+    for (size_t r = 0; r < ranges.size(); ++r) {
+        const size_t first = ranges[r].first, count = ranges[r].second;
+        const size_t before = doc.indices.size();
+        for (size_t k = first; k < first + count && k < asset.indices.size(); ++k) {
+            const uint32_t idx = asset.indices[k];
+            if (idx < remap.size() && remap[idx] >= 0) doc.indices.push_back(static_cast<uint32_t>(remap[idx]));
+        }
+        Material mat;
+        const library::AssetMaterial* src = nullptr;
+        if (r < asset.submeshMaterials.size() && static_cast<size_t>(asset.submeshMaterials[r]) < asset.materials.size())
+            src = &asset.materials[static_cast<size_t>(asset.submeshMaterials[r])];
+        if (src) {
+            mat.name = src->name.empty() ? asset.name : src->name;
+            mat.nameEn = mat.name;
+            mat.diffuse = src->diffuse;
+            mat.ambient = src->ambient;
+            mat.specular = src->specular;
+            mat.specularPower = src->specularPower;
+            mat.edgeColor = {src->edgeColor.x, src->edgeColor.y, src->edgeColor.z, 1.0f};
+            mat.edgeSize = src->edgeSize;
+            mat.drawFlags = src->drawFlags;
+            mat.texture = mapTexture(src->diffuseTexture);
+            mat.sphere = mapTexture(src->sphereTexture);
+            mat.sphereMode = src->sphereMode;
+            mat.toon = mapTexture(src->toonTexture);
+            mat.toonFlag = mat.toon >= 0 ? 0 : 1;
+            mat.sharedToon = 0;
+        } else {
+            mat.name = asset.name.empty() ? "Applied asset" : asset.name;
+            mat.nameEn = mat.name;
+            mat.diffuse = {1, 1, 1, 1};
+            mat.ambient = {0.5f, 0.5f, 0.5f};
+            mat.drawFlags = 0x1E;
+            mat.edgeColor = {0, 0, 0, 1};
+            mat.edgeSize = 1.0f;
+            mat.toonFlag = 1;
+            result.warnings.push_back("material data for submesh " + std::to_string(r) + " was unavailable; using a default material");
+        }
+        mat.indexCount = static_cast<uint32_t>(doc.indices.size() - before);
+        doc.materials.push_back(mat);
+    }
+    result.addedMaterials = doc.materials.size() - baseMaterials;
+    result.addedTextures = doc.textures.size() - baseTextures;
     result.ok = true;
     result.addedVertices = doc.vertices.size() - base;
     result.addedIndices = doc.indices.size() - baseIndices;

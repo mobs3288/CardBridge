@@ -34,6 +34,7 @@
 #include "pmx/PmxReader.h"
 #include "pmx/PmxBodyRestore.h"
 #include "pmx/PmxAssetApply.h"
+#include "pmx/PmxToScene.h"
 #include "pmx/PmxTransform.h"
 #include "assemble/KkBodyTemplate.h"
 #include "core/Timing.h"
@@ -288,6 +289,7 @@ void usage() {
         "                                             append the KK/KKS body from the asset library (append-only PMX edit)\n"
         "  cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey> [--mods <dir>]\n"
         "                                             apply one catalog asset with a compatibility report (append-only PMX edit)\n"
+        "                                             [--no-textures] [--json-report] [--map src>dst] [--tx..--sz] [--auto]\n"
         "  cardbridge assets build --library <dir> --mods <dir>   index KK/KKS clothes, hair and accessories\n"
         "  cardbridge assets list  --library <dir> --mods <dir> [--category clothing|hair|accessories|body|textures|other]\n"
         "                          [--search <text>] [--limit N] [--json] [--cache <file>]\n"
@@ -1561,7 +1563,7 @@ int cmdPmx(const Args& a) {
             tr.scale = {static_cast<float>(std::atof(a.get("sx", "1").c_str())),
                         static_cast<float>(std::atof(a.get("sy", "1").c_str())),
                         static_cast<float>(std::atof(a.get("sz", "1").c_str()))};
-            const library::AssetTemplate aligned = pmx::ApplyTransform(asset, tr);
+            library::AssetTemplate aligned = pmx::ApplyTransform(asset, tr);
             pmx::BoneMatchOptions mo;
             mo.allowGeometric = a.has("auto") || a.has("geometric");
             pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(aligned, m, mo);
@@ -1583,6 +1585,8 @@ int cmdPmx(const Args& a) {
                             auto& mapping = fit.mappings[static_cast<size_t>(si)];
                             mapping.target = ti; mapping.method = pmx::MatchMethod::Alias;
                             mapping.confidence = 1.0f; mapping.ambiguous = false; mapping.note = "manual mapping";
+                            fit.warnings.erase(std::remove_if(fit.warnings.begin(), fit.warnings.end(),
+                                [&](const std::string& w) { return w.find(src) != std::string::npos; }), fit.warnings.end());
                         } else {
                             std::fprintf(stderr, "warning: manual mapping '%s' refers to unknown bones\n", pair.c_str());
                         }
@@ -1618,6 +1622,9 @@ int cmdPmx(const Args& a) {
                 j["scale"] = fit.scale;
                 j["hierarchy"] = fit.hierarchyCompatibility;
                 j["indexCapacityOk"] = fit.indexCapacityOk;
+                j["materialCompatibility"] = fit.materialCompatibility;
+                j["materials"] = aligned.materials.size();
+                j["textures"] = aligned.textures.size();
                 j["warnings"] = fit.warnings;
                 auto& rows = j["mappings"] = nlohmann::json::array();
                 for (const auto& mp : fit.mappings) {
@@ -1643,12 +1650,40 @@ int cmdPmx(const Args& a) {
                 std::fprintf(stderr, "error: %s\n", fit.reason.c_str());
                 return fit.status == pmx::FitStatus::RequiresManualMapping ? 4 : 3;
             }
-            const pmx::AssetApplyResult r = pmx::ApplyAsset(m, aligned, fit);
+            if (a.has("no-textures")) {
+                for (auto& mat : aligned.materials) {
+                    mat.diffuseTexture = mat.toonTexture = mat.sphereTexture = -1;
+                }
+                aligned.textures.clear();
+            }
+            // Transactional: only a fully validated, successfully applied copy
+            // replaces the loaded document. A failure leaves `m` untouched.
+            pmx::Model working = m;
+            const pmx::AssetApplyResult r = pmx::ApplyAsset(working, aligned, fit);
             if (!r.ok) { std::fprintf(stderr, "error: %s\n", r.error.c_str()); return 3; }
-            const Bytes written = pmx::WritePmx(m);
-            fileio::WriteFile(out, written.data(), written.size());
-            std::printf("applied %s: +%zu vertices, +%zu indices -> %s\n",
-                        found->name.c_str(), r.addedVertices, r.addedIndices, out.c_str());
+            for (const std::string& w : r.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+            if (r.importedTextureBytes.empty()) {
+                const Bytes written = pmx::WritePmx(working);
+                fileio::WriteFile(out, written.data(), written.size());
+            } else {
+                const size_t slash = out.rfind('/');
+                const std::string parent = slash == std::string::npos ? std::string(".") : out.substr(0, slash);
+                std::string stem = slash == std::string::npos ? out : out.substr(slash + 1);
+                const size_t dot = stem.rfind('.');
+                if (dot != std::string::npos) stem = stem.substr(0, dot);
+                std::vector<Bytes> overrides(working.textures.size());
+                for (size_t i = 0; i < r.importedTextureBytes.size(); ++i)
+                    if (r.textureStart + i < overrides.size()) overrides[r.textureStart + i] = r.importedTextureBytes[i];
+                const std::string folderPmx = pmx::ExportDocument(working, "", parent, stem, overrides);
+                if (folderPmx != out) {   // keep the exact requested output path
+                    const Bytes bytes = fileio::ReadFile(folderPmx);
+                    fileio::WriteFile(out, bytes.data(), bytes.size());
+                }
+            }
+            m = std::move(working);
+            std::printf("applied %s: +%zu vertices, +%zu indices, +%zu materials, +%zu textures -> %s\n",
+                        found->name.c_str(), r.addedVertices, r.addedIndices, r.addedMaterials,
+                        r.addedTextures, out.c_str());
             return 0;
         }
     } catch (const std::exception& e) {
@@ -1864,7 +1899,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine", "auto", "geometric", "json-report"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine", "auto", "geometric", "json-report", "no-textures"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

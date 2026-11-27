@@ -37,6 +37,9 @@ struct AssetApplyResult {
     bool ok = false;
     std::string error;
     size_t addedVertices = 0, addedIndices = 0;
+    size_t addedMaterials = 0, addedTextures = 0, textureStart = 0;
+    std::vector<Bytes> importedTextureBytes;   // parallel to the appended textures
+    std::vector<std::string> warnings;
 };
 
 // Append-only application: original vertices, indices, morphs, frames, physics
