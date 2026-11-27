@@ -93,6 +93,7 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxReader.cpp
     src/pmx/PmxToScene.cpp
     src/pmx/PmxBodyRestore.cpp
+    src/pmx/PmxAssetApply.cpp
     src/export/Exporter.cpp
     src/export/ModelExport.cpp
     src/export/FormatCommon.cpp
@@ -127,6 +128,7 @@ add_library(cardbridge_core STATIC
     src/export/ColourGrade.cpp
     src/library/Library.cpp
     src/library/AssetCatalog.cpp
+    src/library/AssetTemplate.cpp
     src/shape/Shape.cpp
     src/measure/BodyMeasure.cpp
     src/mesh/Simplify.cpp

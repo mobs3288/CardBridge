@@ -67,6 +67,7 @@
 #include "pmx/PmxReader.h"
 #include "pmx/PmxToScene.h"
 #include "pmx/PmxBodyRestore.h"
+#include "pmx/PmxAssetApply.h"
 #include "assemble/KkBodyTemplate.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
@@ -12326,6 +12327,95 @@ void bodyRestoreTests() {
     });
 }
 
+void crossModelTransferTests() {
+    auto syntheticAsset = [](const pmx::Model& doc, bool compatible) {
+        library::AssetTemplate asset;
+        asset.key = "test|105|1|base";
+        asset.name = "Test Accessory";
+        asset.attachNode = "a_n_bust";
+        for (size_t i = 0; i < doc.bones.size(); ++i) {
+            asset.boneNames.push_back(compatible ? doc.bones[i].name : "no_match_" + std::to_string(i));
+            const Vec3 p = doc.bones[i].position;
+            asset.bonePositions.push_back({p.x * 0.95f, p.y * 0.95f, p.z * 0.95f});
+        }
+        for (int i = 0; i < 3; ++i) {
+            library::AssetVertex v;
+            v.pos = {static_cast<float>(i) * 0.1f, 0, 0};
+            v.normal = {0, 1, 0};
+            v.uv = {static_cast<float>(i), 0.5f};
+            v.bone[0] = i % 2; v.weight[0] = 1.0f;
+            asset.vertices.push_back(v);
+        }
+        asset.indices = {0, 1, 2};
+        return asset;
+    };
+
+    test("cross-model transfer: analyze and apply an asset without touching the source PMX", [&] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        const auto asset = syntheticAsset(doc, true);
+        const auto vertices0 = doc.vertices;
+        const auto indices0 = doc.indices;
+        const auto morphs0 = doc.morphs;
+        const auto trailing0 = doc.format.trailing;
+        const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, doc);
+        CHECK(fit.compatible);
+        CHECK(fit.reason.empty());
+        CHECK(fit.requiredBones == 2 && fit.matchedBones == 2);
+        CHECK(std::fabs(fit.scale - 1.0f / 0.95f) < 1e-4f);   // PMX / asset scale
+        const pmx::AssetApplyResult r = pmx::ApplyAsset(doc, asset, fit);
+        CHECK(r.ok);
+        CHECK(r.addedVertices == 3 && r.addedIndices == 3);
+        CHECK(doc.materials.back().indexCount == 3);
+        CHECK(doc.vertices.size() == vertices0.size() + 3);
+        CHECK(doc.indices.size() == indices0.size() + 3);
+        for (size_t i = 0; i < vertices0.size(); ++i) CHECK(doc.vertices[i].position.x == vertices0[i].position.x);
+        CHECK(doc.morphs.size() == morphs0.size());
+        CHECK(doc.format.trailing == trailing0);
+        CHECK(doc.vertices[vertices0.size()].bone[0] == 0);
+        CHECK(doc.vertices[vertices0.size()].weight[0] == 1.0f);
+        const Bytes bytes = pmx::WritePmx(doc);
+        const pmx::Model again = pmx::ReadPmx(bytes);
+        CHECK(again.vertices.size() == doc.vertices.size());
+        CHECK(again.indices.size() == doc.indices.size());
+        CHECK(again.materials.size() == doc.materials.size());
+        CHECK(again.format.trailing == doc.format.trailing);
+    });
+
+    test("cross-model transfer: missing required bones produce a clear rejection", [&] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        const auto asset = syntheticAsset(doc, false);
+        const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, doc);
+        CHECK(!fit.compatible);
+        CHECK(fit.reason.find("incompatible") != std::string::npos);
+        CHECK(fit.matchedBones == 0);
+        const size_t v0 = doc.vertices.size();
+        const pmx::AssetApplyResult r = pmx::ApplyAsset(doc, asset, fit);
+        CHECK(!r.ok);
+        CHECK(doc.vertices.size() == v0);
+    });
+
+    test("cross-model transfer: load a real catalog asset without a card (CARDBRIDGE_TEST_LIBRARY)", [&] {
+        const std::string library = envUtf8("CARDBRIDGE_TEST_LIBRARY");
+        if (library.empty()) { ++g_skipped; return; }
+        library::CatalogOptions opt;
+        opt.libraryRoot = library;
+        const library::AssetCatalog catalog = library::BuildCatalog(opt, nullptr);
+        CHECK(!catalog.records.empty());
+        size_t tried = 0, loaded = 0;
+        for (const auto& rec : catalog.records) {
+            if (rec.asset.empty() || rec.asset.rfind("p_", 0) != 0) continue;
+            if (++tried > 8) break;
+            library::AssetTemplateOptions tOpt;
+            tOpt.libraryRoot = library;
+            library::AssetTemplate asset;
+            std::string error;
+            if (library::LoadAssetTemplate(rec, tOpt, asset, error) && asset.vertices.size() > 0) { ++loaded; break; }
+        }
+        if (!loaded) { ++g_skipped; return; }
+        CHECK(loaded == 1);
+    });
+}
+
 void pmxImportTests() {
     test("pmx import: bad magic, truncation and unknown deform types are rejected clearly", [] {
         bool threw = false;
@@ -12692,6 +12782,7 @@ int main() {
     modIndexCacheTests();
     assetCatalogTests();
     bodyRestoreTests();
+    crossModelTransferTests();
     pmxImportTests();
     meshTests();
     exportFileNameTests();

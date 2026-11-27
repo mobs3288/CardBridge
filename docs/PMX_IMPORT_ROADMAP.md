@@ -53,7 +53,7 @@
 | **1 — Native PMX foundation** | Lossless document model, native importer, preservation layer, round-trip export, regression tests, `pmx info`/`pmx roundtrip` CLI | **complete** |
 | **2 — Unified editing foundation** | PMX→Scene bridge, load `.pmx` in viewer, Model Explorer, materials/textures, existing bone/pose editor, validation | **complete** |
 | **3 — Asset library** | Enumerable KK/KKS catalog, category taxonomy, thumbnails, dependency index, asset browser, dedup/caching | **complete** |
-| 4 — Cross-model transfer | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | pending |
+| **4 — Cross-model transfer** | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | **in progress** (foundation) |
 | 5 — Advanced editing | Morph, physics, mesh, advanced material/texture editors | pending |
 | 6 — Final integration | Unified open/export/project workflow, UI refinement, performance, full regression | pending |
 | **7 — Koikatsu body restoration for imported PMX** | Restore hidden/missing KK/KKS body geometry when clothing or parts are removed from an imported PMX, preserving the imported character's proportions, skeleton, weights and morphs | **in progress** (foundation) |
@@ -145,8 +145,35 @@
 - The category taxonomy is derived from the numeric categories actually present in source/docs; unknown custom mod categories fall under "Other" with their numeric id, not a guessed name.
 - The GUI was not driven automatically for this phase; verification is via unit tests and CLI runs.
 
+---
+
+## Phase 4 — Cross-model asset transfer (2026-11-27)
+
+### Investigation summary
+- Every primitive needed for a card-free single-asset load exists: `Resolver::openBundle/openItemBundle` accept a synthetic `ResolvedItem`, and `KkBodyTemplate.cpp:24-89` proves `Resolver`/`UnityFile` extraction without a card. `GraftLayerScene` (`Assembler.cpp:2322-2522`) shows name-exact bone mapping + weight remapping but is file-local `static` and KK-skeleton-shaped; `Assemble`/`Builder` are card-bound.
+- The imported document is append-friendly: `PmxWriter` `SourceFormat` preserves index sizes and all source-only sections; `PmxBodyRestore` proves append-only mutation. There was no card-free asset extractor, no compatibility report type and no Scene→document write-back beyond materials/body.
+- Viewer gizmos (`Gizmo.inc`) work on arbitrary scene parts, but native export ignores part transforms and the Model Explorer has no part rows/chips.
+
+### Proposed approach
+Asset catalog record → card-free prefab/geometry extractor → explicit compatibility analysis (required/available bones, matched rest positions, index-size capacity) → conservative translation/scale fit → append-only PMX application (new vertices, indices, one material; no original data reordered) → CLI first, viewer UI later. Assets needing new bones, chains or a rotation fit are rejected with precise errors rather than silently approximated.
+
+### Files changed
+- New: `src/library/AssetTemplate.{h,cpp}`, `src/pmx/PmxAssetApply.{h,cpp}`.
+- Modified: `CMakeLists.txt`, `cli/main.cpp` (`pmx apply-asset`; asset progress moved off stdout so `--json` stays valid), `tests/cardbridge_tests.cpp`, this roadmap.
+
+### Results
+- Build clean; **19,615 checks, 0 failed** (1 integration suite skipped). Three new tests: append-only apply with weight remap and measured scale, missing-bone rejection, and a real catalog asset loaded from `library_full` without a card.
+- CLI `assets list --category accessories --json` returns clean JSON; `pmx apply-asset` on the supplied Rin PMX reports `incompatible skeleton: 0 of 1 required bones are present` (`N_move` missing) and exits 3 — the intended explicit fallback.
+
+### Known limitations
+- Strict name-exact (case-insensitive local/English) bone matching only; no MMD-Japanese↔KK alias table or geometric fallback, so most third-party PMX models will be rejected with a clear message.
+- No asset textures are copied into the PMX document yet; the applied material is plain white. No new bones/chains/physics are grafted; assets requiring them are rejected.
+- No viewer "Apply asset" action, compatibility panel or transform editor yet; the native export branch does not bake part transforms. `ExportDocument` still reads texture files only from disk.
+
+### Next steps in Phase 4
+- MMD↔KK alias/compatibility layer and a warned geometric fallback; asset texture write path; new-bone/chain grafting; viewer Assets-tab "Apply" with a compatibility report and a transform editor whose values are baked into the document at apply time.
+
 ### Remaining implementation tasks
-- **Phase 4:** accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting; rendered asset preview.
 - **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
 - **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.
 

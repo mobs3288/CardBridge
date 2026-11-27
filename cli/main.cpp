@@ -33,6 +33,7 @@
 #include "core/MemoryProbe.h"
 #include "pmx/PmxReader.h"
 #include "pmx/PmxBodyRestore.h"
+#include "pmx/PmxAssetApply.h"
 #include "assemble/KkBodyTemplate.h"
 #include "core/Timing.h"
 #include "export/ColourGrade.h"
@@ -284,6 +285,8 @@ void usage() {
         "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
         "  cardbridge pmx restore-body <in.pmx> <out.pmx> --library <dir>\n"
         "                                             append the KK/KKS body from the asset library (append-only PMX edit)\n"
+        "  cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey> [--mods <dir>]\n"
+        "                                             apply one catalog asset with a compatibility report (append-only PMX edit)\n"
         "  cardbridge assets build --library <dir> --mods <dir>   index KK/KKS clothes, hair and accessories\n"
         "  cardbridge assets list  --library <dir> --mods <dir> [--category clothing|hair|accessories|body|textures|other]\n"
         "                          [--search <text>] [--limit N] [--json] [--cache <file>]\n"
@@ -1521,6 +1524,49 @@ int cmdPmx(const Args& a) {
                         body.source.c_str(), r.addedVertices, r.addedIndices, out.c_str());
             return 0;
         }
+        if (sub == "apply-asset") {
+            if (a.positional.size() < 4) { usage(); return 1; }
+            const std::string out = normalizeSlashes(a.positional[3]);
+            const std::string key = a.get("key");
+            if (key.empty()) { std::fprintf(stderr, "error: --key <assetKey> is required (see 'assets list')\n"); return 1; }
+            library::CatalogOptions catOpt;
+            catOpt.libraryRoot = normalizeSlashes(a.get("library"));
+            catOpt.modsRoot = normalizeSlashes(a.get("mods"));
+            const char* la = std::getenv("LOCALAPPDATA");
+            catOpt.cachePath = la ? std::string(la) + "/CardBridge/assetcatalog.json" : std::string();
+            catOpt.modCachePath = la ? std::string(la) + "/CardBridge/modindex.json" : std::string();
+            std::vector<std::string> issues;
+            const library::AssetCatalog catalog = library::BuildCatalog(catOpt, &issues);
+            const library::AssetRecord* found = nullptr;
+            for (const auto& rec : catalog.records) if (rec.key == key) { found = &rec; break; }
+            if (!found) { std::fprintf(stderr, "error: asset key not found in the catalog: %s\n", key.c_str()); return 1; }
+            library::AssetTemplateOptions tOpt;
+            tOpt.libraryRoot = catOpt.libraryRoot;
+            tOpt.modsRoot = catOpt.modsRoot;
+            tOpt.modCachePath = catOpt.modCachePath;
+            library::AssetTemplate asset;
+            std::string error;
+            if (!library::LoadAssetTemplate(*found, tOpt, asset, error)) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 3;
+            }
+            const pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(asset, m);
+            std::printf("asset %s: %d/%d required bones matched, scale %.3f, %zu vertices, %zu indices\n",
+                        found->name.c_str(), fit.matchedBones, fit.requiredBones, fit.scale,
+                        asset.vertices.size(), asset.indices.size());
+            for (const std::string& w : fit.warnings) std::printf("  %s\n", w.c_str());
+            if (!fit.compatible) {
+                std::fprintf(stderr, "error: %s\n", fit.reason.c_str());
+                return 3;
+            }
+            const pmx::AssetApplyResult r = pmx::ApplyAsset(m, asset, fit);
+            if (!r.ok) { std::fprintf(stderr, "error: %s\n", r.error.c_str()); return 3; }
+            const Bytes written = pmx::WritePmx(m);
+            fileio::WriteFile(out, written.data(), written.size());
+            std::printf("applied %s: +%zu vertices, +%zu indices -> %s\n",
+                        found->name.c_str(), r.addedVertices, r.addedIndices, out.c_str());
+            return 0;
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 3;
@@ -1679,7 +1725,7 @@ int cmdAssets(const Args& a) {
     std::vector<std::string> issues;
     const library::AssetCatalog cat = library::BuildCatalog(opt, &issues,
         [](size_t done, size_t total) {
-            if (total) std::printf("indexing mods %zu / %zu\n", done, total);
+            if (total) std::fprintf(stderr, "indexing mods %zu / %zu\n", done, total);
         });
     for (const std::string& issue : issues)
         std::fprintf(stderr, "warning: %s\n", issue.c_str());

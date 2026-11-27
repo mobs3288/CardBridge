@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.13.0] - 2026-11-27
+
+### Added
+
+- **Phase 4 foundation — cross-model asset transfer.** `library::LoadAssetTemplate` extracts one catalog asset's prefab geometry, skin weights, bone names and rest positions from the base library or owning zipmod with no card and no running game. `pmx::AnalyzeAssetFit` reports required/available bones, missing bones, a conservative translation/scale fit and index-size capacity; `pmx::ApplyAsset` then appends the asset's vertices, indices and one material to an imported PMX document without touching any original vertex, morph, frame, physics section or format byte. CLI: `cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey>` prints the compatibility report and refuses incompatible rigs with a precise error. Asset-list progress now goes to stderr so `--json` output stays parseable. Tests cover append-only preservation, weight remap, scale measurement, missing-bone rejection and a real catalog asset loaded without a card. See `docs/PMX_IMPORT_ROADMAP.md`.
+
 ## [0.12.0] - 2026-11-27
 
 ### Added
