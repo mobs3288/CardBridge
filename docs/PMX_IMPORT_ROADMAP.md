@@ -56,6 +56,7 @@
 | 4 — Cross-model transfer | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | pending |
 | 5 — Advanced editing | Morph, physics, mesh, advanced material/texture editors | pending |
 | 6 — Final integration | Unified open/export/project workflow, UI refinement, performance, full regression | pending |
+| **7 — Koikatsu body restoration for imported PMX** | Restore hidden/missing KK/KKS body geometry when clothing or parts are removed from an imported PMX, preserving the imported character's proportions, skeleton, weights and morphs | **in progress** (foundation) |
 
 ---
 
@@ -148,3 +149,54 @@
 - **Phase 4:** accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting; rendered asset preview.
 - **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
 - **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.
+
+---
+
+## Phase 7 — Koikatsu Body Restoration for Imported PMX (2026-11-27)
+
+### Architecture findings (mandatory investigation)
+- Imported PMX: `PmxReader`/`PmxToScene` produce **one** `SceneMesh` + **one** `ScenePart` (`id="model"`, `status="native-pmx"`), `reshapable=false`; no under-piece, nude switch, `coveredBy`, chains or create jobs (`src/pmx/PmxToScene.cpp:119-188`). Source-specific data stays in `pmx::Model` (ADR-013).
+- Deletion is a **viewer id-set**, not geometry: `PoseState::deletedParts` (`viewer/State.inc:14-20`), `PartDeleted`/`HiddenPartsNow`/`DeletePart` (`viewer/Parts.inc:6-51`), undo/pose JSON (`viewer/Pose.inc:86-209`, `src/assemble/Pose.cpp:551-627`). The card export applies `exporter::ApplyPartStateForExport` (`src/export/Preview.cpp:1381-1404`); the native-PMX export branch **ignores deletions** (`viewer/Export.inc:43-72`). No "restore body" action exists.
+- Under-piece/nudity infrastructure (`src/assemble/BodySuppression.cpp:45-308`, `Scene.h:372-381`, `Exporter.cpp:1109-1168`) is card-assembled-scene only; it can copy existing triangles but cannot invent missing geometry. `SuppressBodyUnderGarments` hard-codes part id `"body"`.
+- Body geometry assembly lives inside `assemble::Assemble(const Card&, Resolver&, ...)` (`src/assemble/Assembler.cpp:2826-3086`) and `Builder::addRenderer` (`:1544+`), both card-bound. There is **no card-free body extractor**.
+- Card-free primitives do exist: `Resolver::openBaseBundle("chara/oo_base.unity3d")` (`Resolver.h:80`), `UnityFile::{findPrefabRoot,renderersUnder,readMesh,readMaterial,readTexture}` (`UnityScene.h:155-178`), `DecodeBlendChannels` for KKS (`UnityScene.cpp:55`). KK uses `m_Skin` channels; KKS uses channels 12/13 (`docs/KKS_FORMAT_FEASIBILITY.md:71-93`).
+- Measurement/transfer machinery (`measure::*`, `assemble::transfer::*`, Body Transfer tab) assumes KK part ids, `cf_s_*` bones and card slider vectors; imported PMX has none, so it cannot be applied directly (`docs/BODY_PROPORTION_TRANSFER.md:87`).
+
+### Root cause / feasibility
+The missing capability is twofold: (1) **no card-free extraction of KK/KKS body geometry**, and (2) **no document-level write path** that can append restored geometry without breaking the imported PMX's existing morph offsets, physics references and `SourceFormat`. The preservation-first document (`PmxWriter.h:149-181`) is the right place to append, because appending vertices/indices/materials leaves all existing indices valid. The hard part is **proportion/skeleton compatibility**: an arbitrary PMX cannot be blindly fitted to a default KK body without violating the brief, so mapping must be explicit, measured and fail loudly when bones cannot be matched.
+
+### Proposed approach (incremental)
+1. **Card-free body template** (`src/assemble/KkBodyTemplate.*`): extract body mesh + bone names + skin weights from `oo_base.unity3d` through `Resolver`/`UnityFile`, for both KK and KKS. No `Card` involved.
+2. **Document-level restoration** (`src/pmx/PmxBodyRestore.*`): map KK bone names onto the PMX bone list (exact → case-insensitive → English), derive a conservative translation/uniform-scale fit from matched rest-bone positions, and **append** body vertices, indices and one material to `pmx::Model`. Never reorders or rewrites original data; existing morph offsets, frames and physics stay valid. Low-confidence fits are rejected with a precise compatibility error, not silently applied.
+3. **CLI** `pmx restore-body <in> <out> --library ...` to make the foundation testable without GUI.
+4. **Viewer + deletion/export integration** (later in this phase): Model Explorer actions for "remove selected clothing / remove all clothing / remove accessories / restore body"; native export must apply the deletion set and the restored document. Hidden body regions under removed garments are the restored template geometry.
+5. **Body textures/morphs** (later in this phase): copy decoded `cf_body` textures into the export folder and add morphs for restored vertices only when the source provides them.
+
+### Known limitations of the foundation
+- No rendered mannequin preview; no automatic proportion inference from arbitrary PMX bones beyond matched-bone translation/uniform scale. No rotation fitting — a rig with a different axis convention is rejected.
+- Restored body material carries no KK textures yet (new textures are not copied into the PMX document in this increment).
+- Viewer deletion/restoration UI is not wired yet; the foundation is exercised through the CLI.
+
+### Implementation summary (landed)
+- `src/assemble/KkBodyTemplate.{h,cpp}`: card-free extraction of the largest skinned body mesh under `p_cf_body_00` from `<library>/abdata/chara/oo_base.unity3d`, using `Resolver::openBaseBundle` + `UnityFile::{findPrefabRoot,renderersUnder,readMesh,worldMatrix}`. Produces vertices, indices, renderer bone names and rest-world bone positions; handles KK `m_Skin` and KKS blend channels through the shared reader. No `Card` involved.
+- `src/pmx/PmxBodyRestore.{h,cpp}`: append-only document edit. Maps KK bone names onto PMX bones (local/English, case-insensitive), requires at least six matches, computes translation and a bounded uniform scale from matched rest-bone positions, appends body vertices/indices and one material. Original vertices, indices, morph offsets, frames, rigid bodies, joints and `SourceFormat` are untouched; vertices whose influences cannot be mapped are skipped and counted.
+- CLI: `pmx restore-body <in.pmx> <out.pmx> --library <dir> [--mods <dir>]`.
+- Tests: synthetic append-only preservation, incompatible-skeleton rejection, and a real-library body-template extraction test gated on `CARDBRIDGE_TEST_LIBRARY`.
+
+### Files changed
+- New: `src/assemble/KkBodyTemplate.{h,cpp}`, `src/pmx/PmxBodyRestore.{h,cpp}`.
+- Modified: `CMakeLists.txt`, `cli/main.cpp`, `tests/cardbridge_tests.cpp`, this roadmap.
+
+### Results
+- Build clean; **19,585 checks, 0 failed** (1 integration suite skipped). Real `library_full` body template loaded: 100 body bones, thousands of vertices/indices (verified by the gated test).
+- The supplied Rin PMX reports `skeleton incompatible: only 0 of 100 body bones have a matching name in this PMX` — the expected, explicit fallback for a model with Japanese MMD bone names; no proportions are silently changed.
+
+### Known limitations
+- Bone-name compatibility is currently exact/case-insensitive only; no MMD-Japanese→KK alias table or geometric fallback exists yet, so many third-party PMX models will be rejected with a clear message.
+- A fit is translation + bounded uniform scale only; no rotation fitting. Restored geometry carries a plain material — KK body textures are not copied into the PMX document in this increment.
+- Viewer deletion/restoration UI and native-export application of restored geometry are not wired yet; the foundation is exercised through the CLI.
+
+### Next steps in Phase 7
+- Add a general MMD↔KK bone alias/compatibility layer (not model-specific), then a warned geometric fallback for unmatched rigs.
+- Wire Model Explorer actions (remove selected/all clothing, remove accessories, restore body) and make native export apply the deletion set plus the restored document.
+- Copy decoded `cf_body` textures into the export folder and add restored-body morphs only where the source provides them.

@@ -32,6 +32,8 @@
 #include "core/FileIo.h"
 #include "core/MemoryProbe.h"
 #include "pmx/PmxReader.h"
+#include "pmx/PmxBodyRestore.h"
+#include "assemble/KkBodyTemplate.h"
 #include "core/Timing.h"
 #include "export/ColourGrade.h"
 #include "export/Exporter.h"
@@ -280,6 +282,8 @@ void usage() {
         "  cardbridge library check --library <dir> [--hashes]\n"
         "  cardbridge pmx info <model.pmx> [--json]      report a PMX's format and feature counts\n"
         "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
+        "  cardbridge pmx restore-body <in.pmx> <out.pmx> --library <dir>\n"
+        "                                             append the KK/KKS body from the asset library (append-only PMX edit)\n"
         "  cardbridge assets build --library <dir> --mods <dir>   index KK/KKS clothes, hair and accessories\n"
         "  cardbridge assets list  --library <dir> --mods <dir> [--category clothing|hair|accessories|body|textures|other]\n"
         "                          [--search <text>] [--limit N] [--json] [--cache <file>]\n"
@@ -1493,6 +1497,29 @@ int cmdPmx(const Args& a) {
                         original == written ? "byte-identical" : "re-encoded", same ? "preserved" : "CHANGED");
             if (!same) std::printf("before: %s\nafter:  %s\n", info.dump().c_str(), info2.dump().c_str());
             return same ? 0 : 3;
+        }
+        if (sub == "restore-body") {
+            if (a.positional.size() < 4) { usage(); return 1; }
+            const std::string out = normalizeSlashes(a.positional[3]);
+            assemble::BodyTemplateOptions opt;
+            opt.libraryRoot = normalizeSlashes(a.get("library"));
+            opt.modsRoot = normalizeSlashes(a.get("mods"));
+            const char* la = std::getenv("LOCALAPPDATA");
+            opt.modCachePath = la ? std::string(la) + "/CardBridge/modindex.json" : std::string();
+            assemble::BodyTemplate body;
+            std::string error;
+            if (!assemble::LoadBodyTemplate(opt, body, error)) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 3;
+            }
+            const pmx::RestoreResult r = pmx::RestoreBody(m, body);
+            for (const std::string& w : r.warnings) std::printf("  %s\n", w.c_str());
+            if (!r.ok) { std::fprintf(stderr, "error: %s\n", r.error.c_str()); return 3; }
+            const Bytes written = pmx::WritePmx(m);
+            fileio::WriteFile(out, written.data(), written.size());
+            std::printf("restored body from %s: +%zu vertices, +%zu indices -> %s\n",
+                        body.source.c_str(), r.addedVertices, r.addedIndices, out.c_str());
+            return 0;
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

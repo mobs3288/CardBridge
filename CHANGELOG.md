@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.12.0] - 2026-11-27
+
+### Added
+
+- **Phase 7 foundation — card-free Koikatsu body extraction and append-only PMX body restoration.** `assemble::LoadBodyTemplate` reads the skinned body mesh, bone names and rest positions from `<library>/abdata/chara/oo_base.unity3d` through the existing `Resolver`/`UnityFile` primitives — no card and no running game. `pmx::RestoreBody` maps KK/KKS bone names onto an imported PMX's bones, fits translation and a bounded uniform scale from matched rest bones, and appends body vertices, indices and one material to the PMX document; original vertices, morph offsets, frames, physics and format metadata remain untouched. Unmatched skeletons are rejected with an explicit compatibility error instead of silently changing proportions. CLI: `cardbridge pmx restore-body <in.pmx> <out.pmx> --library <dir>`. Tests cover append-only preservation, incompatible-skeleton rejection and real-library body extraction (`CARDBRIDGE_TEST_LIBRARY`). See `docs/PMX_IMPORT_ROADMAP.md`.
+
 ## [0.11.1] - 2026-11-25
 
 ### Fixed

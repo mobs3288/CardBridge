@@ -10,7 +10,7 @@
 
 **CardBridge turns a Koikatsu character card into a rigged PMX model** — offline, on your own machine. The game does not need to be running, no plugin or BepInEx is involved, and nothing is uploaded anywhere. Drop a card onto the window, press `E`, and out comes a PMX with its textures, physics, morphs and a `.cardbridge.json` manifest — an alternative to KKPMX with a standalone workflow.
 
-> **Version 0.8.0.** It converts **Koikatsu and Koikatsu Sunshine** cards with one offline pipeline. It works **100% for the base game**: stock items convert and look right. **Several modded cards also work**, but not all of them — expect rough edges and see [Known limitations](#known-limitations).
+> **Version 0.12.0.** It converts **Koikatsu and Koikatsu Sunshine** cards with one offline pipeline. It works **100% for the base game**: stock items convert and look right. **Several modded cards also work**, but not all of them — expect rough edges and see [Known limitations](#known-limitations).
 >
 > **Starting 1 December 2026, development will slow down — but CardBridge is still in active development.** If you run into any issue, [open an issue](https://github.com/mobs3288/CardBridge/issues). That is the best way to get it looked at.
 

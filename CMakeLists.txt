@@ -77,6 +77,7 @@ add_library(cardbridge_core STATIC
     src/resolve/ListTable.cpp
     src/resolve/Resolver.cpp
     src/assemble/Assembler.cpp
+    src/assemble/KkBodyTemplate.cpp
     src/assemble/FaceFeatures.cpp
     src/assemble/Proportions.cpp
     src/assemble/ProportionTransfer.cpp
@@ -91,6 +92,7 @@ add_library(cardbridge_core STATIC
     src/pmx/PmxWriter.cpp
     src/pmx/PmxReader.cpp
     src/pmx/PmxToScene.cpp
+    src/pmx/PmxBodyRestore.cpp
     src/export/Exporter.cpp
     src/export/ModelExport.cpp
     src/export/FormatCommon.cpp

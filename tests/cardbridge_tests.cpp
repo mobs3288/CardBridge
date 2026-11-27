@@ -66,6 +66,8 @@
 #include "pmx/PmxWriter.h"
 #include "pmx/PmxReader.h"
 #include "pmx/PmxToScene.h"
+#include "pmx/PmxBodyRestore.h"
+#include "assemble/KkBodyTemplate.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
 #include "shader/UnityShader.h"
@@ -12249,6 +12251,81 @@ void assetCatalogTests() {
     });
 }
 
+void bodyRestoreTests() {
+    auto syntheticBody = [](const pmx::Model& doc, float factor) {
+        assemble::BodyTemplate body;
+        body.source = "koikatsu";
+        for (size_t i = 0; i < doc.bones.size(); ++i) {
+            body.boneNames.push_back(doc.bones[i].name);
+            const Vec3 p = doc.bones[i].position;
+            body.bonePositions.push_back({p.x * factor, p.y * factor, p.z * factor});
+        }
+        for (int i = 0; i < 3; ++i) {
+            assemble::BodyVertex v;
+            v.pos = {static_cast<float>(i) * 0.1f, 0, 0};
+            v.normal = {0, 1, 0};
+            v.uv = {static_cast<float>(i), 0.5f};
+            v.bone[0] = 0; v.weight[0] = 1.0f;
+            body.vertices.push_back(v);
+        }
+        body.indices = {0, 1, 2};
+        return body;
+    };
+
+    test("body restore: append-only edit preserves the imported PMX document", [&] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        const auto body = syntheticBody(doc, 0.9f);
+        const size_t v0 = doc.vertices.size(), i0 = doc.indices.size(), m0 = doc.materials.size();
+        const auto vertices0 = doc.vertices;
+        const auto morphs0 = doc.morphs;
+        const auto frames0 = doc.frames;
+        const auto trailing0 = doc.format.trailing;
+        const pmx::RestoreResult r = pmx::RestoreBody(doc, body);
+        CHECK(r.ok);
+        CHECK(r.error.empty());
+        CHECK(r.addedVertices == 3 && r.addedIndices == 3);
+        CHECK(doc.vertices.size() == v0 + 3 && doc.indices.size() == i0 + 3);
+        CHECK(doc.materials.size() == m0 + 1);
+        CHECK(doc.materials.back().indexCount == 3);
+        CHECK(doc.morphs.size() == morphs0.size() && doc.frames.size() == frames0.size());
+        CHECK(doc.format.trailing == trailing0);
+        CHECK(doc.vertices[v0].bone[0] == 0);
+        CHECK(doc.vertices[v0].uv.x == body.vertices[0].uv.x);
+        for (size_t i = 0; i < v0; ++i) CHECK(doc.vertices[i].position.x == vertices0[i].position.x);
+        const Bytes bytes = pmx::WritePmx(doc);
+        const pmx::Model again = pmx::ReadPmx(bytes);
+        CHECK(again.vertices.size() == doc.vertices.size());
+        CHECK(again.indices.size() == doc.indices.size());
+        CHECK(again.materials.size() == doc.materials.size());
+        CHECK(again.format.trailing == doc.format.trailing);
+    });
+
+    test("body restore: an incompatible skeleton is rejected, not silently fitted", [&] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        auto body = syntheticBody(doc, 1.0f);
+        for (size_t i = 0; i < body.boneNames.size(); ++i) body.boneNames[i] = "no_match_" + std::to_string(i);
+        const pmx::RestoreResult r = pmx::RestoreBody(doc, body);
+        CHECK(!r.ok);
+        CHECK(r.error.find("incompatible") != std::string::npos);
+        CHECK(doc.vertices.size() == 6);
+    });
+
+    test("body template: loads a real KK/KKS body from the asset library (CARDBRIDGE_TEST_LIBRARY)", [] {
+        const std::string library = envUtf8("CARDBRIDGE_TEST_LIBRARY");
+        if (library.empty()) { ++g_skipped; return; }
+        assemble::BodyTemplateOptions opt;
+        opt.libraryRoot = library;
+        assemble::BodyTemplate body;
+        std::string error;
+        CHECK(assemble::LoadBodyTemplate(opt, body, error));
+        if (!error.empty()) std::printf("  body template: %s\n", error.c_str());
+        CHECK(body.vertices.size() > 100);
+        CHECK(body.indices.size() > 100);
+        CHECK(body.boneNames.size() > 10);
+        CHECK(body.bonePositions.size() == body.boneNames.size());
+    });
+}
+
 void pmxImportTests() {
     test("pmx import: bad magic, truncation and unknown deform types are rejected clearly", [] {
         bool threw = false;
@@ -12614,6 +12691,7 @@ int main() {
     unitTests();
     modIndexCacheTests();
     assetCatalogTests();
+    bodyRestoreTests();
     pmxImportTests();
     meshTests();
     exportFileNameTests();
