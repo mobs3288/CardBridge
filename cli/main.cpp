@@ -287,11 +287,12 @@ void usage() {
         "  cardbridge library check --library <dir> [--hashes]\n"
         "  cardbridge pmx info <model.pmx> [--json]      report a PMX's format and feature counts\n"
         "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
+        "  cardbridge pmx bones <model.pmx> [--json]   list bones (names, English names, parents)\n"
         "  cardbridge pmx restore-body <in.pmx> <out.pmx> --library <dir>\n"
         "                                             append the KK/KKS body from the asset library (append-only PMX edit)\n"
         "  cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey> [--mods <dir>]\n"
         "                                             apply one catalog asset with a compatibility report (append-only PMX edit)\n"
-        "                                             [--no-textures] [--json-report] [--map src>dst] [--tx..--sz] [--auto]\n"
+        "                                             [--no-textures] [--json-report] [--map src>dst] [--tx..--sz] [--auto] [--allow-partial]\n"
         "  cardbridge pmx apply-outfit <in.pmx> <out.pmx> <clothing.png> --library <dir> [--mods <dir>] [--auto]\n"
         "                                             graft every resolvable item of a Koikatsu outfit/coordinate file\n"
         "  cardbridge pmx graft-bones <in.pmx> <out.pmx> --spec <file.json>\n"
@@ -1496,6 +1497,27 @@ int cmdPmx(const Args& a) {
             else pmxPrintDescribe(info);
             return 0;
         }
+        if (sub == "bones") {
+            nlohmann::json j = nlohmann::json::array();
+            for (size_t i = 0; i < m.bones.size(); ++i) {
+                const auto& b = m.bones[i];
+                const std::string parent = b.parent >= 0 && static_cast<size_t>(b.parent) < m.bones.size()
+                    ? (m.bones[static_cast<size_t>(b.parent)].nameEn.empty() ? m.bones[static_cast<size_t>(b.parent)].name
+                                                                            : m.bones[static_cast<size_t>(b.parent)].nameEn)
+                    : std::string();
+                if (a.has("json")) {
+                    nlohmann::json e;
+                    e["index"] = i; e["name"] = b.name; e["nameEn"] = b.nameEn;
+                    e["parent"] = parent; e["position"] = {b.position.x, b.position.y, b.position.z};
+                    j.push_back(std::move(e));
+                } else {
+                    std::printf("%4zu  %-24s %-24s parent=%s\n", i, b.name.c_str(),
+                                b.nameEn.c_str(), parent.c_str());
+                }
+            }
+            if (a.has("json")) std::printf("%s\n", j.dump(2).c_str());
+            return 0;
+        }
         if (sub == "roundtrip") {
             if (a.positional.size() < 4) { usage(); return 1; }
             const std::string out = normalizeSlashes(a.positional[3]);
@@ -1572,7 +1594,7 @@ int cmdPmx(const Args& a) {
             library::AssetTemplate aligned = pmx::ApplyTransform(asset, tr);
             pmx::BoneMatchOptions mo;
             mo.allowGeometric = a.has("auto") || a.has("geometric");
-            pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(aligned, m, mo);
+            pmx::AssetFitReport fit = pmx::AnalyzeAssetFit(aligned, m, mo, a.has("allow-partial"));
             // Optional explicit bone mapping: --map "source>destination,..." (names, not indices).
             const std::string manual = a.get("map");
             if (!manual.empty()) {
@@ -1724,9 +1746,11 @@ int cmdPmx(const Args& a) {
                                  item.record.bundle.c_str(), item.record.asset.c_str(), item.record.key.c_str());
                     ++failed; continue;
                 }
-                const auto fit = pmx::AnalyzeAssetFit(t, working, mo);
+                const auto fit = pmx::AnalyzeAssetFit(t, working, mo, a.has("allow-partial"));
                 if (!fit.compatible) {
                     std::fprintf(stderr, "warning: %s: %s\n", item.key.c_str(), fit.reason.c_str());
+                    for (size_t k = 0; k < std::min<size_t>(6, fit.warnings.size()); ++k)
+                        std::fprintf(stderr, "    %s\n", fit.warnings[k].c_str());
                     ++failed; continue;
                 }
                 const auto r = pmx::ApplyAsset(working, t, fit);
@@ -2016,7 +2040,7 @@ int main(int argc, char** argv) {
     argc = static_cast<int>(ptrs.size());
     argv = ptrs.data();
 #endif
-    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine", "auto", "geometric", "json-report", "no-textures"});
+    Args a = parseArgs(argc, argv, {"overwrite", "minimal", "hashes", "json", "help", "version", "no-bake", "bake-flat", "bake-lit", "no-grade", "no-toon-ramp", "gpu-view", "nipple-inside", "nude", "apose", "tpose","unity-facing", "no-physics", "auto-cloth", "no-auto-cloth", "no-mmd-names", "gpu-bones", "gpu-bones-helpers", "no-jiggle-bust", "no-jiggle-butt", "jiggle-butt", "no-bra-physics", "replace-accessories", "card-nipples", "include-hidden", "with-hair-accessories", "with-abmx", "render-thumbnail", "no-mods", "lods", "normalize-head-proportions", "normalize-body-proportions", "normalize-face-proportions", "normalize-overall", "print-diagnostics", "fix-garment-intersections", "no-fix-garment-intersections", "refine", "auto", "geometric", "json-report", "no-textures", "allow-partial"});
     if (a.has("version")) { std::printf("cardbridge %s\n", kVersion); return 0; }
     if (a.positional.empty() || a.has("help")) { usage(); return a.has("help") ? 0 : 1; }
     const std::string& cmd = a.positional[0];

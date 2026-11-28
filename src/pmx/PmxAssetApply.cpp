@@ -27,7 +27,7 @@ const char* FitStatusName(FitStatus s) {
 }
 
 AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model& doc,
-                               const BoneMatchOptions& options) {
+                               const BoneMatchOptions& options, bool allowPartial) {
     AssetFitReport report;
     report.materialCompatibility = std::to_string(asset.materials.size()) + " material(s), " +
                                    std::to_string(asset.textures.size()) + " texture(s)";
@@ -74,17 +74,23 @@ AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model&
                 report.warnings.push_back("missing required bone: " + asset.boneNames[i]);
         }
     }
-    if (report.missingBones) {
+    const bool degraded = report.missingBones > 0 || report.ambiguousBones > 0;
+    if (degraded && !allowPartial) {
+        report.status = report.ambiguousBones ? FitStatus::RequiresManualMapping : FitStatus::Incompatible;
+        report.reason = report.ambiguousBones ? "ambiguous bone mappings require manual resolution"
+                                              : "incompatible skeleton: " + std::to_string(report.missingBones) +
+                                                " required bone(s) unresolved";
+        return report;
+    }
+    if (report.matchedBones == 0) {
         report.status = FitStatus::Incompatible;
-        report.reason = "incompatible skeleton: " + std::to_string(report.missingBones) +
-                        " required bone(s) unresolved";
+        report.reason = "no required bone could be resolved to this PMX";
         return report;
     }
-    if (report.ambiguousBones) {
-        report.status = FitStatus::RequiresManualMapping;
-        report.reason = "ambiguous bone mappings require manual resolution";
-        return report;
-    }
+    if (degraded)
+        report.warnings.push_back("partial mapping: " + std::to_string(report.missingBones) +
+                                  " missing and " + std::to_string(report.ambiguousBones) +
+                                  " ambiguous bones; their vertex influences are dropped");
 
     const uint64_t need = static_cast<uint64_t>(doc.vertices.size()) + asset.vertices.size();
     report.indexCapacityOk = need <= indexCapacity(doc.format.vertexSize());
@@ -237,9 +243,13 @@ AssetApplyResult ApplyAsset(Model& doc, const library::AssetTemplate& asset, con
     for (size_t r = 0; r < ranges.size(); ++r) {
         const size_t first = ranges[r].first, count = ranges[r].second;
         const size_t before = doc.indices.size();
-        for (size_t k = first; k < first + count && k < asset.indices.size(); ++k) {
-            const uint32_t idx = asset.indices[k];
-            if (idx < remap.size() && remap[idx] >= 0) doc.indices.push_back(static_cast<uint32_t>(remap[idx]));
+        for (size_t k = first; k + 2 < first + count && k + 2 < asset.indices.size(); k += 3) {
+            const uint32_t a = asset.indices[k], b = asset.indices[k + 1], c = asset.indices[k + 2];
+            if (a >= remap.size() || b >= remap.size() || c >= remap.size()) continue;
+            if (remap[a] < 0 || remap[b] < 0 || remap[c] < 0) continue;   // never keep a partial triangle
+            doc.indices.push_back(static_cast<uint32_t>(remap[a]));
+            doc.indices.push_back(static_cast<uint32_t>(remap[b]));
+            doc.indices.push_back(static_cast<uint32_t>(remap[c]));
         }
         Material mat;
         const library::AssetMaterial* src = nullptr;

@@ -12687,6 +12687,25 @@ void crossModelTransferTests() {
         CHECK(again.format.trailing == doc.format.trailing);
     });
 
+    test("cross-model transfer: partial mapping is opt-in and always reported", [&] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        auto asset = syntheticAsset(doc, false);
+        pmx::BoneMatchOptions strict; strict.allowGeometric = false;
+        const auto rejected = pmx::AnalyzeAssetFit(asset, doc, strict, false);
+        CHECK(!rejected.compatible);
+        const auto accepted = pmx::AnalyzeAssetFit(asset, doc, strict, true);
+        CHECK(!accepted.compatible);   // zero resolved bones can never be applied
+        CHECK(accepted.reason.find("no required bone") != std::string::npos);
+        // With one resolvable bone, partial mode accepts and warns.
+        asset.boneNames[0] = doc.bones[0].name;
+        const auto partial = pmx::AnalyzeAssetFit(asset, doc, strict, true);
+        CHECK(partial.compatible);
+        CHECK(partial.status == pmx::FitStatus::CompatibleWithWarnings);
+        CHECK(partial.missingBones > 0);
+        const auto stillStrict = pmx::AnalyzeAssetFit(asset, doc, strict, false);
+        CHECK(!stillStrict.compatible);
+    });
+
     test("cross-model transfer: missing required bones produce a clear rejection", [&] {
         pmx::Model doc = makeRoundTripFixture(false);
         const auto asset = syntheticAsset(doc, false);

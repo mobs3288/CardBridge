@@ -30,8 +30,11 @@ struct AssetFitReport {
 // Full compatibility analysis: bone resolution (exact/normalized/alias/
 // hierarchy/geometric), confidence and ambiguity reporting, hierarchy
 // agreement, index capacity and material notes. Nothing is modified.
+// `allowPartial` is an explicit opt-in for third-party rigs: unresolved or
+// ambiguous bones become warnings instead of a hard rejection, and only the
+// confidently resolved influences are used. Off by default.
 AssetFitReport AnalyzeAssetFit(const library::AssetTemplate& asset, const Model& doc,
-                               const BoneMatchOptions& options = {});
+                               const BoneMatchOptions& options = {}, bool allowPartial = false);
 
 struct AssetApplyResult {
     bool ok = false;

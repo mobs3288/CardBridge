@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.16.2] - 2026-11-28
+
+### Fixed
+
+- **Cross-model outfit grafting works on third-party PMX rigs with opt-in partial mapping.** Expanded the KK↔MMD bone alias registry (spine, bust, waist, forearm twist, thigh/knee/ankle) so Japanese MMD rigs resolve more Koikatsu bones. `--allow-partial` accepts explicitly warned unresolved/ambiguous mappings instead of rejecting the whole item, and triangles with unmapped vertices are dropped whole so the exported PMX stays valid. Added `pmx bones` for inspecting destination bone names. Verified on a real modded outfit: 6 of 7 items grafted (+17,149 vertices, +77,025 indices), with the remaining item reported as unresolved. Tests: 19,732 checks pass.
+
 ## [0.16.1] - 2026-11-28
 
 ### Fixed

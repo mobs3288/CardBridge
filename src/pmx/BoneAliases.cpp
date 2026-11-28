@@ -28,7 +28,15 @@ std::vector<BoneAlias>& registry() {
             {"toe",          {"つま先", "Toe", "cf_j_toes"}},
             {"waist",        {"腰", "Waist", "cf_s_waist01", "cf_s_waist02"}},
             {"hip",          {"Hip", "cf_s_siri"}},
-            {"chest",        {"胸", "Chest", "cf_j_bust01"}},
+            {"chest",        {"胸", "Chest", "cf_j_bust01", "cf_s_bust01", "cf_s_bust02"}},
+            {"upper_body",   {"上半身1", "cf_s_spine01"}},
+            {"upper_body2",  {"上半身2", "cf_s_spine02"}},
+            {"waist",        {"腰", "Waist", "cf_s_waist01", "cf_s_waist02"}},
+            {"elbow",        {"cf_s_forearm01", "cf_j_forearm01"}},
+            {"arm_twist",    {"腕捩", "ArmTwist", "cf_s_forearm02", "cf_s_forearm03"}},
+            {"leg",          {"cf_s_thigh00", "cf_s_thigh01", "cf_s_thigh02", "cf_j_thigh00"}},
+            {"knee",         {"cf_s_kneeB", "cf_s_thigh03"}},
+            {"ankle",        {"cf_s_leg01", "cf_s_leg02", "cf_s_leg03", "cf_j_foot"}},
         };
         // Pre-normalize every alias once so matching is cheap and consistent.
         for (BoneAlias& entry : a)
@@ -145,6 +153,7 @@ BoneIdentity IdentifyBone(const std::string& name) {
                 if (coreNorm == alias || (alias.size() >= 6 && contains(coreNorm, alias))) {
                     id.valid = true;
                     id.canonical = entry.canonical;
+                    if (id.canonical == "arm_twist") id.twist = true;
                     return id;
                 }
     }
