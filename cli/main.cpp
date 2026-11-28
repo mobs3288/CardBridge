@@ -1720,7 +1720,8 @@ int cmdPmx(const Args& a) {
                 library::AssetTemplateOptions tOpt;
                 tOpt.libraryRoot = bOpt.libraryRoot; tOpt.modsRoot = bOpt.modsRoot; tOpt.modCachePath = bOpt.modCachePath;
                 if (!library::LoadAssetTemplate(item.record, tOpt, t, err)) {
-                    std::fprintf(stderr, "warning: %s: %s\n", item.key.c_str(), err.c_str());
+                    std::fprintf(stderr, "warning: %s: %s (bundle='%s' asset='%s' game=%s)\n", item.key.c_str(), err.c_str(),
+                                 item.record.bundle.c_str(), item.record.asset.c_str(), item.record.key.c_str());
                     ++failed; continue;
                 }
                 const auto fit = pmx::AnalyzeAssetFit(t, working, mo);
@@ -1735,7 +1736,12 @@ int cmdPmx(const Args& a) {
                     if (r.textureStart + i < overrides.size()) overrides[r.textureStart + i] = r.importedTextureBytes[i];
                 addedV += r.addedVertices; addedI += r.addedIndices; ++applied;
             }
-            if (!applied) { std::fprintf(stderr, "error: no outfit item could be applied\n"); return 3; }
+            if (!applied) {
+                std::fprintf(stderr, "error: no outfit item could be applied - the outfit's mods must be installed in --mods\n");
+                for (const std::string& w : bridged.warnings)
+                    if (w.find("mod '") != std::string::npos) std::fprintf(stderr, "  %s\n", w.c_str());
+                return 3;
+            }
             const bool anyMemory = std::any_of(overrides.begin(), overrides.end(), [](const Bytes& b) { return !b.empty(); });
             if (anyMemory) {
                 const size_t slash = out.rfind('/');

@@ -569,6 +569,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateBodyMeasurements();   // the measurements exist from the first frame, not only after an edit
         }
         g.hidden.assign(L ? L->scene.parts.size() : 0, 0);
+        if (L && L->NativePmx()) g.cam.yawDeg = L->suggestedYaw;   // start native PMX from the front
         g.bt.nudePreview = false;   // a card load rebuilds the visibility state
         g.bt.savedHidden.clear();
         if (L && g.applyKeep)

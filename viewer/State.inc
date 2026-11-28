@@ -57,6 +57,7 @@ struct Loaded {
     std::shared_ptr<pmx::Model> pmxDoc;
     std::string pmxDir;
     std::vector<Bytes> textureOverrides;   // in-memory textures from applied assets
+    float suggestedYaw = 0.0f;             // facing direction detected on PMX import
     bool NativePmx() const { return pmxDoc != nullptr; }
     std::string title;
     int outfit = 0, outfits = 0;

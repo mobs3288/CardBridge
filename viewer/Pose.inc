@@ -657,6 +657,26 @@ bool EnsureResolver(const std::string& libraryRoot, const std::string& modsRoot,
     return true;
 }
 
+float PmxSuggestedYaw(const pmx::Model& doc) {
+    // The default camera looks from +Z. A model whose toes extend toward -Z
+    // faces away from it, so start that model from the opposite side; models
+    // facing +Z keep the default. No geometry is changed.
+    auto contains = [](const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; };
+    int toe = -1, ankle = -1;
+    for (size_t i = 0; i < doc.bones.size(); ++i) {
+        const std::string a = doc.bones[i].name, b = doc.bones[i].nameEn;
+        if (toe < 0 && (contains(a, "つま先") || contains(b, "つま先") || contains(b, "Toe") || contains(a, "Toe"))) toe = static_cast<int>(i);
+        if (ankle < 0 && (contains(a, "足首") || contains(b, "足首") || contains(b, "Ankle") || contains(a, "Ankle"))) ankle = static_cast<int>(i);
+    }
+    if (toe < 0) return 0.0f;
+    if (ankle < 0) ankle = doc.bones[static_cast<size_t>(toe)].parent;
+    if (ankle < 0 || static_cast<size_t>(ankle) >= doc.bones.size()) return 0.0f;
+    const Vec3 t = doc.bones[static_cast<size_t>(toe)].position;
+    const Vec3 a = doc.bones[static_cast<size_t>(ankle)].position;
+    const float forwardZ = t.z - a.z;
+    return forwardZ < -0.01f ? 180.0f : 0.0f;
+}
+
 bool IsPmxPath(const std::string& path) {
     const size_t dot = path.rfind('.');
     if (dot == std::string::npos) return false;
@@ -674,6 +694,8 @@ void StartLoadPmx(const std::string& path) {
     g.loadingOutfit = -1;
     g.applyKeep = false;
     g.tweakPending = false;
+    g.cam.pitchDeg = 0.0f;
+    g.cam.zoom = 1.0f; g.cam.panX = g.cam.panY = 0.0f;
     KillTimer(g.hwnd, kTimerApplyTweaks);
     g.status = "loading " + fileio::FileName(path) + " ...";
     ProgBegin("Loading " + fileio::FileName(path));
@@ -689,6 +711,7 @@ void StartLoadPmx(const std::string& path) {
             const size_t slash = path.rfind('/');
             out->pmxDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
             ProgSet(0.45, "building the scene");
+            out->suggestedYaw = PmxSuggestedYaw(*out->pmxDoc);
             const pmx::PmxLoadResult built = pmx::BuildScene(*out->pmxDoc, out->pmxDir);
             out->scene = built.scene;
             out->notes = built.warnings;

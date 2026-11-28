@@ -56,6 +56,13 @@ bool EnumerateClothingAssets(const ClothingFile& clothing, const ClothingAssetOp
             ref.label = slotName[i];
             const resolve::ResolvedItem ri = resolver.resolve(clothing.rows, ref);
             if (!ri.ok()) { out.warnings.push_back(ref.partId + ": " + ri.detail); continue; }
+            // An empty/none slot can still carry a nonzero list id whose row
+            // points at the game's dummy prefab. Skip placeholders instead of
+            // trying to graft them.
+            const std::string assetName = ri.listItem.get("MainData");
+            const std::string lowerAsset = [&] { std::string s = assetName; for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; }();
+            if (assetName.empty() || lowerAsset.find("dummy") != std::string::npos ||
+                ri.listItem.get("Name").empty() || ri.listItem.get("Name") == "なし") continue;
             library::AssetRecord rec;
             rec.key = std::string(info.name()) + "|" + std::to_string(ref.category) + "|" + std::to_string(id) + "|" +
                       (ri.modGuid.empty() ? std::string("base") : ri.modGuid);
@@ -99,6 +106,13 @@ bool EnumerateClothingAssets(const ClothingFile& clothing, const ClothingAssetOp
             ref.attachNode = part.at("parentKey").asStr();
             const resolve::ResolvedItem ri = resolver.resolve(clothing.rows, ref);
             if (!ri.ok()) { out.warnings.push_back(ref.partId + ": " + ri.detail); continue; }
+            // An empty/none slot can still carry a nonzero list id whose row
+            // points at the game's dummy prefab. Skip placeholders instead of
+            // trying to graft them.
+            const std::string assetName = ri.listItem.get("MainData");
+            const std::string lowerAsset = [&] { std::string s = assetName; for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; }();
+            if (assetName.empty() || lowerAsset.find("dummy") != std::string::npos ||
+                ri.listItem.get("Name").empty() || ri.listItem.get("Name") == "なし") continue;
             library::AssetRecord rec;
             rec.key = std::string(info.name()) + "|" + std::to_string(ref.category) + "|" + std::to_string(id) + "|" +
                       (ri.modGuid.empty() ? std::string("base") : ri.modGuid);

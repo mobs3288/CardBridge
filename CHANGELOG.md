@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.16.1] - 2026-11-28
+
+### Fixed
+
+- **Koikatsu outfit grafting no longer tries to append placeholder parts.** Clothing slots whose list row resolves to the game's dummy prefab are skipped, and the CLI now reports exactly which mod GUIDs are missing from `--mods` when no item can be applied. Native PMX imports also pick their starting camera side from the model's toe/ankle direction instead of assuming a fixed facing.
+
 ## [0.15.1] - 2026-11-28
 
 ### Fixed
