@@ -60,6 +60,8 @@
 #include "core/FileIo.h"
 #include "pmx/PmxReader.h"
 #include "pmx/PmxToScene.h"
+#include "pmx/PmxAssetApply.h"
+#include "pmx/PmxTransform.h"
 #include "library/AssetCatalog.h"
 #include "core/Timing.h"
 #include "export/Preview.h"

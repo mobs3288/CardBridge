@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.15.1] - 2026-11-28
+
+### Fixed
+
+- **Selective Import now respects parts deleted in the viewer.** The current-character and proposed-result previews hide parts removed with the row's x chip, and applying Replace/Add clears that delete from the pieces the import recreates — a replacement garment reuses the slot's stable id, so without this it stayed invisible after Apply. Kept and skipped slots keep their delete. The viewer build also includes the PMX asset-apply headers its Assets tab needs.
+
 ## [0.15.0] - 2026-11-27
 
 ### Added

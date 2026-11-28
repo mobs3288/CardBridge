@@ -387,6 +387,38 @@ assemble::AssembleOptions SelAssembleOptions(int outfit, bool useSource) {
     return ao;
 }
 
+// True when `id` is a piece the chosen component (re)creates in the target outfit. Clothes Add/Replace
+// overwrite the slot (its base part and the top's sub-parts). An accessory Replace overwrites its slot;
+// Add only does when the card's slot was empty — otherwise the merge relocates the new piece and the
+// character's old, deleted accessory stays out.
+static bool SelImportCoversPart(const std::string& id, const std::string& prefix, const SelectiveComp& sc,
+                                card::SelectiveAction a) {
+    if (a != card::SelectiveAction::Replace && a != card::SelectiveAction::Add) return false;
+    const std::string base = prefix + sc.comp.slotName;
+    if (sc.comp.kind == 0) return id == base || id.rfind(base + ".sub_", 0) == 0;
+    return id == base && (a == card::SelectiveAction::Replace || !sc.comp.hasExisting);
+}
+
+// The hidden set the proposed view renders with. A viewer delete survives a same-card reload, so the
+// proposed picture must hide those parts too; the exception is a slot the import is about to (re)create,
+// whose old delete must not hide the incoming piece. Caller holds g.mu.
+static std::vector<char> SelProposalHidden(const assemble::Scene& scene, const std::set<std::string>& deleted) {
+    std::vector<char> hidden(scene.parts.size(), 0);
+    const std::string prefix = "outfit" + std::to_string(g.sel.dstOutfit) + ".";
+    for (size_t i = 0; i < scene.parts.size(); ++i) {
+        const std::string& id = scene.parts[i].id;
+        if (!deleted.count(id)) continue;
+        bool restored = false;
+        for (const SelectiveComp& sc : g.sel.comps) {
+            const auto it = g.sel.decisions.find(sc.comp.key);
+            const card::SelectiveAction a = it == g.sel.decisions.end() ? card::SuggestedAction(sc.comp) : it->second;
+            if (SelImportCoversPart(id, prefix, sc, a)) { restored = true; break; }
+        }
+        hidden[i] = restored ? 0 : 1;
+    }
+    return exporter::EffectiveHiddenParts(scene, hidden);
+}
+
 // Uploads the scene into a preview view's Direct3D copy (or marks the software fallback ready).
 // Called on a worker thread after the scene is built. Locks never nest: g.mu guards the state reads/writes,
 // selGpuMu is a leaf around the device calls only, so the render worker and the paint path stay lock-brief.
@@ -417,13 +449,17 @@ void SelUploadScene(int view, int session) {
             Log("selective import preview: Direct3D 11 unavailable - the preview uses the software renderer", LogKind::Warn);
         }
     }
-    std::vector<char> zero(scene->parts.size(), 0);
-    const std::vector<char> hidden0 = exporter::EffectiveHiddenParts(*scene, zero);
+    std::vector<char> hidden0;
+    if (view != 0) {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (view == 2) hidden0 = SelProposalHidden(*scene, g.sel.deletedParts);
+        else hidden0 = exporter::EffectiveHiddenParts(*scene, std::vector<char>(scene->parts.size(), 0));
+    }
     SelRemapComponents(view);   // takes g.mu itself
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
         if (g.sel.session == session) {
-            v.hidden = hidden0;
+            if (view != 0) v.hidden = hidden0;   // view 0 keeps the main window's hidden set (set at open)
             v.state = 2;
             v.error.clear();
             v.dirty = true;   // the freshly assembled picture needs one full render
@@ -582,8 +618,9 @@ void SelBuildProposal() {
 // ==================================================================== proposal caching =====
 // The proposed scene is cached per effective decision set, so revisiting an earlier choice
 // (e.g. flipping a slot back to a state the user already committed to) is instant instead of
-// another full assembly. Keep/Skip merge nothing and Add lands the same item in the slot as
-// Replace — only Replace/Add (merged) and AddLayer (grafted) actually move geometry.
+// another full assembly. Keep/Skip merge nothing; AddLayer grafts a new piece. Clothes Add and
+// Replace both write the slot, so they share a key; an accessory Add relocates around the
+// character's own accessories and must be a distinct key from Replace (different geometry).
 static std::string SelEffectiveKey(const std::map<std::string, card::SelectiveAction>& d,
                                    const std::string& cardPath, const std::string& src,
                                    int dstOutfit, int srcOutfit, bool srcCoord) {
@@ -593,8 +630,12 @@ static std::string SelEffectiveKey(const std::map<std::string, card::SelectiveAc
     key += "|c" + std::to_string(srcCoord ? srcOutfit : -1);
     for (const auto& [k, a] : d) {
         char c = 0;
-        if (a == card::SelectiveAction::Replace || a == card::SelectiveAction::Add) c = 'R';
-        else if (a == card::SelectiveAction::AddLayer) c = 'L';
+        if (a == card::SelectiveAction::Replace) c = 'R';
+        else if (a == card::SelectiveAction::Add) {
+            bool accessory = false;
+            for (const SelectiveComp& sc : g.sel.comps) if (sc.comp.key == k) { accessory = sc.comp.kind == 1; break; }
+            c = accessory ? 'A' : 'R';
+        } else if (a == card::SelectiveAction::AddLayer) c = 'L';
         if (!c) continue;
         key += '|';
         key += k;
@@ -1181,6 +1222,7 @@ void SelTeardownPreview() {
         }
         g.sel.comps.clear();
         g.sel.decisions.clear();
+        g.sel.deletedParts.clear();
         g.sel.buildingProposal = false;
         g.sel.proposalQueued = false;
         g.sel.proposalGen = 0;
@@ -1324,8 +1366,8 @@ void SelectiveOpen(const std::string& path) {
         g.sel.status = "assembling the preview ...";
         g.sel.views[0].scene = std::shared_ptr<const assemble::Scene>(L, &L->scene);   // the loaded character itself, kept alive while the window is open
         g.sel.views[0].state = 1;   // uploaded on its own Direct3D device on a worker thread (see below)
-        std::vector<char> zero(L->scene.parts.size(), 0);
-        g.sel.views[0].hidden = exporter::EffectiveHiddenParts(L->scene, zero);
+        g.sel.views[0].hidden = exporter::EffectiveHiddenParts(L->scene, HiddenPartsNow(L->scene));
+        g.sel.deletedParts = g.deletedParts;   // the previews hide the parts the main window already deleted
     }
     if (!SelBuildComponentList()) {
         Log("selective import: " + g.sel.status, LogKind::Error);
@@ -1439,6 +1481,7 @@ void SelectiveClose() {
         }
         g.sel.comps.clear();
         g.sel.decisions.clear();
+        g.sel.deletedParts.clear();
         g.sel.buildingProposal = false;
         g.sel.proposalQueued = false;
         g.sel.proposalGen = 0;
@@ -2305,6 +2348,25 @@ card::SelectivePlan SelPlan() {
     return card::BuildSelectivePlan(ccs, SelDecisionsNow());
 }
 
+// A same-card reload keeps the viewer's delete set keyed by stable part id, and an imported piece reuses
+// its slot's id — so a delete left on that slot would keep the new garment hidden and Apply would look
+// like it did nothing. Bring back only the pieces the chosen actions actually (re)create; a skipped or
+// kept slot keeps its delete.
+static void SelRestoreImportedParts(const std::map<std::string, card::SelectiveAction>& decisions) {
+    std::lock_guard<std::recursive_mutex> lk(g.mu);
+    const std::string prefix = "outfit" + std::to_string(g.sel.dstOutfit) + ".";
+    for (auto it = g.deletedParts.begin(); it != g.deletedParts.end(); ) {
+        bool restored = false;
+        for (const SelectiveComp& sc : g.sel.comps) {
+            const auto dit = decisions.find(sc.comp.key);
+            const card::SelectiveAction a = dit == decisions.end() ? card::SuggestedAction(sc.comp) : dit->second;
+            if (SelImportCoversPart(*it, prefix, sc, a)) { restored = true; break; }
+        }
+        if (restored) it = g.deletedParts.erase(it);
+        else ++it;
+    }
+}
+
 // Commit: pin the selective import on the on-screen outfit and reload — the same pin the clothing imports use.
 void SelApply() {
     SelRecomputeValidation();
@@ -2319,6 +2381,8 @@ void SelApply() {
     size_t layerCount = 0;
     {
         std::lock_guard<std::recursive_mutex> lk(g.mu);
+        // A deleted slot must not keep hiding the imported replacement (it reuses the slot's stable part id).
+        SelRestoreImportedParts(g.sel.decisions);
         // the layers this apply adds (AddLayer on clothes components), in slot order with stable layer indices
         const std::vector<assemble::AssembleLayerSpec> specLayers = SelLayersFromDecisions(g.sel.decisions);
         for (const assemble::AssembleLayerSpec& spec : specLayers) {

@@ -259,6 +259,7 @@ struct SelectiveState {
     SelView views[3];
     std::vector<SelectiveComp> comps;
     std::map<std::string, card::SelectiveAction> decisions;
+    std::set<std::string> deletedParts;   // the viewer's delete set when the window opened; the previews hide these
     std::atomic<int> hoverComp{-1}, selComp{-1};   // hover (transient) and selected (sticky, -1 = none)
     std::atomic<int> hoverAction{0};               // hit id of a row/right-column/link button (0 = none; see SelBtn)
     int listScroll = 0;
