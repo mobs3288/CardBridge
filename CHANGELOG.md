@@ -2,6 +2,12 @@
 
 All notable changes to CardBridge are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). CardBridge did not keep a changelog before 0.3.0; entries for earlier releases were reconstructed from the git history and the release notes that shipped with those releases, and are not expanded beyond what those show.
 
+## [0.17.0] - 2026-11-29
+
+### Added
+
+- **Drop a Koikatsu outfit file onto an open PMX in the viewer.** With a native PMX loaded, dragging a `【KoiKatuClothes】` `.png` onto the window resolves its items card-free and grafts them onto the document on a worker, using the same Apply/undo/texture path as the Assets tab. A Coordinate PNG is explicitly reported as unsupported for PMX grafting; Koikatsu character-card workflows are unchanged.
+
 ## [0.16.3] - 2026-11-28
 
 ### Added

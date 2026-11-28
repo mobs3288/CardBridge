@@ -53,6 +53,7 @@
 #include "export/RotateGizmo.h"
 #include "export/ScaleGizmo.h"
 #include "card/CardFile.h"
+#include "card/ClothingAssetBridge.h"
 #include "card/SelectiveImport.h"
 #include "card/ClothingExport.h"
 #include "card/MaterialEdits.h"

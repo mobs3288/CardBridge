@@ -158,6 +158,76 @@ void StartAssetApply() {
     }).detach();
 }
 
+// Drop a Koikatsu outfit/clothing PNG onto an open PMX: resolve its items
+// card-free and graft them onto the document on a worker. Commit uses the same
+// WM_ASSET_APPLY_READY path as the Assets tab (including undo and textures).
+bool StartOutfitApplyToPmx(const std::string& path) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || !L->NativePmx()) return false;
+    if (g.assets.applyBusy) { Log("an asset apply is already running", LogKind::Warn); return true; }
+    const std::shared_ptr<pmx::Model> source = L->pmxDoc;
+    const std::string pmxDir = L->pmxDir;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        g.assets.applyBusy = true;
+        g.assets.applyError.clear();
+    }
+    Log("applying outfit to PMX: " + fileio::FileName(path), LogKind::Info);
+    std::thread([path, source, pmxDir]() {
+        bool failed = false;
+        std::string error;
+        auto working = std::make_shared<pmx::Model>(*source);
+        std::vector<Bytes> overrides(working->textures.size());
+        size_t applied = 0;
+        try {
+            card::ClothingFile clothing = card::LoadClothingFile(path);
+            card::ClothingAssetOptions bOpt;
+            bOpt.libraryRoot = g.settings.library;
+            bOpt.modsRoot = g.settings.mods;
+            bOpt.modCachePath = ModCachePath();
+            card::ClothingAssetResult bridged;
+            std::string why;
+            if (!card::EnumerateClothingAssets(clothing, bOpt, bridged, why)) throw std::runtime_error(why);
+            pmx::BoneMatchOptions mo; mo.allowGeometric = true;
+            for (const auto& item : bridged.items) {
+                library::AssetTemplate t;
+                std::string terr;
+                library::AssetTemplateOptions tOpt;
+                tOpt.libraryRoot = g.settings.library;
+                tOpt.modsRoot = g.settings.mods;
+                tOpt.modCachePath = ModCachePath();
+                if (!library::LoadAssetTemplate(item.record, tOpt, t, terr)) { Log("  " + item.key + ": " + terr, LogKind::Warn); continue; }
+                const auto fit = pmx::AnalyzeAssetFit(t, *working, mo, true);
+                if (!fit.compatible) { Log("  " + item.key + ": " + fit.reason, LogKind::Warn); continue; }
+                const auto r = pmx::ApplyAsset(*working, t, fit);
+                if (!r.ok) { Log("  " + item.key + ": " + r.error, LogKind::Warn); continue; }
+                overrides.resize(working->textures.size());
+                for (size_t i = 0; i < r.importedTextureBytes.size(); ++i)
+                    if (r.textureStart + i < overrides.size()) overrides[r.textureStart + i] = r.importedTextureBytes[i];
+                ++applied;
+            }
+            if (!applied) throw std::runtime_error("no outfit item could be applied to this PMX");
+        } catch (const std::exception& e) {
+            failed = true; error = e.what();
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.assets.applyBusy = false;
+            if (failed) {
+                g.assets.applyError = error;
+            } else {
+                g.assets.pendingDoc = working;
+                g.assets.pendingOverrides = std::move(overrides);
+                g.assets.applyError.clear();
+            }
+        }
+        if (failed) Log("outfit apply failed: " + error, LogKind::Error);
+        else Log("outfit applied: " + std::to_string(applied) + " item(s)", LogKind::Good);
+        PostMessageW(g.hwnd, WM_ASSET_APPLY_READY, failed ? 1 : 0, 0);
+    }).detach();
+    return true;
+}
+
 RECT AssetCatRect(const PanelLayout& l, int i) {
     const int w = 116, h = 20, gap = 6;
     const int x = 10 + (i % 3) * (w + gap), y = l.assetCats.top + (i / 3) * (h + 2);

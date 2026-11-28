@@ -735,8 +735,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             const card::ImageSourceKind sourceKind = card::DetectImageSource(dropped);
             if (sourceKind == card::ImageSourceKind::RegularClothing) {
-                // A Koikatsu Coordinate (outfit) file: always ask how it goes onto the outfit on screen.
+                std::shared_ptr<Loaded> cur = Current();
+                if (cur && cur->NativePmx()) {
+                    // Graft the outfit onto the PMX that is currently open.
+                    StartOutfitApplyToPmx(dropped);
+                    DragFinish(reinterpret_cast<HDROP>(wp));
+                    return 0;
+                }
+                // A Koikatsu Coordinate (outfit) file on a character card: ask how it goes onto the outfit on screen.
                 ShowCoordinateImportDialog(dropped);
+            } else if (sourceKind == card::ImageSourceKind::Coordinate && Current() && Current()->NativePmx()) {
+                Log("a Coordinate PNG is not an outfit asset source for PMX grafting; drop a 【KoiKatuClothes】 file", LogKind::Warn);
             } else {
                 // Nothing on screen (open the card, as always), or a source we do not import:
                 // fall back to the plain drop behavior (open as character), never to clothing import.
