@@ -288,6 +288,7 @@ void usage() {
         "  cardbridge pmx info <model.pmx> [--json]      report a PMX's format and feature counts\n"
         "  cardbridge pmx roundtrip <in.pmx> <out.pmx>   import, re-export and verify structural preservation\n"
         "  cardbridge pmx bones <model.pmx> [--json]   list bones (names, English names, parents)\n"
+        "  cardbridge pmx bbox <model.pmx> [--after N]   vertex bounds (all, or vertices from index N)\n"
         "  cardbridge pmx restore-body <in.pmx> <out.pmx> --library <dir>\n"
         "                                             append the KK/KKS body from the asset library (append-only PMX edit)\n"
         "  cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey> [--mods <dir>]\n"
@@ -1495,6 +1496,20 @@ int cmdPmx(const Args& a) {
         if (sub == "info") {
             if (a.has("json")) std::printf("%s\n", info.dump(2).c_str());
             else pmxPrintDescribe(info);
+            return 0;
+        }
+        if (sub == "bbox") {
+            const size_t after = static_cast<size_t>(std::max(0, std::atoi(a.get("after", "0").c_str())));
+            Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+            size_t n = 0;
+            for (size_t i = after; i < m.vertices.size(); ++i) {
+                const Vec3& p = m.vertices[i].position;
+                lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
+                hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z);
+                ++n;
+            }
+            std::printf("vertices from %zu: %zu; min (%.3f, %.3f, %.3f) max (%.3f, %.3f, %.3f)\n",
+                        after, n, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
             return 0;
         }
         if (sub == "bones") {
