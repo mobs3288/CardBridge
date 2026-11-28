@@ -404,6 +404,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ASSETS_FRAME:
         InvalidatePanel();
         return 0;
+    case WM_ASSET_FIT_READY:
+        InvalidatePanel();
+        if (wp) Log(std::string("asset fit: ") + g.assets.fit.reason, LogKind::Warn);
+        return 0;
+    case WM_ASSET_APPLY_READY: {
+        if (wp) {
+            Log(std::string("asset apply failed: ") + g.assets.applyError, LogKind::Error);
+        } else if (std::shared_ptr<Loaded> L = Current(); L && L->NativePmx() && g.assets.pendingDoc) {
+            g.assets.undoDoc = L->pmxDoc;
+            g.assets.undoOverrides = L->textureOverrides;
+            L->pmxDoc = g.assets.pendingDoc;
+            L->textureOverrides = g.assets.pendingOverrides;
+            const auto built = pmx::BuildScene(*L->pmxDoc, L->pmxDir);
+            L->scene = built.scene;
+            g.gpu.Unload();
+            g.gpuScene.reset();
+            g.showExp = g.expOk = false;
+            g.expScene.reset();
+            g.gpuExp.Unload();
+            g.hidden.assign(L->scene.parts.size(), 0);
+            g.boneEdits.clear();
+            g.dirty = true;
+            Log("asset applied: Ctrl+Z restores the previous document", LogKind::Good);
+        }
+        g.assets.pendingDoc.reset();
+        g.assets.pendingOverrides.clear();
+        InvalidatePanel();
+        return 0;
+    }
     case WM_PROGRESS: {
         // Keep the indeterminate chunk / percent moving: repaint the strip
         // under the toolbar and the overlay card, plus the footer hint.
@@ -1471,6 +1500,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (g.ctrlDown) {   // Ctrl+Z undo (Shift: redo), Ctrl+Y redo, Ctrl+S save, Ctrl+O load (pose or materials by tab)
+            if (g.tab == TabAssets) {
+                if ((wp == 'Z' || wp == 'Y') && g.assets.undoDoc) {
+                    std::shared_ptr<Loaded> L = Current();
+                    if (L && L->NativePmx()) {
+                        std::swap(L->pmxDoc, g.assets.undoDoc);
+                        std::swap(L->textureOverrides, g.assets.undoOverrides);
+                        const auto built = pmx::BuildScene(*L->pmxDoc, L->pmxDir);
+                        L->scene = built.scene;
+                        g.gpu.Unload(); g.gpuScene.reset();
+                        g.showExp = g.expOk = false; g.expScene.reset(); g.gpuExp.Unload();
+                        g.boneEdits.clear(); g.hidden.assign(L->scene.parts.size(), 0);
+                        g.dirty = true;
+                        Log("asset apply undone", LogKind::Info);
+                    }
+                } else if (wp == 'S') StartExport();
+                InvalidatePanel();
+                return 0;
+            }
             if (g.tab == TabMaterials) {
                 if (wp == 'Z') MaterialUndo(g.shiftDown);
                 else if (wp == 'Y') MaterialUndo(true);

@@ -29,11 +29,13 @@
 #include "card/Abmx.h"
 #include "card/CardFile.h"
 #include "card/ClothingExport.h"
+#include "card/ClothingAssetBridge.h"
 #include "core/FileIo.h"
 #include "core/MemoryProbe.h"
 #include "pmx/PmxReader.h"
 #include "pmx/PmxBodyRestore.h"
 #include "pmx/PmxAssetApply.h"
+#include "pmx/PmxBoneGraft.h"
 #include "pmx/PmxToScene.h"
 #include "pmx/PmxTransform.h"
 #include "assemble/KkBodyTemplate.h"
@@ -290,6 +292,10 @@ void usage() {
         "  cardbridge pmx apply-asset <in.pmx> <out.pmx> --library <dir> --key <assetKey> [--mods <dir>]\n"
         "                                             apply one catalog asset with a compatibility report (append-only PMX edit)\n"
         "                                             [--no-textures] [--json-report] [--map src>dst] [--tx..--sz] [--auto]\n"
+        "  cardbridge pmx apply-outfit <in.pmx> <out.pmx> <clothing.png> --library <dir> [--mods <dir>] [--auto]\n"
+        "                                             graft every resolvable item of a Koikatsu outfit/coordinate file\n"
+        "  cardbridge pmx graft-bones <in.pmx> <out.pmx> --spec <file.json>\n"
+        "                                             opt-in append-only bone grafting (validated before commit)\n"
         "  cardbridge assets build --library <dir> --mods <dir>   index KK/KKS clothes, hair and accessories\n"
         "  cardbridge assets list  --library <dir> --mods <dir> [--category clothing|hair|accessories|body|textures|other]\n"
         "                          [--search <text>] [--limit N] [--json] [--cache <file>]\n"
@@ -1684,6 +1690,111 @@ int cmdPmx(const Args& a) {
             std::printf("applied %s: +%zu vertices, +%zu indices, +%zu materials, +%zu textures -> %s\n",
                         found->name.c_str(), r.addedVertices, r.addedIndices, r.addedMaterials,
                         r.addedTextures, out.c_str());
+            return 0;
+        }
+        if (sub == "apply-outfit") {
+            if (a.positional.size() < 5) { usage(); return 1; }
+            const std::string out = normalizeSlashes(a.positional[3]);
+            const std::string outfitPath = normalizeSlashes(a.positional[4]);
+            card::ClothingFile clothing = card::LoadClothingFile(outfitPath);
+            card::ClothingAssetOptions bOpt;
+            bOpt.libraryRoot = normalizeSlashes(a.get("library"));
+            bOpt.modsRoot = normalizeSlashes(a.get("mods"));
+            const char* la2 = std::getenv("LOCALAPPDATA");
+            bOpt.modCachePath = la2 ? std::string(la2) + "/CardBridge/modindex.json" : std::string();
+            card::ClothingAssetResult bridged;
+            std::string bridgeError;
+            if (!card::EnumerateClothingAssets(clothing, bOpt, bridged, bridgeError)) {
+                std::fprintf(stderr, "error: %s\n", bridgeError.c_str());
+                return 3;
+            }
+            for (const std::string& w : bridged.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+            pmx::BoneMatchOptions mo;
+            mo.allowGeometric = a.has("auto") || a.has("geometric");
+            pmx::Model working = m;
+            std::vector<Bytes> overrides(working.textures.size());
+            size_t applied = 0, failed = 0, addedV = 0, addedI = 0;
+            for (const auto& item : bridged.items) {
+                library::AssetTemplate t;
+                std::string err;
+                library::AssetTemplateOptions tOpt;
+                tOpt.libraryRoot = bOpt.libraryRoot; tOpt.modsRoot = bOpt.modsRoot; tOpt.modCachePath = bOpt.modCachePath;
+                if (!library::LoadAssetTemplate(item.record, tOpt, t, err)) {
+                    std::fprintf(stderr, "warning: %s: %s\n", item.key.c_str(), err.c_str());
+                    ++failed; continue;
+                }
+                const auto fit = pmx::AnalyzeAssetFit(t, working, mo);
+                if (!fit.compatible) {
+                    std::fprintf(stderr, "warning: %s: %s\n", item.key.c_str(), fit.reason.c_str());
+                    ++failed; continue;
+                }
+                const auto r = pmx::ApplyAsset(working, t, fit);
+                if (!r.ok) { std::fprintf(stderr, "warning: %s: %s\n", item.key.c_str(), r.error.c_str()); ++failed; continue; }
+                overrides.resize(working.textures.size());
+                for (size_t i = 0; i < r.importedTextureBytes.size(); ++i)
+                    if (r.textureStart + i < overrides.size()) overrides[r.textureStart + i] = r.importedTextureBytes[i];
+                addedV += r.addedVertices; addedI += r.addedIndices; ++applied;
+            }
+            if (!applied) { std::fprintf(stderr, "error: no outfit item could be applied\n"); return 3; }
+            const bool anyMemory = std::any_of(overrides.begin(), overrides.end(), [](const Bytes& b) { return !b.empty(); });
+            if (anyMemory) {
+                const size_t slash = out.rfind('/');
+                const std::string parent = slash == std::string::npos ? std::string(".") : out.substr(0, slash);
+                std::string stem = slash == std::string::npos ? out : out.substr(slash + 1);
+                const size_t dot = stem.rfind('.');
+                if (dot != std::string::npos) stem = stem.substr(0, dot);
+                const std::string folderPmx = pmx::ExportDocument(working, "", parent, stem, overrides);
+                if (folderPmx != out) {
+                    const Bytes bytes = fileio::ReadFile(folderPmx);
+                    fileio::WriteFile(out, bytes.data(), bytes.size());
+                }
+            } else {
+                const Bytes bytes = pmx::WritePmx(working);
+                fileio::WriteFile(out, bytes.data(), bytes.size());
+            }
+            m = std::move(working);
+            std::printf("applied %zu/%zu outfit items: +%zu vertices, +%zu indices -> %s\n",
+                        applied, bridged.items.size(), addedV, addedI, out.c_str());
+            return 0;
+        }
+        if (sub == "graft-bones") {
+            if (a.positional.size() < 4) { usage(); return 1; }
+            const std::string out = normalizeSlashes(a.positional[3]);
+            const std::string specPath = normalizeSlashes(a.get("spec"));
+            if (specPath.empty()) { std::fprintf(stderr, "error: --spec <file.json> is required\n"); return 1; }
+            const Bytes raw = fileio::ReadFile(specPath);
+            const nlohmann::json j = nlohmann::json::parse(raw.begin(), raw.end(), nullptr, false);
+            if (j.is_discarded()) { std::fprintf(stderr, "error: invalid graft spec JSON\n"); return 1; }
+            pmx::GraftSpec spec;
+            spec.confirmed = j.value("confirmed", false);
+            for (const auto& b : j.value("bones", nlohmann::json::array())) {
+                pmx::GraftBone gb;
+                gb.bone.name = b.value("name", std::string());
+                gb.bone.nameEn = b.value("nameEn", std::string());
+                auto pos = b.value("position", std::vector<float>{0, 0, 0});
+                if (pos.size() == 3) gb.bone.position = {pos[0], pos[1], pos[2]};
+                gb.bone.parent = b.value("parent", -1);
+                gb.bone.layer = b.value("layer", 0);
+                gb.bone.flags = static_cast<uint16_t>(b.value("flags", 0x001E));
+                gb.bone.flagsFromSource = true;
+                gb.bone.tailBone = b.value("tailBone", -1);
+                gb.bone.appendParent = b.value("appendParent", -1);
+                gb.bone.appendRatio = b.value("appendRatio", 1.0f);
+                gb.bone.ikTarget = b.value("ikTarget", -1);
+                gb.sourceBone = b.value("sourceBone", -1);
+                gb.remapWeights = b.value("remapWeights", false);
+                spec.bones.push_back(std::move(gb));
+            }
+            const pmx::GraftResult check = pmx::AnalyzeBoneGraft(spec, m);
+            for (const std::string& w : check.warnings) std::printf("  %s\n", w.c_str());
+            if (!check.ok) { std::fprintf(stderr, "error: %s\n", check.error.c_str()); return 3; }
+            pmx::Model working = m;
+            const pmx::GraftResult r = pmx::AppendBones(working, spec);
+            if (!r.ok) { std::fprintf(stderr, "error: %s\n", r.error.c_str()); return 3; }
+            const Bytes bytes = pmx::WritePmx(working);
+            fileio::WriteFile(out, bytes.data(), bytes.size());
+            m = std::move(working);
+            std::printf("grafted %zu bone(s), remapped %zu vertices -> %s\n", r.addedBones, r.remappedVertices, out.c_str());
             return 0;
         }
     } catch (const std::exception& e) {

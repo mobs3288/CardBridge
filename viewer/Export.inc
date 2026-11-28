@@ -47,9 +47,10 @@ void StartExport() {
         Log("export started: " + outDir + " (native PMX)", LogKind::Info);
         auto doc = std::make_shared<pmx::Model>(*L->pmxDoc);
         const std::string pmxDir = L->pmxDir;
+        const std::vector<Bytes> overrides = L->textureOverrides;
         assemble::Scene sceneCopy = L->scene;
         material::WorkbenchState matCopy = g.mat;
-        std::thread([doc, pmxDir, outDir, stem, sceneCopy = std::move(sceneCopy), matCopy]() mutable {
+        std::thread([doc, pmxDir, outDir, stem, overrides, sceneCopy = std::move(sceneCopy), matCopy]() mutable {
             bool cancelled = false;
             try {
                 ProgSet(0.2, "applying material edits");
@@ -57,7 +58,7 @@ void StartExport() {
                 pmx::ApplySceneMaterials(sceneCopy, *doc);
                 if (ProgCancelled()) throw Cancelled{};
                 ProgSet(0.6, "writing PMX and textures");
-                const std::string path = pmx::ExportDocument(*doc, pmxDir, outDir, stem);
+                const std::string path = pmx::ExportDocument(*doc, pmxDir, outDir, stem, overrides);
                 Log("export done: " + path, LogKind::Good);
             } catch (const Cancelled&) {
                 cancelled = true;

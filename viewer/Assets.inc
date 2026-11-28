@@ -83,6 +83,81 @@ void EnsureAssetCatalog() {
     }).detach();
 }
 
+void StartAssetFit(const library::AssetRecord record) {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || !L->NativePmx()) return;
+    pmx::AssetTransform tr;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.assets.fitBusy) return;
+        g.assets.fitBusy = true;
+        g.assets.fitReady = false;
+        tr = g.assets.transform;
+    }
+    library::AssetTemplateOptions opt;
+    opt.libraryRoot = g.settings.library;
+    opt.modsRoot = g.settings.mods;
+    opt.modCachePath = ModCachePath();
+    const std::shared_ptr<pmx::Model> doc = L->pmxDoc;
+    std::thread([record, opt, tr, doc]() {
+        library::AssetTemplate t;
+        std::string error;
+        pmx::AssetFitReport fit;
+        if (library::LoadAssetTemplate(record, opt, t, error)) {
+            t = pmx::ApplyTransform(t, tr);
+            fit = pmx::AnalyzeAssetFit(t, *doc);
+        } else {
+            fit.reason = error;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.assets.fittedTemplate = t;
+            g.assets.fit = fit;
+            g.assets.fitReady = true;
+            g.assets.fitBusy = false;
+        }
+        PostMessageW(g.hwnd, WM_ASSET_FIT_READY, fit.compatible ? 0 : 1, 0);
+    }).detach();
+}
+
+void StartAssetApply() {
+    std::shared_ptr<Loaded> L = Current();
+    if (!L || !L->NativePmx()) return;
+    library::AssetTemplate t;
+    pmx::AssetFitReport fit;
+    std::shared_ptr<pmx::Model> doc;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g.mu);
+        if (g.assets.applyBusy || !g.assets.fitReady || !g.assets.fit.compatible) return;
+        g.assets.applyBusy = true;
+        t = g.assets.fittedTemplate;
+        fit = g.assets.fit;
+        doc = std::make_shared<pmx::Model>(*L->pmxDoc);
+    }
+    std::thread([t, fit, doc]() {
+        auto working = std::make_shared<pmx::Model>(*doc);
+        const auto r = pmx::ApplyAsset(*working, t, fit);
+        if (!r.ok) {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.assets.applyError = r.error;
+            g.assets.applyBusy = false;
+            PostMessageW(g.hwnd, WM_ASSET_APPLY_READY, 1, 0);
+            return;
+        }
+        std::vector<Bytes> overrides(working->textures.size());
+        for (size_t i = 0; i < r.importedTextureBytes.size(); ++i)
+            if (r.textureStart + i < overrides.size()) overrides[r.textureStart + i] = r.importedTextureBytes[i];
+        {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.assets.pendingDoc = working;
+            g.assets.pendingOverrides = std::move(overrides);
+            g.assets.applyError.clear();
+            g.assets.applyBusy = false;
+        }
+        PostMessageW(g.hwnd, WM_ASSET_APPLY_READY, 0, 0);
+    }).detach();
+}
+
 RECT AssetCatRect(const PanelLayout& l, int i) {
     const int w = 116, h = 20, gap = 6;
     const int x = 10 + (i % 3) * (w + gap), y = l.assetCats.top + (i / 3) * (h + 2);
@@ -187,9 +262,39 @@ void DrawAssetsTab(ui::Surface& s, const RECT& clip, const PanelLayout& l) {
                              0.0f, 1.0f / (thumb.right - thumb.left), 0.0f, 1.0f / (thumb.bottom - thumb.top),
                              true, 0, true);
     }
+
+    const char* fitText = g.assets.fitReady ? pmx::FitStatusName(g.assets.fit.status)
+                                            : (g.assets.fitBusy ? "analyzing ..." : "not analyzed");
+    s.Text(g.fontSmall, g.assets.fitReady && g.assets.fit.compatible ? ui::kGood : ui::kSub,
+           14, l.assetDetail.top + 108,
+           std::string("fit: ") + fitText + (g.assets.fitReady
+               ? "  " + std::to_string(g.assets.fit.matchedBones) + "/" + std::to_string(g.assets.fit.requiredBones) + " bones" : ""),
+           &l.assetDetail);
+    static const char* labels[9] = {"X", "Y", "Z", "RX", "RY", "RZ", "SX", "SY", "SZ"};
+    for (int i = 0; i < 9; ++i) {
+        const RECT& box = l.assetFields[i];
+        const bool active = g.assets.editField == i;
+        s.FillRound(box, ui::kRad, ui::kBg);
+        s.StrokeRound(box, ui::kRad, active ? ui::kAccent : ui::kLine);
+        const float value = i < 3 ? (&g.assets.transform.translation.x)[i]
+                          : i < 6 ? (&g.assets.transform.rotationDeg.x)[i - 3]
+                                  : (&g.assets.transform.scale.x)[i - 6];
+        const std::string shown = active ? g.assets.fieldBuf + "_" : std::to_string(value).substr(0, 6);
+        s.Text(g.fontSmall, active ? ui::kText : ui::kSub, box.left + 5, box.top + 3,
+               std::string(labels[i]) + " " + shown, &box);
+    }
+    const bool canApply = g.assets.fitReady && g.assets.fit.compatible && !g.assets.applyBusy;
+    s.FillRound(l.assetApply, ui::kRad, canApply ? ui::kAccent : ui::kCardHi);
+    s.TextCentered(g.fontSemi, canApply ? ui::kOnAccent : ui::kFaint, l.assetApply,
+                   g.assets.applyBusy ? "applying ..." : "Apply asset to this PMX");
+    if (!g.assets.applyError.empty())
+        s.Text(g.fontSmall, ui::kBad, 14, l.assetApply.bottom + 2, ClipText(g.assets.applyError, 48), &l.assetDetail);
 }
 
+void CommitAssetField();   // defined below with AssetsChar
+
 void AssetsTabClick(int x, int y, const PanelLayout& l) {
+    if (g.assets.editField >= 0) { CommitAssetField(); return; }
     if (PtInRect(&l.assetSearch, POINT{x, y})) {
         {
             std::lock_guard<std::recursive_mutex> lk(g.mu);
@@ -212,6 +317,17 @@ void AssetsTabClick(int x, int y, const PanelLayout& l) {
         InvalidatePanel();
         return;
     }
+    // Transform fields and Apply button live in the detail card, below the list.
+    for (int i = 0; i < 9; ++i) {
+        if (PtInRect(&l.assetFields[i], POINT{x, y})) {
+            std::lock_guard<std::recursive_mutex> lk(g.mu);
+            g.assets.editField = i;
+            g.assets.fieldBuf.clear();
+            InvalidatePanel();
+            return;
+        }
+    }
+    if (PtInRect(&l.assetApply, POINT{x, y})) { StartAssetApply(); return; }
     if (y < l.assetListTop || y > l.assetListBottom) return;
     const auto rows = AssetRows();
     const int idx = static_cast<int>((y - l.assetListTop + std::lround(g.assets.listPos * kRowH)) / kRowH);
@@ -221,12 +337,32 @@ void AssetsTabClick(int x, int y, const PanelLayout& l) {
         g.assets.selected = idx;
     }
     LoadAssetPreviewAsync(*rows[static_cast<size_t>(idx)]);
+    StartAssetFit(*rows[static_cast<size_t>(idx)]);
     InvalidatePanel();
+}
+
+void CommitAssetField() {
+    if (g.assets.editField < 0) return;
+    const float value = static_cast<float>(std::atof(g.assets.fieldBuf.c_str()));
+    const int i = g.assets.editField;
+    if (i < 3) (&g.assets.transform.translation.x)[i] = value;
+    else if (i < 6) (&g.assets.transform.rotationDeg.x)[i - 3] = value;
+    else (&g.assets.transform.scale.x)[i - 6] = value;
+    g.assets.editField = -1;
+    g.assets.fieldBuf.clear();
+    g.assets.fitReady = false;   // transform changed: re-analysis needed
 }
 
 void AssetsChar(wchar_t c) {
     if (g.tab != TabAssets) return;
     std::lock_guard<std::recursive_mutex> lk(g.mu);
+    if (g.assets.editField >= 0) {
+        if (c == 13 || c == 27) CommitAssetField();
+        else if (c == 8) { if (!g.assets.fieldBuf.empty()) g.assets.fieldBuf.pop_back(); }
+        else if ((c >= '0' && c <= '9') || c == '-' || c == '.' || c == '+') g.assets.fieldBuf += static_cast<char>(c);
+        InvalidatePanel();
+        return;
+    }
     if (!g.assets.editing) return;
     if (c == 13 || c == 27) { g.assets.editing = false; }
     else if (c == 8) { if (!g.assets.search.empty()) g.assets.search.pop_back(); }

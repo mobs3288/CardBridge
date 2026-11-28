@@ -65,6 +65,7 @@ add_library(cardbridge_core STATIC
     src/core/ZipArchive.cpp
     src/card/CardFile.cpp
     src/card/SelectiveImport.cpp
+    src/card/ClothingAssetBridge.cpp
     src/card/ClothingExport.cpp
     src/card/MaterialEdits.cpp
     src/card/HairAccessoryCustomizer.cpp
@@ -97,6 +98,7 @@ add_library(cardbridge_core STATIC
     src/pmx/BoneAliases.cpp
     src/pmx/BoneMatcher.cpp
     src/pmx/PmxTransform.cpp
+    src/pmx/PmxBoneGraft.cpp
     src/export/Exporter.cpp
     src/export/ModelExport.cpp
     src/export/FormatCommon.cpp

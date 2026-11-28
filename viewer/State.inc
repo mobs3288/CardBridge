@@ -56,6 +56,7 @@ struct Loaded {
     // copy of it at export time, never rebuilt through the card pipeline.
     std::shared_ptr<pmx::Model> pmxDoc;
     std::string pmxDir;
+    std::vector<Bytes> textureOverrides;   // in-memory textures from applied assets
     bool NativePmx() const { return pmxDoc != nullptr; }
     std::string title;
     int outfit = 0, outfits = 0;
@@ -89,6 +90,18 @@ struct AssetBrowserState {
     std::string thumbKey;                 // which record the pixels below belong to
     std::vector<uint8_t> thumbRgba;
     int thumbW = 0, thumbH = 0;
+    // Phase 4 apply workflow: analysis and apply run on workers, never on the UI thread.
+    pmx::AssetFitReport fit;
+    pmx::AssetTransform transform;
+    library::AssetTemplate fittedTemplate;
+    bool fitBusy = false, fitReady = false, applyBusy = false;
+    std::string applyError;
+    std::shared_ptr<pmx::Model> undoDoc;   // one document-level undo step
+    std::vector<Bytes> undoOverrides;
+    std::shared_ptr<pmx::Model> pendingDoc;
+    std::vector<Bytes> pendingOverrides;
+    int editField = -1;                    // 0..8 transform field being typed
+    std::string fieldBuf;
 };
 
 // ---- the Optimize tab: triangle reduction & LOD generation ------------------
@@ -340,6 +353,8 @@ struct PanelLayout {
     RECT matFilter{}, matOpen{};
     // Assets tab: a search row, category chips, the result list, then the detail/preview card.
     RECT assetSearch{}, assetCats{}, assetDetail{};
+    RECT assetFields[9]{};
+    RECT assetApply{};
     int assetListTop = 0, assetListBottom = 0;
 };
 
@@ -741,8 +756,15 @@ PanelLayout LayoutFor(int H, bool boneTab, int editRows) {
     l.assetSearch = {10, l.partsTop, kPanel - 10, l.partsTop + kRowH};
     l.assetCats = {10, l.partsTop + kRowH + 4, kPanel - 10, l.partsTop + 2 * kRowH + 8};
     l.assetListTop = l.assetCats.bottom + 6;
-    l.assetListBottom = std::max(l.assetListTop + kRowH, l.partsBottom - 6 * kRowH);
+    l.assetListBottom = std::max(l.assetListTop + kRowH, l.partsBottom - 11 * kRowH);
     l.assetDetail = {6, l.assetListBottom + 4, kPanel - 6, l.partsBottom};
+    for (int i = 0; i < 9; ++i) {
+        const int col = i % 3, row = i / 3;
+        const int fw = 104, gap = 8;
+        const int x = 14 + col * (fw + gap), y = l.assetDetail.top + 112 + row * kRowH;
+        l.assetFields[i] = {x, y, x + fw, y + kRowH};
+    }
+    l.assetApply = {14, l.assetDetail.top + 112 + 3 * kRowH + 4, kPanel - 14, l.assetDetail.top + 112 + 3 * kRowH + 26};
     return l;
 }
 
@@ -828,6 +850,8 @@ constexpr UINT WM_SEL_FRAME = WM_APP + 10;     // the render worker produced fre
 constexpr UINT WM_BT_READY = WM_APP + 11;      // a reference card finished loading for the Body Transfer tab
 constexpr UINT WM_ASSETS_READY = WM_APP + 12;  // the asset catalog build finished (wParam 1 = failed)
 constexpr UINT WM_ASSETS_FRAME = WM_APP + 13;  // a thumbnail decode finished (wParam: 1 = no image)
+constexpr UINT WM_ASSET_FIT_READY = WM_APP + 14;   // compatibility analysis finished
+constexpr UINT WM_ASSET_APPLY_READY = WM_APP + 15; // asset apply finished (wParam 1 = failed)
 // Test hook (viewer_smoke.ps1): only answered when CARDBRIDGE_TEST_HOOKS is set in the environment, so a normal run ignores it.
 // wParam: 1 undo, 2 redo, 3 save the pose, 4 load the pose (both to CARDBRIDGE_POSE_PATH), 10 write the layout JSON to CARDBRIDGE_TEST_LAYOUT, 11 nude body on, clothes and accessories off, the camera on the chest, 12 reset the imported outfit to the card default.
 constexpr UINT WM_TEST = WM_APP + 40;

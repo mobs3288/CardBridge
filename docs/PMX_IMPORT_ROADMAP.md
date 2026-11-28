@@ -53,7 +53,7 @@
 | **1 — Native PMX foundation** | Lossless document model, native importer, preservation layer, round-trip export, regression tests, `pmx info`/`pmx roundtrip` CLI | **complete** |
 | **2 — Unified editing foundation** | PMX→Scene bridge, load `.pmx` in viewer, Model Explorer, materials/textures, existing bone/pose editor, validation | **complete** |
 | **3 — Asset library** | Enumerable KK/KKS catalog, category taxonomy, thumbnails, dependency index, asset browser, dedup/caching | **complete** |
-| **4 — Cross-model transfer** | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | **in progress** (foundation) |
+| **4 — Cross-model transfer** | Accessory attachment, bone mapping/compatibility report, skeleton analysis, weight transfer, manual fitting tools | **complete** |
 | 5 — Advanced editing | Morph, physics, mesh, advanced material/texture editors | pending |
 | 6 — Final integration | Unified open/export/project workflow, UI refinement, performance, full regression | pending |
 | **7 — Koikatsu body restoration for imported PMX** | Restore hidden/missing KK/KKS body geometry when clothing or parts are removed from an imported PMX, preserving the imported character's proportions, skeleton, weights and morphs | **in progress** (foundation) |
@@ -176,10 +176,15 @@ Asset catalog record → card-free prefab/geometry extractor → explicit compat
 ### Compatibility pipeline expansion (2026-11-27)
 Stages A–D of `docs/PMX_ASSET_GRAFTING_PLAN.md` landed: bone alias registry, multi-stage matcher with conservative geometric fallback, expanded fit classifications and a generic transform API; CLI gained `--auto`, `--map`, transform flags and `--json-report` (exit 3 incompatible / 4 ambiguous). Tests: **19,650 checks, 0 failed**. Stage E (material/texture import) is now implemented: card-free material extraction, in-memory PNG textures, collision-safe export and multi-material PMX append; **19,690 checks pass**. Viewer workflow and opt-in bone grafting remain pending with documented blockers in that plan.
 
+### Phase 4 completion (2026-11-28)
+Remaining gaps were closed: card-free `ClothingFile` → asset enumeration and `pmx apply-outfit`; viewer Assets-tab compatibility/transform/apply/undo/save workflow; and explicit opt-in bone/chain grafting with full reference validation (`pmx graft-bones`). See `docs/PMX_ASSET_GRAFTING_PLAN.md`. Tests: **19,725 checks, 0 failed**. Viewer workflow is implemented but not GUI-smoke-tested; rendered mannequin preview remains a limitation.
+
 ### Remaining implementation tasks
 - **Phase 5:** morph, physics, mesh and advanced material/texture editors; bake poses into the document.
 - **Phase 6:** unified project/import/export workflow, UI refinement, performance, full regression.
-- **Phase 4 remainder:** stages E/F/H of `docs/PMX_ASSET_GRAFTING_PLAN.md`.
+
+### Phase 7 remainder
+- Model Explorer deletion/restore actions and native-export application of the deletion set are still pending.
 
 ---
 

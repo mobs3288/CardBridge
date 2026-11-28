@@ -75,6 +75,10 @@ Resolver::Resolver(const ModIndex& mods, ListTable& lists, std::string abdataRoo
     : mods_(mods), lists_(lists), abdata_(std::move(abdataRoot)), game_(std::move(game)) {}
 
 ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
+    return resolve(card.rows, ref);
+}
+
+ResolvedItem Resolver::resolve(const std::vector<card::ResolveRow>& rows, const ItemRef& ref) {
     // In the viewer, Reshape (UI thread) can resolve while a card load (worker thread) is assembling. Both walk
     // the shared modlists map and mutate it, so serialize them with the bundle-cache lock.
     std::lock_guard<std::mutex> lk(cacheMutex_);
@@ -92,11 +96,11 @@ ResolvedItem Resolver::resolve(const card::Card& card, const ItemRef& ref) {
     // (category, slot) - the pair identifies a mod item even if a property
     // name differs between plugin versions.
     const card::ResolveRow* row = nullptr;
-    for (const auto& rr : card.rows)
+    for (const auto& rr : rows)
         if (rr.property == ref.property && rr.slot == ref.id) { row = &rr; break; }
     if (!row) {
         std::vector<const card::ResolveRow*> hits;
-        for (const auto& rr : card.rows)
+        for (const auto& rr : rows)
             if (rr.category == ref.category && rr.slot == ref.id) hits.push_back(&rr);
         if (!hits.empty()) {
             row = hits[0];

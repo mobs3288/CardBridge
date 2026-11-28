@@ -68,6 +68,9 @@ public:
     const library::GameInfo& gameInfo() const { return game_; }
 
     ResolvedItem resolve(const card::Card& card, const ItemRef& ref);
+    // Same resolution from resolver rows alone. An outfit/clothing file carries
+    // the same rows as a card but no character; this keeps asset grafting card-free.
+    ResolvedItem resolve(const std::vector<card::ResolveRow>& rows, const ItemRef& ref);
 
     // Opens (and caches) the bundle that holds the item's prefab.
     std::shared_ptr<unity::UnityFile> openBundle(const ResolvedItem& item, std::string* why);

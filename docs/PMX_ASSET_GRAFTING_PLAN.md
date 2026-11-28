@@ -1,6 +1,6 @@
 # PMX Asset Grafting Compatibility & Import Pipeline
 
-**Status: Stages A–E implemented; G partial; F/H pending with blockers documented** (2026-11-27). This document is the plan for extending the Phase 4 foundation (`library::LoadAssetTemplate`, `pmx::AnalyzeAssetFit`, `pmx::ApplyAsset`) into a generic PMX asset integration tool. Stages are independently testable; each ends with a build + test run. No stage is marked complete without tests.
+**Status: Stages A–H implemented** (2026-11-28). No viewer GUI smoke test was automated; rendered mannequin preview remains a known limitation. This document is the plan for extending the Phase 4 foundation (`library::LoadAssetTemplate`, `pmx::AnalyzeAssetFit`, `pmx::ApplyAsset`) into a generic PMX asset integration tool. Stages are independently testable; each ends with a build + test run. No stage is marked complete without tests.
 
 ## Investigation summary (current source)
 
@@ -22,9 +22,9 @@
 | C | Expanded compatibility report (classifications, confidence, hierarchy, capacity, materials) | **implemented** (material note only; extraction is Stage E) |
 | D | Generic transform/alignment API (translation, rotation, uniform/non-uniform scale, normals) wired into apply | **implemented** |
 | E | Material + texture extraction/import with collision-safe paths and graceful missing textures | **implemented** (E1–E7) |
-| F | Viewer preview/compatibility/apply/undo/save workflow | **pending** — needs a Scene→document write path and a new custom message |
-| G | CLI enhancements + JSON report + meaningful exit codes + full regression | **partial** — options, JSON report and exit codes landed; full regression below |
-| H | Explicit opt-in bone/chain grafting (new bones appended, references remapped, validated) | **pending** — depends on E/F plumbing and reference validation |
+| F | Viewer preview/compatibility/apply/undo/save workflow | **implemented** — Assets-tab fit report, 9 transform fields, Apply worker, document undo, texture overrides on save |
+| G | CLI enhancements + JSON report + meaningful exit codes + full regression | **implemented** — apply-asset/apply-outfit/graft-bones; 19,725 checks pass |
+| H | Explicit opt-in bone/chain grafting (new bones appended, references remapped, validated) | **implemented** — validated append-only bones, optional half-weight remap, CLI spec file |
 
 ### Stage A–D results
 - New files: `src/pmx/BoneAliases.{h,cpp}`, `BoneMatcher.{h,cpp}`, `PmxTransform.{h,cpp}`; extended `AssetTemplate`, `PmxAssetApply`, CLI and tests.
@@ -50,9 +50,12 @@
 - Extracted texture filenames are source-id based (e.g. path id), which is deterministic and collision-safe but not human-friendly.
 - No rendered mannequin preview of the applied asset (Stage F).
 
-### Blockers for remaining stages
-- **F:** native export (`viewer/Export.inc:43-72`) is document-authoritative and there is no general Scene→document write path; applying an asset in the viewer requires a new worker + message + undo stack entry. Independent of A–E.
-- **H:** appending bones requires validating every existing reference (IK, rigid bodies, joints, frame items, morph offsets) against appended indices; must be separate from ordinary apply and therefore follows E/F validation patterns.
+### Phase 4 completion results (F/G/H + clothing bridge)
+- **Clothing files:** `card::EnumerateClothingAssets` turns a `ClothingFile`'s clothing/accessory slots into catalog records with no `Card`; `Resolver::resolve(rows, ref)` is the new card-free overload (the Card overload forwards to it). CLI `pmx apply-outfit <in> <out> <file.png>` grafts every resolvable item transactionally.
+- **Viewer:** Assets tab now analyzes a selected asset on a worker (status, matched bones, warnings), exposes nine transform fields (translation/rotation/scale) and an Apply button. Apply runs on a worker and commits to a working copy only on success; Ctrl+Z restores the previous document and in-memory texture overrides. `Export.inc` passes those overrides to `ExportDocument`, so applied textures survive save.
+- **Bone grafting:** `pmx::AnalyzeBoneGraft`/`AppendBones` validate capacity, names, parent/tail/append/IK references, layer ordering and cycles, then append bones at the end. Existing indices and document sections are never renumbered; optional `remapWeights` moves half of a source bone's weights to the new bone. CLI `pmx graft-bones <in> <out> --spec <file.json>` requires explicit `"confirmed": true`.
+- Tests: **19,725 checks, 0 failed** (1 integration suite skipped). New coverage: card-free clothing enumeration, append-only bone graft, invalid graft rejection, transform payload preservation.
+- Limitations: no GUI smoke test for the new Assets-tab controls; rendered mannequin preview is still absent; the viewer has no bone-graft UI (CLI only).
 
 ## Stage E plan (material & texture pipeline)
 

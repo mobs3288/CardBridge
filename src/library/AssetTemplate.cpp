@@ -247,7 +247,7 @@ bool LoadAssetTemplate(const AssetRecord& record, const AssetTemplateOptions& op
             error = "asset has no usable geometry";
             return false;
         }
-        out.warnings = std::move(issues);
+        out.warnings.insert(out.warnings.end(), issues.begin(), issues.end());
         return true;
     } catch (const std::exception& e) {
         error = e.what();

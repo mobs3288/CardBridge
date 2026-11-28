@@ -71,6 +71,8 @@
 #include "pmx/BoneAliases.h"
 #include "pmx/BoneMatcher.h"
 #include "pmx/PmxTransform.h"
+#include "pmx/PmxBoneGraft.h"
+#include "card/ClothingAssetBridge.h"
 #include "assemble/KkBodyTemplate.h"
 #include "unity/TextureDecode.h"
 #include "unity/UnityScene.h"
@@ -12420,6 +12422,116 @@ void boneMatchingTests() {
     });
 }
 
+void clothingBridgeTests() {
+    test("clothing bridge: an unsupported file is rejected without a card", [] {
+        card::ClothingFile file;
+        file.supported = false;
+        file.supportNote = "KKS outfit files are not supported";
+        card::ClothingAssetOptions opt;
+        card::ClothingAssetResult result;
+        std::string error;
+        CHECK(!card::EnumerateClothingAssets(file, opt, result, error));
+        CHECK(error.find("KKS") != std::string::npos);
+        CHECK(result.items.empty());
+    });
+
+    test("clothing bridge: enumerates real outfit items card-free (CARDBRIDGE_TEST_LIBRARY)", [] {
+        const std::string library = envUtf8("CARDBRIDGE_TEST_LIBRARY");
+        if (library.empty()) { ++g_skipped; return; }
+        card::ClothingFile file;
+        file.supported = true;
+        auto kv = [](const char* k, Value v) { return std::make_pair(Value(std::string(k)), std::move(v)); };
+        Value topPart(Value::Map{kv("id", Value(int64_t(42)))});
+        Value clothes(Value::Map{kv("parts", Value(Value::Array{Value(), std::move(topPart)}))});
+        Value accessory(Value::Map{kv("parts", Value(Value::Array{}))});
+        file.outfit.clothes = std::move(clothes);
+        file.outfit.accessory = std::move(accessory);
+        // A base-game item has no resolve row at all (the resolver falls back to the base list).
+        card::ClothingAssetOptions opt;
+        opt.libraryRoot = library;
+        card::ClothingAssetResult result;
+        std::string error;
+        CHECK(card::EnumerateClothingAssets(file, opt, result, error));
+        CHECK(!result.items.empty());
+        if (result.items.empty()) return;
+        CHECK(result.items[0].key == "clothes.bottom");
+        CHECK(result.items[0].record.categoryNo == 106);
+        CHECK(result.items[0].record.id == 42);
+        CHECK(!result.items[0].record.asset.empty());
+        library::AssetTemplate t;
+        std::string tError;
+        library::AssetTemplateOptions tOpt;
+        tOpt.libraryRoot = library;
+        CHECK(library::LoadAssetTemplate(result.items[0].record, tOpt, t, tError));
+        CHECK(!t.vertices.empty());
+    });
+}
+
+void boneGraftTests() {
+    test("bone graft: append-only bones preserve the original document and remap requested weights", [] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        const auto bones0 = doc.bones;
+        const auto vertices0 = doc.vertices;
+        const auto morphs0 = doc.morphs;
+        const auto frames0 = doc.frames;
+        const auto trailing0 = doc.format.trailing;
+        pmx::GraftSpec spec;
+        spec.confirmed = true;
+        pmx::GraftBone gb;
+        gb.bone.name = "grafted_bone";
+        gb.bone.nameEn = "Grafted Bone";
+        gb.bone.position = {0, 1, 0};
+        gb.bone.parent = 0;
+        gb.bone.layer = 100;
+        gb.bone.flags = 0x001E;
+        gb.bone.flagsFromSource = true;
+        gb.sourceBone = 0;
+        gb.remapWeights = true;
+        spec.bones.push_back(gb);
+        const pmx::GraftResult check = pmx::AnalyzeBoneGraft(spec, doc);
+        CHECK(check.ok);
+        const pmx::GraftResult r = pmx::AppendBones(doc, spec);
+        CHECK(r.ok);
+        CHECK(r.addedBones == 1);
+        CHECK(r.remappedVertices > 0);
+        CHECK(doc.bones.size() == bones0.size() + 1);
+        CHECK(doc.bones.back().name == "grafted_bone");
+        for (size_t i = 0; i < bones0.size(); ++i) CHECK(doc.bones[i].name == bones0[i].name);
+        CHECK(doc.morphs.size() == morphs0.size() && doc.frames.size() == frames0.size());
+        CHECK(doc.format.trailing == trailing0);
+        const Bytes bytes = pmx::WritePmx(doc);
+        const pmx::Model again = pmx::ReadPmx(bytes);
+        CHECK(again.bones.size() == doc.bones.size());
+        CHECK(again.bones.back().name == "grafted_bone");
+        CHECK(again.bones.back().parent == 0);
+        (void)vertices0;
+    });
+
+    test("bone graft: invalid references, duplicate names and missing confirmation are rejected", [] {
+        pmx::Model doc = makeRoundTripFixture(false);
+        pmx::GraftSpec spec;
+        pmx::GraftBone gb;
+        gb.bone.name = "new_bone"; gb.bone.parent = 0; gb.bone.layer = 100;
+        gb.bone.flagsFromSource = true;
+        spec.bones.push_back(gb);
+        CHECK(!pmx::AnalyzeBoneGraft(spec, doc).ok);   // not confirmed
+        spec.confirmed = true;
+        CHECK(pmx::AnalyzeBoneGraft(spec, doc).ok);
+        spec.bones[0].bone.name = doc.bones[0].name;
+        CHECK(!pmx::AnalyzeBoneGraft(spec, doc).ok);   // duplicate
+        spec.bones[0].bone.name = "new_bone";
+        spec.bones[0].bone.parent = 9999;
+        CHECK(!pmx::AnalyzeBoneGraft(spec, doc).ok);   // out of range
+        spec.bones[0].bone.parent = 0;
+        spec.bones[0].bone.ikTarget = 0;
+        CHECK(!pmx::AnalyzeBoneGraft(spec, doc).ok);   // IK without links
+        const size_t n = doc.bones.size();
+        const auto r = pmx::AppendBones(doc, spec);
+        CHECK(!r.ok);
+        CHECK(doc.bones.size() == n);
+    });
+}
+
 void stageETests() {
     test("stage E: in-memory texture export is collision-safe and portable", [] {
         const std::string dst = tempPath("stage_e_export");
@@ -12993,6 +13105,8 @@ int main() {
     assetCatalogTests();
     bodyRestoreTests();
     boneMatchingTests();
+    clothingBridgeTests();
+    boneGraftTests();
     stageETests();
     crossModelTransferTests();
     pmxImportTests();

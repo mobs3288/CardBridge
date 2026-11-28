@@ -8,6 +8,12 @@ All notable changes to CardBridge are documented here, following [Keep a Changel
 
 - **Selective Import now respects parts deleted in the viewer.** The current-character and proposed-result previews hide parts removed with the row's x chip, and applying Replace/Add clears that delete from the pieces the import recreates — a replacement garment reuses the slot's stable id, so without this it stayed invisible after Apply. Kept and skipped slots keep their delete. The viewer build also includes the PMX asset-apply headers its Assets tab needs.
 
+## [0.16.0] - 2026-11-28
+
+### Added
+
+- **Phase 4 completed — Koikatsu outfit files, viewer grafting and bone grafting.** A card-free `ClothingFile` → catalog bridge plus `pmx apply-outfit` lets clothing/coordinate PNG items be grafted onto an imported PMX. The viewer's Assets tab now shows a compatibility report, nine transform fields and an Apply action with document-level undo; applied in-memory textures are carried through save. `pmx::AnalyzeBoneGraft`/`AppendBones` add an explicit, opt-in bone-grafting path with reference/capacity validation and optional weight remap, exposed as `pmx graft-bones --spec <file.json>`. Tests: 19,725 checks pass. See `docs/PMX_ASSET_GRAFTING_PLAN.md`.
+
 ## [0.15.0] - 2026-11-27
 
 ### Added
